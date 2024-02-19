@@ -2,10 +2,18 @@ import numpy as np
 import pandas as pd
 
 
-n_ranks = 8
-entries = pd.concat([
-    pd.read_parquet(f'data/csd_{rank:02d}.parquet') for rank in range(n_ranks)
-    ], ignore_index=True)
+source = 'csd'
+
+if source == 'csd':
+    print('Removing duplicates from CSD dataset')
+    n_ranks = 8
+    entries = pd.concat([
+        pd.read_parquet(f'data/csd_{rank:02d}.parquet') for rank in range(n_ranks)
+        ], ignore_index=True)
+elif source == 'cod':
+    print('Removing duplicates from COD dataset')
+    entries = pd.read_parquet(f'data/cod_00.parquet')
+
 all_unique_entries = []
 all_duplicated_entries = []
 groups = entries.groupby('crystal_family')
@@ -45,5 +53,9 @@ for key in groups.groups.keys():
 all_unique_entries = pd.concat(all_unique_entries)
 all_duplicated_entries = pd.concat(all_duplicated_entries)
 
-all_unique_entries.to_parquet('data/unique_entries.parquet')
-all_duplicated_entries.to_parquet('data/duplicate_entries.parquet')
+if source == 'csd':
+    all_unique_entries.to_parquet('data/unique_entries_csd.parquet')
+    all_duplicated_entries.to_parquet('data/duplicate_entries_csd.parquet')
+elif source == 'cod':
+    all_unique_entries.to_parquet('data/unique_entries_cod.parquet')
+    all_duplicated_entries.to_parquet('data/duplicate_entries_cod.parquet')

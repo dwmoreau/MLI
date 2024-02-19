@@ -223,7 +223,8 @@ class Optimizer:
             self.indexer.hkl_ref = None
         self.indexer.N_bl = self.comm.bcast(self.indexer.N_bl, root=0)
         self.indexer.hkl_ref = self.comm.bcast(self.indexer.hkl_ref, root=0)
-        self.indexer.setup_networks()
+        self.indexer.setup_regression()
+        self.indexer.setup_assignment()
         self.opt_params['minimum_uc_scaled'] = \
             (self.opt_params['minimum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
         self.opt_params['maximum_uc_scaled'] = \

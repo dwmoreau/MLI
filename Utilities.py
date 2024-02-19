@@ -144,12 +144,11 @@ class Q2Calculator:
         return q2_ref
 
 
-
 class PairwiseDifferenceCalculator(Q2Calculator):
     def __init__(self, lattice_system, hkl_ref, tensorflow, q2_scaler, uc_scaler=None):
         super().__init__(lattice_system, hkl_ref, tensorflow)
         self.q2_scaler = q2_scaler
-        if not uc_scaler is None:
+        if uc_scaler is not None:
             self.uc_scaler = uc_scaler
 
     def get_pairwise_differences_from_uc_scaled(self, uc_pred_scaled, q2_scaled):

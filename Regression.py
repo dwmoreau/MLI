@@ -1,13 +1,12 @@
 import copy
 import csv
+import gc
 import joblib
 from keras_self_attention import SeqSelfAttention
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.stats
 from sklearn.decomposition import PCA
 import tensorflow as tf
-from tqdm import tqdm
 
 from Networks import mlp_model_builder
 from Networks import bnn_model_builder
@@ -15,13 +14,13 @@ from TargetFunctions import LikelihoodLoss
 
 
 class Regression_base:
-    def __init__(self, bravais_lattice, data_params, model_params, save_to, unit_cell_key, seed):
+    def __init__(self, group, data_params, model_params, save_to, unit_cell_key, seed):
         self.model_params = model_params
         self.n_points = data_params['n_points']
         self.n_outputs = data_params['n_outputs']
         self.y_indices = data_params['y_indices']
         self.unit_cell_key = unit_cell_key
-        self.bravais_lattice = bravais_lattice
+        self.group = group
         self.save_to = save_to
         self.seed = seed
 
@@ -45,8 +44,6 @@ class Regression_base:
             self.model = tf.keras.Model(inputs, self.model_builder_mlp(inputs))
         elif self.model_params['nn_type'] == 'bnn':
             self.model = tf.keras.Model(inputs, self.model_builder_bnn(inputs))
-        elif self.model_params['nn_type'] == 'bnn_head':
-            self.model = tf.keras.Model(inputs, self.model_builder_bnn_head(inputs))
         elif self.model_params['nn_type'] == 'mlp_head':
             self.model = tf.keras.Model(inputs, self.model_builder_mlp_head(inputs))
         elif self.model_params['nn_type'] == 'rnn_head':
@@ -89,19 +86,19 @@ class Regression_base:
             unit_cell_scaled_val = np.stack(val[f'{self.unit_cell_key}_scaled'])[:, self.y_indices]
             self.pca = PCA(n_components=self.n_outputs).fit(unit_cell_scaled_train)
             train_true = {
-                f'uc_pred_scaled_{self.bravais_lattice}': self.pca.transform(unit_cell_scaled_train)
+                f'uc_pred_scaled_{self.group}': self.pca.transform(unit_cell_scaled_train)
                 }
             val_true = {
-                f'uc_pred_scaled_{self.bravais_lattice}': self.pca.transform(unit_cell_scaled_val)
+                f'uc_pred_scaled_{self.group}': self.pca.transform(unit_cell_scaled_val)
                 }
         else:
             train_true = {
-                f'uc_pred_scaled_{self.bravais_lattice}': np.stack(
+                f'uc_pred_scaled_{self.group}': np.stack(
                     train[f'{self.unit_cell_key}_scaled']
                     )[:, self.y_indices],
                 }
             val_true = {
-                f'uc_pred_scaled_{self.bravais_lattice}': np.stack(
+                f'uc_pred_scaled_{self.group}': np.stack(
                     val[f'{self.unit_cell_key}_scaled']
                     )[:, self.y_indices],
                 }
@@ -113,7 +110,7 @@ class Regression_base:
 
         for cycle_index in range(self.model_params['cycles']):
             self.compile_model('mean')
-            print(f'\n Starting cycle {cycle_index} mean for {self.bravais_lattice}')
+            print(f'\n Starting cycle {cycle_index} mean for {self.group}')
             self.fit_history[2*cycle_index] = self.model.fit(
                 x=train_inputs,
                 y=train_true,
@@ -121,11 +118,11 @@ class Regression_base:
                 shuffle=True,
                 batch_size=self.model_params['batch_size'], 
                 validation_data=(val_inputs, val_true),
-                callbacks=None,
-                sample_weight=None
                 )
+            tf.keras.backend.clear_session()
+            gc.collect()
             self.compile_model('variance')
-            print(f'\n Starting cycle {cycle_index} variance for {self.bravais_lattice}')
+            print(f'\n Starting cycle {cycle_index} variance for {self.group}')
             self.fit_history[2*cycle_index + 1] = self.model.fit(
                 x=train_inputs,
                 y=train_true,
@@ -133,9 +130,12 @@ class Regression_base:
                 shuffle=True,
                 batch_size=self.model_params['batch_size'], 
                 validation_data=(val_inputs, val_true),
-                callbacks=None,
-                sample_weight=None
                 )
+            # https://github.com/tensorflow/tensorflow/issues/37505
+            # these are to deal with a memory leak.
+            # This does not solve the issue
+            tf.keras.backend.clear_session()
+            gc.collect()
 
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
@@ -200,12 +200,12 @@ class Regression_base:
                     )
             axes[col].set_ylim(ylims)
         axes[0].legend()
-        axes[0].set_title(self.bravais_lattice)
+        axes[0].set_title(self.group)
         axes[0].set_ylabel('UC Loss')
         axes[1].set_ylabel('UC MSE')
         axes[1].set_xlabel('Epoch')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.bravais_lattice}_reg_training_loss_{self.model_params["tag"]}.png')
+        fig.savefig(f'{self.save_to}/{self.group}_reg_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
     def fit_model_warmup(self, data):
@@ -213,7 +213,7 @@ class Regression_base:
         train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
 
         self.compile_model('mean')
-        print(f'\n Starting warmup mean for {self.bravais_lattice}')
+        print(f'\n Starting warmup mean for {self.group}')
         self.fit_history[0] = self.model.fit(
             x=train_inputs,
             y=train_true,
@@ -225,7 +225,7 @@ class Regression_base:
             sample_weight=None
             )
         self.compile_model('variance')
-        print(f'\n Starting warmup variance for {self.bravais_lattice}')
+        print(f'\n Starting warmup variance for {self.group}')
         self.fit_history[1] = self.model.fit(
             x=train_inputs,
             y=train_true,
@@ -237,7 +237,7 @@ class Regression_base:
             sample_weight=None
             )
         self.compile_model('both')
-        print(f'\n Training mean & variance for {self.bravais_lattice}')
+        print(f'\n Training mean & variance for {self.group}')
         self.fit_history[2] = self.model.fit(
             x=train_inputs,
             y=train_true,
@@ -309,17 +309,17 @@ class Regression_base:
         hl, ll = axes[0].get_legend_handles_labels()
         hr, lr = axes_1r.get_legend_handles_labels()
         axes[0].legend(hl + hr, ll + lr)
-        axes[0].set_title(self.bravais_lattice)
+        axes[0].set_title(self.group)
         axes[0].set_ylabel('UC Loss')
         axes[1].set_ylabel('UC MSE')
         axes_1r.set_ylabel('UC MSE: Val / Training')
         axes[1].set_xlabel('Epoch')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.bravais_lattice}_reg_training_loss_{self.model_params["tag"]}.png')
+        fig.savefig(f'{self.save_to}/{self.group}_reg_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
     def do_predictions(self, data=None, inputs=None, verbose=1, n_evals=500):
-        if self.model_params['nn_type'] in ['bnn', 'bnn_head']:
+        if self.model_params['nn_type'] in ['bnn']:
             uc_pred_scaled, uc_pred_scaled_cov = self.do_predictions_probabalistic(
                 data=data,
                 inputs=inputs,
@@ -335,268 +335,29 @@ class Regression_base:
         return uc_pred_scaled, uc_pred_scaled_cov
 
     def evaluate(self, data):
-        self.evaluate_regression(
+        evaluate_regression(
             data=data,
-            bravais_lattice=self.bravais_lattice,
+            group=self.group,
             n_outputs=self.n_outputs,
             unit_cell_key=self.unit_cell_key,
-            save_to_name=f'{self.save_to}/{self.bravais_lattice}_reg_{self.model_params["tag"]}.png',
+            save_to_name=f'{self.save_to}/{self.group}_reg_{self.model_params["tag"]}.png',
             y_indices=self.y_indices,
             )
 
     def calibrate(self, data):
-        self.calibrate_regression(
+        calibrate_regression(
             data=data,
-            bravais_lattice=self.bravais_lattice,
+            group=self.group,
             n_outputs=self.n_outputs,
             unit_cell_key=self.unit_cell_key,
-            save_to_name=f'{self.save_to}/{self.bravais_lattice}_reg_calibration_{self.model_params["tag"]}.png',
+            save_to_name=f'{self.save_to}/{self.group}_reg_calibration_{self.model_params["tag"]}.png',
             y_indices=self.y_indices,
             )
 
-    @staticmethod
-    def evaluate_regression(data, bravais_lattice, n_outputs, unit_cell_key, save_to_name, y_indices):
-        alpha = 0.1
-        markersize = 0.5
-
-        data = data[~data['augmented']]
-        if bravais_lattice == 'All':
-            bl_data = data
-        else:
-            bl_data = data[data['bravais_lattice'] == bravais_lattice]
-        figsize = (n_outputs*2 + 2, 10)
-        fig, axes = plt.subplots(5, n_outputs, figsize=figsize)
-        y_true = np.stack(bl_data[unit_cell_key])[:, y_indices]
-        y_pred = np.stack(bl_data[f'{unit_cell_key}_pred'])
-        y_cov = np.stack(bl_data[f'{unit_cell_key}_pred_cov'])
-        y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
-        y_error = np.abs(y_pred - y_true)
-        titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
-
-        for uc_index in range(n_outputs):
-            all_info = np.sort(np.concatenate((y_true[:, uc_index], y_pred[:, uc_index])))
-            lower = all_info[int(0.005*all_info.size)]
-            upper = all_info[int(0.995*all_info.size)]
-
-            all_error = np.sort(np.concatenate((y_error[:, uc_index], y_std[:, uc_index])))
-            lower_error = all_error[int(0.005*all_error.size)]
-            upper_error = all_error[int(0.995*all_error.size)]
-            
-            if upper > lower:
-                axes[0, uc_index].plot(
-                    y_true[:, uc_index], y_pred[:, uc_index], 
-                    color=[0, 0, 0], alpha=alpha, 
-                    linestyle='none', marker='.', markersize=markersize,
-                    )
-                axes[0, uc_index].plot(
-                    [lower, upper], [lower, upper],
-                    color=[0.7, 0, 0], linestyle='dotted'
-                    )
-                axes[1, uc_index].semilogy(
-                    y_true[:, uc_index], y_error[:, uc_index], 
-                    color=[0, 0, 0], alpha=alpha, 
-                    linestyle='none', marker='.', markersize=markersize,
-                    )
-                axes[2, uc_index].semilogy(
-                    y_true[:, uc_index], y_std[:, uc_index], 
-                    color=[0, 0, 0], alpha=alpha, 
-                    linestyle='none', marker='.', markersize=markersize,
-                    )
-
-            if upper_error > lower_error:
-                bins = np.linspace(lower_error, upper_error, 101)
-                centers = (bins[1:] + bins[:-1]) / 2
-                dbin = centers[1] - centers[0]
-                hist_std, _ = np.histogram(y_std[:, uc_index], bins=bins, density=True)
-                hist_error, _ = np.histogram(y_error[:, uc_index], bins=bins, density=True)
-                axes[3, uc_index].loglog(
-                    [lower_error, upper_error], [lower_error, upper_error],
-                    color=[0.7, 0, 0], linestyle='dotted'
-                    )
-                axes[3, uc_index].loglog(
-                    y_error[:, uc_index], y_std[:, uc_index], 
-                    color=[0, 0, 0], alpha=alpha, 
-                    linestyle='none', marker='.', markersize=markersize,
-                    )
-                axes[4, uc_index].bar(centers, hist_error, width=dbin, label='Error', alpha=0.5)
-                axes[4, uc_index].bar(centers, hist_std, width=dbin, label='STD Est', alpha=0.5)
-
-            if upper > lower:
-                axes[0, uc_index].set_xlim([lower, upper])
-                axes[0, uc_index].set_ylim([lower, upper])
-                axes[1, uc_index].set_xlim([lower, upper])
-                axes[2, uc_index].set_xlim([lower, upper])
-            if upper_error > 0:
-                axes[1, uc_index].set_ylim([lower_error, upper_error])
-                axes[2, uc_index].set_ylim([lower_error, upper_error])
-                axes[3, uc_index].set_xlim([lower_error, upper_error])
-                axes[3, uc_index].set_ylim([lower_error, upper_error])
-                axes[4, uc_index].set_xscale('log')
-
-            error = np.sort(y_error[:, uc_index])
-            p25 = error[int(0.25 * error.size)]
-            p50 = error[int(0.50 * error.size)]
-            p75 = error[int(0.75 * error.size)]
-            rmse = np.sqrt(1/len(bl_data) * np.linalg.norm(error)**2)
-            error_titles = [
-                titles[uc_index],
-                f'RMSE: {rmse:0.4f}',
-                f'25%: {p25:0.4f}',
-                f'50%: {p50:0.4f}',
-                f'75%: {p75:0.4f}',
-                ]
-            axes[0, uc_index].set_title('\n'.join(error_titles), fontsize=12)
-            axes[0, uc_index].set_xlabel('True')
-            axes[1, uc_index].set_xlabel('True')
-            axes[2, uc_index].set_xlabel('True')
-            axes[3, uc_index].set_xlabel('Error')
-            axes[4, uc_index].set_xlabel('Error / STD')
-        axes[0, 0].set_ylabel('Predicted')
-        axes[1, 0].set_ylabel('Error')
-        axes[2, 0].set_ylabel('STD Est')
-        axes[3, 0].set_ylabel('STD Est')
-        axes[4, 0].set_ylabel('Distribution')
-        axes[4, 0].legend(frameon=False)
-        fig.tight_layout()
-        #fig.savefig()
-        fig.savefig(save_to_name)
-        plt.close()
-
-    @staticmethod
-    def calibrate_regression(data, bravais_lattice, n_outputs, unit_cell_key, save_to_name, y_indices):
-        # calculate residuals / uncertainty
-        hist_bins = np.linspace(-4, 4, 101)
-        hist_centers = (hist_bins[1:] + hist_bins[:-1]) / 2
-        n_calib_bins = 25
-        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        alphas = [1, 0.5]
-        labels = ['Training', 'Validation']
-
-        data = data[~data['augmented']]
-        if bravais_lattice == 'All':
-            bl_data = [
-                data[data['train']],
-                data[~data['train']]
-                ]
-        else:
-            bl_data_all = data[data['bravais_lattice'] == bravais_lattice]
-            bl_data = [
-                bl_data_all[bl_data_all['train']],
-                bl_data_all[~bl_data_all['train']]
-                ]
-        figsize=(10, 2 * (n_outputs + 1))
-        fig, axes = plt.subplots(n_outputs, 3, figsize=figsize)
-        if n_outputs == 1:
-            axes = axes[np.newaxis, :]
-        cv = np.zeros((n_outputs, 2))
-        ENCE = np.zeros((n_outputs, 2, n_calib_bins))
-        for train_index in range(2):
-            y_true = np.stack(bl_data[train_index][unit_cell_key])[:, y_indices]
-            y_pred = np.stack(bl_data[train_index][f'{unit_cell_key}_pred'])
-            y_cov = np.stack(bl_data[train_index][f'{unit_cell_key}_pred_cov'])
-            y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
-            y_error = y_pred - y_true
-            
-            for index in range(n_outputs):
-                z = y_error[:, index] / y_std[:, index]
-                hist, _ = np.histogram(z, bins=hist_bins, density=True)
-                axes[index, 0].bar(
-                    hist_centers, hist, width=(hist_bins[1] - hist_bins[0]),
-                    color=colors[train_index], alpha=alphas[train_index], label=labels[train_index]
-                    )
-
-                sorted_std = np.sort(y_std[:, index])
-                lower_std = sorted_std[int(0.01*sorted_std.size)]
-                upper_std = sorted_std[int(0.98*sorted_std.size)]
-                bins_std = np.linspace(lower_std, upper_std, n_calib_bins + 1)
-                centers_std = (bins_std[1:] + bins_std[:-1]) / 2
-                y_error_binned = np.zeros((n_calib_bins, 2))
-                for bin_index in range(n_calib_bins):
-                    indices = np.logical_and(
-                        y_std[:, index] >= bins_std[bin_index],
-                        y_std[:, index] < bins_std[bin_index + 1]
-                        )
-                    if np.sum(indices) > 0:
-                        y_error_binned[bin_index, 0] = np.abs(y_error[indices, index]).mean()
-                        y_error_binned[bin_index, 1] = np.abs(y_error[indices, index]).std()
-                        RMV = np.sqrt(np.mean(y_std[indices, index]**2))
-                        RMSE = np.sqrt(np.mean(y_error[indices, index]**2))
-                        ENCE[index, train_index, bin_index] = np.abs(RMV - RMSE) / RMV
-                mean_sigma = y_std[:, index].mean()
-                numerator = np.sum((y_std[:, index] - mean_sigma)**2) / (y_std[:, index].size - 1)
-                cv[index, train_index] = np.sqrt(numerator) / mean_sigma
-
-                axes[index, 1].errorbar(
-                    centers_std, y_error_binned[:, 0], y_error_binned[:, 1],
-                    marker='.', color=colors[train_index], label=labels[train_index]
-                    )
-
-                sorted_error = np.sort(np.abs(y_error[:, index]))
-                lower_error = sorted_error[int(0.01*sorted_error.size)]
-                upper_error = sorted_error[int(0.98*sorted_error.size)]
-                bins_error = np.linspace(lower_error, upper_error, n_calib_bins + 1)
-                centers_error = (bins_error[1:] + bins_error[:-1]) / 2
-                y_std_binned = np.zeros((n_calib_bins, 2))
-                for bin_index in range(n_calib_bins):
-                    indices = np.logical_and(
-                        y_error[:, index] >= bins_error[bin_index],
-                        y_error[:, index] < bins_error[bin_index + 1]
-                        )
-                    y_std_binned[bin_index, 0] = np.abs(y_std[indices, index]).mean()
-                    y_std_binned[bin_index, 1] = np.abs(y_std[indices, index]).std()
-                
-                axes[index, 2].errorbar(
-                    centers_error, y_std_binned[:, 0], y_std_binned[:, 1],
-                    marker='.', color=colors[train_index], label=labels[train_index]
-                    )
-
-        for index in range(n_outputs):
-            axes[index, 1].annotate(
-                '\n'.join((
-                    f'ENCE: {np.mean(ENCE[index, 0]):0.3f} / {np.mean(ENCE[index, 1]):0.3f}',
-                    f'Cv: {cv[index, 0]:0.3f} / {cv[index, 1]:0.3f}'
-                    )),
-                xy=(0.05, 0.85), xycoords='axes fraction'
-                )
-            axes[index, 0].plot(
-                hist_centers,
-                scipy.stats.norm.pdf(hist_centers), 
-                color=[0, 0, 0], 
-                linestyle='dotted'
-                )
-            axes[index, 2].set_ylabel('Mean STD Estimate')
-            axes[index, 0].set_ylabel('Distribution')
-            axes[index, 1].set_ylabel('Mean Error')
-
-            xlim = axes[index, 1].get_xlim()
-            ylim = axes[index, 1].get_ylim()
-            axes[index, 1].plot(
-                xlim, xlim,
-                color=[0, 0, 0], linestyle='dotted'
-                )
-            axes[index, 1].set_xlim(xlim)
-            axes[index, 1].set_ylim(ylim)
-
-            xlim = axes[index, 2].get_xlim()
-            ylim = axes[index, 2].get_ylim()
-            axes[index, 2].plot(
-                xlim, xlim,
-                color=[0, 0, 0], linestyle='dotted'
-                )
-            axes[index, 2].set_xlim(xlim)
-            axes[index, 2].set_ylim(ylim)
-        axes[0, 0].legend(frameon=False)
-        axes[n_outputs - 1, 0].set_xlabel('Normalized Residuals')
-        axes[n_outputs - 1, 1].set_xlabel('Uncertainty Estimate')
-        axes[n_outputs - 1, 2].set_xlabel('Error')
-        fig.tight_layout()
-        fig.savefig(save_to_name)
-        plt.close()
-
 
 class Regression_AlphaBeta(Regression_base):
-    def __init__(self, bravais_lattice, data_params, model_params, save_to, unit_cell_key, seed=12345):
-        super().__init__(bravais_lattice, data_params, model_params, save_to, unit_cell_key, seed)
+    def __init__(self, group, data_params, model_params, save_to, unit_cell_key, seed=12345):
+        super().__init__(group, data_params, model_params, save_to, unit_cell_key, seed)
 
     def setup(self):
         self.model_params['mean_params']['n_outputs'] = self.n_outputs
@@ -624,7 +385,7 @@ class Regression_AlphaBeta(Regression_base):
 
         self.optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
 
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head', 'rnn_head']:
+        if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
             head_params_defaults = {
                 'dropout_rate': 0.0,
                 'epsilon': 0.001,
@@ -681,40 +442,40 @@ class Regression_AlphaBeta(Regression_base):
 
         self.reg_loss = LikelihoodLoss('alpha_beta', n=self.n_outputs, beta_nll=self.model_params['beta_nll'])
         self.loss_weights = {
-            f'uc_pred_scaled_{self.bravais_lattice}': 1
+            f'uc_pred_scaled_{self.group}': 1
             }
         self.loss_functions = {
-            f'uc_pred_scaled_{self.bravais_lattice}': self.reg_loss
+            f'uc_pred_scaled_{self.group}': self.reg_loss
             }
         self.loss_metrics = {
-            f'uc_pred_scaled_{self.bravais_lattice}': [self.reg_loss.mean_squared_error]
+            f'uc_pred_scaled_{self.group}': [self.reg_loss.mean_squared_error]
             }
 
     def save(self):
         model_params = copy.deepcopy(self.model_params)
-        with open(f'{self.save_to}/{self.bravais_lattice}_reg_params_{self.model_params["tag"]}.csv', 'w') as output_file:
+        with open(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv', 'w') as output_file:
             writer = csv.DictWriter(output_file, fieldnames=model_params.keys())
             writer.writeheader()
             writer.writerow(model_params)
 
         network_keys = ['mean_params', 'alpha_params', 'beta_params']
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head', 'rnn_head']:
+        if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
             network_keys += ['head_params']
         for network_key in network_keys:
             params = copy.deepcopy(self.model_params[network_key])
             params.pop('kernel_initializer')
             params.pop('bias_initializer')
-            with open(f'{self.save_to}/{self.bravais_lattice}_reg_{network_key}_{self.model_params["tag"]}.csv', 'w') as output_file:
+            with open(f'{self.save_to}/{self.group}_reg_{network_key}_{self.model_params["tag"]}.csv', 'w') as output_file:
                 writer = csv.DictWriter(output_file, fieldnames=params.keys())
                 writer.writeheader()
                 writer.writerow(params)
 
-        self.model.save_weights(f'{self.save_to}/{self.bravais_lattice}_reg_weights_{self.model_params["tag"]}.h5')
+        self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
         if self.model_params['predict_pca']:
-            joblib.dump(self.pca, f'{self.save_to}/{self.bravais_lattice}_pca.bin')
+            joblib.dump(self.pca, f'{self.save_to}/{self.group}_pca.bin')
 
     def load_from_tag(self):
-        with open(f'{self.save_to}/{self.bravais_lattice}_reg_params_{self.model_params["tag"]}.csv', 'r') as params_file:
+        with open(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv', 'r') as params_file:
             reader = csv.DictReader(params_file)
             for row in reader:
                 params = row
@@ -730,7 +491,6 @@ class Regression_AlphaBeta(Regression_base):
             'cycles',
             'learning_rate',
             'fit_strategy',
-            'N_train',
             'predict_pca',
             ]
         self.model_params = dict.fromkeys(params_keys)
@@ -750,10 +510,9 @@ class Regression_AlphaBeta(Regression_base):
                 )
         if params['predict_pca'] == 'True':
             self.model_params['predict_pca'] = True
-            self.pca = joblib.load(f'{self.save_to}/{self.bravais_lattice}_pca.bin')
+            self.pca = joblib.load(f'{self.save_to}/{self.group}_pca.bin')
         elif params['predict_pca'] == 'False':
             self.model_params['predict_pca'] = False
-        self.model_params['N_train'] = int(params['N_train'])
 
         params_keys = [
             'dropout_rate',
@@ -766,10 +525,10 @@ class Regression_AlphaBeta(Regression_base):
             'bias_initializer',
             ]
         network_keys = ['mean_params', 'alpha_params', 'beta_params']
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head', 'rnn_head']:
+        if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
             network_keys += ['head_params']
         for network_key in network_keys:
-            with open(f'{self.save_to}/{self.bravais_lattice}_reg_{network_key}_{self.model_params["tag"]}.csv', 'r') as params_file:
+            with open(f'{self.save_to}/{self.group}_reg_{network_key}_{self.model_params["tag"]}.csv', 'r') as params_file:
                 reader = csv.DictReader(params_file)
                 for row in reader:
                     params = row
@@ -789,87 +548,48 @@ class Regression_AlphaBeta(Regression_base):
 
         self.build_model()
         self.model.load_weights(
-            filepath=f'{self.save_to}/{self.bravais_lattice}_reg_weights_{self.model_params["tag"]}.h5',
+            filepath=f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5',
             by_name=True
             )
         self.compile_model(mode='both')
-
-    def model_builder_bnn_head(self, inputs):
-        head_outputs = tf.keras.layers.SimpleRNN(
-            self.model_params['head_params']['layers'][0],
-            name=f'head_{self.bravais_lattice}',
-            )(inputs['q2_scaled'][:, :, tf.newaxis])
-
-        uc_pred_mean_scaled = bnn_model_builder(
-            head_outputs,
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
-            N_train=self.model_params['N_train']
-            )
-        uc_pred_alpha_scaled = 1 + bnn_model_builder(
-            head_outputs,
-            tag=f'uc_pred_alpha_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.bravais_lattice}',
-            N_train=self.model_params['N_train']
-            )
-        uc_pred_beta_scaled = bnn_model_builder(
-            head_outputs,
-            tag=f'uc_pred_beta_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.bravais_lattice}',
-            N_train=self.model_params['N_train']
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_alpha_scaled[:, :, tf.newaxis],
-                uc_pred_beta_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
 
     def model_builder_rnn_head(self, inputs):
         head_outputs = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(
             self.model_params['head_params']['layers'][0],
             return_sequences=True
             ),
-            name=f'head_{self.bravais_lattice}',
+            name=f'head_{self.group}',
             )(inputs['q2_scaled'][:, :, tf.newaxis])
         head_outputs = SeqSelfAttention(
             return_attention=True,
-            name=f'head_{self.bravais_lattice}_attn'
+            name=f'head_{self.group}_attn'
             )(head_outputs)
         head_outputs = tf.keras.layers.concatenate(head_outputs)
         head_outputs = tf.keras.layers.Flatten()(head_outputs)
 
         uc_pred_mean_scaled = mlp_model_builder(
             head_outputs,
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_mean_scaled_{self.group}',
             model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}',
             )
         uc_pred_alpha_scaled = 1 + mlp_model_builder(
             head_outputs,
-            tag=f'uc_pred_alpha_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_alpha_scaled_{self.group}',
             model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}',
             )
         uc_pred_beta_scaled = mlp_model_builder(
             head_outputs,
-            tag=f'uc_pred_beta_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_beta_scaled_{self.group}',
             model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}',
             )
 
         # uc_pred_mean_scaled: n_batch x n_outputs
         uc_pred_scaled = tf.keras.layers.Concatenate(
             axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
+            name=f'uc_pred_scaled_{self.group}'
             )((
                 uc_pred_mean_scaled[:, :, tf.newaxis],
                 uc_pred_alpha_scaled[:, :, tf.newaxis],
@@ -878,20 +598,6 @@ class Regression_AlphaBeta(Regression_base):
         return uc_pred_scaled
 
     def model_builder_mlp_head(self, inputs):
-        """
-        head_outputs = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(
-            self.model_params['head_params']['layers'][0],
-            return_sequences=True
-            ),
-            name=f'head_{self.bravais_lattice}',
-            )(inputs['q2_scaled'][:, :, tf.newaxis])
-        head_outputs = SeqSelfAttention(
-            return_attention=True,
-            name=f'head_{self.bravais_lattice}_attn'
-            )(head_outputs)
-        head_outputs = tf.keras.layers.concatenate(head_outputs)
-        head_outputs = tf.keras.layers.Flatten()(head_outputs)
-        """
         x_head = inputs['q2_scaled']
         for layer_index in range(len(self.model_params['head_params']['layers'])):
             x_head = tf.keras.layers.Dense(
@@ -911,27 +617,27 @@ class Regression_AlphaBeta(Regression_base):
 
         uc_pred_mean_scaled = mlp_model_builder(
             x_head,
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_mean_scaled_{self.group}',
             model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}',
             )
         uc_pred_alpha_scaled = 1 + mlp_model_builder(
             x_head,
-            tag=f'uc_pred_alpha_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_alpha_scaled_{self.group}',
             model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}',
             )
         uc_pred_beta_scaled = mlp_model_builder(
             x_head,
-            tag=f'uc_pred_beta_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_beta_scaled_{self.group}',
             model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}',
             )
 
         # uc_pred_mean_scaled: n_batch x n_outputs
         uc_pred_scaled = tf.keras.layers.Concatenate(
             axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
+            name=f'uc_pred_scaled_{self.group}'
             )((
                 uc_pred_mean_scaled[:, :, tf.newaxis],
                 uc_pred_alpha_scaled[:, :, tf.newaxis],
@@ -942,30 +648,30 @@ class Regression_AlphaBeta(Regression_base):
     def model_builder_bnn(self, inputs):
         uc_pred_mean_scaled = bnn_model_builder(
             inputs['q2_scaled'],
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_mean_scaled_{self.group}',
             model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}',
             N_train=self.model_params['N_train']
             )
         uc_pred_alpha_scaled = 1 + bnn_model_builder(
             inputs['q2_scaled'],
-            tag=f'uc_pred_alpha_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_alpha_scaled_{self.group}',
             model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}',
             N_train=self.model_params['N_train']
             )
         uc_pred_beta_scaled = bnn_model_builder(
             inputs['q2_scaled'],
-            tag=f'uc_pred_beta_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_beta_scaled_{self.group}',
             model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.bravais_lattice}',
+            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}',
             N_train=self.model_params['N_train']
             )
 
         # uc_pred_mean_scaled: n_batch x n_outputs
         uc_pred_scaled = tf.keras.layers.Concatenate(
             axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
+            name=f'uc_pred_scaled_{self.group}'
             )((
                 uc_pred_mean_scaled[:, :, tf.newaxis],
                 uc_pred_alpha_scaled[:, :, tf.newaxis],
@@ -976,27 +682,27 @@ class Regression_AlphaBeta(Regression_base):
     def model_builder_mlp(self, inputs):
         uc_pred_mean_scaled = mlp_model_builder(
             inputs['q2_scaled'],
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_mean_scaled_{self.group}',
             model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}'
+            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}'
             )
         uc_pred_alpha_scaled = 1 + mlp_model_builder(
             inputs['q2_scaled'],
-            tag=f'uc_pred_alpha_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_alpha_scaled_{self.group}',
             model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.bravais_lattice}'
+            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}'
             )
         uc_pred_beta_scaled = mlp_model_builder(
             inputs['q2_scaled'],
-            tag=f'uc_pred_beta_scaled_{self.bravais_lattice}',
+            tag=f'uc_pred_beta_scaled_{self.group}',
             model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.bravais_lattice}'
+            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}'
             )
 
         # uc_pred_mean_scaled: n_batch x n_outputs
         uc_pred_scaled = tf.keras.layers.Concatenate(
             axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
+            name=f'uc_pred_scaled_{self.group}'
             )((
                 uc_pred_mean_scaled[:, :, tf.newaxis],
                 uc_pred_alpha_scaled[:, :, tf.newaxis],
@@ -1007,33 +713,33 @@ class Regression_AlphaBeta(Regression_base):
     def get_layer_names(self):
         self.mean_layer_names = []
         for layer_index in range(len(self.model_params['mean_params']['layers'])):
-            self.mean_layer_names.append(f'dense_uc_pred_mean_scaled_{self.bravais_lattice}_{layer_index}')
-            self.mean_layer_names.append(f'layer_norm_uc_pred_mean_scaled_{self.bravais_lattice}_{layer_index}')
-        self.mean_layer_names.append(f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}')
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head']:
+            self.mean_layer_names.append(f'dense_uc_pred_mean_scaled_{self.group}_{layer_index}')
+            self.mean_layer_names.append(f'layer_norm_uc_pred_mean_scaled_{self.group}_{layer_index}')
+        self.mean_layer_names.append(f'{self.model_params["mean_params"]["output_name"]}_{self.group}')
+        if self.model_params['nn_type'] in ['mlp_head']:
             for layer_index in range(len(self.model_params['head_params']['layers'])):
                 self.mean_layer_names.append(f'dense_head_{layer_index}')
                 self.mean_layer_names.append(f'layer_norm_head_{layer_index}')
         if self.model_params['nn_type'] in ['rnn_head']:
-            self.mean_layer_names.append(f'head_{self.bravais_lattice}')
-            self.mean_layer_names.append(f'head_{self.bravais_lattice}_attn')
+            self.mean_layer_names.append(f'head_{self.group}')
+            self.mean_layer_names.append(f'head_{self.group}_attn')
 
         self.var_layer_names = []
         for layer_index in range(len(self.model_params['alpha_params']['layers'])):
-            self.var_layer_names.append(f'dense_uc_pred_alpha_scaled_{self.bravais_lattice}_{layer_index}')
-            self.var_layer_names.append(f'layer_norm_uc_pred_alpha_scaled_{self.bravais_lattice}_{layer_index}')
-        self.var_layer_names.append(f'{self.model_params["alpha_params"]["output_name"]}_{self.bravais_lattice}')
+            self.var_layer_names.append(f'dense_uc_pred_alpha_scaled_{self.group}_{layer_index}')
+            self.var_layer_names.append(f'layer_norm_uc_pred_alpha_scaled_{self.group}_{layer_index}')
+        self.var_layer_names.append(f'{self.model_params["alpha_params"]["output_name"]}_{self.group}')
         for layer_index in range(len(self.model_params['beta_params']['layers'])):
-            self.var_layer_names.append(f'dense_uc_pred_beta_scaled_{self.bravais_lattice}_{layer_index}')
-            self.var_layer_names.append(f'layer_norm_uc_pred_beta_scaled_{self.bravais_lattice}_{layer_index}')
-        self.var_layer_names.append(f'{self.model_params["beta_params"]["output_name"]}_{self.bravais_lattice}')
+            self.var_layer_names.append(f'dense_uc_pred_beta_scaled_{self.group}_{layer_index}')
+            self.var_layer_names.append(f'layer_norm_uc_pred_beta_scaled_{self.group}_{layer_index}')
+        self.var_layer_names.append(f'{self.model_params["beta_params"]["output_name"]}_{self.group}')
 
     def do_predictions_deterministic(self, data=None, inputs=None, verbose=1):
         N = len(data)
         if not data is None:
             inputs = {'q2_scaled': np.stack(data['q2_scaled'])}
         if verbose == 1:
-            print(f'\n Regression inferences for {self.bravais_lattice}')
+            print(f'\n Regression inferences for {self.group}')
         outputs = self.model.predict(inputs, batch_size=4096, verbose=verbose)
         pred = outputs[:, :, 0]
         pred_alpha = outputs[:, :, 1]
@@ -1057,7 +763,7 @@ class Regression_AlphaBeta(Regression_base):
         if not data is None:
             inputs = {'q2_scaled': np.stack(data['q2_scaled'])}
         if verbose == 1:
-            print(f'\n Regression inferences for {self.bravais_lattice}')
+            print(f'\n Regression inferences for {self.group}')
 
         uc_pred_scaled_all = np.zeros((N, self.n_outputs, n_evals))
         uc_pred_scaled_var_all = np.zeros((N, self.n_outputs, n_evals))
@@ -1077,391 +783,3 @@ class Regression_AlphaBeta(Regression_base):
                 uc_pred_scaled_var[index] + 1/N*uc_pred_scaled_model_var[index]
         return uc_pred_scaled, uc_pred_scaled_cov
 
-
-class Regression_MVE(Regression_base):
-    def __init__(self, bravais_lattice, data_params, model_params, save_to, unit_cell_key, seed=12345):
-        super().__init__(bravais_lattice, data_params, model_params, save_to, unit_cell_key, seed)
-
-    def setup(self):
-        self.model_params['mean_params']['n_outputs'] = self.n_outputs
-        self.model_params['var_params']['n_outputs'] = self.n_outputs
-        model_params_defaults = {
-            'nn_type': 'mlp',
-            'fit_strategy': 'cycles',
-            'beta_nll': 0.5,
-            'batch_size': 64,
-            'learning_rate': 0.0002,
-            }
-        for key in model_params_defaults.keys():
-            if key not in self.model_params.keys():
-                self.model_params[key] = model_params_defaults[key]
-
-        if self.model_params['fit_strategy'] == 'cycles':
-            if not 'epochs' in self.model_params.keys():
-                self.model_params['epochs'] = 5
-            if not 'cycles' in self.model_params.keys():
-                self.model_params['cycles'] = 10
-        if self.model_params['fit_strategy'] == 'warmup':
-            if not 'epochs' in self.model_params.keys():
-                self.model_params['epochs'] = [10, 10, 80]
-
-        self.optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
-
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head']:
-            head_params_defaults = {
-                'dropout_rate': 0.0,
-                'epsilon': 0.001,
-                'layers': [60],
-                }
-            for key in head_params_defaults.keys():
-                if key not in self.model_params['head_params'].keys():
-                    self.model_params['head_params'][key] = head_params_defaults[key]
-        self.model_params['head_params']['kernel_initializer'] = None
-        self.model_params['head_params']['bias_initializer'] = None
-
-        mean_params_defaults = {        
-            'dropout_rate': 0.0,
-            'epsilon': 0.001,
-            'layers': [60, 60],
-            'output_activation': 'linear',
-            'output_name': 'uc_mean_scaled',
-            }
-        for key in mean_params_defaults.keys():
-            if key not in self.model_params['mean_params'].keys():
-                self.model_params['mean_params'][key] = mean_params_defaults[key]
-        self.model_params['mean_params']['kernel_initializer'] = None
-        self.model_params['mean_params']['bias_initializer'] = None
-
-        var_params_defaults = {        
-            'dropout_rate': 0.0,
-            'epsilon': 0.001,
-            'layers': [60, 60],
-            'output_activation': 'softplus',
-            'output_name': 'uc_var_scaled',
-            }
-        for key in var_params_defaults.keys():
-            if key not in self.model_params['var_params'].keys():
-                self.model_params['var_params'][key] = var_params_defaults[key]
-        self.model_params['var_params']['kernel_initializer'] = None
-        self.model_params['var_params']['bias_initializer'] = \
-            tf.keras.initializers.RandomNormal(mean=1, stddev=0.05, seed=self.seed)
-
-        self.reg_loss = LikelihoodLoss('normal', n=self.n_outputs, beta_nll=self.model_params['beta_nll'])
-        self.loss_weights = {
-            f'uc_pred_scaled_{self.bravais_lattice}': 1
-            }
-        self.loss_functions = {
-            f'uc_pred_scaled_{self.bravais_lattice}': self.reg_loss
-            }
-        self.loss_metrics = {
-            f'uc_pred_scaled_{self.bravais_lattice}': [self.reg_loss.mean_squared_error]
-            }
-
-    def save(self):
-        model_params = copy.deepcopy(self.model_params)
-        with open(f'{self.save_to}/{self.bravais_lattice}_reg_params_{self.model_params["tag"]}.csv', 'w') as output_file:
-            writer = csv.DictWriter(output_file, fieldnames=model_params.keys())
-            writer.writeheader()
-            writer.writerow(model_params)
-
-        network_keys = ['mean_params', 'var_params']
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head']:
-            network_keys += ['head_params']
-        for network_key in network_keys:
-            params = copy.deepcopy(self.model_params[network_key])
-            params.pop('kernel_initializer')
-            params.pop('bias_initializer')
-            with open(f'{self.save_to}/{self.bravais_lattice}_reg_{network_key}_{self.model_params["tag"]}.csv', 'w') as output_file:
-                writer = csv.DictWriter(output_file, fieldnames=params.keys())
-                writer.writeheader()
-                writer.writerow(params)
-        self.model.save_weights(f'{self.save_to}/{self.bravais_lattice}_reg_weights_{self.model_params["tag"]}.h5')
-
-    def load_from_tag(self):
-        with open(f'{self.save_to}/{self.bravais_lattice}_reg_params_{self.model_params["tag"]}.csv', 'r') as params_file:
-            reader = csv.DictReader(params_file)
-            for row in reader:
-                params = row
-        params_keys = [
-            'tag',
-            'nn_type'
-            'mean_params',
-            'var_params',
-            'beta_nll',
-            'batch_size',
-            'epochs',
-            'cycles',
-            'learning_rate',
-            'fit_strategy',
-            'N_train',
-            'var_est',
-            ]
-        self.model_params = dict.fromkeys(params_keys)
-        self.model_params['tag'] = params['tag']
-        self.model_params['nn_type'] = params['nn_type']
-        self.model_params['beta_nll'] = float(params['beta_nll'])
-        self.model_params['batch_size'] = int(params['batch_size'])
-        self.model_params['learning_rate'] = float(params['learning_rate'])
-        self.model_params['fit_strategy'] = params['fit_strategy']
-        if self.model_params['fit_strategy'] == 'cycles':
-            self.model_params['epochs'] = int(params['epochs'])
-            self.model_params['cycles'] = int(params['cycles'])
-        if self.model_params['fit_strategy'] == 'warmup':
-            self.model_params['epochs'] = np.array(
-                params['epochs'].split('[')[1].split(']')[0].split(','),
-                dtype=int
-                )
-        self.model_params['N_train'] = int(params['N_train'])
-        self.model_params['var_est'] = params['var_est']
-
-        params_keys = [
-            'dropout_rate',
-            'epsilon',
-            'layers',
-            'output_activation',
-            'output_name',
-            'n_outputs',
-            'kernel_initializer',
-            'bias_initializer',
-            ]
-        network_keys = ['mean_params', 'var_params']
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head']:
-            network_keys += ['head_params']
-        for network_key in network_keys:
-            with open(f'{self.save_to}/{self.bravais_lattice}_reg_{network_key}_{self.model_params["tag"]}.csv', 'r') as params_file:
-                reader = csv.DictReader(params_file)
-                for row in reader:
-                    params = row
-            self.model_params[network_key] = dict.fromkeys(params_keys)
-            self.model_params[network_key]['dropout_rate'] = float(params['dropout_rate'])
-            self.model_params[network_key]['epsilon'] = float(params['epsilon'])
-            self.model_params[network_key]['layers'] = np.array(
-                params['layers'].split('[')[1].split(']')[0].split(','),
-                dtype=int
-                )
-            self.model_params[network_key]['kernel_initializer'] = None
-            self.model_params[network_key]['bias_initializer'] = None
-            if network_key != 'head_params':
-                self.model_params[network_key]['output_activation'] = params['output_activation']
-                self.model_params[network_key]['output_name'] = params['output_name']
-                self.model_params[network_key]['n_outputs'] = self.n_outputs
-
-        self.optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
-        self.reg_loss = LikelihoodLoss('normal', n=self.n_outputs, beta_nll=self.model_params['beta_nll'])
-        self.loss_weights = {
-            f'uc_pred_scaled_{self.bravais_lattice}': 1
-            }
-        self.loss_functions = {
-            f'uc_pred_scaled_{self.bravais_lattice}': self.reg_loss
-            }
-        self.loss_metrics = {
-            f'uc_pred_scaled_{self.bravais_lattice}': [self.reg_loss.mean_squared_error]
-            }
-        self.build_model()
-        self.model.load_weights(
-            filepath=f'{self.save_to}/{self.bravais_lattice}_reg_weights_{self.model_params["tag"]}.h5',
-            by_name=True
-            )
-        self.compile_model(mode='both')
-
-    def model_builder_bnn_head(self, inputs):
-        head_outputs = tf.keras.layers.SimpleRNN(
-            self.model_params['head_params']['layers'][0],
-            name=f'head_{self.bravais_lattice}',
-            )(inputs['q2_scaled'][:, :, tf.newaxis])
-        uc_pred_mean_scaled = bnn_model_builder(
-            head_outputs,
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
-            N_train=self.model_params['N_train']
-            )
-        uc_pred_var_scaled = bnn_model_builder(
-            head_outputs,
-            tag=f'uc_pred_var_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['var_params'],
-            output_name=f'{self.model_params["var_params"]["output_name"]}_{self.bravais_lattice}',
-            N_train=self.model_params['N_train']
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_var_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
-    def model_builder_mlp_head(self, inputs):
-        head_outputs = tf.keras.layers.SimpleRNN(
-            self.model_params['head_params']['layers'][0],
-            name=f'head_{self.bravais_lattice}',
-            )(inputs['q2_scaled'][:, :, tf.newaxis])
-        uc_pred_mean_scaled = mlp_model_builder(
-            head_outputs,
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
-            )
-        uc_pred_var_scaled = mlp_model_builder(
-            head_outputs,
-            tag=f'uc_pred_var_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['var_params'],
-            output_name=f'{self.model_params["var_params"]["output_name"]}_{self.bravais_lattice}',
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_var_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
-    def model_builder_bnn(self, inputs):
-        uc_pred_mean_scaled = bnn_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
-            N_train=self.model_params['N_train']
-            )
-        uc_pred_var_scaled = bnn_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_var_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['var_params'],
-            output_name=f'{self.model_params["var_params"]["output_name"]}_{self.bravais_lattice}',
-            N_train=self.model_params['N_train']
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_var_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
-    def model_builder_mlp(self, inputs):
-        uc_pred_mean_scaled = mlp_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_mean_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}',
-            )
-        uc_pred_var_scaled = mlp_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_var_scaled_{self.bravais_lattice}',
-            model_params=self.model_params['var_params'],
-            output_name=f'{self.model_params["var_params"]["output_name"]}_{self.bravais_lattice}',
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.bravais_lattice}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_var_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
-    def get_layer_names(self):
-        self.mean_layer_names = []
-        for layer_index in range(len(self.model_params['mean_params']['layers'])):
-            self.mean_layer_names.append(f'dense_uc_pred_mean_scaled_{self.bravais_lattice}_{layer_index}')
-            self.mean_layer_names.append(f'layer_norm_uc_pred_mean_scaled_{self.bravais_lattice}_{layer_index}')
-        self.mean_layer_names.append(f'{self.model_params["mean_params"]["output_name"]}_{self.bravais_lattice}')
-        if self.model_params['nn_type'] in ['bnn_head', 'mlp_head']:
-            self.mean_layer_names.append(f'head_{self.bravais_lattice}')
-
-        self.var_layer_names = []
-        for layer_index in range(len(self.model_params['var_params']['layers'])):
-            self.var_layer_names.append(f'dense_uc_pred_var_scaled_{self.bravais_lattice}_{layer_index}')
-            self.var_layer_names.append(f'layer_norm_uc_pred_var_scaled_{self.bravais_lattice}_{layer_index}')
-        self.var_layer_names.append(f'{self.model_params["var_params"]["output_name"]}_{self.bravais_lattice}')
-
-    def do_predictions_deterministic(self, data=None, inputs=None, verbose=1):
-        N = len(data)
-        if not data is None:
-            inputs = {'q2_scaled': np.stack(data['q2_scaled'])}
-        if verbose == 1:
-            print(f'\n Regression inferences for {self.bravais_lattice}')
-        outputs = self.model.predict(inputs, batch_size=4096, verbose=verbose)
-        uc_pred_scaled = outputs[:, :, 0]
-        uc_pred_scaled_var = outputs[:, :, 1]
-        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = uc_pred_scaled_var[index]
-        return uc_pred_scaled, uc_pred_scaled_cov
-
-    def do_predictions_probabalistic(self, data=None, inputs=None, verbose=1, n_evals=500):
-        if inputs is None:
-            inputs = {'q2_scaled': np.stack(data['q2_scaled'])}
-            N = len(data)
-        elif data is None:
-            N = inputs['q2_scaled'].shape[0]            
-        if verbose == 1:
-            print(f'\n Regression inferences for {self.bravais_lattice}')
-
-        uc_pred_scaled_all = np.zeros((N, self.n_outputs, n_evals))
-        uc_pred_scaled_var_all = np.zeros((N, self.n_outputs, n_evals))
-        for index in range(n_evals):
-            outputs = self.model.predict(inputs, batch_size=N, verbose=0)
-            uc_pred_scaled_all[:, :, index] = outputs[:, :, 0]
-            uc_pred_scaled_var_all[:, :, index] = outputs[:, :, 1]
-        uc_pred_scaled = uc_pred_scaled_all.mean(axis=2)
-        uc_pred_scaled_model_var = uc_pred_scaled_all.std(axis=2)**2
-        uc_pred_scaled_var = uc_pred_scaled_var_all.mean(axis=2)
-        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = \
-                uc_pred_scaled_var[index] + 1/N*uc_pred_scaled_model_var[index]
-        return uc_pred_scaled, uc_pred_scaled_cov
-
-    def do_predictions_test(self, q2_scaled, verbose=1, n_evals=500):
-        inputs = {
-            'q2_scaled': np.repeat(q2_scaled[np.newaxis], n_evals, axis=0)
-            }
-        outputs = self.model.predict(inputs, batch_size=1, verbose=0)
-        print(outputs[:, :, 0])
-        #print(outputs[:, :, 1])
-        """
-        outputs = self.model(inputs, training=True)
-        print(outputs[:, :, 0])
-        outputs = self.model.predict(inputs, batch_size=1, verbose=0)
-        print(outputs[:, :, 0])
-        outputs = self.model.predict(inputs, batch_size=2, verbose=0)
-        print(outputs[:, :, 0])
-        outputs = self.model.predict(inputs, batch_size=n_evals, verbose=0)
-        print(outputs[:, :, 0])
-        outputs = self.model.predict(inputs, batch_size=n_evals, verbose=0)
-        print(outputs[:, :, 0])
-        """
-        """
-        uc_pred_scaled_all = np.zeros((N, self.n_outputs, n_evals))
-        uc_pred_scaled_var_all = np.zeros((N, self.n_outputs, n_evals))
-        for index in range(n_evals):
-            outputs = self.model.predict(inputs, batch_size=N, verbose=0)
-            uc_pred_scaled_all[:, :, index] = outputs[:, :, 0]
-            uc_pred_scaled_var_all[:, :, index] = outputs[:, :, 1]
-            print(outputs[:, :, 0])
-        print()
-        uc_pred_scaled = uc_pred_scaled_all.mean(axis=2)
-        uc_pred_scaled_model_var = uc_pred_scaled_all.std(axis=2)**2
-        uc_pred_scaled_var = uc_pred_scaled_var_all.mean(axis=2)
-        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = \
-                uc_pred_scaled_var[index] + 1/N*uc_pred_scaled_model_var[index]
-        return uc_pred_scaled, uc_pred_scaled_cov
-        """
