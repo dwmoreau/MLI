@@ -360,20 +360,35 @@ class Regression_AlphaBeta(Regression_base):
         super().__init__(group, data_params, model_params, save_to, unit_cell_key, seed)
 
     def setup(self):
-        self.model_params['mean_params']['n_outputs'] = self.n_outputs
-        self.model_params['alpha_params']['n_outputs'] = self.n_outputs
-        self.model_params['beta_params']['n_outputs'] = self.n_outputs
         model_params_defaults = {
             'nn_type': 'mlp_bnn',
             'fit_strategy': 'cycles',
+            'predict_pca': False,
+            'epochs': 10,
+            'cycles': 5,
             'beta_nll': 0.5,
             'batch_size': 64,
-            'learning_rate': 0.0002,
+            'learning_rate': 0.0001,
+            'dropout_rate': 0.5,
+            'mean_params': {
+                'layers': [200, 100, 60],
+                },
+            'alpha_params': {
+                'layers': [100, 60],
+                },
+            'beta_params': {
+                'layers': [100, 60],
+                },
+            'head_params': {
+                'layers': [100]
+                },
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
                 self.model_params[key] = model_params_defaults[key]
-
+        self.model_params['mean_params']['n_outputs'] = self.n_outputs
+        self.model_params['alpha_params']['n_outputs'] = self.n_outputs
+        self.model_params['beta_params']['n_outputs'] = self.n_outputs
         if self.model_params['fit_strategy'] == 'cycles':
             if not 'epochs' in self.model_params.keys():
                 self.model_params['epochs'] = 5

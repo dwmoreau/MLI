@@ -1,34 +1,38 @@
 """
+Indexing.py Regression.py data/SpacegroupGroups.xlsx data/GroupSpec.xlsx
+
+* Why is the number of entries found different than there should be?
+
+- Optimization:
+    * What differentiates a found / not found entry
+        - large differences between prediction and true
+    - common assignments:
+        - drop during optimization but include in loss
+        - use all hkl assignments with largest N likelihoods
+    - Full softmax array optimization
+    - assignment with group specific assigners
+    - SVD
+
 - Data
-    - verify new dataset generation works
-
-
     * Get data from other databases:
         * Materials project
         - ICSD
-
     - more strict duplicate removal
         - entries that differ by one atom in the unit cell
-
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
-
-    - redo dataset generation with new parameters:
-        - use 100 peaks instead of 60
-        - use a narrower FWHM generation
-        - use a wider overlap threshold
-        - use a larger intensity threshold
+    - redo dataset generation with new parameters based on RRUFF database
 
 - SWE:
-    * data leak during cyclic training
+    * memory leak during cyclic training
 
 - Augmentation
     * make peak drop rate a function of distance and q2
 
 - Regression:
-    * Move predictions into the Regression class
+    * Move candidate generation into the Regression class
     - Try random forest models
-    * bnn does not work during prediction
+    - bnn does not work during prediction
 
     - prediction of PCA components
         - evaluation of fitting in the PCA / Scaled space
@@ -39,18 +43,9 @@
           - map d-spacings onto a single scalar correlated with volume
         - ??? extrapolation architecture
 
-- Optimization:
-    * What differentiates a found / not found entry
-        - large differences between prediction and true
-
-    - assignment with group specific assigners
-    - SVD
-    - common assignments:
-        - drop during optimization but include in loss
-        - use all hkl assignments with largest N likelihoods
-
 - Assignments
-    - assigners specific to the unit cell generator
+    - How to incorporate forward model
+    - How would this look as a graphical NN
 """
 import csv
 import joblib
@@ -114,10 +109,12 @@ class Indexing:
             'points_tag': 'intersect',
             'hkl_ref_length': 500,
             }
+
         for key in data_params_defaults.keys():
             if not data_params_defaults[key] is None:
                 if key not in self.data_params.keys():
                     self.data_params[key] = data_params_defaults[key]
+
         if self.data_params['lattice_system'] == 'cubic':
             self.data_params['y_indices'] = [0]
             self.data_params['bravais_lattices'] = ['cF', 'cI', 'cP']
@@ -129,104 +126,6 @@ class Indexing:
         elif self.data_params['lattice_system'] == 'orthorhombic':
             self.data_params['y_indices'] = [0, 1, 2]
             self.data_params['bravais_lattices'] = ['oC', 'oF', 'oI', 'oP']
-            """
-            # Groups V0
-            self.data_params['groups'] = ['ortho_0', 'ortho_1', 'ortho_2', 'ortho_3', 'ortho_4', 'ortho_5']
-            self.group_mappings = {
-                'oC_0': 'ortho_0',
-                'oP_4': 'ortho_0',
-                'oC_1': 'ortho_1',
-                'oP_5': 'ortho_1',
-                'oC_2': 'ortho_2',
-                'oP_6': 'ortho_2',
-                'oP_0': 'ortho_3',
-                'oP_1': 'ortho_3',
-                'oP_2': 'ortho_3',
-                'oP_3': 'ortho_3',
-                'oC_3': 'ortho_4',
-                'oC_4': 'ortho_4',
-                'oC_5': 'ortho_4',
-                'oC_6': 'ortho_4',
-                'oC_7': 'ortho_4',
-                'oC_8': 'ortho_4',
-                'oF_0': 'ortho_4',
-                'oI_0': 'ortho_4',
-                'oI_1': 'ortho_4',
-                'oI_2': 'ortho_4',
-                'oI_3': 'ortho_4',
-                'oP_7': 'ortho_4',
-                'oF_1': 'ortho_5',
-                }
-            # Groups V1
-            self.data_params['groups'] = [
-                'ortho_0', 'ortho_1', 'ortho_2', 'ortho_3', 'ortho_4', 'ortho_5', 'ortho_6', 'ortho_7'
-                ]
-            self.group_mappings = {
-                'oC_0': 'ortho_0',
-                'oP_4': 'ortho_0',
-                'oC_1': 'ortho_1',
-                'oP_5': 'ortho_1',
-                'oC_2': 'ortho_2',
-                'oP_6': 'ortho_2',
-                'oP_0': 'ortho_3',
-                'oP_1': 'ortho_3',
-                'oP_2': 'ortho_3',
-                'oP_3': 'ortho_3',
-                'oC_3': 'ortho_4',
-                'oC_4': 'ortho_4',
-                'oC_5': 'ortho_4',
-                'oC_6': 'ortho_4',
-                'oC_7': 'ortho_4',
-                'oC_8': 'ortho_4',
-                'oF_0': 'ortho_4',
-                'oI_0': 'ortho_5',
-                'oI_1': 'ortho_5',
-                'oI_2': 'ortho_5',
-                'oI_3': 'ortho_5',
-                'oP_7': 'ortho_6',
-                'oF_1': 'ortho_7',
-                }
-            """
-            self.data_params['groups'] = [f'ortho_{i}' for i in range(12)]
-            self.group_mappings = {
-                'oC_0': 'ortho_0',
-                'oP_4': 'ortho_0',
-                'oC_1': 'ortho_1',
-                'oP_5': 'ortho_1',
-                'oC_2': 'ortho_2',
-                'oP_6': 'ortho_2',
-                'oP_0': 'ortho_3',
-                'oP_1': 'ortho_3',
-                'oP_2': 'ortho_3',
-                'oP_3': 'ortho_3',
-                'oC_3': 'ortho_4',
-                'oC_4': 'ortho_4',
-                'oC_5': 'ortho_4',
-                'oC_6': 'ortho_4',
-                'oC_7': 'ortho_4',
-                'oC_8': 'ortho_4',
-                'oF_0': 'ortho_4',
-                'oI_0': 'ortho_5',
-                'oI_1': 'ortho_5',
-                'oI_2': 'ortho_5',
-                'oI_3': 'ortho_5',
-                'oP_7': 'ortho_6_10',
-                'oF_1': 'ortho_11',
-                }
-            self.oP_7_mapping = {
-                19: 'ortho_6',
-                61: 'ortho_7',
-                33: 'ortho_8',
-                62: 'ortho_8',
-                34: 'ortho_9',
-                48: 'ortho_9',
-                52: 'ortho_9',
-                58: 'ortho_9',
-                56: 'ortho_10',
-                60: 'ortho_10',
-                }
-            self.data_params['groups_initial'] = self.group_mappings.keys()
-
         elif self.data_params['lattice_system'] == 'monoclinic':
             self.data_params['y_indices'] = [0, 1, 2, 4]
             self.data_params['bravais_lattices'] = ['mC', 'mP']
@@ -267,7 +166,9 @@ class Indexing:
             'include_centered',
             'use_reduced_cell',
             'n_outputs',
-            'hkl_ref_length'
+            'hkl_ref_length',
+            'groupspec_file_name',
+            'groupspec_sheet',
             ]
 
         self.data_params = dict.fromkeys(data_params_keys)
@@ -288,6 +189,8 @@ class Indexing:
         self.data_params['points_tag'] = params['points_tag']
         self.data_params['hkl_ref_length'] = int(params['hkl_ref_length'])
         self.data_params['n_outputs'] = int(params['n_outputs'])
+        self.data_params['groupspec_file_name'] = params['groupspec_file_name']
+        self.data_params['groupspec_sheet'] = params['groupspec_sheet']
         self._setup_joint()
 
     def _setup_joint(self):
@@ -299,10 +202,10 @@ class Indexing:
             self.unit_cell_key = 'reduced_unit_cell'
             self.volume_key = 'reduced_volume'
             self.hkl_key = 'hkl'
-        elif self.data_params['unit_cell_representation'] == 'permuted':
-            self.unit_cell_key = 'permuted_unit_cell'
+        elif self.data_params['unit_cell_representation'] == 'reindexed':
+            self.unit_cell_key = 'reindexed_unit_cell'
             self.volume_key = 'volume'
-            self.hkl_key = 'permuted_hkl'
+            self.hkl_key = 'reindexed_hkl'
         else:
             print('Need to supply a unit_cell_representation')
             assert False
@@ -315,24 +218,32 @@ class Indexing:
         all_labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
         self.uc_labels = [all_labels[index] for index in self.data_params['y_indices']]
 
+        group_spec = pd.read_excel(
+            os.path.join(self.data_params['data_dir'], self.data_params['groupspec_file_name']),
+            sheet_name=self.data_params['groupspec_sheet'],
+            )
+        group_spec = group_spec.loc[group_spec['group'].notna()]
+        group_spec['hm symbol'] = group_spec['hm symbol'].str.strip()
+        self.data_params['groups'] = group_spec['group'].unique()
+        self.group_mappings = dict.fromkeys(group_spec['hm symbol'].unique())
+        for index in range(len(group_spec)):
+            self.group_mappings[group_spec.iloc[index]['hm symbol']] = group_spec.iloc[index]['group']
+
     def load_data(self):
-        if self.data_params['unit_cell_representation'] == 'permuted':
-            hkl_prefactor = 'permuted_'
+        if self.data_params['unit_cell_representation'] == 'reindexed':
+            hkl_prefactor = 'reindexed_'
         else:
             hkl_prefactor = ''
         read_columns = [
-            'spacegroup_number',
-            'spacegroup_symbol',
-            'permuted_spacegroup_symbol',
-            'setting',
-            'crystal_family',
+            'lattice_system',
             'bravais_lattice',
-            'group',
-            'centering',
-            'd_spacing_' + self.data_params['points_tag'],
+            'spacegroup_number',
+            'spacegroup_symbol_hm',
             'unit_cell',
             'volume',
-            'permuted_unit_cell',
+            'reindexed_spacegroup_symbol_hm',
+            'reindexed_unit_cell',
+            f'd_spacing_{self.data_params["points_tag"]}',
             f'{hkl_prefactor}h_{self.data_params["points_tag"]}',
             f'{hkl_prefactor}k_{self.data_params["points_tag"]}',
             f'{hkl_prefactor}l_{self.data_params["points_tag"]}',
@@ -345,26 +256,12 @@ class Indexing:
                 ]
 
         data = []
-        for index, group in enumerate(self.data_params['groups_initial']):
-            file_name = os.path.join(self.data_params['data_dir'], f'dataset_{group}.parquet')
+        for index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
+            file_name = os.path.join(self.data_params['data_dir'], f'GeneratedDatasets/dataset_{bravais_lattice}.parquet')
             print(f'Loading data from {file_name}')
-            group_data = pd.read_parquet(file_name, columns=read_columns)
-            group_data.rename(columns={'group': 'group_initial'}, inplace=True)
-            if group == 'oP_7':
-                group_data['group'] = group_data['spacegroup_number'].map(lambda x: self.oP_7_mapping[x])
-            else:
-                group_data['group'] = group_data['group_initial'].map(lambda x: self.group_mappings[x])
-            n_entries = min(group_data.shape[0], self.data_params['n_max'])
-            # This shuffles the data and downsamples if needed
-            group_data = group_data.sample(
-                n=n_entries,
-                replace=False,
-                random_state=self.random_seed
-                )
-            group_data['group_label'] = index * np.ones(group_data.shape[0])
-            data.append(group_data)
-            
+            data.append(pd.read_parquet(file_name, columns=read_columns))
         self.data = pd.concat(data, ignore_index=True)
+
         # Remove data that doesn't have enough peaks
         # A total of 60 or so peaks are included in the data set - for all extries
         # If there were less than 60 peaks, those get padded with zeros at the end of the array.
@@ -376,6 +273,20 @@ class Indexing:
         enough_peaks = points.apply(np.count_nonzero) >= self.data_params['n_points']
         self.data = self.data.loc[enough_peaks]
         self.data['augmented'] = np.zeros(self.data.shape[0], dtype=bool)
+
+        # Add label to data and down sample
+        self.data['group'] = self.data['spacegroup_symbol_hm'].map(lambda x: self.group_mappings[x])
+        data_grouped = self.data.groupby('group')
+        data_group = [None for i in range(len(data_grouped.groups.keys()))]
+        for index, group in enumerate(data_grouped.groups.keys()):
+            data_group[index] = data_grouped.get_group(group)
+            data_group[index].insert(loc=0, column='group_label', value=index * np.ones(len(data_group[index])))
+            data_group[index] = data_group[index].sample(
+                n=min(len(data_group[index]), self.data_params['n_max']),
+                replace=False,
+                random_state=self.random_seed
+                )
+        self.data = pd.concat(data_group, ignore_index=True)
 
         d_spacing_pd = self.data[f'd_spacing_{self.data_params["points_tag"]}']
         d_spacing = [np.zeros(self.data_params['n_points']) for i in range(self.data.shape[0])]
@@ -467,8 +378,8 @@ class Indexing:
         self.save()
 
     def load_data_from_tag(self, load_augmented, load_train):
-        if self.data_params['unit_cell_representation'] == 'permuted':
-            hkl_prefactor = 'permuted_'
+        if self.data_params['unit_cell_representation'] == 'reindexed':
+            hkl_prefactor = 'reindexed_'
         else:
             hkl_prefactor = ''
         self.hkl_ref = np.load(f'{self.save_to["data"]}/hkl_ref.npy')
@@ -483,8 +394,8 @@ class Indexing:
         self.data.drop(columns=[f'{hkl_prefactor}h', f'{hkl_prefactor}k', f'{hkl_prefactor}l'], inplace=True)
 
     def save(self):
-        if self.data_params['unit_cell_representation'] == 'permuted':
-            hkl_prefactor = 'permuted_'
+        if self.data_params['unit_cell_representation'] == 'reindexed':
+            hkl_prefactor = 'reindexed_'
         else:
             hkl_prefactor = ''
         hkl = np.stack(self.data[f'{hkl_prefactor}hkl'])
@@ -770,6 +681,7 @@ class Indexing:
         axes.bar(x, group_counts[:, 1], width=0.8, alpha=0.5, label='Unaugmented')
         axes.set_xticks(x)
         axes.set_xticklabels(self.data_params['groups'])
+        axes.tick_params(axis='x', rotation=90)
         axes.set_ylabel('Number of Entries')
         axes.set_xlabel('Group')
         axes.legend()
