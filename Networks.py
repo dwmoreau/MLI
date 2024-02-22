@@ -140,7 +140,7 @@ def hkl_model_builder_conv2D(x_in, tag, model_params):
     for index in range(model_params['n_points']):
         hkl_outs[index] = tf.keras.layers.Dense(
             units=model_params['hkl_ref_length'],
-            activation='linear',
+            activation=model_params['output_activation'],
             name=f'hkl_{tag}_{index}',
             )(x[:, index, :])[:, tf.newaxis, :]
 
@@ -199,7 +199,7 @@ def hkl_model_builder_conv2D_flat(x_in, tag, model_params):
     for index in range(model_params['n_points']):
         hkl_outs[index] = tf.keras.layers.Dense(
             units=model_params['hkl_ref_length'],
-            activation='linear',
+            activation=model_params['output_activation'],
             name=f'hkl_{tag}_{index}',
             )(x)[:, tf.newaxis, :]
 
@@ -241,7 +241,7 @@ def hkl_model_builder_mlp_flat(x, tag, model_params):
     for index in range(model_params['n_points']):
         hkl_outs[index] = tf.keras.layers.Dense(
             units=model_params['hkl_ref_length'],
-            activation='linear',
+            activation=model_params['output_activation'],
             name=f'hkl_{tag}_{index}',
             )(x)[:, tf.newaxis, :]
 
@@ -278,7 +278,7 @@ def hkl_model_builder_mlp(x, tag, model_params):
     for index in range(model_params['n_points']):
         hkl_outs[index] = tf.keras.layers.Dense(
             units=model_params['hkl_ref_length'],
-            activation='linear',
+            activation=model_params['output_activation'],
             name=f'hkl_{tag}_{index}',
             )(x[:, index, :])[:, tf.newaxis, :]
 

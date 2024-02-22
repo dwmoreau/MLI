@@ -5,11 +5,13 @@ import joblib
 from keras_self_attention import SeqSelfAttention
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.decomposition import PCA
+from sklearn.multioutput import MultiOutputRegressor
 import tensorflow as tf
 
 from Networks import mlp_model_builder
-from Networks import bnn_model_builder
 from TargetFunctions import LikelihoodLoss
 
 
@@ -42,8 +44,6 @@ class Regression_base:
             }
         if self.model_params['nn_type'] == 'mlp':
             self.model = tf.keras.Model(inputs, self.model_builder_mlp(inputs))
-        elif self.model_params['nn_type'] == 'bnn':
-            self.model = tf.keras.Model(inputs, self.model_builder_bnn(inputs))
         elif self.model_params['nn_type'] == 'mlp_head':
             self.model = tf.keras.Model(inputs, self.model_builder_mlp_head(inputs))
         elif self.model_params['nn_type'] == 'rnn_head':
@@ -103,6 +103,25 @@ class Regression_base:
                     )[:, self.y_indices],
                 }
         return train_inputs, val_inputs, train_true, val_true
+
+    def fit_trees(self, data):
+        train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
+        self.gradient_boosting_regressor = MultiOutputRegressor(GradientBoostingRegressor(
+            random_state=self.model_params['gradient_boosting']['random_state'],
+            n_estimators=self.model_params['gradient_boosting']['n_estimators'],
+            min_samples_leaf=self.model_params['gradient_boosting']['min_samples_leaf'],
+            max_depth=self.model_params['gradient_boosting']['max_depth'],
+            subsample=self.model_params['gradient_boosting']['subsample'],
+            ))
+        self.gradient_boosting_regressor.fit(train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}'])
+        self.random_forest_regressor = RandomForestRegressor(
+            random_state=self.model_params['random_forest']['random_state'],
+            n_estimators=self.model_params['random_forest']['n_estimators'],
+            min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
+            max_depth=self.model_params['random_forest']['max_depth'],
+            subsample=self.model_params['random_forest']['subsample'],
+            )
+        self.random_forest_regressor.fit(train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}'])
 
     def fit_model_cycles(self, data):
         self.fit_history = [None for j in range(2 * self.model_params['cycles'])] 
@@ -318,22 +337,6 @@ class Regression_base:
         fig.savefig(f'{self.save_to}/{self.group}_reg_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
-    def do_predictions(self, data=None, inputs=None, verbose=1, n_evals=500):
-        if self.model_params['nn_type'] in ['bnn']:
-            uc_pred_scaled, uc_pred_scaled_cov = self.do_predictions_probabalistic(
-                data=data,
-                inputs=inputs,
-                verbose=verbose,
-                n_evals=n_evals
-                )
-        elif self.model_params['nn_type'] in ['mlp', 'mlp_head', 'rnn_head']:
-            uc_pred_scaled, uc_pred_scaled_cov = self.do_predictions_deterministic(
-                data=data,
-                inputs=inputs,
-                verbose=verbose,
-                )
-        return uc_pred_scaled, uc_pred_scaled_cov
-
     def evaluate(self, data):
         evaluate_regression(
             data=data,
@@ -361,9 +364,10 @@ class Regression_AlphaBeta(Regression_base):
 
     def setup(self):
         model_params_defaults = {
-            'nn_type': 'mlp_bnn',
+            'nn_type': 'mlp',
             'fit_strategy': 'cycles',
             'predict_pca': False,
+            'fit_trees': False,
             'epochs': 10,
             'cycles': 5,
             'beta_nll': 0.5,
@@ -382,6 +386,20 @@ class Regression_AlphaBeta(Regression_base):
             'head_params': {
                 'layers': [100]
                 },
+            'random_forest': {
+                'random_state': 0,
+                'n_estimators': 80,
+                'min_samples_leaf': 10,
+                'max_depth': None,
+                'subsample': 0.1,
+                },
+            'gradient_boosting': {
+                'random_state': 0,
+                'n_estimators': 80,
+                'min_samples_leaf': 10,
+                'max_depth': 3,
+                'subsample': 0.1,
+                }
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
@@ -488,6 +506,15 @@ class Regression_AlphaBeta(Regression_base):
         self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
         if self.model_params['predict_pca']:
             joblib.dump(self.pca, f'{self.save_to}/{self.group}_pca.bin')
+        if self.model_params['fit_trees']:
+            joblib.dump(
+                self.gradient_boosting_regressor,
+                f'{self.save_to}/{self.group}_gradient_boosting_regressor.bin'
+                )
+            joblib.dump(
+                self.random_forest_regressor,
+                f'{self.save_to}/{self.group}_random_forests_regressor.bin'
+                )
 
     def load_from_tag(self):
         with open(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv', 'r') as params_file:
@@ -660,40 +687,6 @@ class Regression_AlphaBeta(Regression_base):
                 ))
         return uc_pred_scaled
 
-    def model_builder_bnn(self, inputs):
-        uc_pred_mean_scaled = bnn_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_mean_scaled_{self.group}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}',
-            N_train=self.model_params['N_train']
-            )
-        uc_pred_alpha_scaled = 1 + bnn_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_alpha_scaled_{self.group}',
-            model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}',
-            N_train=self.model_params['N_train']
-            )
-        uc_pred_beta_scaled = bnn_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_beta_scaled_{self.group}',
-            model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}',
-            N_train=self.model_params['N_train']
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.group}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_alpha_scaled[:, :, tf.newaxis],
-                uc_pred_beta_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
     def model_builder_mlp(self, inputs):
         uc_pred_mean_scaled = mlp_model_builder(
             inputs['q2_scaled'],
@@ -749,17 +742,44 @@ class Regression_AlphaBeta(Regression_base):
             self.var_layer_names.append(f'layer_norm_uc_pred_beta_scaled_{self.group}_{layer_index}')
         self.var_layer_names.append(f'{self.model_params["beta_params"]["output_name"]}_{self.group}')
 
-    def do_predictions_deterministic(self, data=None, inputs=None, verbose=1):
-        N = len(data)
+    def do_predictions(self, data=None, inputs=None, verbose=1, batch_size=None):
         if not data is None:
-            inputs = {'q2_scaled': np.stack(data['q2_scaled'])}
+            q2_scaled = np.stack(data['q2_scaled'])
+        else:
+            q2_scaled = inputs['q2_scaled']
         if verbose == 1:
             print(f'\n Regression inferences for {self.group}')
-        outputs = self.model.predict(inputs, batch_size=4096, verbose=verbose)
-        pred = outputs[:, :, 0]
-        pred_alpha = outputs[:, :, 1]
-        pred_beta = outputs[:, :, 2]
-        pred_var = pred_beta / (pred_alpha - 1)
+        if batch_size is None:
+            batch_size = self.model_params['batch_size']
+
+        # Predicting on batch helps with a memory leak...
+        N = len(data)
+        n_batches = N // batch_size
+        left_over = N % batch_size
+        pred = np.zeros((N, self.n_outputs))
+        pred_var = np.zeros((N, self.n_outputs))
+        for batch_index in range(n_batches + 1):
+            start = batch_index * batch_size
+            if batch_index == n_batches:
+                batch_inputs = {'q2_scaled': np.zeros((batch_size, self.n_points))}
+                batch_inputs['q2_scaled'][:left_over] = q2_scaled[start: start + left_over]
+                batch_inputs['q2_scaled'][left_over:] = q2_scaled[0]
+            else:
+                batch_inputs = {'q2_scaled': q2_scaled[start: start + batch_size]}
+
+            outputs = self.model.predict_on_batch(batch_inputs)
+
+            if batch_index == n_batches:
+                pred[start:] = outputs[:left_over, :, 0]
+                pred_alpha = outputs[:left_over, :, 1]
+                pred_beta = outputs[:left_over, :, 2]
+                pred_var[start:] = pred_beta / (pred_alpha - 1)
+            else:
+                pred[start: start + batch_size] = outputs[:, :, 0]
+                pred_alpha = outputs[:, :, 1]
+                pred_beta = outputs[:, :, 2]
+                pred_var[start: start + batch_size] = pred_beta / (pred_alpha - 1)
+
         if self.model_params['predict_pca']:
             uc_pred_scaled = self.pca.inverse_transform(pred)
             temp = np.matmul(np.sqrt(pred_var), self.pca.components_)
@@ -772,29 +792,3 @@ class Regression_AlphaBeta(Regression_base):
             for index in range(N):
                 uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = pred_var[index]
         return uc_pred_scaled, uc_pred_scaled_cov
-
-    def do_predictions_probabalistic(self, data=None, inputs=None, verbose=1, n_evals=500):
-        N = len(data)
-        if not data is None:
-            inputs = {'q2_scaled': np.stack(data['q2_scaled'])}
-        if verbose == 1:
-            print(f'\n Regression inferences for {self.group}')
-
-        uc_pred_scaled_all = np.zeros((N, self.n_outputs, n_evals))
-        uc_pred_scaled_var_all = np.zeros((N, self.n_outputs, n_evals))
-        for index in range(n_evals):
-            outputs = self.model.predict(inputs, batch_size=N, verbose=0)
-            uc_pred_scaled_all[:, :, index] = outputs[:, :, 0]
-            uc_pred_scaled_alpha = outputs[:, :, 1]
-            uc_pred_scaled_beta = outputs[:, :, 2]
-            uc_pred_scaled_var_all[:, :, index] = uc_pred_scaled_beta / (uc_pred_scaled_alpha - 1)
-        uc_pred_scaled = uc_pred_scaled_all.mean(axis=2)
-        uc_pred_scaled_model_var = uc_pred_scaled_all.std(axis=2)**2
-        uc_pred_scaled_var = uc_pred_scaled_var_all.mean(axis=2)
-        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = \
-                uc_pred_scaled_var[index] + 1/N*uc_pred_scaled_model_var[index]
-        return uc_pred_scaled, uc_pred_scaled_cov
-

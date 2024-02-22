@@ -1,7 +1,6 @@
 """
-Indexing.py Regression.py data/SpacegroupGroups.xlsx data/GroupSpec.xlsx
-
-* Why is the number of entries found different than there should be?
+- Get optimization running again to see if the further grouping helps
+    - plot the initial predictions for the different groups
 
 - Optimization:
     * What differentiates a found / not found entry
@@ -14,8 +13,8 @@ Indexing.py Regression.py data/SpacegroupGroups.xlsx data/GroupSpec.xlsx
     - SVD
 
 - Data
-    * Get data from other databases:
-        * Materials project
+    - Get data from other databases:
+        - Materials project
         - ICSD
     - more strict duplicate removal
         - entries that differ by one atom in the unit cell
@@ -25,14 +24,17 @@ Indexing.py Regression.py data/SpacegroupGroups.xlsx data/GroupSpec.xlsx
 
 - SWE:
     * memory leak during cyclic training
+    - get working on dials
 
 - Augmentation
-    * make peak drop rate a function of distance and q2
+    - make peak drop rate a function of distance and q2
+    - Bug in the miller index assignments / labeling. Very poor assigment model accuracy.
 
 - Regression:
-    * Move candidate generation into the Regression class
-    - Try random forest models
-    - bnn does not work during prediction
+    - Improve hyperparameters
+        - variance estimate almost always overfits
+        - mean estimate tends to underfit
+    - random forest predictions
 
     - prediction of PCA components
         - evaluation of fitting in the PCA / Scaled space
@@ -44,6 +46,8 @@ Indexing.py Regression.py data/SpacegroupGroups.xlsx data/GroupSpec.xlsx
         - ??? extrapolation architecture
 
 - Assignments
+    - perform softmax on the inverse pds
+    - how to penalize multiple assignments to the same hkl
     - How to incorporate forward model
     - How would this look as a graphical NN
 """
@@ -53,8 +57,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
-import scipy.special
-import scipy.stats
 from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.preprocessing import StandardScaler
 
@@ -198,14 +200,17 @@ class Indexing:
             self.unit_cell_key = 'unit_cell'
             self.volume_key = 'volume'
             self.hkl_key = 'hkl'
+            self.hkl_prefactor = ''
         elif self.data_params['unit_cell_representation'] == 'reduced':
             self.unit_cell_key = 'reduced_unit_cell'
             self.volume_key = 'reduced_volume'
             self.hkl_key = 'hkl'
+            self.hkl_prefactor = ''
         elif self.data_params['unit_cell_representation'] == 'reindexed':
             self.unit_cell_key = 'reindexed_unit_cell'
             self.volume_key = 'volume'
             self.hkl_key = 'reindexed_hkl'
+            self.hkl_prefactor = 'reindexed_'
         else:
             print('Need to supply a unit_cell_representation')
             assert False
@@ -230,29 +235,23 @@ class Indexing:
             self.group_mappings[group_spec.iloc[index]['hm symbol']] = group_spec.iloc[index]['group']
 
     def load_data(self):
-        if self.data_params['unit_cell_representation'] == 'reindexed':
-            hkl_prefactor = 'reindexed_'
-        else:
-            hkl_prefactor = ''
         read_columns = [
             'lattice_system',
             'bravais_lattice',
             'spacegroup_number',
-            'spacegroup_symbol_hm',
-            'unit_cell',
             'volume',
-            'reindexed_spacegroup_symbol_hm',
-            'reindexed_unit_cell',
+                f'{self.hkl_prefactor}spacegroup_symbol_hm',
+            f'{self.hkl_prefactor}unit_cell',
             f'd_spacing_{self.data_params["points_tag"]}',
-            f'{hkl_prefactor}h_{self.data_params["points_tag"]}',
-            f'{hkl_prefactor}k_{self.data_params["points_tag"]}',
-            f'{hkl_prefactor}l_{self.data_params["points_tag"]}',
+            f'{self.hkl_prefactor}h_{self.data_params["points_tag"]}',
+            f'{self.hkl_prefactor}k_{self.data_params["points_tag"]}',
+            f'{self.hkl_prefactor}l_{self.data_params["points_tag"]}',
             ]
 
         if self.data_params['augment']:
             read_columns += [
                 'd_spacing_sa',
-                f'{hkl_prefactor}h_sa', f'{hkl_prefactor}k_sa', f'{hkl_prefactor}l_sa',
+                f'{self.hkl_prefactor}h_sa', f'{self.hkl_prefactor}k_sa', f'{self.hkl_prefactor}l_sa',
                 ]
 
         data = []
@@ -263,9 +262,10 @@ class Indexing:
         self.data = pd.concat(data, ignore_index=True)
 
         # Remove data that doesn't have enough peaks
-        # A total of 60 or so peaks are included in the data set - for all extries
+        # A total of 60 or so peaks are included in the data set - for all entries
         # If there were less than 60 peaks, those get padded with zeros at the end of the array.
         #   - the 60 number is arbitrary and set in GenerateDataset_mpi.py
+
         points = self.data[f'd_spacing_{self.data_params["points_tag"]}']
         indices = points.apply(len) >= self.data_params['n_points']
         self.data = self.data.loc[indices]
@@ -275,7 +275,7 @@ class Indexing:
         self.data['augmented'] = np.zeros(self.data.shape[0], dtype=bool)
 
         # Add label to data and down sample
-        self.data['group'] = self.data['spacegroup_symbol_hm'].map(lambda x: self.group_mappings[x])
+        self.data['group'] = self.data['reindexed_spacegroup_symbol_hm'].map(lambda x: self.group_mappings[x])
         data_grouped = self.data.groupby('group')
         data_group = [None for i in range(len(data_grouped.groups.keys()))]
         for index, group in enumerate(data_grouped.groups.keys()):
@@ -331,27 +331,27 @@ class Indexing:
             hkl_all = np.zeros((len(self.data), self.n_generated_points, 3), dtype=int)
         for entry_index in range(len(self.data)):
             entry = self.data.iloc[entry_index]
-            hkl[entry_index, :, 0] = entry[f'{hkl_prefactor}h_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
-            hkl[entry_index, :, 1] = entry[f'{hkl_prefactor}k_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
-            hkl[entry_index, :, 2] = entry[f'{hkl_prefactor}l_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
+            hkl[entry_index, :, 0] = entry[f'{self.hkl_prefactor}h_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
+            hkl[entry_index, :, 1] = entry[f'{self.hkl_prefactor}k_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
+            hkl[entry_index, :, 2] = entry[f'{self.hkl_prefactor}l_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
             if self.data_params['augment']:
-                n_peaks_sa = entry[f'{hkl_prefactor}h_sa'].size
-                hkl_sa[entry_index, :n_peaks_sa, 0] = entry[f'{hkl_prefactor}h_sa']
-                hkl_sa[entry_index, :n_peaks_sa, 1] = entry[f'{hkl_prefactor}k_sa']
-                hkl_sa[entry_index, :n_peaks_sa, 2] = entry[f'{hkl_prefactor}l_sa']
-        self.data[f'{hkl_prefactor}hkl'] = list(hkl)
+                n_peaks_sa = entry[f'{self.hkl_prefactor}h_sa'].size
+                hkl_sa[entry_index, :n_peaks_sa, 0] = entry[f'{self.hkl_prefactor}h_sa']
+                hkl_sa[entry_index, :n_peaks_sa, 1] = entry[f'{self.hkl_prefactor}k_sa']
+                hkl_sa[entry_index, :n_peaks_sa, 2] = entry[f'{self.hkl_prefactor}l_sa']
+        self.data[f'{self.hkl_prefactor}hkl'] = list(hkl)
         if self.data_params['augment']:
-            self.data[f'{hkl_prefactor}hkl_sa'] = list(hkl_sa)
+            self.data[f'{self.hkl_prefactor}hkl_sa'] = list(hkl_sa)
         drop_columns = [
-            f'{hkl_prefactor}h_{self.data_params["points_tag"]}',
-            f'{hkl_prefactor}k_{self.data_params["points_tag"]}',
-            f'{hkl_prefactor}l_{self.data_params["points_tag"]}'
+            f'{self.hkl_prefactor}h_{self.data_params["points_tag"]}',
+            f'{self.hkl_prefactor}k_{self.data_params["points_tag"]}',
+            f'{self.hkl_prefactor}l_{self.data_params["points_tag"]}'
             ]
         if self.data_params['augment']:
             drop_columns += [
-                f'{hkl_prefactor}h_sa',
-                f'{hkl_prefactor}k_sa',
-                f'{hkl_prefactor}l_sa',
+                f'{self.hkl_prefactor}h_sa',
+                f'{self.hkl_prefactor}k_sa',
+                f'{self.hkl_prefactor}l_sa',
                 ]
         self.data.drop(columns=drop_columns, inplace=True)
 
@@ -366,7 +366,7 @@ class Indexing:
             drop_columns = [
                 f'q2_{self.data_params["points_tag"]}',
                 'q2_sa',
-                f'{hkl_prefactor}hkl_sa',
+                f'{self.hkl_prefactor}hkl_sa',
                 ]
             self.data.drop(columns=drop_columns, inplace=True)
 
@@ -378,31 +378,23 @@ class Indexing:
         self.save()
 
     def load_data_from_tag(self, load_augmented, load_train):
-        if self.data_params['unit_cell_representation'] == 'reindexed':
-            hkl_prefactor = 'reindexed_'
-        else:
-            hkl_prefactor = ''
         self.hkl_ref = np.load(f'{self.save_to["data"]}/hkl_ref.npy')
         self.data = pd.read_parquet(f'{self.save_to["data"]}/data.parquet')
         hkl = np.stack([
-            np.stack(self.data[f'{hkl_prefactor}h'], axis=0)[:, :, np.newaxis],
-            np.stack(self.data[f'{hkl_prefactor}k'], axis=0)[:, :, np.newaxis],
-            np.stack(self.data[f'{hkl_prefactor}l'], axis=0)[:, :, np.newaxis]
+            np.stack(self.data[f'{self.hkl_prefactor}h'], axis=0)[:, :, np.newaxis],
+            np.stack(self.data[f'{self.hkl_prefactor}k'], axis=0)[:, :, np.newaxis],
+            np.stack(self.data[f'{self.hkl_prefactor}l'], axis=0)[:, :, np.newaxis]
             ], axis=2
             )
-        self.data[f'{hkl_prefactor}hkl'] = list(hkl)
-        self.data.drop(columns=[f'{hkl_prefactor}h', f'{hkl_prefactor}k', f'{hkl_prefactor}l'], inplace=True)
+        self.data[f'{self.hkl_prefactor}hkl'] = list(hkl)
+        self.data.drop(columns=[f'{self.hkl_prefactor}h', f'{self.hkl_prefactor}k', f'{self.hkl_prefactor}l'], inplace=True)
 
     def save(self):
-        if self.data_params['unit_cell_representation'] == 'reindexed':
-            hkl_prefactor = 'reindexed_'
-        else:
-            hkl_prefactor = ''
-        hkl = np.stack(self.data[f'{hkl_prefactor}hkl'])
-        self.data[f'{hkl_prefactor}h'] = list(hkl[:, :, 0])
-        self.data[f'{hkl_prefactor}k'] = list(hkl[:, :, 1])
-        self.data[f'{hkl_prefactor}l'] = list(hkl[:, :, 2])
-        self.data.drop(columns=[f'{hkl_prefactor}hkl'], inplace=True)
+        hkl = np.stack(self.data[f'{self.hkl_prefactor}hkl'])
+        self.data[f'{self.hkl_prefactor}h'] = list(hkl[:, :, 0])
+        self.data[f'{self.hkl_prefactor}k'] = list(hkl[:, :, 1])
+        self.data[f'{self.hkl_prefactor}l'] = list(hkl[:, :, 2])
+        self.data.drop(columns=[f'{self.hkl_prefactor}hkl'], inplace=True)
         self.data.to_parquet(f'{self.save_to["data"]}/data.parquet')
 
         np.save(f'{self.save_to["data"]}/hkl_ref.npy', self.hkl_ref)
@@ -455,7 +447,7 @@ class Indexing:
                 self.hkl_ref[:, 2]**2
                 ))
             check_data = np.stack((
-                hkl[:, :, 0]**2 +  hkl[:, :, 0]* hkl[:, :, 1] + hkl[:, :, 1]**2,
+                hkl[:, :, 0]**2 + hkl[:, :, 0] * hkl[:, :, 1] + hkl[:, :, 1]**2,
                 hkl[:, :, 2]**2
                 ),
                 axis=2
@@ -570,7 +562,7 @@ class Indexing:
         for group_index, group in enumerate(self.data_params['groups']):
             print(f'Augmenting {group}')
             group_data = self.data[self.data['group'] == group]
-            data_augmented[group_index] = self.augmentor.augment(group_data)
+            data_augmented[group_index] = self.augmentor.augment(group_data, f'{self.hkl_prefactor}spacegroup_symbol_hm')
         data_augmented = pd.concat(data_augmented, ignore_index=True)
         self.data = pd.concat((self.data, data_augmented), ignore_index=True)
 
@@ -907,7 +899,6 @@ class Indexing:
             else:
                 group_indices = self.data['group'] == group
                 self.unit_cell_generator[group].train_regression(data=self.data[group_indices])
-        self.inferences_regression()
 
     def inferences_regression(self):
         uc_pred_scaled = np.zeros((len(self.data), self.data_params['n_outputs']))
@@ -916,7 +907,7 @@ class Indexing:
         for group_index, group in enumerate(self.data_params['groups']):
             group_indices = self.data['group'] == group
             uc_pred_scaled[group_indices, :], uc_pred_scaled_cov[group_indices, :, :] = \
-                self.unit_cell_generator[group].do_predictions(data=self.data[group_indices])
+                self.unit_cell_generator[group].do_predictions(data=self.data[group_indices], batch_size=1024)
 
         uc_pred, uc_pred_cov = self.revert_predictions(uc_pred_scaled, uc_pred_scaled_cov)
         self.data[self.volume_key + '_pred'] = list(self.infer_unit_cell_volume(uc_pred))
@@ -1045,7 +1036,7 @@ class Indexing:
                     unit_cell_scaled_key = f'{self.unit_cell_key}_pred_scaled'
                     y_indices = None
                 self.assigner[key].fit_model(
-                    data=self.data, 
+                    data=self.data[~self.data['augmented']],
                     unit_cell_scaled_key=unit_cell_scaled_key,
                     y_indices=y_indices,
                     )
@@ -1059,12 +1050,12 @@ class Indexing:
                 unit_cell_scaled_key = f'{self.unit_cell_key}_pred_scaled'
                 y_indices = None
 
-            logits = self.assigner[key].do_predictions(
-                self.data, 
+            softmaxes = self.assigner[key].do_predictions(
+                self.data[~self.data['augmented']],
                 unit_cell_scaled_key=unit_cell_scaled_key,
-                y_indices=y_indices
+                y_indices=y_indices,
+                batch_size=1024
                 )
-            softmaxes = scipy.special.softmax(logits, axis=2)
             hkl_pred = self.convert_softmax_to_assignments(softmaxes)
             hkl_assign = softmaxes.argmax(axis=2)
             """
@@ -1082,7 +1073,6 @@ class Indexing:
             self.data['hkl_labels_pred'] = list(hkl_assign)
             self.data['hkl_pred'] = list(hkl_pred)
             self.data['hkl_softmaxes'] = list(softmaxes)
-            self.data['hkl_logits'] = list(logits)
             self.assigner[key].evaluate(
                 self.data[~self.data['augmented']], 
                 self.data_params['bravais_lattices'] + ['All'],

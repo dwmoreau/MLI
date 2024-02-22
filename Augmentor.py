@@ -5,7 +5,6 @@ import pandas as pd
 import scipy.stats
 import scipy.optimize
 from sklearn.decomposition import PCA
-from tqdm import tqdm
 
 from Utilities import Q2Calculator
 
@@ -38,7 +37,7 @@ class Augmentor:
         self.hkl_ref_length = data_params['hkl_ref_length']
         self.rng = np.random.default_rng(seed)
         self.uc_scaler = uc_scaler
-        if data_params['unit_cell_representation'] == 'permuted':
+        if data_params['unit_cell_representation'] == 'reindexed':
             self.permute_unit_cell = True
         else:
             self.permute_unit_cell = False
@@ -58,7 +57,7 @@ class Augmentor:
             self.perturb_unit_cell = self.perturb_unit_cell_pca
             self.pca = PCA(n_components=self.n_outputs).fit(unit_cell_scaled)
             unit_cell_scaled_transformed = self.pca.transform(unit_cell_scaled)
-            self.std = np.std(unit_cell_scaled_transformed, axis=0)
+            self.stddev = np.std(unit_cell_scaled_transformed, axis=0)
 
         # calculate the order of the peak in the list of sa peaks
         n_bins = 100
@@ -103,7 +102,7 @@ class Augmentor:
 
         self.keep_rate = lambda x, r0, r1: (1 - np.exp(-r0 * x))**r1
         y = keep_sum / total_sum
-        self.keep_rate_params, pcov = scipy.optimize.curve_fit(
+        self.keep_rate_params, _ = scipy.optimize.curve_fit(
             f=self.keep_rate,
             xdata=difference_centers[~np.isnan(y)],
             ydata=y[~np.isnan(y)],
@@ -129,27 +128,32 @@ class Augmentor:
         fig.savefig(f'{self.save_to}/aug_setup_{self.aug_params["tag"]}.png')
         plt.close()
 
-    def augment(self, data):
-        groups = data['group'].unique()
-        n_augment = dict.fromkeys(groups)
-        for group in groups:
-            N = np.sum(data['group'] == group)
-            n_augment_all = self.n_max - N
-            n_augment_times = n_augment_all // N
-            if n_augment_times >= self.aug_params['max_augmentation']:
-                n_augment[group] = self.aug_params['max_augmentation'] * np.ones(N, dtype=int)
+    def augment(self, data, subgroup_label):
+        sub_groups = data[subgroup_label].unique()
+        n_subgroups = len(sub_groups)
+        n_target_entries = self.n_max // n_subgroups
+        n_augment = dict.fromkeys(sub_groups)
+        for sub_group in sub_groups:
+            n_subgroup_entries = np.sum(data[subgroup_label] == sub_group)
+            n_augment_all = n_target_entries - n_subgroup_entries
+            if n_augment_all > 0:
+                n_augment_times = n_augment_all // n_subgroup_entries
+                if n_augment_times >= self.aug_params['max_augmentation']:
+                    n_augment[sub_group] = self.aug_params['max_augmentation'] * np.ones(n_subgroup_entries, dtype=int)
+                else:
+                    n_augment[sub_group] = n_augment_times * np.ones(n_subgroup_entries, dtype=int)
+                    n_augment_remainder = n_augment_all % n_subgroup_entries
+                    indices = self.rng.choice(n_subgroup_entries, size=n_augment_remainder, replace=False)
+                    n_augment[sub_group][indices] += 1
             else:
-                n_augment[group] = n_augment_times * np.ones(N, dtype=int)
-                n_augment_remainder = n_augment_all % N
-                indices = self.rng.choice(N, size=n_augment_remainder, replace=False)
-                n_augment[group][indices] += 1
+                n_augment[sub_group] = np.zeros(n_subgroup_entries, dtype=int)
 
         augmented_entries = []
-        for group in groups:
-            group_data = data[data['group'] == group]
-            for entry_index in range(len(group_data)):
-                entry = group_data.iloc[entry_index]
-                for augment_index in range(n_augment[group][entry_index]):
+        for sub_group in sub_groups:
+            sub_group_data = data[data[subgroup_label] == sub_group]
+            for entry_index in range(len(sub_group_data)):
+                entry = sub_group_data.iloc[entry_index]
+                for augment_index in range(n_augment[sub_group][entry_index]):
                     augmented_entry = None
                     while augmented_entry is None:
                         augmented_entry = self.augment_entry(entry)
@@ -236,7 +240,7 @@ class Augmentor:
         while status:
             perturbed_unit_cell_scaled_transformed = self.rng.normal(
                 loc=unit_cell_scaled_transformed,
-                scale=self.aug_params['augment_shift'] * self.std,
+                scale=self.aug_params['augment_shift'] * self.stddev,
                 )
             perturbed_unit_cell_scaled = self.pca.inverse_transform(
                 perturbed_unit_cell_scaled_transformed[np.newaxis, :]

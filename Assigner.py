@@ -1,20 +1,10 @@
-"""
-Accuracy metric during training bug
-When training with true unit cells, the accuracy sticks around 50 - 55%
-    - Works when I give it the target function the correct labels in a one hot encoded form, I get a 100% accuracy
-    - No difference if I do softmax / logits
-    - Can pull the pairwise difference calculation out of the model and I still have the issue.
-"""
 import copy
 import csv
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.optimize
 import tensorflow as tf
-import tensorflow.keras.backend as K
 
-from Networks import hkl_model_builder_conv2D
-from Networks import hkl_model_builder_conv2D_flat
 from Networks import hkl_model_builder_mlp
 from Networks import hkl_model_builder_mlp_flat
 from Utilities import PairwiseDifferenceCalculator
@@ -29,13 +19,13 @@ class Assigner:
         model_params_defaults = {
             'n_filters': 4,
             'kernel_size': [5, 20],
-            'layers': [self.model_params['hkl_ref_length'], self.model_params['hkl_ref_length']],
+            'layers': [200, 200, 200, 100],
             'epsilon': 0.001,
             'dropout_rate': 0.25,
-            'output_activation': 'linear',
+            'output_activation': 'softmax',
             'epochs': 10,
-            'learning_rate': 0.001,
-            'batch_size': 64,
+            'learning_rate': 0.0005,
+            'batch_size': 256,
             'epsilon_pds': 0.01,
             'perturb_std': None,
             }
@@ -122,9 +112,17 @@ class Assigner:
             )
 
     def get_initial_assign_biases(self, data):
-        def bias_init_tf(b, f):
+        def bias_init_tf_jac(b, f):
             f_est = np.exp(b) / np.sum(np.exp(b))
-            return np.sum((f - f_est)**2)
+
+            term0 = np.zeros((b.size, f.size))
+            term0[np.arange(b.size), np.arange(b.size)] = f_est
+            term1 = f_est[:, np.newaxis] * f_est[np.newaxis]
+            df_est_db = term0 - term1
+
+            tf = 1/2 * np.sum((f - f_est)**2)
+            dtf_db = -np.sum((f - f_est) * df_est_db, axis=1)
+            return tf, dtf_db
 
         # bias initialization
         # batch_size x 10 x 100
@@ -137,12 +135,13 @@ class Assigner:
         bias_init = np.zeros((self.model_params['n_points'], self.model_params['hkl_ref_length']))
         for index in range(self.model_params['n_points']):
             results = scipy.optimize.minimize(
-                bias_init_tf,
-                x0=np.zeros(self.model_params['hkl_ref_length']),
+                bias_init_tf_jac,
+                x0=frequencies[index],
                 args=(frequencies[index]),
-                method='BFGS'
+                method='L-BFGS-B',
+                jac=True
                 )
-            bias_init[index] = results.x
+
         #fig, axes = plt.subplots(1, 1, figsize=(10, 4))
         #axes.plot(results.x)
         #plt.show()
@@ -164,14 +163,15 @@ class Assigner:
             }
         self.model = tf.keras.Model(inputs, self.model_builder(inputs, mode))
         #self.model.summary()
+        """
         # This sets the biases to the initial distribution.
-        # This helps with very early training but benefits aren't worth the time spent in
-        # this loop.
+        # This helps with very early training but benefits aren't worth the time spent in this loop.
         if not data is None:
             bias_init = self.get_initial_assign_biases(data[data['train']])
             for index in range(self.model_params['n_points']):
-                weights, biases = self.model.get_layer(f'hkl_logits_{index}').get_weights()
-                self.model.get_layer(f'hkl_logits_{index}').set_weights([weights, bias_init[index]])
+                weights, biases = self.model.get_layer(f'hkl_softmaxes_{index}').get_weights()
+                self.model.get_layer(f'hkl_softmaxes_{index}').set_weights([weights, bias_init[index]])
+        """
 
     def model_builder(self, inputs, mode):
         if self.model_params['perturb_std'] is None:
@@ -189,20 +189,14 @@ class Assigner:
             unit_cell_scaled, inputs['q2_scaled']
             )
         pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=True)
-        hkl_logits = hkl_model_builder_mlp(pds_inv, 'logits', self.model_params)
-        return hkl_logits
+        hkl_softmaxes = hkl_model_builder_mlp_flat(pds_inv, 'softmaxes', self.model_params)
+        return hkl_softmaxes
 
     def compile_model(self):
         optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
-        loss_functions = {
-            'hkl_logits': tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-            }
-        loss_metrics = {
-            'hkl_logits': 'accuracy',
-            }
-        loss_weights = {
-            'hkl_logits': 1,
-            }
+        loss_functions = {'hkl_softmaxes': tf.keras.losses.SparseCategoricalCrossentropy()}
+        loss_metrics = {'hkl_softmaxes': 'accuracy'}
+        loss_weights = {'hkl_softmaxes': 1}
         self.model.compile(
             optimizer=optimizer, 
             loss=loss_functions,
@@ -238,12 +232,8 @@ class Assigner:
             'unit_cell_scaled': unit_cell_scaled[~data['train']],
             'q2_scaled': np.stack(val_data['q2_scaled']),
             }
-        train_true = {
-            'hkl_logits': np.stack(train_data['hkl_labels']),
-            }
-        val_true = {
-            'hkl_logits': np.stack(val_data['hkl_labels']),
-            }
+        train_true = {'hkl_softmaxes': np.stack(train_data['hkl_labels'])}
+        val_true = {'hkl_softmaxes': np.stack(val_data['hkl_labels'])}
         print(f'\n Starting assign model training: {self.model_params["tag"]} {self.model_params["perturb_std"]}')
         self.fit_history = self.model.fit(
             x=train_inputs,
@@ -288,7 +278,7 @@ class Assigner:
         fig.savefig(f'{self.save_to}/assignment_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
-    def do_predictions(self, data, unit_cell_scaled_key, y_indices, reload_model=True):
+    def do_predictions(self, data, unit_cell_scaled_key, y_indices, reload_model=True, batch_size=256):
         if reload_model:
             self.build_model(mode='evaluate')
             self.model.load_weights(
@@ -307,9 +297,33 @@ class Assigner:
                 'q2_scaled': np.stack(data['q2_scaled'])
                 }
         print(f'\n Inference for Miller Index Assignments')
-        logits = self.model.predict(inputs, batch_size=256)
-        #logits = self.model(inputs, training=False)
-        return logits
+        n_batchs = len(data) // batch_size
+        left_over = len(data) % batch_size
+
+        softmaxes = np.zeros((len(data), self.model_params['n_points'], self.model_params['hkl_ref_length']))
+        for batch_index in range(n_batchs + 1):
+            start = batch_index * batch_size
+            if batch_index == n_batchs:
+                batch_unit_cell_scaled = np.zeros((batch_size, self.model_params['n_uc_params']))
+                batch_q2_scaled = np.zeros((batch_size, self.model_params['n_points']))
+                batch_unit_cell_scaled[:left_over] = inputs['unit_cell_scaled'][start: start + left_over]
+                batch_unit_cell_scaled[left_over:] = inputs['unit_cell_scaled'][0]
+                batch_q2_scaled[:left_over] = inputs['q2_scaled'][start: start + left_over]
+                batch_q2_scaled[left_over:] = inputs['q2_scaled'][0]
+            else:
+                end = (batch_index + 1) * batch_size
+                batch_unit_cell_scaled = inputs['unit_cell_scaled'][start: end]
+                batch_q2_scaled = inputs['q2_scaled'][start: end]
+            batch_inputs = {
+                'unit_cell_scaled': batch_unit_cell_scaled,
+                'q2_scaled': batch_q2_scaled
+                }
+            softmaxes_batch = self.model.predict_on_batch(batch_inputs)
+            if batch_index == n_batchs:
+                softmaxes[start: start + left_over] = softmaxes_batch[:left_over]
+            else:
+                softmaxes[start: end] = softmaxes_batch
+        return softmaxes
 
     def evaluate(self, data, bravais_lattices, unit_cell_scaled_key, y_indices):
         for bravais_lattice in bravais_lattices:
@@ -401,20 +415,6 @@ class Assigner:
             plt.close()    
 
     def calibrate(self, data):
-        def softmax_temp_scaled(logits, T):
-            exponential = np.exp(logits / T)
-            denominator = exponential.sum(axis=2)
-            return exponential / denominator[:, :, np.newaxis]
-
-        def nll(T, logits, y_true, n_points):
-            N = y_true.shape[0]
-            softmaxes = softmax_temp_scaled(logits, T)
-            p_pred = np.zeros((N, n_points))
-            for i in range(N):
-                for point_index in range(n_points):
-                    p_pred[i, point_index] = softmaxes[i, point_index, y_true[i, point_index]]
-            return -np.log(p_pred).sum()
-
         def calibration_plots(softmaxes, n_points, n_bins=25):
             N = softmaxes.shape[0]
             y_pred = softmaxes.argmax(axis=2)
@@ -449,45 +449,17 @@ class Assigner:
             return metrics, ece
 
         softmaxes = np.stack(data['hkl_softmaxes'])
-        logits = np.stack(data['hkl_logits'])
         y_true = np.stack(data['hkl_labels'])
-        results = scipy.optimize.minimize_scalar(
-            fun=nll,
-            bounds=[1, 10],
-            args=(logits, y_true, self.model_params['n_points']),
-            )
-        scaling_temp = results.x
-        softmaxes_scaled = softmax_temp_scaled(logits, scaling_temp)
 
-        metrics, ece = calibration_plots(
-            softmaxes, 
-            self.model_params['n_points'],
-            )
-        metrics_scaled, ece_scaled = calibration_plots(
-            softmaxes_scaled, 
-            self.model_params['n_points'],
-            )
+        metrics, ece = calibration_plots(softmaxes, self.model_params['n_points'])
+        fig, axes = plt.subplots(1, 1, figsize=(5, 3))
+        axes.plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])
+        axes.set_xlabel('Confidence')
+        axes.errorbar(metrics[:, 2], metrics[:, 1], yerr=metrics[:, 3], marker='.')
 
-        fig, axes = plt.subplots(1, 2, figsize=(8, 3))
-        for i in range(2):
-            axes[i].plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])
-            axes[i].set_xlabel('Confidence')
-        axes[0].errorbar(
-            metrics[:, 2], metrics[:, 1], yerr=metrics[:, 3],
-            marker='.'
-            )
-        axes[1].errorbar(
-            metrics_scaled[:, 2], metrics_scaled[:, 1], yerr=metrics_scaled[:, 3],
-            marker='.'
-            )
-
-        axes[0].set_ylabel('Accuracy')
-        axes[0].set_title(f'Unscaled\nExpected Confidence Error: {ece:0.4f}')
-        lines = [
-            f'Scaled: Temperature {scaling_temp:1.2f}',
-            f'Expected Confidence Error: {ece_scaled:0.4f}'
-            ]
-        axes[1].set_title('\n'.join(lines))
+        axes.set_ylabel('Accuracy')
+        axes.set_title(f'Unscaled\nExpected Confidence Error: {ece:0.4f}')
+        axes.set_title(f'Expected Confidence Error: {ece:0.4f}')
         fig.tight_layout()
         fig.savefig(f'{self.save_to}/assignment_calibration_{self.model_params["tag"]}.png')
         plt.close()

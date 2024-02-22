@@ -7,7 +7,6 @@ import os
 import pandas as pd
 import scipy.optimize
 import scipy.special
-import tensorflow as tf
 
 from Indexing import Indexing
 from TargetFunctions import CandidateOptLoss
@@ -18,7 +17,6 @@ class Candidates:
         q2_obs, q2_obs_scaled, 
         unit_cell, unit_cell_scaled,
         minimum_unit_cell, maximum_unit_cell,
-        unit_cell_generator_label,
         tolerance, tolerance_key,
         ):
         self.minimum_unit_cell = minimum_unit_cell
@@ -48,10 +46,9 @@ class Candidates:
         self.candidates['unit_cell'] = list(unit_cell)
         self.candidates['unit_cell_scaled'] = list(unit_cell_scaled)
         self.candidates['unit_cell_initial'] = list(unit_cell)
-        self.candidates['unit_cell_generator'] = unit_cell_generator_label
         self.n = unit_cell.shape[0]
 
-    def initial_diagnostics(self, unit_cell_true, unit_cell_pred, unit_cell_pred_std, hkl_true, bl_true, sg_true):
+    def initial_diagnostics(self, unit_cell_true, hkl_true, bl_true, sg_true, spacegroup_symbol_hm_true):
         unit_cell_initial = np.stack(self.candidates['unit_cell_initial'])
         unit_cell_initial_rms = 1/unit_cell_true.size * np.linalg.norm(unit_cell_initial - unit_cell_true, axis=1)
         unit_cell_initial_max_diff = np.max(np.abs(unit_cell_initial - unit_cell_true), axis=1)
@@ -62,15 +59,13 @@ class Candidates:
             hkl_correct[candidate_index, :, :] = hkl_initial[candidate_index, :, :] == hkl_true
         hkl_accuracy = np.count_nonzero(np.all(hkl_correct, axis=2), axis=1) / self.q2_obs.size
         print(f'True unit cell:              {np.round(unit_cell_true, decimals=4)}')
-        print(f'Predicted unit cell:         {np.round(unit_cell_pred, decimals=4)}')
-        print(f'Predicted unit cell std:     {np.round(unit_cell_pred_std, decimals=4)}')
         print(f'Closest unit cell rms:       {unit_cell_initial_rms.min():2.4f}')
         print(f'Smallest unit cell max diff: {unit_cell_initial_max_diff.min():2.4f}')
         print(f'Mean unit cell rms:          {unit_cell_initial_rms.mean():2.4f}')
-        print(f'Best HKL accuracy: {hkl_accuracy.max()}')
-        print(f'Mean HKL accuracy: {hkl_accuracy.mean()}')
-        print(f'Bravais Lattice: {bl_true}')
-        print(f'Spacegroup: {sg_true}')
+        print(f'Best HKL accuracy:           {hkl_accuracy.max()}')
+        print(f'Mean HKL accuracy:           {hkl_accuracy.mean()}')
+        print(f'Bravais Lattice:             {bl_true}')
+        print(f'Spacegroup:                  {int(sg_true)} {spacegroup_symbol_hm_true}')
 
     def update(self):
         self.drop_bad_optimizations()
@@ -186,11 +181,9 @@ class Optimizer:
 
         opt_params_defaults = {
             'n_candidates': 100,
-            'subsampling_iterations': [[1, 5], [2, 3], [3, 1]],
             'minimum_uc': 2,
             'maximum_uc': 500,
             'tuning_param': [1, 10],
-            'load_predictions': False,
             'n_pred_evals': 500,
             'found_tolerance_key': 'wL2',
             'found_tolerance': 1e-20,
@@ -208,8 +201,7 @@ class Optimizer:
 
         self.indexer = Indexing(
             assign_params=self.assign_params, 
-            class_params={'tag': None}, 
-            data_params=self.data_params, 
+            data_params=self.data_params,
             reg_params=self.reg_params, 
             seed=12345, 
             )
@@ -219,9 +211,7 @@ class Optimizer:
             if not os.path.exists(self.save_to):
                 os.mkdir(self.save_to)
         else:
-            self.indexer.N_bl = None
             self.indexer.hkl_ref = None
-        self.indexer.N_bl = self.comm.bcast(self.indexer.N_bl, root=0)
         self.indexer.hkl_ref = self.comm.bcast(self.indexer.hkl_ref, root=0)
         self.indexer.setup_regression()
         self.indexer.setup_assignment()
@@ -245,7 +235,8 @@ class Optimizer:
                 )
             uc_scaled_cov_all = np.load(
                 f'{self.save_to}/{self.data_params["tag"]}_uc_scaled_cov.npy'
-                )  
+                )
+
         if self.rank == 0:
             for rank_index in range(1, self.n_ranks):
                 rank_indices = np.arange(rank_index, self.indexer.N, self.n_ranks)
@@ -254,40 +245,40 @@ class Optimizer:
                 if self.opt_params['load_predictions']:
                     self.comm.send(uc_scaled_mean_all[rank_indices], dest=rank_index, tag=2)
                     self.comm.send(uc_scaled_cov_all[rank_indices], dest=rank_index, tag=3)
-            self.rank_indices = np.arange(0, self.indexer.N, self.n_ranks)
+            self.rank_indices = np.arange(0, self.indexer.data.shape[0], self.n_ranks)
             self.indexer.data = self.indexer.data.iloc[self.rank_indices]
             if self.opt_params['load_predictions']:
                 self.uc_scaled_mean = uc_scaled_mean_all[self.rank_indices]
                 self.uc_scaled_cov = uc_scaled_cov_all[self.rank_indices]
                 self.N = self.indexer.data.shape[0]
-                self.n_bl = len(self.indexer.data_params['bravais_lattices'])
+                self.n_groups = len(self.indexer.data_params['groups'])
         else:
             self.rank_indices = self.comm.recv(source=0, tag=0)
             self.indexer.data = self.comm.recv(source=0, tag=1)
             if self.opt_params['load_predictions']:
                 self.uc_scaled_mean = self.comm.recv(source=0, tag=2)
                 self.uc_scaled_cov = self.comm.recv(source=0, tag=3)
+                self.n_groups = len(self.indexer.data_params['groups'])
                 self.N = self.indexer.data.shape[0]
-                self.n_bl = len(self.indexer.data_params['bravais_lattices'])
+
         if self.opt_params['load_predictions'] == False:
+            self.n_groups = len(self.indexer.data_params['groups'])
             self.N = self.indexer.data.shape[0]
-            self.n_bl = len(self.indexer.data_params['bravais_lattices'])
-            self.uc_scaled_mean = np.zeros((self.N, self.n_bl, self.indexer.data_params['n_outputs']))
+            self.uc_scaled_mean = np.zeros((self.N, self.n_groups, self.indexer.data_params['n_outputs']))
             self.uc_scaled_cov = np.zeros((
                 self.N,
-                self.n_bl,
+                self.n_groups,
                 self.indexer.data_params['n_outputs'],
                 self.indexer.data_params['n_outputs']
                 ))
-            for bl_index, bravais_lattice in enumerate(self.indexer.data_params['bravais_lattices']):
-                mean, cov = self.indexer.unit_cell_generator[bravais_lattice].do_predictions(
-                    data=self.indexer.data,
-                    verbose=0,
-                    n_evals=self.opt_params['n_pred_evals'],
+            for group_index, group in enumerate(self.indexer.data_params['groups']):
+                print(f'Performing predictions with {group}')
+                mean, cov = self.indexer.unit_cell_generator[group].do_predictions(
+                    data=self.indexer.data, verbose=0, batch_size=2048
                     )
-                self.uc_scaled_mean[:, bl_index, :] = mean
-                self.uc_scaled_cov[:, bl_index, :, :] = cov
-                        
+                self.uc_scaled_mean[:, group_index, :] = mean
+                self.uc_scaled_cov[:, group_index, :, :] = cov
+
             if self.rank == 0:
                 uc_scaled_mean_all = [None for i in range(self.n_ranks)]
                 uc_scaled_cov_all = [None for i in range(self.n_ranks)]
@@ -315,30 +306,15 @@ class Optimizer:
                 self.comm.send(self.uc_scaled_mean, dest=0, tag=2)
                 self.comm.send(self.uc_scaled_cov, dest=0, tag=3)
                 self.comm.send(self.rank_indices, dest=0, tag=4)
-        """
-        for entry_index in range(self.N):
-            print(self.indexer.data.iloc[entry_index]['bravais_lattice'])
-            print(self.indexer.data.iloc[entry_index]['reordered_unit_cell'])
-            for bl_index in range(self.n_bl):
-                print(self.indexer.revert_predictions(uc_pred_scaled=self.uc_scaled_mean[entry_index, bl_index, :]))
-            print()
-        print(f'{self.rank} {self.uc_scaled_mean.sum()}, {self.uc_scaled_cov.sum()}')
-        """
 
     def run(self):
-        uc_true = np.stack(self.indexer.data['reordered_unit_cell'])[:, self.indexer.data_params['y_indices']]
-        uc_pred = np.stack(self.indexer.data['reordered_unit_cell_pred'])
-        uc_pred_cov = np.stack(self.indexer.data['reordered_unit_cell_pred_cov'])
-        diag_indices = np.arange(uc_true.shape[1])
-        uc_pred_std = np.sqrt(uc_pred_cov[:, diag_indices, diag_indices])
+        uc_true = np.stack(self.indexer.data['reindexed_unit_cell'])[:, self.indexer.data_params['y_indices']]
         bl_true = list(self.indexer.data['bravais_lattice'])
+        spacegroup_symbol_hm_true = list(self.indexer.data['reindexed_spacegroup_symbol_hm'])
         sg_true = list(self.indexer.data['spacegroup_number'])
-        hkl_true = np.stack(self.indexer.data['reordered_hkl'])[:, :, :, 0]
+        hkl_true = np.stack(self.indexer.data['reindexed_hkl'])[:, :, :, 0]
 
         uc_best_opt = np.zeros((self.N, self.indexer.data_params['n_outputs']))
-        uc_best_cand = np.zeros((self.N, self.indexer.data_params['n_outputs']))
-        hkl_best_opt = np.zeros((self.N, self.indexer.data_params['n_points'], 3))
-        hkl_best_cand = np.zeros((self.N, self.indexer.data_params['n_points'], 3))
 
         percentage = 0
         report_counts = {
@@ -352,20 +328,13 @@ class Optimizer:
                 self.logger.info(f' {100*current_percentage:3.0f}% complete')
                 percentage += 0.01
             print()
-            #print(uc_true[entry_index])
             candidate_uc_scaled = np.zeros((
-                self.n_bl * self.opt_params['n_candidates'],
+                len(self.indexer.data_params['groups']) * self.opt_params['n_candidates'],
                 self.indexer.data_params['n_outputs']
                 ))
-            unit_cell_generator_labels = []
-            for bl_index in range(self.n_bl):
-                #print(self.indexer.revert_predictions(uc_pred_scaled=self.uc_scaled_mean[entry_index, bl_index, :]))
+            for bl_index in range(len(self.indexer.data_params['groups'])):
                 start = bl_index * self.opt_params['n_candidates']
                 stop = (bl_index + 1) * self.opt_params['n_candidates']
-                unit_cell_generator_labels += [
-                    self.indexer.data_params['bravais_lattices'][bl_index] 
-                    for i in range(self.opt_params['n_candidates'])
-                    ]
                 candidates_scaled = self.rng.multivariate_normal(
                     mean=self.uc_scaled_mean[entry_index, bl_index, :],
                     cov=self.uc_scaled_cov[entry_index, bl_index, :, :],
@@ -395,22 +364,20 @@ class Optimizer:
                 unit_cell_scaled=candidate_uc_scaled,
                 minimum_unit_cell=self.opt_params['minimum_uc'],
                 maximum_unit_cell=self.opt_params['maximum_uc'],
-                unit_cell_generator_label=unit_cell_generator_labels,
                 tolerance=self.opt_params['found_tolerance'],
                 tolerance_key=self.opt_params['found_tolerance_key']
                 )
             candidates = self.assign_hkls(candidates, self.opt_params['iteration_info'][0][0])
             candidates.candidates['hkl_initial'] = candidates.candidates['hkl'].copy()
             candidates.initial_diagnostics(
-                uc_true[entry_index], uc_pred[entry_index], uc_pred_std[entry_index], 
-                hkl_true[entry_index], bl_true[entry_index], sg_true[entry_index]
+                uc_true[entry_index], hkl_true[entry_index], bl_true[entry_index], sg_true[entry_index], spacegroup_symbol_hm_true[entry_index]
                 )
             candidates = self.optimize_entry(candidates)
             uc_best_opt[entry_index], report_counts = candidates.get_best_candidates(
                 uc_true[entry_index], bl_true[entry_index], hkl_true[entry_index], report_counts
                 )
             print(report_counts)
-        self.indexer.data['reordered_unit_cell_best_opt'] = list(uc_best_opt)
+        self.indexer.data['reindexed_unit_cell_best_opt'] = list(uc_best_opt)
 
     def optimize_entry(self, candidates):
         candidates = self.assign_hkls(candidates, self.opt_params['iteration_info'][0][0])
@@ -424,18 +391,7 @@ class Optimizer:
                 candidates = self.optimize_iteration(candidates, assigner_key, n_subsample, n_drop)
                 #print(f'{candidates.n}, {candidates.candidates[self.opt_params["found_tolerance_key"]].mean()} {assigner_key}')
                 #print(len(candidates.explainers))
-        #candidate_uc, loss = self.multiple_assignments(candidate_uc, q2_scaled)
-        """
-        for subsampled_index in range(len(self.opt_params['subsampling_iterations'])):
-            n_drop = self.opt_params['subsampling_iterations'][subsampled_index][0]
-            n_iterations = self.opt_params['subsampling_iterations'][subsampled_index][1]
-            for iter_index in range(n_iterations):
-                candidate_uc, explainers, loss = self.deterministic_subsampling(
-                    candidate_uc, explainers, q2, q2_scaled, n_drop
-                    )
-                print(f'{loss.size}, {loss.mean()}')
-                print(len(explainers))
-        """
+
         return candidates
 
     def assign_hkls(self, candidates, assigner_key, subsampled_candidates=None):
@@ -594,9 +550,7 @@ class Optimizer:
         if n_drop == 0:
             n_subsample = 1
 
-        optimized_unit_cell = np.zeros((
-            candidates.n, n_subsample, self.indexer.data_params['n_outputs']
-            ))
+        optimized_unit_cell = np.zeros((candidates.n, n_subsample, self.indexer.data_params['n_outputs']))
         hkl = np.stack(candidates.candidates['hkl'])
         softmax = np.stack(candidates.candidates['softmax'])
         unit_cell = np.stack(candidates.candidates['unit_cell'])
@@ -651,54 +605,6 @@ class Optimizer:
                 )
         candidates = self.update_candidates(candidates, assigner_key, optimized_unit_cell)
         return candidates
-
-    """
-    def multiple_assignments(self, candidate_uc, q2_scaled):
-        # This should be broken
-        def get_repeats(hkl_labels_pred):
-            m = np.ones(hkl_labels_pred.shape, dtype=bool)
-            m[np.unique(hkl_labels_pred, return_index=True)[1]] = False
-            return np.unique(hkl_labels_pred[m])
-
-        candidate_hkls, candidate_softmaxes, candidate_softmaxes_all = self.assign_hkls(candidate_uc, q2_scaled)
-        candidate_hkl_labels = candidate_softmaxes_all.argmax(axis=2)
-        for entry_index in range(candidate_uc.shape[0]):
-            entry_hkl_labels = candidate_hkl_labels[entry_index]
-            entry_softmaxes_all = candidate_softmaxes_all[entry_index]
-
-            repeated = get_repeats(entry_hkl_labels)
-            x = np.arange(self.indexer.data_params['n_points'])
-            #print(entry_hkl_labels)
-            #print(entry_softmaxes_all.max(axis=1))
-            #print(np.unique(entry_hkl_labels))
-            #print(repeated)
-            if len(repeated) > 0:
-                for repeat in repeated:
-                    common_indices = entry_hkl_labels == repeat
-                    for reaarange_index in np.argsort(entry_softmaxes_all[common_indices, repeat])[:-1]:
-                        peak_to_reassign = x[common_indices][reaarange_index]
-                        new_choice_indices = np.argsort(entry_softmaxes_all[peak_to_reassign])[::-1]
-                        for new_index in new_choice_indices[1:]:
-                            if not new_index in entry_hkl_labels:
-                                entry_hkl_labels[peak_to_reassign] = new_index
-                                break
-            #print(entry_hkl_labels)
-            #print(entry_softmaxes_all[x, entry_hkl_labels])
-            #print(entry_hkls[x, ])
-            #print()
-            candidate_hkl_labels[entry_index] = entry_hkl_labels
-            candidate_softmaxes[entry_index] = entry_softmaxes_all[x, entry_hkl_labels]
-            #print(candidate_hkls[entry_index])
-            candidate_hkls[entry_index] = self.indexer.hkl_ref[entry_hkl_labels]
-            #print(candidate_hkls[entry_index])
-            #print()
-        candidate_hkls, candidate_softmaxes, candidate_uc = self.drop_identical_assignments(
-            candidate_hkls, candidate_softmaxes, candidate_uc
-            )
-        candidate_uc, loss = self.optimize_candidates(candidate_hkls, candidate_softmaxes, candidate_uc)
-        candidate_uc, candidate_hkls, candidate_softmaxes, loss = self.drop_bad_optimizations(candidate_uc, candidate_hkls, candidate_softmaxes, loss)
-        return candidate_uc, loss
-    """
 
     def deterministic_subsampling(self, candidate_uc, explainers, q2, q2_scaled, n_drop):
         candidate_hkls, candidate_softmaxes, candidate_softmaxes_all = \
@@ -813,14 +719,14 @@ class Optimizer:
             for rank_index in range(1, self.n_ranks):
                 optimized_data[rank_index] = self.comm.recv(source=rank_index, tag=2)
             self.optimized_data = pd.concat(optimized_data)
-            self.optimized_data['reordered_h'] = list(np.stack(self.optimized_data['reordered_hkl'])[:, :, 0, 0])
-            self.optimized_data['reordered_k'] = list(np.stack(self.optimized_data['reordered_hkl'])[:, :, 1, 0])
-            self.optimized_data['reordered_l'] = list(np.stack(self.optimized_data['reordered_hkl'])[:, :, 2, 0])
+            self.optimized_data['reindexed_h'] = list(np.stack(self.optimized_data['reindexed_hkl'])[:, :, 0, 0])
+            self.optimized_data['reindexed_k'] = list(np.stack(self.optimized_data['reindexed_hkl'])[:, :, 1, 0])
+            self.optimized_data['reindexed_l'] = list(np.stack(self.optimized_data['reindexed_hkl'])[:, :, 2, 0])
             drop_columns = [
                 'hkl',
-                'reordered_hkl',
-                'reordered_unit_cell_pred_cov',
-                'reordered_unit_cell_pred_scaled_cov'
+                'reindexed_hkl',
+                'reindexed_unit_cell_pred_cov',
+                'reindexed_unit_cell_pred_scaled_cov'
                 ]
             self.optimized_data.drop(columns=drop_columns, inplace=True)
             self.optimized_data.to_parquet(f'{self.save_to}/{self.opt_params["tag"]}_optimized_data.parquet')
@@ -838,9 +744,9 @@ class Optimizer:
                     bl_data = self.optimized_data[self.optimized_data['bravais_lattice'] == bravais_lattice]
                 else:
                     bl_data = self.optimized_data
-                uc_true_bl = np.stack(bl_data['reordered_unit_cell'])[:, self.indexer.data_params['y_indices']]
-                uc_best_opt_bl = np.stack(bl_data['reordered_unit_cell_best_opt'])
-                uc_best_cand_bl = np.stack(bl_data['reordered_unit_cell_best_cand'])
+                uc_true_bl = np.stack(bl_data['reindexed_unit_cell'])[:, self.indexer.data_params['y_indices']]
+                uc_best_opt_bl = np.stack(bl_data['reindexed_unit_cell_best_opt'])
+                uc_best_cand_bl = np.stack(bl_data['reindexed_unit_cell_best_cand'])
                 figsize = (self.indexer.data_params['n_outputs']*2 + 2, 8)
                 fig, axes = plt.subplots(2, self.indexer.data_params['n_outputs'], figsize=figsize)
                 uc_pred = [uc_best_opt_bl, uc_best_cand_bl]
@@ -947,12 +853,12 @@ class MPIFileHandler(logging.FileHandler):
             self.stream = None
 
 
-if (__name__ == '__main__'):
+if __name__ == '__main__':
     data_params = {
-        'tag': 'Indexing_orthorhombic_20points',
+        'tag': 'orthorhombic_grouped_V3',
         }
-    oP_params = {
-        'tag': 'mlp_20points',
+    reg_group_params = {
+        'tag': 'rnn',
         'load_from_tag': True,
         'var_est': 'alpha_beta',
         'alpha_params': {},
@@ -962,26 +868,43 @@ if (__name__ == '__main__'):
         'head_params': {},
         }
     reg_params = {
-        'oP': oP_params,
-        'oC': oP_params,
-        'oF': oP_params,
-        'oI': oP_params,
+        'ortho_00': reg_group_params,
+        'ortho_01': reg_group_params,
+        'ortho_02': reg_group_params,
+        'ortho_03': reg_group_params,
+        'ortho_04': reg_group_params,
+        'ortho_05': reg_group_params,
+        'ortho_06': reg_group_params,
+        'ortho_07': reg_group_params,
+        'ortho_08': reg_group_params,
+        'ortho_09': reg_group_params,
+        'ortho_10': reg_group_params,
+        'ortho_11': reg_group_params,
+        'ortho_12': reg_group_params,
+        'ortho_13': reg_group_params,
+        'ortho_14': reg_group_params,
         }
     assign_params = {
-        '0': {'tag': 'mlp_20points_0'},
-        '1': {'tag': 'mlp_20points_1'},
-        '2': {'tag': 'mlp_20points_2'},
-        '3': {'tag': 'mlp_20points_3'},
-        '4': {'tag': 'mlp_20points_4'},
-        '5': {'tag': 'mlp_20points_5'},
+        '0': {'tag': 'group_v3_0'},
+        '1': {'tag': 'group_v3_1'},
+        '2': {'tag': 'group_v3_2'},
+        '3': {'tag': 'group_v3_3'},
+        '4': {'tag': 'group_v3_4'},
+        '5': {'tag': 'group_v3_5'},
         }
 
+    # iteration_info:
+    # 0: assigner_key
+    # 1: n_opt_iterations
+    # 2: n_subsample
+    # 3: n_drop
     opt_params = {
-        'tag': 'mlp_20points',
-        'n_candidates': 200,
+        'tag': 'group_v3',
+        'load_predictions': True,
+        'n_candidates': 100,
         'iteration_info': [
             ['1', 1, 10, 5],
-            ['2', 10, 1, 0], 
+            ['2', 10, 1, 0],
             ['3', 10, 1, 0],
             ['4', 10, 1, 0],
             ['5', 10, 1, 0],
@@ -989,12 +912,10 @@ if (__name__ == '__main__'):
             ],
         'found_tolerance': 1e-20,
         'found_tolerance_key': 'wL2',
-        'subsampling_iterations': [[1, 5], [2, 3]],
         'subsampling_assignment_key': '5',
         'minimum_uc': 2,
         'maximum_uc': 500,
         'tuning_param': [1, 5],
-        'load_predictions': False,
         'n_pred_evals': 500,
         'assignment_batch_size': 64,
         }
@@ -1003,4 +924,3 @@ if (__name__ == '__main__'):
     optimizer.distribute_data()
     optimizer.run()
     optimizer.evaluate()
-
