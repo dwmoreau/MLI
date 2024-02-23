@@ -6,7 +6,6 @@ import scipy.optimize
 import tensorflow as tf
 
 from Networks import hkl_model_builder_mlp
-from Networks import hkl_model_builder_mlp_flat
 from Utilities import PairwiseDifferenceCalculator
 
 
@@ -24,7 +23,7 @@ class Assigner:
             'dropout_rate': 0.25,
             'output_activation': 'softmax',
             'epochs': 10,
-            'learning_rate': 0.0005,
+            'learning_rate': 0.002,
             'batch_size': 256,
             'epsilon_pds': 0.01,
             'perturb_std': None,
@@ -189,7 +188,7 @@ class Assigner:
             unit_cell_scaled, inputs['q2_scaled']
             )
         pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=True)
-        hkl_softmaxes = hkl_model_builder_mlp_flat(pds_inv, 'softmaxes', self.model_params)
+        hkl_softmaxes = hkl_model_builder_mlp(pds_inv, 'softmaxes', self.model_params)
         return hkl_softmaxes
 
     def compile_model(self):
@@ -325,7 +324,7 @@ class Assigner:
                 softmaxes[start: end] = softmaxes_batch
         return softmaxes
 
-    def evaluate(self, data, bravais_lattices, unit_cell_scaled_key, y_indices):
+    def evaluate(self, data, bravais_lattices, unit_cell_scaled_key, y_indices, perturb_std):
         for bravais_lattice in bravais_lattices:
             if bravais_lattice == 'All':
                 bl_data = data
@@ -336,79 +335,66 @@ class Assigner:
             else:
                 unit_cell_scaled = np.stack(bl_data[unit_cell_scaled_key])[:, y_indices]
 
+            if perturb_std is not None:
+                noise = np.random.normal(loc=0, scale=perturb_std, size=unit_cell_scaled.shape)
+                unit_cell_scaled += noise
             pairwise_differences_scaled = self.pairwise_difference_calculation.get_pairwise_differences_from_uc_scaled(
                 unit_cell_scaled, np.stack(bl_data['q2_scaled'])
                 )
             bl_pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=False)
             labels_closest = np.argmax(bl_pds_inv, axis=2)
             labels_true = np.stack(bl_data['hkl_labels'])
-            labels_pred = np.stack(bl_data['hkl_labels_pred'])
+            labels_true_train = np.stack(bl_data[bl_data['train']]['hkl_labels'])
+            labels_pred_train = np.stack(bl_data[bl_data['train']]['hkl_labels_pred'])
+            labels_true_val = np.stack(bl_data[~bl_data['train']]['hkl_labels'])
+            labels_pred_val = np.stack(bl_data[~bl_data['train']]['hkl_labels_pred'])
 
             # correct shape: n_entries, n_peaks
-            correct_pred = labels_true == labels_pred
+            correct_pred_train = labels_true_train == labels_pred_train
+            correct_pred_val = labels_true_val == labels_pred_val
             correct_closest = labels_true == labels_closest
-            accuracy_pred = correct_pred.sum() / correct_pred.size
+            accuracy_pred_train = correct_pred_train.sum() / correct_pred_train.size
+            accuracy_pred_val = correct_pred_val.sum() / correct_pred_val.size
             accuracy_closest = correct_closest.sum() / correct_closest.size
             # accuracy for each entry
-            accuracy_entry = correct_pred.sum(axis=1) / self.model_params['n_points']
+            accuracy_entry_train = correct_pred_train.sum(axis=1) / self.model_params['n_points']
+            accuracy_entry_val = correct_pred_val.sum(axis=1) / self.model_params['n_points']
             accuracy_entry_closest = correct_closest.sum(axis=1) / self.model_params['n_points']
             # accuracy per peak position
-            accuracy_peak_position = correct_pred.sum(axis=0) / bl_data.shape[0]
+            accuracy_peak_position_train = correct_pred_train.sum(axis=0) / correct_pred_train.shape[0]
+            accuracy_peak_position_val = correct_pred_val.sum(axis=0) / correct_pred_val.shape[0]
             accuracy_peak_position_closest = correct_closest.sum(axis=0) / bl_data.shape[0]
 
-            softmaxes = np.stack(bl_data['hkl_softmaxes'])
-            max_softmax = softmaxes.max(axis=2)
-            mean_max_softmax = np.zeros((self.model_params['n_points'], 2))
-            std_max_softmax = np.zeros((self.model_params['n_points'], 2))
-            for point_index in range(self.model_params['n_points']):
-                correct_indices = correct_pred[:, point_index]
-                mean_max_softmax[point_index, 0] = max_softmax[correct_indices, point_index].mean()
-                mean_max_softmax[point_index, 1] = max_softmax[~correct_indices, point_index].mean()
-                std_max_softmax[point_index, 0] = max_softmax[correct_indices, point_index].std()
-                std_max_softmax[point_index, 1] = max_softmax[~correct_indices, point_index].std()
-
-            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
             bins = (np.arange(self.model_params['n_points'] + 2) - 0.5) / self.model_params['n_points']
             centers = (bins[1:] + bins[:-1]) / 2
             dbin = bins[1] - bins[0]
-            hist, _ = np.histogram(accuracy_entry, bins=bins, density=True)
+            hist_train, _ = np.histogram(accuracy_entry_train, bins=bins, density=True)
+            hist_val, _ = np.histogram(accuracy_entry_val, bins=bins, density=True)
             hist_closest, _ = np.histogram(accuracy_entry_closest, bins=bins, density=True)
-            axes[0].bar(centers, hist, width=dbin, label='Predicted')
+            axes[0].bar(centers, hist_train, width=dbin, label='Predicted: Training')
+            axes[0].bar(centers, hist_val, width=dbin, alpha=0.5, label='Predicted: Validation')
             axes[0].bar(centers, hist_closest, width=dbin, alpha=0.5, label='Closest')
             axes[1].bar(
-                np.arange(self.model_params['n_points']), accuracy_peak_position, 
-                width=1, 
+                np.arange(self.model_params['n_points']), accuracy_peak_position_train,
+                width=1, label='Predicted: Training'
                 )
             axes[1].bar(
-                np.arange(self.model_params['n_points']), accuracy_peak_position_closest, 
+                np.arange(self.model_params['n_points']), accuracy_peak_position_val,
+                width=1, alpha=0.5, label='Predicted: Validation'
+                )
+            axes[1].bar(
+                np.arange(self.model_params['n_points']), accuracy_peak_position_closest,
                 width=1, alpha=0.5, label='Closest'
                 )
-            axes[2].bar(
-                np.arange(self.model_params['n_points']), mean_max_softmax[:, 0], 
-                width=1, alpha=0.5, label='Correct'
-                )
-            axes[2].bar(
-                np.arange(self.model_params['n_points']), mean_max_softmax[:, 1], 
-                width=1, alpha=0.5, label='Incorrect'
-                )
-            axes[2].errorbar(
-                np.arange(self.model_params['n_points']), mean_max_softmax[:, 0], yerr=std_max_softmax[:, 0],
-                color=[0, 0, 0]
-                )
-            axes[2].errorbar(
-                np.arange(self.model_params['n_points']), mean_max_softmax[:, 1], yerr=std_max_softmax[:, 1],
-                color=[0, 0, 0], linestyle='dotted'
-                )
-            axes[0].legend(frameon=False)
-            axes[0].set_title(f'Predicted accuracy: {accuracy_pred:0.3f}\nClosest accuracy: {accuracy_closest:0.3f}')
+
+            axes[1].legend(frameon=False)
+            axes[0].set_title(f'Predicted accuracy: {accuracy_pred_train:0.3f}/{accuracy_pred_val:0.3f}\nClosest accuracy: {accuracy_closest:0.3f}')
 
             axes[0].set_xlabel('Accuracy')
             axes[1].set_xlabel('Peak Position')
-            axes[2].set_xlabel('Peak Position')
             axes[0].set_ylabel('Entry Accuracy')
             axes[1].set_ylabel('Peak Accuracy')
-            axes[2].set_ylabel('Maximum Softmax')
-            axes[2].legend(frameon=False)
             axes[1].set_ylim([0, 1])
             fig.tight_layout()
             fig.savefig(f'{self.save_to}/{bravais_lattice}_assignment_{self.model_params["tag"]}.png')

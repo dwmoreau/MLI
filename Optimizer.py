@@ -1,5 +1,3 @@
-import gc
-import logging
 import matplotlib.pyplot as plt
 from mpi4py import MPI
 import numpy as np
@@ -10,7 +8,7 @@ import scipy.special
 
 from Indexing import Indexing
 from TargetFunctions import CandidateOptLoss
-
+from Utilities import get_mpi_logger
 
 class Candidates:
     def __init__(self,
@@ -18,6 +16,7 @@ class Candidates:
         unit_cell, unit_cell_scaled,
         minimum_unit_cell, maximum_unit_cell,
         tolerance, tolerance_key,
+        unit_cell_true, unit_cell_pred, hkl_true, bl_true, sg_true, spacegroup_symbol_hm_true
         ):
         self.minimum_unit_cell = minimum_unit_cell
         self.maximum_unit_cell = maximum_unit_cell
@@ -28,9 +27,7 @@ class Candidates:
         df_columns = [
             'unit_cell',
             'unit_cell_scaled',
-            'unit_cell_initial',
             'hkl',
-            'hkl_initial',
             'softmax',
             'q2_pred',
             'L1',
@@ -45,27 +42,41 @@ class Candidates:
 
         self.candidates['unit_cell'] = list(unit_cell)
         self.candidates['unit_cell_scaled'] = list(unit_cell_scaled)
-        self.candidates['unit_cell_initial'] = list(unit_cell)
-        self.n = unit_cell.shape[0]
+        self.n = len(self.candidates)
+        self.n_uc = unit_cell.shape[0]
+        self.n_points = q2_obs.size
 
-    def initial_diagnostics(self, unit_cell_true, hkl_true, bl_true, sg_true, spacegroup_symbol_hm_true):
-        unit_cell_initial = np.stack(self.candidates['unit_cell_initial'])
-        unit_cell_initial_rms = 1/unit_cell_true.size * np.linalg.norm(unit_cell_initial - unit_cell_true, axis=1)
-        unit_cell_initial_max_diff = np.max(np.abs(unit_cell_initial - unit_cell_true), axis=1)
+        self.unit_cell_true = unit_cell_true
+        self.unit_cell_pred = unit_cell_pred
+        self.hkl_true = hkl_true
+        self.bl_true = bl_true
+        self.sg_true = int(sg_true)
+        self.spacegroup_symbol_hm_true = spacegroup_symbol_hm_true
 
-        hkl_initial = np.stack(self.candidates['hkl_initial'])
-        hkl_correct = np.zeros(hkl_initial.shape, dtype=bool)
+    def diagnostics(self):
+        hkl = np.stack(self.candidates['hkl'])
+        unit_cell = np.stack(self.candidates['unit_cell'])
+
+        unit_cell_rms = 1/np.sqrt(self.n_uc) * np.linalg.norm(unit_cell - self.unit_cell_true, axis=1)
+        unit_cell_max_diff = np.max(np.abs(unit_cell - self.unit_cell_true), axis=1)
+
+        hkl_correct = np.zeros(hkl.shape, dtype=bool)
         for candidate_index in range(self.n):
-            hkl_correct[candidate_index, :, :] = hkl_initial[candidate_index, :, :] == hkl_true
-        hkl_accuracy = np.count_nonzero(np.all(hkl_correct, axis=2), axis=1) / self.q2_obs.size
-        print(f'True unit cell:              {np.round(unit_cell_true, decimals=4)}')
-        print(f'Closest unit cell rms:       {unit_cell_initial_rms.min():2.4f}')
-        print(f'Smallest unit cell max diff: {unit_cell_initial_max_diff.min():2.4f}')
-        print(f'Mean unit cell rms:          {unit_cell_initial_rms.mean():2.4f}')
-        print(f'Best HKL accuracy:           {hkl_accuracy.max()}')
-        print(f'Mean HKL accuracy:           {hkl_accuracy.mean()}')
-        print(f'Bravais Lattice:             {bl_true}')
-        print(f'Spacegroup:                  {int(sg_true)} {spacegroup_symbol_hm_true}')
+            ### !!! The absolute value will not work for monoclinic and triclinic
+            hkl_correct[candidate_index, :, :] = np.abs(hkl[candidate_index, :, :]) == np.abs(self.hkl_true)
+        hkl_accuracy = np.count_nonzero(np.all(hkl_correct, axis=2), axis=1) / self.n_points
+        #most_accurate = hkl_accuracy.argmax()
+        #for i in range(self.hkl_true.shape[0]):
+        #    print(f'{self.hkl_true[i]} {hkl[most_accurate, i].astype(int)}')
+        print(f'True unit cell:              {np.round(self.unit_cell_true, decimals=4)}')
+        print(f'Closest predicted unit cell: {np.round(self.unit_cell_pred, decimals=4)}')
+        print(f'Closest unit cell rms:       {unit_cell_rms.min():2.4f}')
+        print(f'Smallest unit cell max diff: {unit_cell_max_diff.min():2.4f}')
+        print(f'Mean unit cell rms:          {unit_cell_rms.mean():2.4f}')
+        print(f'Best HKL accuracy:           {hkl_accuracy.max():1.4f}')
+        print(f'Mean HKL accuracy:           {hkl_accuracy.mean():1.4f}')
+        print(f'Bravais Lattice:             {self.bl_true}')
+        print(f'Spacegroup:                  {self.sg_true} {self.spacegroup_symbol_hm_true}')
 
     def update(self):
         self.drop_bad_optimizations()
@@ -85,7 +96,7 @@ class Candidates:
         self.n = len(self.candidates)
 
     def drop_bad_optimizations(self):
-        # Remove really bad loss's
+        # Remove bad loss's
         loss = self.candidates[self.tolerance_key]
         z = (loss - np.median(loss)) / loss.std()
         self.candidates = self.candidates.loc[z < 4]
@@ -110,27 +121,23 @@ class Candidates:
             self.candidates = self.candidates.loc[~found]
             self.n = len(self.candidates)
 
-    def get_best_candidates(self, uc_true, bl_true, hkl_true, report_counts):
+    def get_best_candidates(self, report_counts):
         if len(self.explainers) == 0:
             uc_best_opt = self.candidates.iloc[0]['unit_cell']
             print(uc_best_opt)
-            if np.all(np.isclose(uc_true, np.sort(uc_best_opt), atol=1e-3)):
+            if np.all(np.isclose(self.unit_cell_true, np.sort(uc_best_opt), atol=1e-3)):
                 report_counts['Found and best'] += 1
             else:
                 report_counts['Not found'] += 1
         elif len(self.explainers) == 1:
             print(self.explainers['unit_cell'])
-            #print(self.explainers['unit_cell_initial'])
-            #print(bl_true)
-            #print(self.explainers['unit_cell_generator'])
             uc_best_opt = self.explainers.iloc[0]['unit_cell']
-            if np.all(np.isclose(uc_true, np.sort(uc_best_opt), atol=1e-3)):
+            if np.all(np.isclose(self.unit_cell_true, np.sort(uc_best_opt), atol=1e-3)):
                 report_counts['Found and best'] += 1
             else:
                 report_counts['Not found'] += 1
         else:
             print(self.explainers['unit_cell'])
-            #print(self.explainers['unit_cell_initial'])
             explainer_uc, unique_indices = np.unique(
                 np.round(np.stack(self.explainers['unit_cell']), decimals=4), 
                 return_index=True, axis=0
@@ -138,7 +145,7 @@ class Candidates:
             uc_best_opt = explainer_uc[0]
             if explainer_uc.shape[0] == 1:
                 print(uc_best_opt)
-                if np.all(np.isclose(uc_true, np.sort(uc_best_opt), atol=1e-3)):
+                if np.all(np.isclose(self.unit_cell_true, np.sort(uc_best_opt), atol=1e-3)):
                     report_counts['Found and best'] += 1
                 else:
                     report_counts['Not found'] += 1
@@ -146,7 +153,7 @@ class Candidates:
                 found_best = False
                 found_not_best = False
                 for explainer_index, uc in enumerate(explainer_uc):
-                    if np.all(np.isclose(uc_true, np.sort(uc), atol=1e-3)):
+                    if np.all(np.isclose(self.unit_cell_true, np.sort(uc), atol=1e-3)):
                         if explainer_index == 0:
                             found_best = True
                         else:
@@ -163,7 +170,7 @@ class Candidates:
         #print(f'{np.abs(uc_best_cand - uc_true)}')
         #print(f'{uc_best_cand} {loss[np.argmin(difference)]}')
         #for i in range(5):
-        #    print(f'{candidate_uc[i]} {loss[i]}')
+        #    print(f'{candidate_åuc[i]} {loss[i]}')
         #print()
         return uc_best_opt, report_counts
 
@@ -219,13 +226,7 @@ class Optimizer:
             (self.opt_params['minimum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
         self.opt_params['maximum_uc_scaled'] = \
             (self.opt_params['maximum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
-
-        self.logger = logging.getLogger("rank[%i]"%self.comm.rank)
-        self.logger.setLevel(logging.DEBUG)                                       
-        mh = MPIFileHandler(f'{self.save_to}/{self.opt_params["tag"]}.log')
-        formatter = logging.Formatter('%(asctime)s:%(name)s:%(levelname)s:%(message)s')
-        mh.setFormatter(formatter)
-        self.logger.addHandler(mh)
+        self.logger = get_mpi_logger(self.rank, self.save_to, self.opt_params['tag'])
 
     def distribute_data(self):
         # Make predictions
@@ -309,6 +310,9 @@ class Optimizer:
 
     def run(self):
         uc_true = np.stack(self.indexer.data['reindexed_unit_cell'])[:, self.indexer.data_params['y_indices']]
+        uc_mean = self.indexer.revert_predictions(uc_pred_scaled=self.uc_scaled_mean)
+        closest_prediction = np.linalg.norm(uc_true[:, np.newaxis, :] - uc_mean, axis=2).argmin(axis=1)
+        uc_pred = uc_mean[np.arange(len(closest_prediction)), closest_prediction]
         bl_true = list(self.indexer.data['bravais_lattice'])
         spacegroup_symbol_hm_true = list(self.indexer.data['reindexed_spacegroup_symbol_hm'])
         sg_true = list(self.indexer.data['spacegroup_number'])
@@ -332,12 +336,12 @@ class Optimizer:
                 len(self.indexer.data_params['groups']) * self.opt_params['n_candidates'],
                 self.indexer.data_params['n_outputs']
                 ))
-            for bl_index in range(len(self.indexer.data_params['groups'])):
-                start = bl_index * self.opt_params['n_candidates']
-                stop = (bl_index + 1) * self.opt_params['n_candidates']
+            for group_index in range(len(self.indexer.data_params['groups'])):
+                start = group_index * self.opt_params['n_candidates']
+                stop = (group_index + 1) * self.opt_params['n_candidates']
                 candidates_scaled = self.rng.multivariate_normal(
-                    mean=self.uc_scaled_mean[entry_index, bl_index, :],
-                    cov=self.uc_scaled_cov[entry_index, bl_index, :, :],
+                    mean=self.uc_scaled_mean[entry_index, group_index, :],
+                    cov=self.uc_scaled_cov[entry_index, group_index, :, :],
                     size=self.opt_params['n_candidates'],
                     )
                 ###!!! FIX FOR ANGLES
@@ -348,8 +352,8 @@ class Optimizer:
                 n_bad_indices = np.sum(bad_indices)
                 while n_bad_indices > 0:
                     candidates_scaled[bad_indices] = self.rng.multivariate_normal(
-                        mean=self.uc_scaled_mean[entry_index, bl_index, :],
-                        cov=self.uc_scaled_cov[entry_index, bl_index, :, :],
+                        mean=self.uc_scaled_mean[entry_index, group_index, :],
+                        cov=self.uc_scaled_cov[entry_index, group_index, :, :],
                         size=n_bad_indices,
                         )
                     ###!!! FIX FOR ANGLES
@@ -365,23 +369,30 @@ class Optimizer:
                 minimum_unit_cell=self.opt_params['minimum_uc'],
                 maximum_unit_cell=self.opt_params['maximum_uc'],
                 tolerance=self.opt_params['found_tolerance'],
-                tolerance_key=self.opt_params['found_tolerance_key']
+                tolerance_key=self.opt_params['found_tolerance_key'],
+                unit_cell_true=uc_true[entry_index],
+                unit_cell_pred=uc_pred[entry_index],
+                hkl_true=hkl_true[entry_index],
+                bl_true=bl_true[entry_index],
+                sg_true=sg_true[entry_index],
+                spacegroup_symbol_hm_true=spacegroup_symbol_hm_true[entry_index]
                 )
-            candidates = self.assign_hkls(candidates, self.opt_params['iteration_info'][0][0])
-            candidates.candidates['hkl_initial'] = candidates.candidates['hkl'].copy()
-            candidates.initial_diagnostics(
-                uc_true[entry_index], hkl_true[entry_index], bl_true[entry_index], sg_true[entry_index], spacegroup_symbol_hm_true[entry_index]
-                )
+            if self.opt_params['iteration_info'][0][0] != 'closest':
+                candidates = self.assign_hkls(candidates, self.opt_params['iteration_info'][0][0])
+            else:
+                candidates = self.assign_hkls_closest(candidates)
+            candidates.diagnostics()
             candidates = self.optimize_entry(candidates)
-            uc_best_opt[entry_index], report_counts = candidates.get_best_candidates(
-                uc_true[entry_index], bl_true[entry_index], hkl_true[entry_index], report_counts
-                )
+            #candidates.diagnostics()
+            uc_best_opt[entry_index], report_counts = candidates.get_best_candidates(report_counts)
             print(report_counts)
         self.indexer.data['reindexed_unit_cell_best_opt'] = list(uc_best_opt)
 
     def optimize_entry(self, candidates):
-        candidates = self.assign_hkls(candidates, self.opt_params['iteration_info'][0][0])
-        candidates.candidates['hkl_initial'] = candidates.candidates['hkl'].copy()
+        if self.opt_params['iteration_info'][0][0] != 'closest':
+            candidates = self.assign_hkls(candidates, self.opt_params['iteration_info'][0][0])
+        else:
+            candidates = self.assign_hkls_closest(candidates)
         for iteration_info in self.opt_params['iteration_info']:
             assigner_key = iteration_info[0]
             n_opt_iterations = iteration_info[1]
@@ -389,6 +400,7 @@ class Optimizer:
             n_drop = iteration_info[3]
             for iter_index in range(n_opt_iterations):
                 candidates = self.optimize_iteration(candidates, assigner_key, n_subsample, n_drop)
+                #candidates.diagnostics()
                 #print(f'{candidates.n}, {candidates.candidates[self.opt_params["found_tolerance_key"]].mean()} {assigner_key}')
                 #print(len(candidates.explainers))
 
@@ -418,7 +430,7 @@ class Optimizer:
             repeats=self.opt_params['assignment_batch_size'],
             axis=0
             )
-        logits = np.zeros((
+        softmaxes = np.zeros((
             candidates.n,
             self.indexer.data_params['n_points'],
             self.indexer.data_params['hkl_ref_length']
@@ -438,24 +450,19 @@ class Optimizer:
                 'unit_cell_scaled': batch_unit_cell_scaled,
                 'q2_scaled': batch_q2_scaled
                 }
-            logits_batch = self.indexer.assigner[assigner_key].model.predict_on_batch(inputs)
+            softmaxes_batch = self.indexer.assigner[assigner_key].model.predict_on_batch(inputs)
             if batch_index == n_batchs:
-                logits[start: start + left_over] = logits_batch[:left_over]
+                softmaxes[start: start + left_over] = softmaxes_batch[:left_over]
             else:
-                logits[start: end] = logits_batch
+                softmaxes[start: end] = softmaxes_batch
 
-        # Using tf.nn.softmax results in a memory leak
-        # Switching to scipy solves the issue.
-        # This is slightly faster than the scipy.special implementation
-        exp_logits = np.exp(logits)
-        softmax_all = exp_logits / exp_logits.sum(axis=2, keepdims=True)
         if subsampled_candidates is None:
-            candidates.candidates['softmax'] = list(softmax_all.max(axis=2))
-            candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmax_all))
+            candidates.candidates['softmax'] = list(softmaxes.max(axis=2))
+            candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmaxes))
             return candidates
         else:
-            subsampled_candidates['softmax'] = list(softmax_all.max(axis=2))
-            subsampled_candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmax_all))
+            subsampled_candidates['softmax'] = list(softmaxes.max(axis=2))
+            subsampled_candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmaxes))
             return subsampled_candidates
 
     def assign_hkls_closest(self, candidates):
@@ -606,112 +613,6 @@ class Optimizer:
         candidates = self.update_candidates(candidates, assigner_key, optimized_unit_cell)
         return candidates
 
-    def deterministic_subsampling(self, candidate_uc, explainers, q2, q2_scaled, n_drop):
-        candidate_hkls, candidate_softmaxes, candidate_softmaxes_all = \
-            self.assign_hkls(candidate_uc, q2_scaled, self.opt_params['subsampling_assignment_key'])
-        candidate_hkls, candidate_softmaxes, candidate_uc = \
-            self.drop_identical_assignments(candidate_hkls, candidate_softmaxes, candidate_uc)
-
-        n_candidates = candidate_uc.shape[0]
-        n_points = self.indexer.data_params['n_points']
-        if n_drop == 1:
-            n_subsamples = n_points
-        elif n_drop == 2:
-            n_subsamples = int(n_points * (n_points - 1) / 2)
-        elif n_drop == 3:
-            n_subsamples = int(n_points * (n_points - 1) * (n_points - 2) / (3 * 2))
-        print(f'drop {n_drop}')
-
-        subsampled_uc = np.zeros((n_candidates, n_subsamples, candidate_uc.shape[1]))
-        subsampled_loss = np.zeros((n_candidates, n_subsamples))
-        if n_drop == 1:
-            for point_index in range(n_points):
-                subsampled_indices = np.ones(n_points, dtype=bool)
-                subsampled_indices[point_index] = False
-                self.target_function = CandidateOptLoss(
-                    q2_obs=q2[subsampled_indices], 
-                    lattice_system=self.indexer.data_params['lattice_system'],
-                    tuning_param=self.opt_params['tuning_param'][0],
-                    )
-                subsampled_uc[:, point_index, :], subsampled_loss[:, point_index] = self.optimize_candidates(
-                    candidate_hkls[:, subsampled_indices, :], 
-                    candidate_softmaxes[:, subsampled_indices], 
-                    candidate_uc
-                    )
-        elif n_drop == 2:
-            point_index = 0
-            for point_index_i in range(n_points - 1):
-                for point_index_j in range(point_index_i + 1, n_points):
-                    subsampled_indices = np.ones(n_points, dtype=bool)
-                    subsampled_indices[point_index_i] = False
-                    subsampled_indices[point_index_j] = False
-                    self.target_function = CandidateOptLoss(
-                        q2_obs=q2[subsampled_indices], 
-                        lattice_system=self.indexer.data_params['lattice_system'],
-                        tuning_param=self.opt_params['tuning_param'][0],
-                        )
-                    subsampled_uc[:, point_index, :], subsampled_loss[:, point_index] = self.optimize_candidates(
-                        candidate_hkls[:, subsampled_indices, :], 
-                        candidate_softmaxes[:, subsampled_indices], 
-                        candidate_uc
-                        )
-                    point_index += 1
-        elif n_drop == 3:
-            point_index = 0
-            for point_index_i in range(n_points - 2):
-                for point_index_j in range(point_index_i + 1, n_points - 1):
-                    for point_index_k in range(point_index_j + 1, n_points):
-                        subsampled_indices = np.ones(n_points, dtype=bool)
-                        subsampled_indices[point_index_i] = False
-                        subsampled_indices[point_index_j] = False
-                        subsampled_indices[point_index_k] = False
-                        self.target_function = CandidateOptLoss(
-                            q2_obs=q2[subsampled_indices], 
-                            lattice_system=self.indexer.data_params['lattice_system'],
-                            tuning_param=self.opt_params['tuning_param'][0],
-                            )
-                        subsampled_uc[:, point_index, :], subsampled_loss[:, point_index] = self.optimize_candidates(
-                            candidate_hkls[:, subsampled_indices, :], 
-                            candidate_softmaxes[:, subsampled_indices], 
-                            candidate_uc
-                            )
-                        point_index += 1
-
-        closest = np.argmin(subsampled_loss, axis=1)
-        loss = np.min(subsampled_loss, axis=1)
-        candidate_uc = subsampled_uc[np.arange(n_candidates), closest, :]
-        candidate_uc, candidate_hkls, candidate_softmaxes, loss = self.drop_bad_optimizations(candidate_uc, candidate_hkls, candidate_softmaxes, loss)
-        candidate_uc, explainers, loss = self.pick_explainers(candidate_uc, candidate_hkls, candidate_softmaxes, explainers, loss)
-        return candidate_uc, explainers, loss
-
-    def random_subsampling(self, candidate_uc, explainers, q2, q2_scaled, n_drop):
-        candidate_hkls, candidate_softmaxes, candidate_softmaxes_all = \
-            self.assign_hkls(candidate_uc, q2_scaled, self.opt_params['subsampling_assignment_key'])
-        candidate_hkls, candidate_softmaxes, candidate_uc = \
-            self.drop_identical_assignments(candidate_hkls, candidate_softmaxes, candidate_uc)
-
-        n_candidates = candidate_uc.shape[0]
-        n_points = self.indexer.data_params['n_points']
-        if n_drop == 1:
-            n_subsamples = n_points
-        elif n_drop == 2:
-            n_subsamples = int(n_points * (n_points - 1) / 2)
-        elif n_drop == 3:
-            n_subsamples = int(n_points * (n_points - 1) * (n_points - 2) / (3 * 2))
-
-        subsampled_uc = np.zeros((n_candidates, n_subsamples, candidate_uc.shape[1]))
-        subsampled_loss = np.zeros((n_candidates, n_subsamples))
-
-    def cluster_candidates(self, candidate_uc, uc_true):
-        fig, axes = plt.subplots(1, 3, figsize=(10, 4))
-        axes[0].plot(candidate_uc[:, 0], candidate_uc[:, 1], linestyle='none', marker='.')
-        axes[1].plot(candidate_uc[:, 0], candidate_uc[:, 2], linestyle='none', marker='.')
-        axes[2].plot(candidate_uc[:, 1], candidate_uc[:, 2], linestyle='none', marker='.')
-        axes[0].plot(uc_true[0], uc_true[1], linestyle='none', marker='x')
-        axes[1].plot(uc_true[0], uc_true[2], linestyle='none', marker='x')
-        axes[2].plot(uc_true[1], uc_true[2], linestyle='none', marker='x')
-        plt.show()
-
     def gather_optimized_unit_cells(self):
         if self.rank == 0:
             optimized_data = [None for i in range(self.n_ranks)]
@@ -787,72 +688,6 @@ class Optimizer:
                 plt.close()
 
 
-class MPIFileHandler(logging.FileHandler):
-    """
-    Code was copied from https://gist.github.com/muammar/2baec60fa8c7e62978720686895cdb9f
-
-    Created on Wed Feb 14 16:17:38 2018
-    This handler is used to deal with logging with mpi4py in Python3.
-    @author: cheng
-    @reference: 
-        https://cvw.cac.cornell.edu/python/logging
-        https://groups.google.com/forum/#!topic/mpi4py/SaNzc8bdj6U
-        https://gist.github.com/JohnCEarls/8172807
-    """                                  
-    def __init__(self,
-                 filename,
-                 mode=MPI.MODE_WRONLY|MPI.MODE_CREATE|MPI.MODE_APPEND ,
-                 encoding='utf-8',  
-                 delay=False,
-                 comm=MPI.COMM_WORLD):                                                
-        self.baseFilename = os.path.abspath(filename)                           
-        self.mode = mode                                                        
-        self.encoding = encoding                                            
-        self.comm = comm                                                        
-        if delay:                                                               
-            #We don't open the stream, but we still need to call the            
-            #Handler constructor to set level, formatter, lock etc.             
-            logging.Handler.__init__(self)                                      
-            self.stream = None                                                  
-        else:                                                                   
-           logging.StreamHandler.__init__(self, self._open())                   
-                                                                                
-    def _open(self):                                                            
-        stream = MPI.File.Open( self.comm, self.baseFilename, self.mode )     
-        stream.Set_atomicity(True)                                              
-        return stream
-                                                    
-    def emit(self, record):
-        """
-        Emit a record.
-        If a formatter is specified, it is used to format the record.
-        The record is then written to the stream with a trailing newline.  If
-        exception information is present, it is formatted using
-        traceback.print_exception and appended to the stream.  If the stream
-        has an 'encoding' attribute, it is used to determine how to do the
-        output to the stream.
-        
-        Modification:
-            stream is MPI.File, so it must use `Write_shared` method rather
-            than `write` method. And `Write_shared` method only accept 
-            bytestring, so `encode` is used. `Write_shared` should be invoked
-            only once in each all of this emit function to keep atomicity.
-        """
-        try:
-            msg = self.format(record)
-            stream = self.stream
-            stream.Write_shared((msg+self.terminator).encode(self.encoding))
-            #self.flush()
-        except Exception:
-            self.handleError(record)
-                                                         
-    def close(self):                                                            
-        if self.stream:                                                         
-            self.stream.Sync()                                                  
-            self.stream.Close()                                                 
-            self.stream = None
-
-
 if __name__ == '__main__':
     data_params = {
         'tag': 'orthorhombic_grouped_V3',
@@ -885,12 +720,12 @@ if __name__ == '__main__':
         'ortho_14': reg_group_params,
         }
     assign_params = {
-        '0': {'tag': 'group_v3_0'},
-        '1': {'tag': 'group_v3_1'},
-        '2': {'tag': 'group_v3_2'},
-        '3': {'tag': 'group_v3_3'},
-        '4': {'tag': 'group_v3_4'},
-        '5': {'tag': 'group_v3_5'},
+        '0': {'tag': 'group_v3_0_notflat'},
+        '1': {'tag': 'group_v3_1_notflat'},
+        '2': {'tag': 'group_v3_2_notflat'},
+        '3': {'tag': 'group_v3_3_notflat'},
+        '4': {'tag': 'group_v3_4_notflat'},
+        '5': {'tag': 'group_v3_5_notflat'},
         }
 
     # iteration_info:
@@ -901,7 +736,7 @@ if __name__ == '__main__':
     opt_params = {
         'tag': 'group_v3',
         'load_predictions': True,
-        'n_candidates': 100,
+        'n_candidates': 50,
         'iteration_info': [
             ['1', 1, 10, 5],
             ['2', 10, 1, 0],
@@ -910,13 +745,11 @@ if __name__ == '__main__':
             ['5', 10, 1, 0],
             ['closest', 10, 0, 0],
             ],
-        'found_tolerance': 1e-20,
+        'found_tolerance': 1e-15,
         'found_tolerance_key': 'wL2',
-        'subsampling_assignment_key': '5',
         'minimum_uc': 2,
         'maximum_uc': 500,
         'tuning_param': [1, 5],
-        'n_pred_evals': 500,
         'assignment_batch_size': 64,
         }
 

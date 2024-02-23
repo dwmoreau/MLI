@@ -1,9 +1,12 @@
 """
-- Get optimization running again to see if the further grouping helps
-    - plot the initial predictions for the different groups
+- Why did optimization stop working
+    - Why is prediction with closest outperforming NN
+        - remove the "flat" NN
+    - move analysis to dials server to speed up work
 
-- Optimization:
-    * What differentiates a found / not found entry
+
+* Optimization:
+    - What differentiates a found / not found entry
         - large differences between prediction and true
     - common assignments:
         - drop during optimization but include in loss
@@ -46,7 +49,6 @@
         - ??? extrapolation architecture
 
 - Assignments
-    - perform softmax on the inverse pds
     - how to penalize multiple assignments to the same hkl
     - How to incorporate forward model
     - How would this look as a graphical NN
@@ -165,7 +167,6 @@ class Indexing:
             'y_indices',
             'n_points',
             'points_tag',
-            'include_centered',
             'use_reduced_cell',
             'n_outputs',
             'hkl_ref_length',
@@ -387,7 +388,10 @@ class Indexing:
             ], axis=2
             )
         self.data[f'{self.hkl_prefactor}hkl'] = list(hkl)
-        self.data.drop(columns=[f'{self.hkl_prefactor}h', f'{self.hkl_prefactor}k', f'{self.hkl_prefactor}l'], inplace=True)
+        self.data.drop(
+            columns=[f'{self.hkl_prefactor}h', f'{self.hkl_prefactor}k', f'{self.hkl_prefactor}l'],
+            inplace=True
+            )
 
     def save(self):
         hkl = np.stack(self.data[f'{self.hkl_prefactor}hkl'])
@@ -1050,11 +1054,13 @@ class Indexing:
                 unit_cell_scaled_key = f'{self.unit_cell_key}_pred_scaled'
                 y_indices = None
 
+            unaugmented_data = self.data[~self.data['augmented']].copy()
             softmaxes = self.assigner[key].do_predictions(
-                self.data[~self.data['augmented']],
+                unaugmented_data,
                 unit_cell_scaled_key=unit_cell_scaled_key,
                 y_indices=y_indices,
-                batch_size=1024
+                reload_model=False,
+                batch_size=1024,
                 )
             hkl_pred = self.convert_softmax_to_assignments(softmaxes)
             hkl_assign = softmaxes.argmax(axis=2)
@@ -1070,16 +1076,19 @@ class Indexing:
             np.save('hkl_labels_pred.npy', hkl_assign[indices])
             np.save('softmaxes.npy', softmaxes[indices])
             """
-            self.data['hkl_labels_pred'] = list(hkl_assign)
-            self.data['hkl_pred'] = list(hkl_pred)
-            self.data['hkl_softmaxes'] = list(softmaxes)
+
+            unaugmented_data['hkl_labels_pred'] = list(hkl_assign)
+            unaugmented_data['hkl_pred'] = list(hkl_pred)
+            unaugmented_data['hkl_softmaxes'] = list(softmaxes)
             self.assigner[key].evaluate(
-                self.data[~self.data['augmented']], 
-                self.data_params['bravais_lattices'] + ['All'],
+                unaugmented_data,
+                self.data_params['bravais_lattices'],
                 unit_cell_scaled_key=unit_cell_scaled_key,
-                y_indices=y_indices
+                y_indices=y_indices,
+                perturb_std=self.assign_params[key]['perturb_std']
                 )
-            self.assigner[key].calibrate(self.data[~self.data['augmented']])
+
+            self.assigner[key].calibrate(unaugmented_data)
 
     def convert_softmax_to_assignments(self, softmaxes):
         n_entries = softmaxes.shape[0]
