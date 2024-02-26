@@ -10,6 +10,8 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices)
     data = data[~data['augmented']]
     figsize = (n_outputs*2 + 2, 10)
     fig, axes = plt.subplots(5, n_outputs, figsize=figsize)
+    if n_outputs == 1:
+        axes = axes[:, np.newaxis]
     y_true = np.stack(data[unit_cell_key])[:, y_indices]
     y_pred = np.stack(data[f'{unit_cell_key}_pred'])
     y_cov = np.stack(data[f'{unit_cell_key}_pred_cov'])

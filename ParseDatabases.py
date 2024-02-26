@@ -175,6 +175,11 @@ class ProcessEntry:
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
+        elif self.lattice_system in ['cubic', 'tetragonal']:
+            self.reindexed_unit_cell = self.unit_cell
+            self.permutation = 'abc'
+            self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
+            self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
         else:
             self.reindexed_unit_cell = self.unit_cell
             self.permutation = 'abc'

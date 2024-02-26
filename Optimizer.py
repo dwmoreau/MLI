@@ -170,7 +170,7 @@ class Candidates:
         #print(f'{np.abs(uc_best_cand - uc_true)}')
         #print(f'{uc_best_cand} {loss[np.argmin(difference)]}')
         #for i in range(5):
-        #    print(f'{candidate_åuc[i]} {loss[i]}')
+        #    print(f'{candidate_uc[i]} {loss[i]}')
         #print()
         return uc_best_opt, report_counts
 
@@ -401,7 +401,7 @@ class Optimizer:
             for iter_index in range(n_opt_iterations):
                 candidates = self.optimize_iteration(candidates, assigner_key, n_subsample, n_drop)
                 #candidates.diagnostics()
-                #print(f'{candidates.n}, {candidates.candidates[self.opt_params["found_tolerance_key"]].mean()} {assigner_key}')
+                print(f'{candidates.n}, {candidates.candidates[self.opt_params["found_tolerance_key"]].mean()}, {candidates.candidates[self.opt_params["found_tolerance_key"]].min()}, {assigner_key}')
                 #print(len(candidates.explainers))
 
         return candidates
@@ -738,14 +738,14 @@ if __name__ == '__main__':
         'load_predictions': True,
         'n_candidates': 50,
         'iteration_info': [
-            ['1', 1, 10, 5],
-            ['2', 10, 1, 0],
-            ['3', 10, 1, 0],
-            ['4', 10, 1, 0],
-            ['5', 10, 1, 0],
-            ['closest', 10, 0, 0],
+            ['1', 1, 100, 10],
+            ['2', 1, 100, 10],
+            ['3', 1, 100, 5],
+            ['4', 1, 100, 5],
+            ['5', 5, 100, 5],
+            ['closest', 1, 1, 0],
             ],
-        'found_tolerance': 1e-15,
+        'found_tolerance': 1e-20,
         'found_tolerance_key': 'wL2',
         'minimum_uc': 2,
         'maximum_uc': 500,

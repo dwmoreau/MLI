@@ -1,19 +1,18 @@
 """
 - Why did optimization stop working
-    - Why is prediction with closest outperforming NN
-        - remove the "flat" NN
-    - move analysis to dials server to speed up work
-
+    - Get cubic working again
+    - Get tetragonal working again
 
 * Optimization:
+    * WTF
     - What differentiates a found / not found entry
         - large differences between prediction and true
     - common assignments:
         - drop during optimization but include in loss
         - use all hkl assignments with largest N likelihoods
     - Full softmax array optimization
-    - assignment with group specific assigners
     - SVD
+    - assignment with group specific assigners
 
 - Data
     - Get data from other databases:
@@ -31,13 +30,11 @@
 
 - Augmentation
     - make peak drop rate a function of distance and q2
-    - Bug in the miller index assignments / labeling. Very poor assigment model accuracy.
 
 - Regression:
     - Improve hyperparameters
         - variance estimate almost always overfits
         - mean estimate tends to underfit
-    - random forest predictions
 
     - prediction of PCA components
         - evaluation of fitting in the PCA / Scaled space
@@ -276,7 +273,7 @@ class Indexing:
         self.data['augmented'] = np.zeros(self.data.shape[0], dtype=bool)
 
         # Add label to data and down sample
-        self.data['group'] = self.data['reindexed_spacegroup_symbol_hm'].map(lambda x: self.group_mappings[x])
+        self.data['group'] = self.data[f'{self.hkl_prefactor}spacegroup_symbol_hm'].map(lambda x: self.group_mappings[x])
         data_grouped = self.data.groupby('group')
         data_group = [None for i in range(len(data_grouped.groups.keys()))]
         for index, group in enumerate(data_grouped.groups.keys()):
@@ -832,28 +829,29 @@ class Indexing:
         plt.close()
 
         # PCA components
-        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-        unit_cell_cov = np.cov(unit_cell[:, self.data_params['y_indices']].T)
-        unit_cell_scaled_cov = np.cov(unit_cell_scaled[:, self.data_params['y_indices']].T)
-        cov_display = ConfusionMatrixDisplay(
-            confusion_matrix=unit_cell_cov,
-            display_labels=self.uc_labels,
-            )
-        cov_scaled_display = ConfusionMatrixDisplay(
-            confusion_matrix=unit_cell_scaled_cov,
-            display_labels=self.uc_labels,
-            )
-        cov_display.plot(ax=axes[0], colorbar=False, values_format='0.2f')
-        cov_scaled_display.plot(ax=axes[1], colorbar=False, values_format='0.2f')
-        axes[0].set_title('Unit cell covariance')
-        axes[1].set_title('Scaled unit cell covariance')
-        axes[0].set_xlabel('')
-        axes[0].set_ylabel('')
-        axes[1].set_xlabel('')
-        axes[1].set_ylabel('')
-        fig.tight_layout()
-        fig.savefig(f'{self.save_to["data"]}/covariance_inputs.png')
-        plt.close()
+        if self.data_params['lattice_system'] != 'cubic':
+            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+            unit_cell_cov = np.cov(unit_cell[:, self.data_params['y_indices']].T)
+            unit_cell_scaled_cov = np.cov(unit_cell_scaled[:, self.data_params['y_indices']].T)
+            cov_display = ConfusionMatrixDisplay(
+                confusion_matrix=unit_cell_cov,
+                display_labels=self.uc_labels,
+                )
+            cov_scaled_display = ConfusionMatrixDisplay(
+                confusion_matrix=unit_cell_scaled_cov,
+                display_labels=self.uc_labels,
+                )
+            cov_display.plot(ax=axes[0], colorbar=False, values_format='0.2f')
+            cov_scaled_display.plot(ax=axes[1], colorbar=False, values_format='0.2f')
+            axes[0].set_title('Unit cell covariance')
+            axes[1].set_title('Scaled unit cell covariance')
+            axes[0].set_xlabel('')
+            axes[0].set_ylabel('')
+            axes[1].set_xlabel('')
+            axes[1].set_ylabel('')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to["data"]}/covariance_inputs.png')
+            plt.close()
 
         # what is the order of the unit cell lengths
         if self.data_params['lattice_system'] == 'orthorhombic':

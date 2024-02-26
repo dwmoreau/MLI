@@ -155,9 +155,14 @@ class Augmentor:
                 entry = sub_group_data.iloc[entry_index]
                 for augment_index in range(n_augment[sub_group][entry_index]):
                     augmented_entry = None
+                    attempts = 0
                     while augmented_entry is None:
                         augmented_entry = self.augment_entry(entry)
-                    augmented_entries.append(augmented_entry)
+                        attempts += 1
+                        if attempts == 10:
+                            break
+                    if augmented_entry is not None:
+                        augmented_entries.append(augmented_entry)
         return pd.DataFrame(augmented_entries)
 
     def augment_entry(self, entry):
@@ -207,11 +212,14 @@ class Augmentor:
     def perturb_unit_cell_std(self, unit_cell_scaled):
         # perturb unit cell
         status = True
+        i = 0
         while status:
             perturbed_unit_cell_scaled = self.rng.normal(
                 loc=unit_cell_scaled,
                 scale=self.aug_params['augment_shift'] * self.stddev
                 )[0]
+            #print(f'{unit_cell_scaled} {perturbed_unit_cell_scaled} {self.min_unit_cell_scaled} {i}')
+            i += 1
             if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
                 status = False
         if self.permute_unit_cell:
