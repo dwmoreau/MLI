@@ -3,7 +3,7 @@ import numpy as np
 import scipy.stats
 
 
-def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices):
+def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, trees):
     alpha = 0.1
     markersize = 0.5
 
@@ -13,8 +13,12 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices)
     if n_outputs == 1:
         axes = axes[:, np.newaxis]
     y_true = np.stack(data[unit_cell_key])[:, y_indices]
-    y_pred = np.stack(data[f'{unit_cell_key}_pred'])
-    y_cov = np.stack(data[f'{unit_cell_key}_pred_cov'])
+    if trees:
+        y_pred = np.stack(data[f'{unit_cell_key}_pred_trees'])
+        y_cov = np.stack(data[f'{unit_cell_key}_pred_cov_trees'])
+    else:
+        y_pred = np.stack(data[f'{unit_cell_key}_pred'])
+        y_cov = np.stack(data[f'{unit_cell_key}_pred_cov'])
     y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
     y_error = np.abs(y_pred - y_true)
     titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
@@ -108,7 +112,7 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices)
     fig.savefig(save_to_name)
     plt.close()
 
-def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices):
+def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, trees):
     # calculate residuals / uncertainty
     hist_bins = np.linspace(-4, 4, 101)
     hist_centers = (hist_bins[1:] + hist_bins[:-1]) / 2
@@ -130,8 +134,12 @@ def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices
     ENCE = np.zeros((n_outputs, 2, n_calib_bins))
     for train_index in range(2):
         y_true = np.stack(data[train_index][unit_cell_key])[:, y_indices]
-        y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred'])
-        y_cov = np.stack(data[train_index][f'{unit_cell_key}_pred_cov'])
+        if trees:
+            y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred_trees'])
+            y_cov = np.stack(data[train_index][f'{unit_cell_key}_pred_cov_trees'])
+        else:
+            y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred'])
+            y_cov = np.stack(data[train_index][f'{unit_cell_key}_pred_cov'])
         y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
         y_error = y_pred - y_true
 

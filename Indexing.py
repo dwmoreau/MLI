@@ -1,4 +1,12 @@
 """
+cubic:        99.5%
+orthorhombic: 83%
+add random forest predictions:
+    - redo training with orthorhombic
+    - Include in optimizer
+
+Split tetragonal into a<c and c>a
+
 * Optimization:
     * Evaluate with softmaxes = 1
     - Levenberg-Marquardt optimization
@@ -33,7 +41,6 @@ Indexing.py:
     - make peak drop rate a function of distance and q2
 
 - Regression:
-    - add random forest predictions
     - Improve hyperparameters
         - variance estimate almost always overfits
         - mean estimate tends to underfit
@@ -911,11 +918,15 @@ class Indexing:
     def inferences_regression(self):
         uc_pred_scaled = np.zeros((len(self.data), self.data_params['n_outputs']))
         uc_pred_scaled_cov = np.zeros((len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']))
+        uc_pred_scaled_trees = np.zeros((len(self.data), self.data_params['n_outputs']))
+        uc_pred_scaled_cov_trees = np.zeros((len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']))
 
         for group_index, group in enumerate(self.data_params['groups']):
             group_indices = self.data['group'] == group
             uc_pred_scaled[group_indices, :], uc_pred_scaled_cov[group_indices, :, :] = \
                 self.unit_cell_generator[group].do_predictions(data=self.data[group_indices], batch_size=1024)
+            uc_pred_scaled_trees[group_indices, :], uc_pred_scaled_cov_trees[group_indices, :, :], _ = \
+                self.unit_cell_generator[group].do_predictions_trees(data=self.data[group_indices])
 
         uc_pred, uc_pred_cov = self.revert_predictions(uc_pred_scaled, uc_pred_scaled_cov)
         self.data[self.volume_key + '_pred'] = list(self.infer_unit_cell_volume(uc_pred))
@@ -923,6 +934,14 @@ class Indexing:
         self.data[self.unit_cell_key + '_pred_cov'] = list(uc_pred_cov)
         self.data[self.unit_cell_key + '_pred_scaled'] = list(uc_pred_scaled)
         self.data[self.unit_cell_key + '_pred_scaled_cov'] = list(uc_pred_scaled_cov)
+
+        uc_pred_trees, uc_pred_cov_trees = self.revert_predictions(uc_pred_scaled_trees, uc_pred_scaled_cov_trees)
+        self.data[self.volume_key + '_pred_trees'] = list(self.infer_unit_cell_volume(uc_pred_trees))
+        self.data[self.unit_cell_key + '_pred_trees'] = list(uc_pred_trees)
+        self.data[self.unit_cell_key + '_pred_cov_trees'] = list(uc_pred_cov_trees)
+        self.data[self.unit_cell_key + '_pred_scaled_trees'] = list(uc_pred_scaled_trees)
+        self.data[self.unit_cell_key + '_pred_scaled_cov_trees'] = list(uc_pred_scaled_cov_trees)
+
 
     def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_cov=None):
         if not uc_pred_scaled is None:
@@ -981,14 +1000,32 @@ class Indexing:
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg.png',
-                y_indices=self.data_params['y_indices']
+                y_indices=self.data_params['y_indices'],
+                trees=False
+                )
+            evaluate_regression(
+                data=self.data[self.data['bravais_lattice'] == bravais_lattice],
+                n_outputs=self.data_params['n_outputs'],
+                unit_cell_key=self.unit_cell_key,
+                save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_tree.png',
+                y_indices=self.data_params['y_indices'],
+                trees=True
                 )
             calibrate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration.png',
-                y_indices=self.data_params['y_indices']
+                y_indices=self.data_params['y_indices'],
+                trees=False
+                )
+            calibrate_regression(
+                data=self.data[self.data['bravais_lattice'] == bravais_lattice],
+                n_outputs=self.data_params['n_outputs'],
+                unit_cell_key=self.unit_cell_key,
+                save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration_tree.png',
+                y_indices=self.data_params['y_indices'],
+                trees=True
                 )
         for group in self.data_params['groups']:
             evaluate_regression(
@@ -996,28 +1033,64 @@ class Indexing:
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
                 save_to_name=f'{self.save_to["regression"]}/{group}_reg.png',
-                y_indices=self.data_params['y_indices']
+                y_indices=self.data_params['y_indices'],
+                trees=False
+                )
+            evaluate_regression(
+                data=self.data[self.data['group'] == group],
+                n_outputs=self.data_params['n_outputs'],
+                unit_cell_key=self.unit_cell_key,
+                save_to_name=f'{self.save_to["regression"]}/{group}_reg_tree.png',
+                y_indices=self.data_params['y_indices'],
+                trees=True
                 )
             calibrate_regression(
                 data=self.data[self.data['group'] == group],
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
                 save_to_name=f'{self.save_to["regression"]}/{group}_reg_calibration.png',
-                y_indices=self.data_params['y_indices']
+                y_indices=self.data_params['y_indices'],
+                trees=False
+                )
+            calibrate_regression(
+                data=self.data[self.data['group'] == group],
+                n_outputs=self.data_params['n_outputs'],
+                unit_cell_key=self.unit_cell_key,
+                save_to_name=f'{self.save_to["regression"]}/{group}_reg_calibration_tree.png',
+                y_indices=self.data_params['y_indices'],
+                trees=True
                 )
         evaluate_regression(
             data=self.data,
             n_outputs=self.data_params['n_outputs'],
             unit_cell_key=self.unit_cell_key,
             save_to_name=f'{self.save_to["regression"]}/All_reg.png',
-            y_indices=self.data_params['y_indices']
+            y_indices=self.data_params['y_indices'],
+            trees=False
             )
         calibrate_regression(
             data=self.data,
             n_outputs=self.data_params['n_outputs'],
             unit_cell_key=self.unit_cell_key,
             save_to_name=f'{self.save_to["regression"]}/All_reg_calibration.png',
-            y_indices=self.data_params['y_indices']
+            y_indices=self.data_params['y_indices'],
+            trees=False
+            )
+        evaluate_regression(
+            data=self.data,
+            n_outputs=self.data_params['n_outputs'],
+            unit_cell_key=self.unit_cell_key,
+            save_to_name=f'{self.save_to["regression"]}/All_reg_trees.png',
+            y_indices=self.data_params['y_indices'],
+            trees=True
+            )
+        calibrate_regression(
+            data=self.data,
+            n_outputs=self.data_params['n_outputs'],
+            unit_cell_key=self.unit_cell_key,
+            save_to_name=f'{self.save_to["regression"]}/All_reg_calibration_trees.png',
+            y_indices=self.data_params['y_indices'],
+            trees=True
             )
 
     def setup_assignment(self):

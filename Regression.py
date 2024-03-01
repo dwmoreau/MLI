@@ -5,10 +5,8 @@ import joblib
 from keras_self_attention import SeqSelfAttention
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.decomposition import PCA
-from sklearn.multioutput import MultiOutputRegressor
 import tensorflow as tf
 
 from Networks import mlp_model_builder
@@ -27,6 +25,8 @@ class Regression_base:
         self.seed = seed
 
     def train_regression(self, data):
+        if self.model_params['fit_trees']:
+            self.fit_trees(data)
         self.build_model()
         if self.model_params['fit_strategy'] == 'cycles':
             self.fit_model_cycles(data)
@@ -106,22 +106,38 @@ class Regression_base:
 
     def fit_trees(self, data):
         train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
-        self.gradient_boosting_regressor = MultiOutputRegressor(GradientBoostingRegressor(
-            random_state=self.model_params['gradient_boosting']['random_state'],
-            n_estimators=self.model_params['gradient_boosting']['n_estimators'],
-            min_samples_leaf=self.model_params['gradient_boosting']['min_samples_leaf'],
-            max_depth=self.model_params['gradient_boosting']['max_depth'],
-            subsample=self.model_params['gradient_boosting']['subsample'],
-            ))
-        self.gradient_boosting_regressor.fit(train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}'])
         self.random_forest_regressor = RandomForestRegressor(
             random_state=self.model_params['random_forest']['random_state'],
             n_estimators=self.model_params['random_forest']['n_estimators'],
             min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
             max_depth=self.model_params['random_forest']['max_depth'],
-            subsample=self.model_params['random_forest']['subsample'],
+            max_samples=self.model_params['random_forest']['subsample'],
             )
         self.random_forest_regressor.fit(train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}'])
+
+    def do_predictions_trees(self, data=None, inputs=None):
+        if not data is None:
+            q2_scaled = np.stack(data['q2_scaled'])
+        else:
+            q2_scaled = inputs['q2_scaled']
+        N = q2_scaled.shape[0]
+        uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)
+        if self.n_outputs == 1:
+            uc_pred_scaled = uc_pred_scaled[:, np.newaxis]
+        uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
+        for tree in range(self.model_params['random_forest']['n_estimators']):
+            prediction = self.random_forest_regressor.estimators_[tree].predict(q2_scaled)
+            if self.n_outputs == 1:
+                uc_pred_scaled_tree[:, :, tree] = prediction[:, np.newaxis]
+            else:
+                uc_pred_scaled_tree[:, :, tree] = prediction
+        uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
+
+        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
+        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
+        for index in range(N):
+            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = uc_pred_scaled_var[index]
+        return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
 
     def fit_model_cycles(self, data):
         self.fit_history = [None for j in range(2 * self.model_params['cycles'])] 
@@ -337,26 +353,6 @@ class Regression_base:
         fig.savefig(f'{self.save_to}/{self.group}_reg_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
-    def evaluate(self, data):
-        evaluate_regression(
-            data=data,
-            group=self.group,
-            n_outputs=self.n_outputs,
-            unit_cell_key=self.unit_cell_key,
-            save_to_name=f'{self.save_to}/{self.group}_reg_{self.model_params["tag"]}.png',
-            y_indices=self.y_indices,
-            )
-
-    def calibrate(self, data):
-        calibrate_regression(
-            data=data,
-            group=self.group,
-            n_outputs=self.n_outputs,
-            unit_cell_key=self.unit_cell_key,
-            save_to_name=f'{self.save_to}/{self.group}_reg_calibration_{self.model_params["tag"]}.png',
-            y_indices=self.y_indices,
-            )
-
 
 class Regression_AlphaBeta(Regression_base):
     def __init__(self, group, data_params, model_params, save_to, unit_cell_key, seed=12345):
@@ -367,7 +363,7 @@ class Regression_AlphaBeta(Regression_base):
             'nn_type': 'mlp',
             'fit_strategy': 'cycles',
             'predict_pca': False,
-            'fit_trees': False,
+            'fit_trees': True,
             'epochs': 10,
             'cycles': 5,
             'beta_nll': 0.5,
@@ -386,20 +382,7 @@ class Regression_AlphaBeta(Regression_base):
             'head_params': {
                 'layers': [100]
                 },
-            'random_forest': {
-                'random_state': 0,
-                'n_estimators': 80,
-                'min_samples_leaf': 10,
-                'max_depth': None,
-                'subsample': 0.1,
-                },
-            'gradient_boosting': {
-                'random_state': 0,
-                'n_estimators': 80,
-                'min_samples_leaf': 10,
-                'max_depth': 3,
-                'subsample': 0.1,
-                }
+            'random_forest': {},
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
@@ -472,6 +455,16 @@ class Regression_AlphaBeta(Regression_base):
         self.model_params['beta_params']['kernel_initializer'] = None
         self.model_params['beta_params']['bias_initializer'] = \
             tf.keras.initializers.RandomNormal(mean=0.5, stddev=0.05, seed=self.seed)
+        random_forest_defaults = {
+            'random_state': 0,
+            'n_estimators': 80,
+            'min_samples_leaf': 10,
+            'max_depth': None,
+            'subsample': 0.1,
+            }
+        for key in random_forest_defaults.keys():
+            if key not in self.model_params['random_forest'].keys():
+                self.model_params['random_forest'][key] = random_forest_defaults[key]
 
         self.reg_loss = LikelihoodLoss('alpha_beta', n=self.n_outputs, beta_nll=self.model_params['beta_nll'])
         self.loss_weights = {
@@ -491,29 +484,14 @@ class Regression_AlphaBeta(Regression_base):
             writer.writeheader()
             writer.writerow(model_params)
 
-        network_keys = ['mean_params', 'alpha_params', 'beta_params']
-        if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
-            network_keys += ['head_params']
-        for network_key in network_keys:
-            params = copy.deepcopy(self.model_params[network_key])
-            params.pop('kernel_initializer')
-            params.pop('bias_initializer')
-            with open(f'{self.save_to}/{self.group}_reg_{network_key}_{self.model_params["tag"]}.csv', 'w') as output_file:
-                writer = csv.DictWriter(output_file, fieldnames=params.keys())
-                writer.writeheader()
-                writer.writerow(params)
-
         self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
+
         if self.model_params['predict_pca']:
             joblib.dump(self.pca, f'{self.save_to}/{self.group}_pca.bin')
         if self.model_params['fit_trees']:
             joblib.dump(
-                self.gradient_boosting_regressor,
-                f'{self.save_to}/{self.group}_gradient_boosting_regressor.bin'
-                )
-            joblib.dump(
                 self.random_forest_regressor,
-                f'{self.save_to}/{self.group}_random_forests_regressor.bin'
+                f'{self.save_to}/{self.group}_random_forest_regressor.bin'
                 )
 
     def load_from_tag(self):
@@ -534,6 +512,7 @@ class Regression_AlphaBeta(Regression_base):
             'learning_rate',
             'fit_strategy',
             'predict_pca',
+            'fit_trees',
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
@@ -550,11 +529,31 @@ class Regression_AlphaBeta(Regression_base):
                 params['epochs'].split('[')[1].split(']')[0].split(','),
                 dtype=int
                 )
+
         if params['predict_pca'] == 'True':
             self.model_params['predict_pca'] = True
             self.pca = joblib.load(f'{self.save_to}/{self.group}_pca.bin')
         elif params['predict_pca'] == 'False':
             self.model_params['predict_pca'] = False
+
+        self.model_params['random_forest'] = {}
+        for element in params['random_forest'].split('{')[1].split('}')[0].split(','):
+            key = element.split(':')[0].split("'")[1]
+            value = element.split(':')[1]
+            if key in ['random_state', 'n_estimators', 'min_samples_leaf']:
+                self.model_params['random_forest'][key] = int(value)
+            elif key == 'subsample':
+                self.model_params['random_forest'][key] = float(value)
+            elif key == 'max_depth':
+                if 'None' in value:
+                    self.model_params['random_forest']['max_depth'] = 'None'
+                else:
+                    self.model_params['random_forest']['max_depth'] = int(value)
+        if params['fit_trees'] == 'True':
+            self.model_params['fit_trees'] = True
+            self.random_forest_regressor = joblib.load(f'{self.save_to}/{self.group}_random_forest_regressor.bin')
+        elif params['fit_trees'] == 'False':
+            self.model_params['fit_trees'] = False
 
         params_keys = [
             'dropout_rate',
@@ -570,23 +569,23 @@ class Regression_AlphaBeta(Regression_base):
         if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
             network_keys += ['head_params']
         for network_key in network_keys:
-            with open(f'{self.save_to}/{self.group}_reg_{network_key}_{self.model_params["tag"]}.csv', 'r') as params_file:
-                reader = csv.DictReader(params_file)
-                for row in reader:
-                    params = row
             self.model_params[network_key] = dict.fromkeys(params_keys)
-            self.model_params[network_key]['dropout_rate'] = float(params['dropout_rate'])
-            self.model_params[network_key]['epsilon'] = float(params['epsilon'])
-            self.model_params[network_key]['layers'] = np.array(
-                params['layers'].split('[')[1].split(']')[0].split(','),
-                dtype=int
-                )
+            self.model_params[network_key]['n_outputs'] = self.n_outputs
+            for element in params[network_key].split('{')[1].split('}')[0].split(", '"):
+                key = element.replace("'", "").split(':')[0]
+                value = element.replace("'", "").split(':')[1]
+                if key in ['dropout_rate', 'epsilon']:
+                    self.model_params[network_key][key] = float(value)
+                if key == 'layers':
+                    self.model_params[network_key]['layers'] = np.array(
+                        value.split('[')[1].split(']')[0].split(','),
+                        dtype=int
+                        )
+                if network_key != 'head_params':
+                    if key in ['output_activation', 'output_name']:
+                        self.model_params[network_key][key] = value.replace(' ', '')
             self.model_params[network_key]['kernel_initializer'] = None
             self.model_params[network_key]['bias_initializer'] = None
-            if network_key != 'head_params':
-                self.model_params[network_key]['output_activation'] = params['output_activation']
-                self.model_params[network_key]['output_name'] = params['output_name']
-                self.model_params[network_key]['n_outputs'] = self.n_outputs
 
         self.build_model()
         self.model.load_weights(
