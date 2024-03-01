@@ -6,9 +6,10 @@ import os
 import pandas as pd
 import scipy.optimize
 import scipy.special
+import time
 
 from Indexing import Indexing
-from TargetFunctions import CandidateOptLoss
+from TargetFunctions import CandidateOptLoss_inv2
 from Utilities import get_mpi_logger
 
 
@@ -235,7 +236,7 @@ class Optimizer:
             'n_candidates': 100,
             'minimum_uc': 2,
             'maximum_uc': 500,
-            'tuning_param': [1, 10],
+            'tuning_param': 100,
             'n_pred_evals': 500,
             'found_tolerance': 1e-20,
             'assignment_batch_size': 64,
@@ -374,6 +375,7 @@ class Optimizer:
             'Found but not best': 0
             }
         for entry_index in range(self.N):
+            start = time.time()
             current_percentage = entry_index / self.N
             if current_percentage > percentage + 0.01:
                 self.logger.info(f' {100*current_percentage:3.0f}% complete')
@@ -388,6 +390,8 @@ class Optimizer:
             candidates = self.optimize_entry(candidates)
             uc_best_opt[entry_index], report_counts = candidates.get_best_candidates(report_counts)
             print(report_counts)
+            end = time.time()
+            print(end - start)
         self.indexer.data[f'{self.indexer.hkl_prefactor}unit_cell_best_opt'] = list(uc_best_opt)
 
     def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry):
@@ -448,8 +452,7 @@ class Optimizer:
                 if candidates.n <= 1:
                     return candidates
                 #candidates.diagnostics()
-                #print(f'{candidates.n}, {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
-                #print(len(candidates.explainers))
+                print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
         return candidates
 
     def assign_hkls(self, candidates, assigner_key, subsampled_candidates=None):
@@ -530,10 +533,11 @@ class Optimizer:
         if optimized_unit_cell is None:
             optimized_unit_cell = np.stack(candidates.candidates['unit_cell'])[:, np.newaxis, :]
         n_subsample = optimized_unit_cell.shape[1]
-        target_function = CandidateOptLoss(
+        target_function = CandidateOptLoss_inv2(
             q2_obs=candidates.q2_obs,
             lattice_system=self.indexer.data_params['lattice_system'],
-            tuning_param=self.opt_params['tuning_param'][0],
+            likelihood='normal',
+            tuning_param=None,
             )
         if n_subsample == 1:
             candidates.candidates['unit_cell'] = list(optimized_unit_cell[:, 0, :])
@@ -549,9 +553,9 @@ class Optimizer:
             unit_cell = np.stack(candidates.candidates['unit_cell'])
             for candidate_index in range(candidates.n):
                 target_function.update(
-                    hkl[candidate_index], softmax[candidate_index], unit_cell[candidate_index]
+                    hkl[candidate_index], softmax[candidate_index], 1/unit_cell[candidate_index]**2
                     )
-                loss[candidate_index] = target_function.get_loss(unit_cell[candidate_index])
+                loss[candidate_index] = target_function.get_loss(1/unit_cell[candidate_index]**2)
             candidates.candidates['loss'] = loss
         else:
             subsampled_candidates = [candidates.candidates.copy() for i in range(n_subsample)]
@@ -570,9 +574,9 @@ class Optimizer:
                 softmax = np.stack(subsampled_candidates[subsampled_index]['softmax'])
                 unit_cell = np.stack(subsampled_candidates[subsampled_index]['unit_cell'])
                 for candidate_index in range(candidates.n):
-                    target_function.update(hkl[candidate_index], softmax[candidate_index], unit_cell[candidate_index])
+                    target_function.update(hkl[candidate_index], softmax[candidate_index], 1/unit_cell[candidate_index]**2)
                     subsampled_loss[candidate_index, subsampled_index] = \
-                        target_function.get_loss(unit_cell[candidate_index])
+                        target_function.get_loss(1/unit_cell[candidate_index]**2)
             best_subsample = np.argmin(subsampled_loss[:, :], axis=1)
             best_loss = subsampled_loss[:, best_subsample]
             unit_cell = np.zeros((candidates.n, self.indexer.data_params['n_outputs']))
@@ -594,29 +598,38 @@ class Optimizer:
         candidates.update()
         return candidates
 
-    def optimize_unit_cell(self, q2_obs, hkl, softmax, unit_cell, optimizer):
-        target_function = CandidateOptLoss(
+    def optimize_unit_cell(self, q2_obs, hkl, softmax, unit_cell, optimizer, likelihood):
+        target_function = CandidateOptLoss_inv2(
             q2_obs=q2_obs,
             lattice_system=self.indexer.data_params['lattice_system'],
-            tuning_param=self.opt_params['tuning_param'][0],
+            likelihood=likelihood,
+            tuning_param=self.opt_params['tuning_param'],
             )
-        target_function.update(hkl, softmax, unit_cell)
+        target_function.update(hkl, softmax, 1/unit_cell**2)
         if optimizer in ['L-BFGS-B', 'BFGS']:
             results = scipy.optimize.minimize(
                 target_function.loss_likelihood,
-                x0=unit_cell,
+                x0=1/unit_cell**2,
                 method=optimizer,
                 jac=True,
                 )
-        elif optimizer in ['trust-krylov']:
+        elif optimizer in ['trust-krylov', 'trust-exact', 'trust-ncg', 'Newton-CG', 'dogleg', 'trust-constr']:
+            """
+            Brief testing showed 'trust-exact' had good performance.
+            However it has a tendency to hang:
+                https://github.com/scipy/scipy/pull/19668
+                https://github.com/scipy/scipy/issues/12513
+            'dogleg' also has good performance
+            """
             results = scipy.optimize.minimize(
                 target_function.loss_likelihood,
-                x0=unit_cell,
+                x0=1/unit_cell**2,
                 method=optimizer,
                 jac=True,
-                hess=target_function.loss_likelihood_hessian
+                hess=target_function.loss_likelihood_hessian,
+                options={'maxiter': 100},
                 )
-        optimized_unit_cell = np.abs(results.x)
+        optimized_unit_cell = np.sqrt(1 / np.abs(results.x))
         return optimized_unit_cell
 
     def random_subsampling(self, candidates, iteration_info):
@@ -629,6 +642,10 @@ class Optimizer:
         softmax = np.stack(candidates.candidates['softmax'])
         unit_cell = np.stack(candidates.candidates['unit_cell'])
         for candidate_index in range(candidates.n):
+            #np.save('q2_obs.npy', candidates.q2_obs)
+            #np.save('hkl.npy', hkl[candidate_index])
+            #np.save('softmax.npy', softmax[candidate_index])
+            #np.save('unit_cell.npy', unit_cell[candidate_index])
             for subsampled_index in range(iteration_info['n_subsample']):
                 if iteration_info['worker'] == 'random_subsampling':
                     p = None
@@ -646,6 +663,7 @@ class Optimizer:
                     softmax=softmax[candidate_index][subsampled_indices],
                     unit_cell=unit_cell[candidate_index],
                     optimizer=iteration_info['optimizer'],
+                    likelihood=iteration_info['likelihood'],
                     )
         return optimized_unit_cell
 
@@ -662,7 +680,6 @@ class Optimizer:
             softmax = np.array(candidates.candidates['softmax'])[np.newaxis]
             unit_cell = np.array(candidates.candidates['unit_cell'])[np.newaxis]
         else:
-            print(candidates.n)
             hkl = np.stack(candidates.candidates['hkl'])
             softmax = np.stack(candidates.candidates['softmax'])
             unit_cell = np.stack(candidates.candidates['unit_cell'])
@@ -675,6 +692,7 @@ class Optimizer:
                     softmax=softmax[candidate_index, subsampled_indices],
                     unit_cell=unit_cell[candidate_index],
                     optimizer=iteration_info['optimizer'],
+                    likelihood=iteration_info['likelihood'],
                     )
         return optimized_unit_cell
 

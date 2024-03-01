@@ -1,20 +1,15 @@
 """
-optimization debuging
-    - only works when initial hkl accuracy is 100%
-        - is the hkl_ref correct
-        - are the hkl's being updated?
-
-        - The hkl true is not unique for cubic, I saw (511) and (333) indices for the same sample
-
 * Optimization:
-    * WTF
+    * Evaluate with softmaxes = 1
+    - Levenberg-Marquardt optimization
+    - SVD optimization
+
     - What differentiates a found / not found entry
         - large differences between prediction and true
     - common assignments:
         - drop during optimization but include in loss
         - use all hkl assignments with largest N likelihoods
     - Full softmax array optimization
-    - SVD
     - assignment with group specific assigners
 
 Indexing.py:
@@ -38,6 +33,7 @@ Indexing.py:
     - make peak drop rate a function of distance and q2
 
 - Regression:
+    - add random forest predictions
     - Improve hyperparameters
         - variance estimate almost always overfits
         - mean estimate tends to underfit
