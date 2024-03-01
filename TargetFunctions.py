@@ -3,12 +3,6 @@ from scipy.special import gamma
 import tensorflow as tf
 
 
-def sparse_categorical_accuracy_2d(y_true, y_pred):
-    labels_pred = tf.cast(tf.math.argmax(y_pred, axis=2), dtype=tf.dtypes.float32)
-    equal = tf.math.equal(y_true, labels_pred)
-    return tf.math.count_nonzero(equal, dtype=tf.dtypes.int32) / tf.size(equal)
-
-
 class LikelihoodLoss:
     def __init__(self, likelihood, n, beta_nll=None, tuning_param=None):
         """
@@ -118,7 +112,7 @@ class LikelihoodLoss:
 
 
 class CandidateOptLoss:
-    def __init__(self, q2_obs, lattice_system, tuning_param=None):
+    def __init__(self, q2_obs, lattice_system, tuning_param):
         self.q2_obs = q2_obs
 
         self.tuning_param = tuning_param
@@ -128,17 +122,11 @@ class CandidateOptLoss:
         self.n_points = q2_obs.size
 
         if lattice_system == 'cubic':
-            self.get_q2_pred = self.get_q2_pred_cubic
             self.uc_length = 1
         elif lattice_system == 'tetragonal':
-            self.get_q2_pred = self.get_q2_pred_tetragonal
             self.uc_length = 2
         elif lattice_system == 'orthorhombic':
-            self.get_q2_pred = self.get_q2_pred_orthorhombic
-            self.loss_likelihood_hessian = self.loss_likelihood_hessian_symmetric
             self.uc_length = 3
-            self.__diag_indices = np.arange(self.uc_length)
-            self.__term1 = np.zeros((self.n_points, self.uc_length, self.uc_length))
         elif lattice_system == 'monoclinic':
             self.get_q2_pred = self.get_q2_pred_monoclinic
             self.uc_length = 4
@@ -152,18 +140,29 @@ class CandidateOptLoss:
             self.get_q2_pred = self.get_q2_pred_rhombohedral
             self.uc_length = 2
 
+        if lattice_system in ['cubic', 'tetragonal', 'orthorhombic']:
+            self.get_q2_pred = self.get_q2_pred_cubic_tetragonal_orthorhombic
+            self.loss_likelihood_hessian = self.loss_likelihood_hessian_diagonal
+            self.__diag_indices = np.arange(self.uc_length)
+            self.__term1 = np.zeros((self.n_points, self.uc_length, self.uc_length))
+
     def update(self, hkl, softmax, uc_init):
         self.hkl = hkl
         self.softmax = softmax
         if self.lattice_system == 'cubic':
-            self.hkl_term = self.hkl[:, 0]**2 + self.hkl[:, 1]**2 + self.hkl[:, 2]**2
+            self.hkl2 = (self.hkl[:, 0]**2 + self.hkl[:, 1]**2 + self.hkl[:, 2]**2)[:, np.newaxis]
+        elif self.lattice_system == 'tetragonal':
+            self.hkl2 = np.column_stack((
+                self.hkl[:, 0]**2 + self.hkl[:, 1]**2,
+                self.hkl[:, 2]**2
+                ))
+        elif self.lattice_system == 'orthorhombic':
+            self.hkl2 = self.hkl**2
         elif self.lattice_system == 'hexagonal':
             self.hk_term = self.hkl[:, 0]**2 + self.hkl[:, 0]*self.hkl[:, 1] + self.hkl[:, 1]**2
         elif self.lattice_system == 'rhombohedral':
             self.hkl2_term = self.hkl[:, 0]**2 + self.hkl[:, 1]**2 + self.hkl[:, 2]**2
             self.hkl_term = self.hkl[:, 0]*self.hkl[:, 1] + self.hkl[:, 0]*self.hkl[:, 2] + self.hkl[:, 1]*self.hkl[:, 2]
-        if self.lattice_system == 'orthorhombic':
-            self.hkl2 = self.hkl**2
 
         q2_pred_init, _ = self.get_q2_pred(uc_init)
         delta_q = np.abs(np.sqrt(q2_pred_init) - np.sqrt(self.q2_obs))
@@ -174,20 +173,7 @@ class CandidateOptLoss:
         self.prefactor = prefactor0 * self.softmax
         self.prefactor_L1 = self.softmax / self.sigma
 
-    def get_q2_pred_cubic(self, uc):
-        q2_pred = self.hkl_term / uc**2
-        dq2_pred_duc = -2 * self.hkl_term / uc**3
-        return q2_pred, dq2_pred_duc[:, np.newaxis]
-
-    def get_q2_pred_tetragonal(self, uc):
-        q2_pred = (self.hkl[:, 0]**2 + self.hkl[:, 1]**2) / uc[0]**2 + self.hkl[:, 2]**2 / uc[1]**2
-        dq2_pred_duc = np.column_stack((
-            -2 * (self.hkl[:, 0]**2 + self.hkl[:, 1]**2) / uc[0]**3,
-            -2 * self.hkl[:, 2]**2 / uc[1]**3,
-            ))
-        return q2_pred, dq2_pred_duc
-
-    def get_q2_pred_orthorhombic(self, uc, jac=True, hessian=False):
+    def get_q2_pred_cubic_tetragonal_orthorhombic(self, uc, jac=True, hessian=False):
         arg = self.hkl2 / uc[np.newaxis, :]**2
         q2_pred = np.sum(arg, axis=1)
         if jac:
@@ -371,7 +357,7 @@ class CandidateOptLoss:
         dloss_duc = -np.sum(dlikelihood_dq2_pred[:, np.newaxis] * dq2_pred_duc, axis=0)
         return loss, dloss_duc
 
-    def loss_likelihood_hessian_symmetric(self, uc):
+    def loss_likelihood_hessian_diagonal(self, uc):
         q2_pred, dq2_pred_duc, d2q2_pred_duc2 = self.get_q2_pred(uc, jac=True, hessian=True)
         residuals = (q2_pred - self.q2_obs) / self.sigma
         arg = 1 + 1/self.tuning_param * residuals**2
@@ -441,6 +427,10 @@ class CandidateOptLoss:
         wL1 = np.sum(self.softmax * sqrt_residuals)
         wL2 = np.sum(self.softmax * residuals)
         return L1, L2, wL1, wL2, loss
+
+    def get_loss(self, uc):
+        loss, q2_pred = self.loss_likelihood_no_jac(uc)
+        return loss
 
 
 class IndexingTargetFunction:

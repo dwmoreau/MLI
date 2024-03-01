@@ -1,7 +1,10 @@
 """
-- Why did optimization stop working
-    - Get cubic working again
-    - Get tetragonal working again
+optimization debuging
+    - only works when initial hkl accuracy is 100%
+        - is the hkl_ref correct
+        - are the hkl's being updated?
+
+        - The hkl true is not unique for cubic, I saw (511) and (333) indices for the same sample
 
 * Optimization:
     * WTF
@@ -13,6 +16,9 @@
     - Full softmax array optimization
     - SVD
     - assignment with group specific assigners
+
+Indexing.py:
+    - need to add hkl_prefix to hkl_labels and hkl predictions
 
 - Data
     - Get data from other databases:
@@ -79,11 +85,11 @@ class Indexing:
         self.reg_params = reg_params
 
         self.save_to = {
-            'results': f'models/{self.data_params["tag"]}',
-            'assigner': f'models/{self.data_params["tag"]}/assigner',
-            'augmentor': f'models/{self.data_params["tag"]}/augmentor',
-            'data': f'models/{self.data_params["tag"]}/data',
-            'regression': f'models/{self.data_params["tag"]}/regression',
+            'results': os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag']),
+            'assigner': os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'], 'assigner'),
+            'augmentor': os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'], 'augmentor'),
+            'data': os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'], 'data'),
+            'regression': os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'], 'regression')
             }
         if not os.path.exists(self.save_to['results']):
             os.mkdir(self.save_to['results'])
@@ -389,6 +395,10 @@ class Indexing:
             columns=[f'{self.hkl_prefactor}h', f'{self.hkl_prefactor}k', f'{self.hkl_prefactor}l'],
             inplace=True
             )
+        if not load_augmented:
+            self.data = self.data[~self.data['augmented']]
+        if not load_train:
+            self.data = self.data[~self.data['train']]
 
     def save(self):
         hkl = np.stack(self.data[f'{self.hkl_prefactor}hkl'])
@@ -1026,10 +1036,7 @@ class Indexing:
                 self.save_to['assigner']
                 )
             if self.assign_params[key]['load_from_tag']:
-                self.assigner[key].load_from_tag(
-                    self.assign_params[key]['tag'],
-                    self.assign_params[key]['mode']
-                    )
+                self.assigner[key].load_from_tag(self.assign_params[key]['tag'], self.assign_params[key]['mode'])
             else:
                 if self.assign_params[key]['train_on'] == 'perturbed':
                     unit_cell_scaled_key = f'{self.unit_cell_key}_scaled'
@@ -1092,6 +1099,6 @@ class Indexing:
         n_entries = softmaxes.shape[0]
         hkl_assign = softmaxes.argmax(axis=2)
         hkl_pred = np.zeros((n_entries, self.data_params['n_points'], 3))
-        for entry_index in range(n_entries ):
+        for entry_index in range(n_entries):
             hkl_pred[entry_index] = self.hkl_ref[hkl_assign[entry_index]]
         return hkl_pred
