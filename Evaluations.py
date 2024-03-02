@@ -13,14 +13,22 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices,
     if n_outputs == 1:
         axes = axes[:, np.newaxis]
     y_true = np.stack(data[unit_cell_key])[:, y_indices]
+    y_true_train = np.stack(data[data['train']][unit_cell_key])[:, y_indices]
+    y_true_val = np.stack(data[~data['train']][unit_cell_key])[:, y_indices]
     if trees:
         y_pred = np.stack(data[f'{unit_cell_key}_pred_trees'])
+        y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred_trees'])
+        y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred_trees'])
         y_cov = np.stack(data[f'{unit_cell_key}_pred_cov_trees'])
     else:
         y_pred = np.stack(data[f'{unit_cell_key}_pred'])
+        y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred'])
+        y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred'])
         y_cov = np.stack(data[f'{unit_cell_key}_pred_cov'])
     y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
     y_error = np.abs(y_pred - y_true)
+    y_error_train = np.abs(y_pred_train - y_true_train)
+    y_error_val = np.abs(y_pred_val - y_true_val)
     titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
 
     for uc_index in range(n_outputs):
@@ -83,17 +91,22 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices,
             axes[3, uc_index].set_ylim([lower_error, upper_error])
             axes[4, uc_index].set_xscale('log')
 
-        error = np.sort(y_error[:, uc_index])
-        p25 = error[int(0.25 * error.size)]
-        p50 = error[int(0.50 * error.size)]
-        p75 = error[int(0.75 * error.size)]
-        rmse = np.sqrt(1/len(data) * np.linalg.norm(error)**2)
+        error_train = np.sort(y_error_train[:, uc_index])
+        p25_train = error_train[int(0.25 * error_train.size)]
+        p50_train = error_train[int(0.50 * error_train.size)]
+        p75_train = error_train[int(0.75 * error_train.size)]
+        rmse_train = np.sqrt(1/error_train.size * np.linalg.norm(error_train)**2)
+        error_val = np.sort(y_error_val[:, uc_index])
+        p25_val = error_val[int(0.25 * error_val.size)]
+        p50_val = error_val[int(0.50 * error_val.size)]
+        p75_val = error_val[int(0.75 * error_val.size)]
+        rmse_val = np.sqrt(1/error_val.size * np.linalg.norm(error_val)**2)
         error_titles = [
             titles[uc_index],
-            f'RMSE: {rmse:0.4f}',
-            f'25%: {p25:0.4f}',
-            f'50%: {p50:0.4f}',
-            f'75%: {p75:0.4f}',
+            f'RMSE: {rmse_train:0.2f} / {rmse_val:0.2f}',
+            f'25%: {p25_train:0.2f} / {p25_val:0.2f}',
+            f'50%: {p50_train:0.2f} / {p50_val:0.2f}',
+            f'75%: {p75_train:0.2f} / {p75_val:0.2f}',
             ]
         axes[0, uc_index].set_title('\n'.join(error_titles), fontsize=12)
         axes[0, uc_index].set_xlabel('True')

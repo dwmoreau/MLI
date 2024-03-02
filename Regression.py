@@ -115,10 +115,10 @@ class Regression_base:
             )
         self.random_forest_regressor.fit(train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}'])
 
-    def do_predictions_trees(self, data=None, inputs=None):
+    def do_predictions_trees(self, data=None, inputs=None, q2_scaled=None):
         if not data is None:
             q2_scaled = np.stack(data['q2_scaled'])
-        else:
+        elif not inputs is None:
             q2_scaled = inputs['q2_scaled']
         N = q2_scaled.shape[0]
         uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)

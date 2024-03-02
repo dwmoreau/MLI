@@ -1,14 +1,13 @@
 """
-cubic:        99.5%
-orthorhombic: 83%
-add random forest predictions:
-    - redo training with orthorhombic
-    - Include in optimizer
+lattice system | accuracy
+-------------------------
+cubic          | 99.5%
+orthorhombic   | 85%
 
 Split tetragonal into a<c and c>a
 
 * Optimization:
-    * Evaluate with softmaxes = 1
+    - Full softmax array optimization
     - Levenberg-Marquardt optimization
     - SVD optimization
 
@@ -17,11 +16,16 @@ Split tetragonal into a<c and c>a
     - common assignments:
         - drop during optimization but include in loss
         - use all hkl assignments with largest N likelihoods
-    - Full softmax array optimization
-    - assignment with group specific assigners
 
 Indexing.py:
     - need to add hkl_prefix to hkl_labels and hkl predictions
+
+- Augmentation
+    - make peak drop rate a function of distance and q2
+
+- Assignments
+    - how to penalize multiple assignments to the same hkl
+    - How to incorporate forward model
 
 - Data
     - Get data from other databases:
@@ -37,9 +41,6 @@ Indexing.py:
     * memory leak during cyclic training
     - get working on dials
 
-- Augmentation
-    - make peak drop rate a function of distance and q2
-
 - Regression:
     - Improve hyperparameters
         - variance estimate almost always overfits
@@ -53,11 +54,6 @@ Indexing.py:
         - cluster input d-spacings
           - map d-spacings onto a single scalar correlated with volume
         - ??? extrapolation architecture
-
-- Assignments
-    - how to penalize multiple assignments to the same hkl
-    - How to incorporate forward model
-    - How would this look as a graphical NN
 """
 import csv
 import joblib

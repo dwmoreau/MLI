@@ -149,6 +149,31 @@ class Candidates:
             self.candidates = self.candidates.loc[~found]
             self.n = len(self.candidates)
 
+    def catch_off_by_two(self, uc_best_opt):
+        mult_factors = np.array([1/2, 1, 2])
+        if self.lattice_system == 'cubic':
+            if np.isclose(self.unit_cell_true, 1/2 * uc_best_opt, atol=1e-3):
+                return True
+            elif np.isclose(self.unit_cell_true, 2 * uc_best_opt, atol=1e-3):
+                return True
+            else:
+                return False
+        elif self.lattice_system == 'tetragonal':
+            for mf0 in mult_factors:
+                for mf1 in mult_factors:
+                    mf = np.array([mf0, mf1])
+                    if np.all(np.isclose(self.unit_cell_true, mf * uc_best_opt, atol=1e-3)):
+                        return True
+            return False
+        elif self.lattice_system == 'orthorhombic':
+            for mf0 in mult_factors:
+                for mf1 in mult_factors:
+                    for mf2 in mult_factors:
+                        mf = np.array([mf0, mf1, mf2])
+                        if np.all(np.isclose(self.unit_cell_true, mf * uc_best_opt, atol=1e-3)):
+                            return True
+            return False
+
     def get_best_candidates(self, report_counts):
         if len(self.explainers) == 0:
             uc_best_opt = self.candidates.iloc[0]['unit_cell']
@@ -162,6 +187,8 @@ class Candidates:
             uc_best_opt = self.explainers.iloc[0]['unit_cell']
             if np.all(np.isclose(self.unit_cell_true, uc_best_opt, atol=1e-3)):
                 report_counts['Found and best'] += 1
+            elif self.catch_off_by_two(uc_best_opt):
+                report_counts['Found but off by two'] += 1
             else:
                 report_counts['Not found'] += 1
         else:
@@ -169,6 +196,7 @@ class Candidates:
             uc_best_opt = np.array(self.explainers.iloc[0]['unit_cell'])
             found_best = False
             found_not_best = False
+            found_off_by_two = False
             for explainer_index in range(len(self.explainers)):
                 uc = np.array(self.explainers.iloc[explainer_index]['unit_cell'])
                 if np.all(np.isclose(self.unit_cell_true, uc, atol=1e-3)):
@@ -176,40 +204,16 @@ class Candidates:
                         found_best = True
                     else:
                         found_not_best = True
+                elif self.catch_off_by_two(uc):
+                    found_off_by_two = True
             if found_best:
                 report_counts['Found and best'] += 1
             elif found_not_best:
                 report_counts['Found but not best'] += 1
+            elif found_off_by_two:
+                report_counts['Found but off by two'] += 1
             else:
                 report_counts['Not found'] += 1
-            """
-           explainer_uc, unique_indices = np.unique(
-                np.round(np.stack(self.explainers['unit_cell']), decimals=4),
-                return_index=True, axis=0
-                )
-            uc_best_opt = explainer_uc[0]
-            if explainer_uc.shape[0] == 1:
-                print(uc_best_opt)
-                if np.all(np.isclose(self.unit_cell_true, np.sort(uc_best_opt), atol=1e-3)):
-                    report_counts['Found and best'] += 1
-                else:
-                    report_counts['Not found'] += 1
-            else:
-                found_best = False
-                found_not_best = False
-                for explainer_index, uc in enumerate(explainer_uc):
-                    if np.all(np.isclose(self.unit_cell_true, np.sort(uc), atol=1e-3)):
-                        if explainer_index == 0:
-                            found_best = True
-                        else:
-                            found_not_best = True
-                if found_best:
-                    report_counts['Found and best'] += 1
-                elif found_not_best:
-                    report_counts['Found but not best'] += 1
-                else:
-                    report_counts['Not found'] += 1
-            """
 
         #difference = np.linalg.norm(uc_true[np.newaxis] - candidate_uc, axis=1)
         #uc_best_cand = candidate_uc[np.argmin(difference)]
@@ -233,7 +237,8 @@ class Optimizer:
         self.rng = np.random.default_rng()
 
         opt_params_defaults = {
-            'n_candidates': 100,
+            'n_candidates_nn': 30,
+            'n_candidates_rf': 30,
             'minimum_uc': 2,
             'maximum_uc': 500,
             'tuning_param': 100,
@@ -372,7 +377,8 @@ class Optimizer:
         report_counts = {
             'Not found': 0,
             'Found and best': 0,
-            'Found but not best': 0
+            'Found but not best': 0,
+            'Found but off by two': 0,
             }
         for entry_index in range(self.N):
             start = time.time()
@@ -395,16 +401,15 @@ class Optimizer:
         self.indexer.data[f'{self.indexer.hkl_prefactor}unit_cell_best_opt'] = list(uc_best_opt)
 
     def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry):
-        candidate_uc_scaled = np.zeros((
-            self.n_groups * self.opt_params['n_candidates'], self.indexer.data_params['n_outputs']
-            ))
-        for group_index in range(len(self.indexer.data_params['groups'])):
-            start = group_index * self.opt_params['n_candidates']
-            stop = (group_index + 1) * self.opt_params['n_candidates']
+        n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
+        candidate_uc_scaled = np.zeros((self.n_groups * n_candidates, self.indexer.data_params['n_outputs']))
+        for group_index, group in enumerate(self.indexer.data_params['groups']):
+            start = group_index * n_candidates
+            stop = (group_index + 1) * n_candidates
             candidates_scaled = self.rng.multivariate_normal(
                 mean=uc_scaled_mean[group_index, :],
                 cov=uc_scaled_cov[group_index, :, :],
-                size=self.opt_params['n_candidates'],
+                size=self.opt_params['n_candidates_nn'],
                 )
             ###!!! FIX FOR ANGLES
             bad_indices = np.logical_or(
@@ -425,7 +430,16 @@ class Optimizer:
                     )
                 n_bad_indices = np.sum(bad_indices)
 
-            candidate_uc_scaled[start: stop, :] = candidates_scaled
+            q2_scaled = np.array(entry['q2_scaled'])[np.newaxis]
+            _, _, candidates_scaled_tree = self.indexer.unit_cell_generator[group].do_predictions_trees(q2_scaled=q2_scaled)
+            tree_indices = self.rng.choice(
+                candidates_scaled_tree.shape[2],
+                size=self.opt_params['n_candidates_rf'],
+                replace=False
+                )
+            candidate_uc_scaled[start: start + self.opt_params['n_candidates_nn'], :] = candidates_scaled
+            candidate_uc_scaled[start + self.opt_params['n_candidates_nn']: stop, :] = candidates_scaled_tree[0, :, tree_indices]
+
         candidates = Candidates(
             entry=entry,
             unit_cell=self.indexer.revert_predictions(uc_pred_scaled=candidate_uc_scaled),
@@ -549,11 +563,12 @@ class Optimizer:
                 candidates = self.assign_hkls(candidates, assigner_key)
             loss = np.zeros(candidates.n)
             hkl = np.stack(candidates.candidates['hkl'])
-            softmax = np.stack(candidates.candidates['softmax'])
             unit_cell = np.stack(candidates.candidates['unit_cell'])
             for candidate_index in range(candidates.n):
                 target_function.update(
-                    hkl[candidate_index], softmax[candidate_index], 1/unit_cell[candidate_index]**2
+                    hkl[candidate_index],
+                    np.ones(self.indexer.data_params['n_points']),
+                    1/unit_cell[candidate_index]**2
                     )
                 loss[candidate_index] = target_function.get_loss(1/unit_cell[candidate_index]**2)
             candidates.candidates['loss'] = loss
@@ -571,10 +586,13 @@ class Optimizer:
                     subsampled_candidates[subsampled_index] = \
                         self.assign_hkls(candidates, assigner_key, subsampled_candidates[subsampled_index])
                 hkl = np.stack(subsampled_candidates[subsampled_index]['hkl'])
-                softmax = np.stack(subsampled_candidates[subsampled_index]['softmax'])
                 unit_cell = np.stack(subsampled_candidates[subsampled_index]['unit_cell'])
                 for candidate_index in range(candidates.n):
-                    target_function.update(hkl[candidate_index], softmax[candidate_index], 1/unit_cell[candidate_index]**2)
+                    target_function.update(
+                        hkl[candidate_index],
+                        np.ones(self.indexer.data_params['n_points']),
+                        1/unit_cell[candidate_index]**2
+                        )
                     subsampled_loss[candidate_index, subsampled_index] = \
                         target_function.get_loss(1/unit_cell[candidate_index]**2)
             best_subsample = np.argmin(subsampled_loss[:, :], axis=1)
