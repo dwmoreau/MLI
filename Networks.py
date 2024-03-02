@@ -3,7 +3,7 @@ import tensorflow_probability as tfp
 
 
 # Define the prior weight distribution as Normal of mean=0 and stddev=1.
-# Note that, in this example, the we prior distribution is not trainable,
+# Note that, in this example, the prior distribution is not trainable,
 # as we fix its parameters.
 def prior(kernel_size, bias_size, dtype=None):
     n = kernel_size + bias_size
@@ -136,7 +136,7 @@ def hkl_model_builder_conv2D(x_in, tag, model_params):
             name=f'dropout_{tag}_{index}'
             )(x)
     
-    hkl_outs = [None for i in range(model_params['n_points'])]
+    hkl_outs = [None for _ in range(model_params['n_points'])]
     for index in range(model_params['n_points']):
         hkl_outs[index] = tf.keras.layers.Dense(
             units=model_params['hkl_ref_length'],
@@ -173,7 +173,7 @@ def hkl_model_builder_mlp(x, tag, model_params):
             name=f'dropout_{tag}_{index}'
             )(x)
 
-    hkl_outs = [None for i in range(model_params['n_points'])]
+    hkl_outs = [None for _ in range(model_params['n_points'])]
     for index in range(model_params['n_points']):
         hkl_outs[index] = tf.keras.layers.Dense(
             units=model_params['hkl_ref_length'],

@@ -170,7 +170,7 @@ class Candidates:
                 for mf1 in mult_factors:
                     for mf2 in mult_factors:
                         mf = np.array([mf0, mf1, mf2])
-                        if np.all(np.isclose(self.unit_cell_true, mf * uc_best_opt, atol=1e-3)):
+                        if np.all(np.isclose(self.unit_cell_true, np.sort(mf * uc_best_opt), atol=1e-3)):
                             return True
             return False
 
@@ -320,7 +320,7 @@ class Optimizer:
                 self.n_groups = len(self.indexer.data_params['groups'])
                 self.N = self.indexer.data.shape[0]
 
-        if self.opt_params['load_predictions'] == False:
+        if not self.opt_params['load_predictions']:
             self.n_groups = len(self.indexer.data_params['groups'])
             self.N = self.indexer.data.shape[0]
             self.uc_scaled_mean = np.zeros((self.N, self.n_groups, self.indexer.data_params['n_outputs']))
@@ -339,9 +339,9 @@ class Optimizer:
                 self.uc_scaled_cov[:, group_index, :, :] = cov
 
             if self.rank == 0:
-                uc_scaled_mean_all = [None for i in range(self.n_ranks)]
-                uc_scaled_cov_all = [None for i in range(self.n_ranks)]
-                rank_indices_all = [None for i in range(self.n_ranks)]
+                uc_scaled_mean_all = [None for _ in range(self.n_ranks)]
+                uc_scaled_cov_all = [None for _ in range(self.n_ranks)]
+                rank_indices_all = [None for _ in range(self.n_ranks)]
                 uc_scaled_mean_all[0] = self.uc_scaled_mean
                 uc_scaled_cov_all[0] = self.uc_scaled_cov
                 rank_indices_all[0] = self.rank_indices
@@ -367,7 +367,9 @@ class Optimizer:
                 self.comm.send(self.rank_indices, dest=0, tag=4)
 
     def run(self):
-        uc_true = np.stack(self.indexer.data[f'{self.indexer.hkl_prefactor}unit_cell'])[:, self.indexer.data_params['y_indices']]
+        uc_true = np.stack(
+            self.indexer.data[f'{self.indexer.hkl_prefactor}unit_cell']
+            )[:, self.indexer.data_params['y_indices']]
         uc_mean = self.indexer.revert_predictions(uc_pred_scaled=self.uc_scaled_mean)
         closest_prediction = np.linalg.norm(uc_true[:, np.newaxis, :] - uc_mean, axis=2).argmin(axis=1)
         uc_pred = uc_mean[np.arange(len(closest_prediction)), closest_prediction]
@@ -431,14 +433,16 @@ class Optimizer:
                 n_bad_indices = np.sum(bad_indices)
 
             q2_scaled = np.array(entry['q2_scaled'])[np.newaxis]
-            _, _, candidates_scaled_tree = self.indexer.unit_cell_generator[group].do_predictions_trees(q2_scaled=q2_scaled)
+            _, _, candidates_scaled_tree = \
+                self.indexer.unit_cell_generator[group].do_predictions_trees(q2_scaled=q2_scaled)
             tree_indices = self.rng.choice(
                 candidates_scaled_tree.shape[2],
                 size=self.opt_params['n_candidates_rf'],
                 replace=False
                 )
             candidate_uc_scaled[start: start + self.opt_params['n_candidates_nn'], :] = candidates_scaled
-            candidate_uc_scaled[start + self.opt_params['n_candidates_nn']: stop, :] = candidates_scaled_tree[0, :, tree_indices]
+            candidate_uc_scaled[start + self.opt_params['n_candidates_nn']: stop, :] = \
+                candidates_scaled_tree[0, :, tree_indices]
 
         candidates = Candidates(
             entry=entry,
@@ -532,9 +536,10 @@ class Optimizer:
         q2_obs_scaled = np.repeat(
             candidates.q2_obs_scaled[np.newaxis, :], repeats=candidates.n, axis=0
             )
-        pairwise_differences_scaled = self.indexer.assigner['0'].pairwise_difference_calculation.get_pairwise_differences_from_uc_scaled(
-            unit_cell_scaled, q2_obs_scaled
-            )
+        pairwise_differences_scaled = \
+            self.indexer.assigner['0'].pairwise_difference_calculation.get_pairwise_differences_from_uc_scaled(
+                unit_cell_scaled, q2_obs_scaled
+                )
         pds_inv = self.indexer.assigner['0'].transform_pairwise_differences(
             pairwise_differences_scaled, tensorflow=False
             )
@@ -573,7 +578,7 @@ class Optimizer:
                 loss[candidate_index] = target_function.get_loss(1/unit_cell[candidate_index]**2)
             candidates.candidates['loss'] = loss
         else:
-            subsampled_candidates = [candidates.candidates.copy() for i in range(n_subsample)]
+            subsampled_candidates = [candidates.candidates.copy() for _ in range(n_subsample)]
             subsampled_loss = np.zeros((candidates.n, n_subsample))
             for subsampled_index in range(n_subsample):
                 subsampled_candidates[subsampled_index]['unit_cell'] = \
@@ -701,7 +706,8 @@ class Optimizer:
             hkl = np.stack(candidates.candidates['hkl'])
             softmax = np.stack(candidates.candidates['softmax'])
             unit_cell = np.stack(candidates.candidates['unit_cell'])
-        combinations = [list(comb) for comb in itertools.combinations(np.arange(self.indexer.data_params['n_points']), n_keep)]
+        comb_generator = itertools.combinations(np.arange(self.indexer.data_params['n_points']), n_keep)
+        combinations = [list(comb) for comb in comb_generator]
         for candidate_index in range(candidates.n):
             for subsampled_index, subsampled_indices in enumerate(combinations):
                 optimized_unit_cell[candidate_index, subsampled_index] = self.optimize_unit_cell(
@@ -716,7 +722,7 @@ class Optimizer:
 
     def gather_optimized_unit_cells(self):
         if self.rank == 0:
-            optimized_data = [None for i in range(self.n_ranks)]
+            optimized_data = [None for _ in range(self.n_ranks)]
             optimized_data[0] = self.indexer.data
             for rank_index in range(1, self.n_ranks):
                 optimized_data[rank_index] = self.comm.recv(source=rank_index, tag=2)

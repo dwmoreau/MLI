@@ -13,7 +13,7 @@ from Networks import mlp_model_builder
 from TargetFunctions import LikelihoodLoss
 
 
-class Regression_base:
+class RegressionBase:
     def __init__(self, group, data_params, model_params, save_to, unit_cell_key, seed):
         self.model_params = model_params
         self.n_points = data_params['n_points']
@@ -140,7 +140,7 @@ class Regression_base:
         return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
 
     def fit_model_cycles(self, data):
-        self.fit_history = [None for j in range(2 * self.model_params['cycles'])] 
+        self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
         train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
 
         for cycle_index in range(self.model_params['cycles']):
@@ -244,7 +244,7 @@ class Regression_base:
         plt.close()
 
     def fit_model_warmup(self, data):
-        self.fit_history = [None for j in range(3)] 
+        self.fit_history = [None for _ in range(3)]
         train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
 
         self.compile_model('mean')
@@ -302,11 +302,9 @@ class Regression_base:
             if cycle_index == 0:
                 train_label = 'Training'
                 val_label = 'Validation'
-                ratio_label = 'Val / Training'
             else:
                 train_label = None
                 val_label = None
-                ratio_label = None
             axes[0].plot(
                 epochs[cycle_index], 
                 self.fit_history[cycle_index].history['loss'],
@@ -354,7 +352,7 @@ class Regression_base:
         plt.close()
 
 
-class Regression_AlphaBeta(Regression_base):
+class Regression_AlphaBeta(RegressionBase):
     def __init__(self, group, data_params, model_params, save_to, unit_cell_key, seed=12345):
         super().__init__(group, data_params, model_params, save_to, unit_cell_key, seed)
 

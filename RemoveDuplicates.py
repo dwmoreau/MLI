@@ -13,6 +13,9 @@ if source == 'csd':
 elif source == 'cod':
     print('Removing duplicates from COD dataset')
     entries = pd.read_parquet(f'data/cod_00.parquet')
+else:
+    print('Source must be either csd or cod')
+    assert False
 
 all_unique_entries = []
 all_duplicated_entries = []

@@ -352,7 +352,7 @@ class CandidateOptLoss:
 
         dq2_pred_duc = np.column_stack((
             term0 * (dterm1_duc0 + dterm4_duc0),
-            term0 * (dterm2_duc1),
+            term0 * dterm2_duc1,
             term0 * (dterm3_duc2 + dterm4_duc2),
             term0 * (dterm2_duc3 + dterm4_duc3) + dterm0_duc3 * (term1 + term2 + term3 + term4)
             ))
@@ -385,8 +385,8 @@ class CandidateOptLoss:
 
         self.__term1[:, self.__diag_indices, self.__diag_indices] = \
             (self.sigma * residuals)[:, np.newaxis] * d2q2_pred_duc2
-        H = constant * np.sum(prefactor[:, np.newaxis, np.newaxis] * (term0 + self.__term1), axis=0)
-        return H
+        hessian = constant * np.sum(prefactor[:, np.newaxis, np.newaxis] * (term0 + self.__term1), axis=0)
+        return hessian
 
     def loss_likelihood_t_no_jac(self, uc):
         q2_pred = self.get_q2_pred(uc, jac=False)
@@ -413,7 +413,8 @@ class CandidateOptLoss:
         q2_pred, dq2_pred_duc, d2q2_pred_duc2 = self.get_q2_pred(uc, jac=True, hessian=True)
 
         term0 = np.matmul(dq2_pred_duc[:, :, np.newaxis], dq2_pred_duc[:, np.newaxis, :])
-        self.__term1[:, self.__diag_indices, self.__diag_indices] = (q2_pred - self.q2_obs)[:, np.newaxis] * d2q2_pred_duc2
+        self.__term1[:, self.__diag_indices, self.__diag_indices] = \
+            (q2_pred - self.q2_obs)[:, np.newaxis] * d2q2_pred_duc2
         H = np.sum(self.hessian_prefactor * (term0 + self.__term1), axis=0)
         return H
 
@@ -541,8 +542,8 @@ class CandidateOptLoss_inv2:
 
         self.__term1[:, self.__diag_indices, self.__diag_indices] = \
             (self.sigma * residuals)[:, np.newaxis] * d2q2_pred_duc2
-        H = constant * np.sum(prefactor[:, np.newaxis, np.newaxis] * (term0 + self.__term1), axis=0)
-        return H
+        hessian = constant * np.sum(prefactor[:, np.newaxis, np.newaxis] * (term0 + self.__term1), axis=0)
+        return hessian
 
     def loss_likelihood_t_no_jac(self, uc):
         q2_pred = self.get_q2_pred(uc, jac=False)

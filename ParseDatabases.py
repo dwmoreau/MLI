@@ -33,6 +33,7 @@ class ProcessEntry:
         self.spacegroup_symbol_hm = None
         self.unit_cell = np.zeros(6)
 
+        self.split = None
         self.reindexed_spacegroup_symbol_hall = None
         self.reindexed_spacegroup_symbol_hm = None
         self.reindexed_unit_cell = np.zeros(6)
@@ -66,6 +67,7 @@ class ProcessEntry:
             'reindexed_spacegroup_symbol_hall': self.reindexed_spacegroup_symbol_hall,
             'reindexed_spacegroup_symbol_hm': self.reindexed_spacegroup_symbol_hm,
             'reindexed_unit_cell': self.reindexed_unit_cell,
+            'split': self.split,
             'permutation': self.permutation,
             'reduced_unit_cell': self.reindexed_unit_cell,
             'reduced_volume': self.reduced_volume,
@@ -186,6 +188,22 @@ class ProcessEntry:
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
 
+        if self.lattice_system in ['cubic', 'orthorhombic']:
+            self.split = 0
+        elif self.lattice_system == 'tetragonal':
+            if self.unit_cell[0] < self.unit_cell[2]:
+                self.split = 0
+            else:
+                self.split = 1
+        elif self.lattice_system == 'monoclinic':
+            if self.unit_cell[3] != 90:
+                self.split = 0
+            elif self.unit_cell[4] != 90:
+                self.split = 1
+            elif self.unit_cell[5] != 90:
+                self.split = 2
+        else:
+            self.split = 0
 
 class ProcessCSDEntry(ProcessEntry):
     def __init__(self):
@@ -274,8 +292,7 @@ class ProcessCODEntry(ProcessEntry):
         try:
             spacegroup = gemmi.SpaceGroup(rename_spacegroup_for_gemmi(spacegroup_symbol))
             return spacegroup
-        except Exception as e:
-            #print(e)
+        except:
             return None
 
     def verify_entry(self, cif_file_name):

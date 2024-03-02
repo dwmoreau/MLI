@@ -180,13 +180,14 @@ class PairwiseDifferenceCalculator(Q2Calculator):
 
 
 def get_mpi_logger(rank, save_to, tag):
-    logger = logging.getLogger("rank[%i]"%rank)
+    logger = logging.getLogger("rank[%i]" % rank)
     logger.setLevel(logging.DEBUG)
     mh = MPIFileHandler(f'{save_to}/{tag}.log')
     formatter = logging.Formatter('%(asctime)s:%(name)s:%(levelname)s:%(message)s')
     mh.setFormatter(formatter)
     logger.addHandler(mh)
     return logger
+
 
 class MPIFileHandler(logging.FileHandler):
     """
@@ -216,7 +217,7 @@ class MPIFileHandler(logging.FileHandler):
             logging.Handler.__init__(self)
             self.stream = None
         else:
-           logging.StreamHandler.__init__(self, self._open())
+            logging.StreamHandler.__init__(self, self._open())
 
     def _open(self):
         stream = MPI.File.Open( self.comm, self.baseFilename, self.mode )

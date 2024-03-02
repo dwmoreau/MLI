@@ -5,19 +5,23 @@ cubic          | 99.5%
 orthorhombic   | 85%
 
 Split tetragonal into a<c and c>a
+    - split at dataset generation
+
+Document current methods
+
+Monoclinic Plan
 
 * Optimization:
     - Full softmax array optimization
     - Levenberg-Marquardt optimization
     - SVD optimization
-
     - What differentiates a found / not found entry
         - large differences between prediction and true
     - common assignments:
         - drop during optimization but include in loss
         - use all hkl assignments with largest N likelihoods
 
-Indexing.py:
+- Indexing.py:
     - need to add hkl_prefix to hkl_labels and hkl predictions
 
 - Augmentation
@@ -243,7 +247,7 @@ class Indexing:
             'bravais_lattice',
             'spacegroup_number',
             'volume',
-                f'{self.hkl_prefactor}spacegroup_symbol_hm',
+            f'{self.hkl_prefactor}spacegroup_symbol_hm',
             f'{self.hkl_prefactor}unit_cell',
             f'd_spacing_{self.data_params["points_tag"]}',
             f'{self.hkl_prefactor}h_{self.data_params["points_tag"]}',
@@ -259,7 +263,10 @@ class Indexing:
 
         data = []
         for index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
-            file_name = os.path.join(self.data_params['data_dir'], f'GeneratedDatasets/dataset_{bravais_lattice}.parquet')
+            file_name = os.path.join(
+                self.data_params['data_dir'],
+                f'GeneratedDatasets/dataset_{bravais_lattice}.parquet'
+                )
             print(f'Loading data from {file_name}')
             data.append(pd.read_parquet(file_name, columns=read_columns))
         self.data = pd.concat(data, ignore_index=True)
@@ -278,9 +285,11 @@ class Indexing:
         self.data['augmented'] = np.zeros(self.data.shape[0], dtype=bool)
 
         # Add label to data and down sample
-        self.data['group'] = self.data[f'{self.hkl_prefactor}spacegroup_symbol_hm'].map(lambda x: self.group_mappings[x])
+        self.data['group'] = self.data[f'{self.hkl_prefactor}spacegroup_symbol_hm'].map(
+            lambda x: self.group_mappings[x]
+            )
         data_grouped = self.data.groupby('group')
-        data_group = [None for i in range(len(data_grouped.groups.keys()))]
+        data_group = [None for _ in range(len(data_grouped.groups.keys()))]
         for index, group in enumerate(data_grouped.groups.keys()):
             data_group[index] = data_grouped.get_group(group)
             data_group[index].insert(loc=0, column='group_label', value=index * np.ones(len(data_group[index])))
@@ -292,7 +301,7 @@ class Indexing:
         self.data = pd.concat(data_group, ignore_index=True)
 
         d_spacing_pd = self.data[f'd_spacing_{self.data_params["points_tag"]}']
-        d_spacing = [np.zeros(self.data_params['n_points']) for i in range(self.data.shape[0])]
+        d_spacing = [np.zeros(self.data_params['n_points']) for _ in range(self.data.shape[0])]
         for entry_index in range(self.data.shape[0]):
             d_spacing[entry_index] = d_spacing_pd.iloc[entry_index][:self.data_params['n_points']]
         self.data['d_spacing'] = d_spacing
@@ -331,7 +340,6 @@ class Indexing:
         hkl = np.zeros((len(self.data), self.data_params['n_points'], 3), dtype=int)
         if self.data_params['augment']:
             hkl_sa = np.zeros((len(self.data), self.n_generated_points, 3), dtype=int)
-            hkl_all = np.zeros((len(self.data), self.n_generated_points, 3), dtype=int)
         for entry_index in range(len(self.data)):
             entry = self.data.iloc[entry_index]
             hkl[entry_index, :, 0] = entry[f'{self.hkl_prefactor}h_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
@@ -496,7 +504,7 @@ class Indexing:
                 self.hkl_ref[:, 0]*self.hkl_ref[:, 1] + self.hkl_ref[:, 0]*self.hkl_ref[:, 2] + self.hkl_ref[:, 1]*self.hkl_ref[:, 2],
                 ))
             check_data = np.stack((
-                hkl[:, :, 0]**2 +  hkl[:, :, 1]**2 + hkl[:, :, 2]**2,
+                hkl[:, :, 0]**2 + hkl[:, :, 1]**2 + hkl[:, :, 2]**2,
                 hkl[:, :, 0]*hkl[:, :, 1] + hkl[:, :, 0]*hkl[:, :, 2] + hkl[:, :, 1]*hkl[:, :, 2]
                 ),
                 axis=2
@@ -568,11 +576,13 @@ class Indexing:
             hkl_key=self.hkl_key,
             )
         self.augmentor.setup(self.data)
-        data_augmented = [None for i in range(len(self.data_params['groups']))]
+        data_augmented = [None for _ in range(len(self.data_params['groups']))]
         for group_index, group in enumerate(self.data_params['groups']):
             print(f'Augmenting {group}')
             group_data = self.data[self.data['group'] == group]
-            data_augmented[group_index] = self.augmentor.augment(group_data, f'{self.hkl_prefactor}spacegroup_symbol_hm')
+            data_augmented[group_index] = self.augmentor.augment(
+                group_data, f'{self.hkl_prefactor}spacegroup_symbol_hm'
+                )
         data_augmented = pd.concat(data_augmented, ignore_index=True)
         self.data = pd.concat((self.data, data_augmented), ignore_index=True)
 
@@ -654,7 +664,7 @@ class Indexing:
     def plot_input(self):
         def make_hkl_plot(data, n_points, hkl_ref_length, save_to):
             fig, axes = plt.subplots(n_points, 1, figsize=(6, 10), sharex=True)
-            hkl_labels = np.stack(data['hkl_labels']) # n_data x n_points
+            hkl_labels = np.stack(data['hkl_labels'])  # n_data x n_points
             bins = np.arange(0, hkl_ref_length + 1) - 0.5
             centers = (bins[1:] + bins[:-1]) / 2
             width = bins[1] - bins[0]
@@ -913,9 +923,13 @@ class Indexing:
 
     def inferences_regression(self):
         uc_pred_scaled = np.zeros((len(self.data), self.data_params['n_outputs']))
-        uc_pred_scaled_cov = np.zeros((len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']))
+        uc_pred_scaled_cov = np.zeros((
+            len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']
+            ))
         uc_pred_scaled_trees = np.zeros((len(self.data), self.data_params['n_outputs']))
-        uc_pred_scaled_cov_trees = np.zeros((len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']))
+        uc_pred_scaled_cov_trees = np.zeros((
+            len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']
+            ))
 
         for group_index, group in enumerate(self.data_params['groups']):
             group_indices = self.data['group'] == group
@@ -1134,18 +1148,6 @@ class Indexing:
                 )
             hkl_pred = self.convert_softmax_to_assignments(softmaxes)
             hkl_assign = softmaxes.argmax(axis=2)
-            """
-            indices = ~self.data['augmented']
-            pairwise_differences_scaled = self.assigner[key].pairwise_difference_calculation.get_pairwise_differences_from_uc_scaled(
-                tf.convert_to_tensor(np.stack(self.data[unit_cell_scaled_key])[:, y_indices]),
-                tf.convert_to_tensor(np.stack(self.data['q2_scaled']))
-                )
-            np.save('pds.npy', pairwise_differences_scaled.numpy()[indices])
-            np.save('hkl_labels_true.npy', np.stack(self.data['hkl_labels'][indices]))
-            np.save('bl_labels.npy', np.stack(self.data['bravais_lattice_label'][indices]))
-            np.save('hkl_labels_pred.npy', hkl_assign[indices])
-            np.save('softmaxes.npy', softmaxes[indices])
-            """
 
             unaugmented_data['hkl_labels_pred'] = list(hkl_assign)
             unaugmented_data['hkl_pred'] = list(hkl_pred)

@@ -119,13 +119,13 @@ class Assigner:
             term1 = f_est[:, np.newaxis] * f_est[np.newaxis]
             df_est_db = term0 - term1
 
-            tf = 1/2 * np.sum((f - f_est)**2)
-            dtf_db = -np.sum((f - f_est) * df_est_db, axis=1)
-            return tf, dtf_db
+            loss = 1/2 * np.sum((f - f_est)**2)
+            dloss_db = -np.sum((f - f_est) * df_est_db, axis=1)
+            return loss, dloss_db
 
         # bias initialization
         # batch_size x 10 x 100
-        hkl_labels = np.stack(data['hkl_labels']) # n_data x n_points
+        hkl_labels = np.stack(data['hkl_labels'])  # n_data x n_points
         frequencies = np.zeros((self.model_params['n_points'], self.model_params['hkl_ref_length']))
         bins = np.arange(0, self.model_params['hkl_ref_length'] + 1) - 0.5
         for index in range(self.model_params['n_points']):
@@ -140,6 +140,7 @@ class Assigner:
                 method='L-BFGS-B',
                 jac=True
                 )
+            bias_init[index] = results.x
 
         #fig, axes = plt.subplots(1, 1, figsize=(10, 4))
         #axes.plot(results.x)

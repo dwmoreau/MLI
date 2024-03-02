@@ -38,6 +38,7 @@ class EntryGenerator:
             'reindexed_spacegroup_symbol_hm': 'string',
             'reindexed_unit_cell': 'float64',
             'permutation': 'string',
+            'split': 'int8',
             'reduced_unit_cell': 'float64',
             'reduced_volume': 'float64',
             'pattern': 'float64',
@@ -58,6 +59,7 @@ class EntryGenerator:
             'reindexed_spacegroup_symbol_hm',
             'reindexed_unit_cell',
             'permutation',
+            'split',
             'reduced_unit_cell',
             'reduced_volume',
             ]
@@ -227,7 +229,7 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
     bad_identifiers = []
     for iteration in range(n_iterations):
         iteration_indices = indices[iteration*n_ranks: (iteration + 1) * n_ranks]
-        data_iteration = [dict.fromkeys(entry_generator.data_set_components) for i in range(n_ranks)]
+        data_iteration = [dict.fromkeys(entry_generator.data_set_components) for _ in range(n_ranks)]
 
         # rank 0 gets the identifiers and sends them to the other ranks
         for rank_index in range(n_ranks):
