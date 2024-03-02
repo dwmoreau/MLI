@@ -1,5 +1,3 @@
-import copy
-import csv
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.optimize
@@ -7,6 +5,8 @@ import tensorflow as tf
 
 from Networks import hkl_model_builder_mlp
 from Utilities import PairwiseDifferenceCalculator
+from Utilities import read_params
+from Utilities import write_params
 
 
 class Assigner:
@@ -41,18 +41,11 @@ class Assigner:
             )
 
     def save(self):
-        model_params = copy.deepcopy(self.model_params)
-        with open(f'{self.save_to}/assignment_params_{self.model_params["tag"]}.csv', 'w') as output_file:
-            writer = csv.DictWriter(output_file, fieldnames=model_params.keys())
-            writer.writeheader()
-            writer.writerow(model_params)
+        write_params(self.model_params, f'{self.save_to}/assignment_params_{self.model_params["tag"]}.csv')
         self.model.save_weights(f'{self.save_to}/assignment_weights_{self.model_params["tag"]}.h5')
 
     def load_from_tag(self, tag, mode):
-        with open(f'{self.save_to}/assignment_params_{self.model_params["tag"]}.csv', 'r') as params_file:
-            reader = csv.DictReader(params_file)
-            for row in reader:
-                params = row
+        params = read_params(f'{self.save_to}/assignment_params_{self.model_params["tag"]}.csv')
         params_keys = [
             'tag',
             'train_on',

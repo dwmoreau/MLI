@@ -74,7 +74,8 @@ from Evaluations import evaluate_regression
 from Evaluations import calibrate_regression
 from Regression import Regression_AlphaBeta
 from Utilities import Q2Calculator
-
+from Utilities import read_params
+from Utilities import write_params
 
 class Indexing:
     def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, seed=12345):
@@ -158,10 +159,7 @@ class Indexing:
         self.volume_scaler = joblib.load(f'{self.save_to["data"]}/volume_scaler.bin')
         self.q2_scaler = joblib.load(f'{self.save_to["data"]}/q2_scaler.bin')
 
-        with open(f'{self.save_to["data"]}/data_params.csv', 'r') as params_file:
-            reader = csv.DictReader(params_file)
-            for row in reader:
-                params = row
+        params = read_params(f'{self.save_to["data"]}/data_params.csv')
         data_params_keys = [
             'augment',
             'bravais_lattices'
@@ -419,11 +417,7 @@ class Indexing:
         joblib.dump(self.uc_scaler, f'{self.save_to["data"]}/uc_scaler.bin')
         joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
         joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
-
-        with open(f'{self.save_to["data"]}/data_params.csv', 'w') as output_file:
-            writer = csv.DictWriter(output_file, fieldnames=self.data_params.keys())
-            writer.writeheader()
-            writer.writerow(self.data_params)
+        write_params(self.data_params, f'{self.save_to["data"]}/data_params.csv')
 
     def setup_hkl(self):
         # This converts the true h, k, and l columns to a single label

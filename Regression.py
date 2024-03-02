@@ -1,5 +1,4 @@
 import copy
-import csv
 import gc
 import joblib
 from keras_self_attention import SeqSelfAttention
@@ -11,6 +10,8 @@ import tensorflow as tf
 
 from Networks import mlp_model_builder
 from TargetFunctions import LikelihoodLoss
+from Utilities import read_params
+from Utilities import write_params
 
 
 class RegressionBase:
@@ -477,11 +478,7 @@ class Regression_AlphaBeta(RegressionBase):
 
     def save(self):
         model_params = copy.deepcopy(self.model_params)
-        with open(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv', 'w') as output_file:
-            writer = csv.DictWriter(output_file, fieldnames=model_params.keys())
-            writer.writeheader()
-            writer.writerow(model_params)
-
+        write_params(model_params, f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
 
         if self.model_params['predict_pca']:
@@ -493,10 +490,7 @@ class Regression_AlphaBeta(RegressionBase):
                 )
 
     def load_from_tag(self):
-        with open(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv', 'r') as params_file:
-            reader = csv.DictReader(params_file)
-            for row in reader:
-                params = row
+        params = read_params(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         params_keys = [
             'tag',
             'nn_type'

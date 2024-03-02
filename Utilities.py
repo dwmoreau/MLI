@@ -1,3 +1,4 @@
+import csv
 import logging
 from mpi4py import MPI
 import numpy as np
@@ -253,3 +254,17 @@ class MPIFileHandler(logging.FileHandler):
             self.stream.Sync()
             self.stream.Close()
             self.stream = None
+
+
+def write_params(params, filename):
+    with open(filename, 'w') as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=params.keys())
+        writer.writeheader()
+        writer.writerow(params)
+
+def read_params(filename):
+    with open(filename, 'r') as params_file:
+        reader = csv.DictReader(params_file)
+        for row in reader:
+            params = row
+    return params
