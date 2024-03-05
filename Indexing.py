@@ -4,16 +4,9 @@ lattice system | accuracy
 cubic          | 99.5%
 orthorhombic   | 90%
 
-
-Split tetragonal into a<c and c>a
-    x train regression
-    - train assignment
-    - run optimization
 Monoclinic
-    x Make spacegroup spreadsheet
-    - Make group spec
-    x Reindexing
-    - dataset generation
+    - redo dataset generation
+    - Reindexing
     - model training
     - optimization
 Document current methods
@@ -30,7 +23,7 @@ Document current methods
         - use all hkl assignments with largest N likelihoods
 
 - Indexing.py:
-    - need to add hkl_prefix to hkl_labels and hkl predictions
+    - get rid of the unit_cell_key
 
 - Augmentation
     - make peak drop rate a function of distance and q2
@@ -40,6 +33,10 @@ Document current methods
     - How to incorporate forward model
 
 - Data
+    - monoclinic logistics
+        - do predictions in the reindexed orientation
+        - do evaluations and miller index assignments in the beta != 90 orientation
+
     - Get data from other databases:
         - Materials project
         - ICSD
@@ -179,7 +176,6 @@ class Indexing:
             'y_indices',
             'n_points',
             'points_tag',
-            'use_reduced_cell',
             'n_outputs',
             'hkl_ref_length',
             'groupspec_file_name',
@@ -214,11 +210,6 @@ class Indexing:
             self.volume_key = 'volume'
             self.hkl_key = 'hkl'
             self.hkl_prefactor = ''
-        elif self.data_params['unit_cell_representation'] == 'reduced':
-            self.unit_cell_key = 'reduced_unit_cell'
-            self.volume_key = 'reduced_volume'
-            self.hkl_key = 'hkl'
-            self.hkl_prefactor = ''
         elif self.data_params['unit_cell_representation'] == 'reindexed':
             self.unit_cell_key = 'reindexed_unit_cell'
             self.volume_key = 'volume'
@@ -242,24 +233,21 @@ class Indexing:
             )
         group_spec = group_spec.loc[group_spec['group'].notna()]
         group_spec['hm symbol'] = group_spec['hm symbol'].str.strip()
+
         self.data_params['groups'] = group_spec['group'].unique()
-        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic']:
+        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic', 'monoclinic']:
             self.data_params['split_groups'] = self.data_params['groups']
         elif self.data_params['lattice_system'] == 'tetragonal':
             self.data_params['split_groups'] = []
             for group in self.data_params['groups']:
                 self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_0_'))
                 self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_1_'))
-        elif self.data_params['lattice_system'] == 'monoclinic':
-            self.data_params['split_groups'] = []
-            for group in self.data_params['groups']:
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_0_'))
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_1_'))
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_2_'))
 
         self.group_mappings = dict.fromkeys(group_spec['hm symbol'].unique())
         for index in range(len(group_spec)):
             self.group_mappings[group_spec.iloc[index]['hm symbol']] = group_spec.iloc[index]['group']
+        #for key in self.group_mappings.keys():
+        #    print(f'{key} -> {self.group_mappings[key]}')
 
     def load_data(self):
         read_columns = [
@@ -268,7 +256,8 @@ class Indexing:
             'spacegroup_number',
             'volume',
             f'{self.hkl_prefactor}spacegroup_symbol_hm',
-            f'{self.hkl_prefactor}unit_cell',
+            f'unit_cell',
+            f'reindexed_unit_cell',
             f'd_spacing_{self.data_params["points_tag"]}',
             f'{self.hkl_prefactor}h_{self.data_params["points_tag"]}',
             f'{self.hkl_prefactor}k_{self.data_params["points_tag"]}',
@@ -308,7 +297,7 @@ class Indexing:
         self.data['group'] = self.data[f'{self.hkl_prefactor}spacegroup_symbol_hm'].map(
             lambda x: self.group_mappings[x]
             )
-        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic']:
+        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic', 'monoclinic']:
             self.data['split_group'] = self.data['group']
         elif self.data_params['lattice_system'] == 'tetragonal':
             # split_0: a < c
@@ -321,6 +310,19 @@ class Indexing:
             self.data.loc[split_1, 'split_group'] = self.data.loc[split_1, 'split_group'].map(
                 lambda x: x.replace('tetragonal_0_', 'tetragonal_1_')
                 )
+        elif self.data_params['lattice_system'] == 'monoclinic':
+            # reset unit cell so beta != 90 <- move this to dataset generation. For now just remove
+            unit_cell = np.stack(self.data['unit_cell'])
+            self.data = self.data.loc[unit_cell[:, 4] != 90]
+            # make reindexed unit cell alpha = gamma = nan and beta != 90
+            reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
+            new_reindexed_unit_cell = reindexed_unit_cell.copy()
+            new_reindexed_unit_cell[:, [3, 5]] = np.nan
+            # y_indices = [0, 1, 2, 4]
+            for entry_index in range(len(self.data)):
+                angle_index = np.argwhere(reindexed_unit_cell[entry_index, 3:] != 90)
+                new_reindexed_unit_cell[entry_index, 4] = reindexed_unit_cell[entry_index, angle_index]
+            self.data['reindexed_unit_cell'] = list(new_reindexed_unit_cell)
 
         data_grouped = self.data.groupby('split_group')
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]
@@ -400,11 +402,14 @@ class Indexing:
                 ]
         self.data.drop(columns=drop_columns, inplace=True)
 
-        self.setup_scalers()
         # Convert angles to radians
-        unit_cell = np.stack(self.data[self.unit_cell_key])
+        unit_cell = np.stack(self.data['unit_cell'])
         unit_cell[:, 3:] = np.pi/180 * unit_cell[:, 3:]
-        self.data[self.unit_cell_key] = list(unit_cell)
+        self.data['unit_cell'] = list(unit_cell)
+        reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
+        reindexed_unit_cell[:, 3:] = np.pi/180 * reindexed_unit_cell[:, 3:]
+        self.data['reindexed_unit_cell'] = list(reindexed_unit_cell)
+        self.setup_scalers()
 
         if self.data_params['augment']:
             self.augment_data()
@@ -594,6 +599,7 @@ class Indexing:
             save_to=self.save_to['augmentor'],
             seed=self.random_seed,
             uc_scaler=self.uc_scaler,
+            angle_scale=self.angle_scale,
             unit_cell_key=self.unit_cell_key,
             hkl_key=self.hkl_key,
             )
@@ -653,13 +659,13 @@ class Indexing:
     def y_scale(self, y):
         y_scaled = np.zeros(y.shape)
         y_scaled[:3] = self.uc_scaler.transform(y[:3][:, np.newaxis])[:, 0]
-        y_scaled[3:] = y[3:] - np.pi/2
+        y_scaled[3:] = (y[3:] - np.pi/2) / self.angle_scale
         return y_scaled
 
     def y_revert(self, y):
         y_reverted = np.zeros(y.shape)
         y_reverted[:3] = self.uc_scaler.inverse_transform(y[:3][:, np.newaxis])[:, 0]
-        y_reverted[3:] = y[3:] + np.pi/2
+        y_reverted[3:] = self.angle_scale * y[3:] + np.pi/2
         return y_reverted
 
     def setup_scalers(self):
@@ -670,12 +676,19 @@ class Indexing:
         self.data['q2_scaled'] = self.data['q2'].apply(self.q2_scale)
 
         # Unit cell parameters scaling
-        self.uc_scaler = StandardScaler()
         uc_train = np.stack(self.data[self.data['train']][self.unit_cell_key])
+
+        # lengths
+        self.uc_scaler = StandardScaler()
         self.uc_scaler.fit(uc_train[:, :3].ravel()[:, np.newaxis])
+        # angles
+        angles = uc_train[:, 3:].ravel()
+        self.angle_scale = angles[angles != np.pi/2].std()
+
         self.data[f'{self.unit_cell_key}_scaled'] = self.data[self.unit_cell_key].apply(self.y_scale)
-        # this hard codes the minimum allowed unit cell in augmented data to 1A
+        # this hard codes the minimum allowed unit cell in augmented data to 1 A
         self.min_unit_cell_scaled = (1 - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+
 
         # Volume scaling
         self.volume_scaler = StandardScaler()
@@ -795,13 +808,16 @@ class Indexing:
         dbin = bins[1] - bins[0]
         hist, _ = np.histogram(q2_sorted, bins=bins, density=True)
         axes[0, 0].bar(centers, hist, width=dbin, label='Unaugmented')
+        hist_scaled, _ = np.histogram(q2_scaled, bins=bins_scaled, density=True)
+        axes[1, 0].bar(centers_scaled, hist_scaled, width=dbin_scaled)
         if self.data_params['augment']:
             data_augmented = self.data[self.data['augmented']]
             q2_augmented = np.stack(data_augmented['q2']).ravel()
             hist_augmented, _ = np.histogram(q2_augmented, bins=bins, density=True)
             axes[0, 0].bar(centers, hist_augmented, width=dbin, alpha=0.5, label='Augmented')
-        hist_scaled, _ = np.histogram(q2_scaled, bins=bins_scaled, density=True)
-        axes[1, 0].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+            q2_scaled_augmented = np.stack(data_augmented['q2_scaled']).ravel()
+            hist_scaled_augmented, _ = np.histogram(q2_scaled_augmented, bins=bins_scaled, density=True)
+            axes[1, 0].bar(centers_scaled, hist_scaled_augmented, width=dbin_scaled, alpha=0.5, label='Augmented')
         axes[0, 0].legend()
 
         # volume
@@ -825,6 +841,7 @@ class Indexing:
         unit_cell = np.stack(data[self.unit_cell_key])
         if self.data_params['augment']:
             unit_cell_augmented = np.stack(data_augmented[self.unit_cell_key])
+            unit_cell_augmented_scaled = np.stack(data_augmented[f'{self.unit_cell_key}_scaled'])
         unit_cell_scaled = np.stack(data[f'{self.unit_cell_key}_scaled'])
         sorted_lengths = np.sort(unit_cell[:, :3].ravel())
         lower = sorted_lengths[int(0.005*sorted_lengths.size)]
@@ -835,13 +852,15 @@ class Indexing:
         for index in range(3):
             hist, _ = np.histogram(unit_cell[:, index], bins=bins, density=True)
             axes[0, index + 2].bar(centers, hist, width=dbin)
-            if self.data_params['augment']:
-                hist_augmented, _ = np.histogram(unit_cell_augmented[:, index], bins=bins, density=True)
-                axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
             hist_scaled, _ = np.histogram(
                 unit_cell_scaled[:, index], bins=bins_scaled, density=True
                 )
             axes[1, index + 2].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+            if self.data_params['augment']:
+                hist_augmented, _ = np.histogram(unit_cell_augmented[:, index], bins=bins, density=True)
+                axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+                hist_augmented_scaled, _ = np.histogram(unit_cell_augmented_scaled[:, index], bins=bins_scaled, density=True)
+                axes[1, index + 2].bar(centers_scaled, hist_augmented_scaled, width=dbin_scaled, alpha=0.5)
             axes[0, index + 2].set_title(y_labels[index])
 
         sorted_angles = np.sort(unit_cell[:, 3:].ravel())
@@ -851,15 +870,23 @@ class Indexing:
         centers = (bins[1:] + bins[:-1]) / 2
         dbin = bins[1] - bins[0]
         for index in range(3, 6):
-            hist, _ = np.histogram(unit_cell[:, index], bins=bins, density=True)
+            indices = unit_cell[:, index] != np.pi/2
+            hist, _ = np.histogram(unit_cell[indices, index], bins=bins, density=True)
             axes[0, index + 2].bar(centers, hist, width=dbin)
-            if self.data_params['augment']:
-                hist_augmented, _ = np.histogram(unit_cell_augmented[:, index], bins=bins, density=True)
-                axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
 
-            hist_scaled, _ = np.histogram(unit_cell_scaled[:, index], bins=bins_scaled, density=True)
+            indices = unit_cell_scaled[:, index] != 0
+            hist_scaled, _ = np.histogram(unit_cell_scaled[indices, index], bins=bins_scaled, density=True)
             axes[1, index + 2].bar(centers_scaled, hist_scaled, width=dbin_scaled)
             axes[0, index + 2].set_title(y_labels[index])
+
+            if self.data_params['augment']:
+                indices = unit_cell_augmented[:, index] != np.pi/2
+                hist_augmented, _ = np.histogram(unit_cell_augmented[indices, index], bins=bins, density=True)
+                axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+
+                indices = unit_cell_augmented_scaled[:, index] != 0
+                hist_augmented_scaled, _ = np.histogram(unit_cell_augmented_scaled[indices, index], bins=bins_scaled, density=True)
+                axes[1, index + 2].bar(centers_scaled, hist_augmented_scaled, width=dbin_scaled, alpha=0.5)
 
         axes[0, 0].set_ylabel('Raw data')
         axes[1, 0].set_ylabel('Standard Scaling')
@@ -869,7 +896,7 @@ class Indexing:
         fig.savefig(f'{self.save_to["data"]}/regression_inputs.png')
         plt.close()
 
-        # PCA components
+        # Covariance
         if self.data_params['lattice_system'] != 'cubic':
             fig, axes = plt.subplots(1, 2, figsize=(8, 4))
             unit_cell_cov = np.cov(unit_cell[:, self.data_params['y_indices']].T)
@@ -981,13 +1008,13 @@ class Indexing:
                 uc_pred = uc_pred_scaled * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
             elif self.data_params['lattice_system'] == 'monoclinic':
                 uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 3] = uc_pred_scaled[:, 3] + np.pi/2
+                uc_pred[:, 3] = self.angle_scale * uc_pred_scaled[:, 3] + np.pi/2
             elif self.data_params['lattice_system'] == 'triclinic':
                 uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 3:] = uc_pred_scaled[:, 3:] + np.pi/2
+                uc_pred[:, 3:] = self.angle_scale * uc_pred_scaled[:, 3:] + np.pi/2
             elif self.data_params['lattice_system'] == 'rhombohedral':
                 uc_pred[:, 0] = uc_pred_scaled[:, 0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 1] = uc_pred_scaled[:, 1] + np.pi/2
+                uc_pred[:, 1] = self.angle_scale * uc_pred_scaled[:, 1] + np.pi/2
 
         if not uc_pred_scaled_cov is None:
             uc_pred_cov = np.zeros(uc_pred_scaled_cov.shape)
@@ -1013,15 +1040,15 @@ class Indexing:
         elif self.data_params['lattice_system'] == 'monoclinic':
             uc_pred_scaled = np.zeros(uc_pred.shape)
             uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            uc_pred_scaled[:, 3] = uc_pred[:, 3] - np.pi/2
+            uc_pred_scaled[:, 3] = (uc_pred[:, 3] - np.pi/2) / self.angle_scale
         elif self.data_params['lattice_system'] == 'triclinic':
             uc_pred_scaled = np.zeros(uc_pred.shape)
             uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            uc_pred_scaled[:, 3:] = uc_pred[:, 3:] - np.pi/2
+            uc_pred_scaled[:, 3:] = (uc_pred[:, 3:] - np.pi/2) / self.angle_scale
         elif self.data_params['lattice_system'] == 'rhombohedral':
             uc_pred_scaled = np.zeros(uc_pred.shape)
             uc_pred_scaled[:, 0] = (uc_pred[:, 0] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            uc_pred_scaled[:, 1] = uc_pred[:, 1] - np.pi/2
+            uc_pred_scaled[:, 1] = (uc_pred[:, 1] - np.pi/2) / self.angle_scale
         return uc_pred_scaled
 
     def evaluate_regression(self):

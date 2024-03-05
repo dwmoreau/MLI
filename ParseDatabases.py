@@ -176,6 +176,12 @@ class ProcessEntry:
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
+            if self.lattice_system == 'monoclinic' and self.spacegroup_symbol_hm.startswith('F'):
+                # There is like one of these entries in all the CSD. I'm excluding these to make
+                # logistics easier.
+                self.reason = 'Excluding F centered monoclinic'
+                self.status = False
+                return None
         else:
             self.reindexed_unit_cell = self.unit_cell
             self.permutation = 'abc'
@@ -198,6 +204,7 @@ class ProcessEntry:
                 self.split = 2
         else:
             self.split = 0
+
 
 class ProcessCSDEntry(ProcessEntry):
     def __init__(self):

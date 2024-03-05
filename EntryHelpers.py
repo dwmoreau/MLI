@@ -466,12 +466,16 @@ def verify_unit_cell_consistency_by_lattice_system(lattice_system, cell_lengths,
             elif alpha == 120 and beta == 90 and gamma == 90:
                 check = True
     elif lattice_system == 'monoclinic':
-        if alpha == beta and alpha == 90 and gamma != 90:
+        if alpha == gamma and alpha == 90 and beta != 90:
             check = True
-        elif alpha == gamma and alpha == 90 and beta != 90:
+        """
+        # Unit cell settings with beta == 90 are fine. They make up a small fraction of total entries and
+        # excluding them makes logistics simpler.
+        elif alpha == beta and alpha == 90 and gamma != 90:
             check = True
         elif beta == gamma and beta == 90 and alpha != 90:
             check = True
+        """
     elif lattice_system == 'triclinic':
         check = True
     return check

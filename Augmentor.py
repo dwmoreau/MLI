@@ -5,6 +5,7 @@ import pandas as pd
 import scipy.stats
 import scipy.optimize
 from sklearn.decomposition import PCA
+from sklearn.metrics import ConfusionMatrixDisplay
 
 from Utilities import Q2Calculator
 
@@ -19,6 +20,7 @@ class Augmentor:
             save_to,
             seed,
             uc_scaler,
+            angle_scale,
             unit_cell_key,
             hkl_key
             ):
@@ -37,6 +39,7 @@ class Augmentor:
         self.hkl_ref_length = data_params['hkl_ref_length']
         self.rng = np.random.default_rng(seed)
         self.uc_scaler = uc_scaler
+        self.angle_scale = angle_scale
         if data_params['unit_cell_representation'] == 'reindexed':
             self.permute_unit_cell = True
         else:
@@ -50,14 +53,43 @@ class Augmentor:
         if self.aug_params['augment_method'] == 'random':
             self.perturb_unit_cell = self.perturb_unit_cell_std
             self.stddev = unit_cell_scaled.std(axis=0)
+            fig, axes = plt.subplots(1, 1, figsize=(5, 3))
+            axes.plot(self.stddev)
+            axes.set_xlabel('Unit cell index')
+            axes.set_ylabel('Unit cell standard deviation')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to}/aug_unit_cell_std_{self.aug_params["tag"]}.png')
+            plt.close()
+
         elif self.aug_params['augment_method'] == 'cov':
             self.perturb_unit_cell = self.perturb_unit_cell_cov
             self.cov = np.cov(unit_cell_scaled.T)
+            fig, axes = plt.subplots(1, 1, figsize=(6, 4))
+            cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov,)
+            cov_display.plot(ax=axes, colorbar=False, values_format='0.2f')
+            axes.set_title('Unit cell covariance')
+            axes.set_xlabel('')
+            axes.set_ylabel('')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to}/aug_unit_cell_cov_{self.aug_params["tag"]}.png')
+            plt.close()
+
         elif self.aug_params['augment_method'] == 'pca':
             self.perturb_unit_cell = self.perturb_unit_cell_pca
             self.pca = PCA(n_components=self.n_outputs).fit(unit_cell_scaled)
             unit_cell_scaled_transformed = self.pca.transform(unit_cell_scaled)
             self.stddev = np.std(unit_cell_scaled_transformed, axis=0)
+            fig, axes = plt.subplots(2, 1, figsize=(6, 6))
+            pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca.components_,)
+            pca_display.plot(ax=axes[0], colorbar=False, values_format='0.2f')
+            axes[1].plot(self.pca.singular_values_, marker='.')
+            axes[0].set_title('PCA Components')
+            axes[0].set_xlabel('')
+            axes[0].set_ylabel('')
+            axes[1].set_title('PCA Singular values')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to}/aug_unit_cell_pca_{self.aug_params["tag"]}.png')
+            plt.close()
 
         # calculate the order of the peak in the list of sa peaks
         n_bins = 100
@@ -173,7 +205,7 @@ class Augmentor:
         perturbed_unit_cell_scaled[self.y_indices] = self.perturb_unit_cell(unit_cell_scaled[self.y_indices])
         perturbed_unit_cell = np.zeros(6)
         perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-        perturbed_unit_cell[3:] = perturbed_unit_cell_scaled[3:] + np.pi/2
+        perturbed_unit_cell[3:] = self.angle_scale * perturbed_unit_cell_scaled[3:] + np.pi/2
         augmented_entry[f'{self.unit_cell_key}_scaled'] = perturbed_unit_cell_scaled
         augmented_entry[f'{self.unit_cell_key}'] = perturbed_unit_cell
         # calculate new d-spacings
@@ -209,6 +241,26 @@ class Augmentor:
         else:
             return None
 
+    def _check_in_range(self, perturbed_unit_cell_scaled):
+        if self.lattice_system in ['monoclinic', 'triclinic']:
+            limit = np.pi/2 / self.angle_scale
+            if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
+                if self.lattice_system == 'monoclinic':
+                    if -limit < perturbed_unit_cell_scaled[3] < limit:
+                        return True
+                elif self.lattice_system == 'triclinic':
+                    assert False
+        else:
+            if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
+                return True
+
+    def _permute_perturbed_unit_cell(self, perturbed_unit_cell_scaled):
+        if self.lattice_system in ['monoclinic', 'triclinic']:
+            perturbed_unit_cell_scaled[:3] = np.sort(perturbed_unit_cell_scaled[:3])
+        else:
+            perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
+        return perturbed_unit_cell_scaled
+
     def perturb_unit_cell_std(self, unit_cell_scaled):
         # perturb unit cell
         status = True
@@ -220,10 +272,10 @@ class Augmentor:
                 )[0]
             #print(f'{unit_cell_scaled} {perturbed_unit_cell_scaled} {self.min_unit_cell_scaled} {i}')
             i += 1
-            if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
+            if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
         if self.permute_unit_cell:
-            perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
+            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_cov(self, unit_cell_scaled):
@@ -235,10 +287,10 @@ class Augmentor:
                 cov=self.aug_params['augment_shift']**2 * self.cov,
                 size=1
                 )[0]
-            if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
+            if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
         if self.permute_unit_cell:
-            perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
+            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_pca(self, unit_cell_scaled):
@@ -253,8 +305,8 @@ class Augmentor:
             perturbed_unit_cell_scaled = self.pca.inverse_transform(
                 perturbed_unit_cell_scaled_transformed[np.newaxis, :]
                 )[0, :]
-            if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
+            if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
         if self.permute_unit_cell:
-            perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
+            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
         return perturbed_unit_cell_scaled

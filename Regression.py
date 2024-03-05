@@ -143,7 +143,6 @@ class RegressionBase:
     def fit_model_cycles(self, data):
         self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
         train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
-
         for cycle_index in range(self.model_params['cycles']):
             self.compile_model('mean')
             print(f'\n Starting cycle {cycle_index} mean for {self.group}')

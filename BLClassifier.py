@@ -109,7 +109,7 @@ class Classifier:
         results = minimize(
             bias_init_tf,
             x0=np.zeros(n),
-            args=(frequencies),
+            args=frequencies,
             method='BFGS'
             )
         bias_init = results.x
