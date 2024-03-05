@@ -2,16 +2,24 @@
 lattice system | accuracy
 -------------------------
 cubic          | 99.5%
-orthorhombic   | 85%
+orthorhombic   | 90%
+
 
 Split tetragonal into a<c and c>a
-    - split at dataset generation
-
+    x train regression
+    - train assignment
+    - run optimization
+Monoclinic
+    x Make spacegroup spreadsheet
+    - Make group spec
+    x Reindexing
+    - dataset generation
+    - model training
+    - optimization
 Document current methods
 
-Monoclinic Plan
 
-* Optimization:
+- Optimization:
     - Full softmax array optimization
     - Levenberg-Marquardt optimization
     - SVD optimization
@@ -40,9 +48,10 @@ Monoclinic Plan
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
     - redo dataset generation with new parameters based on RRUFF database
+    - Rewrite GenerateDataset.py
 
 - SWE:
-    * memory leak during cyclic training
+    - memory leak during cyclic training
     - get working on dials
 
 - Regression:
@@ -59,7 +68,6 @@ Monoclinic Plan
           - map d-spacings onto a single scalar correlated with volume
         - ??? extrapolation architecture
 """
-import csv
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -235,6 +243,20 @@ class Indexing:
         group_spec = group_spec.loc[group_spec['group'].notna()]
         group_spec['hm symbol'] = group_spec['hm symbol'].str.strip()
         self.data_params['groups'] = group_spec['group'].unique()
+        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic']:
+            self.data_params['split_groups'] = self.data_params['groups']
+        elif self.data_params['lattice_system'] == 'tetragonal':
+            self.data_params['split_groups'] = []
+            for group in self.data_params['groups']:
+                self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_0_'))
+                self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_1_'))
+        elif self.data_params['lattice_system'] == 'monoclinic':
+            self.data_params['split_groups'] = []
+            for group in self.data_params['groups']:
+                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_0_'))
+                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_1_'))
+                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_2_'))
+
         self.group_mappings = dict.fromkeys(group_spec['hm symbol'].unique())
         for index in range(len(group_spec)):
             self.group_mappings[group_spec.iloc[index]['hm symbol']] = group_spec.iloc[index]['group']
@@ -286,11 +308,25 @@ class Indexing:
         self.data['group'] = self.data[f'{self.hkl_prefactor}spacegroup_symbol_hm'].map(
             lambda x: self.group_mappings[x]
             )
-        data_grouped = self.data.groupby('group')
+        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic']:
+            self.data['split_group'] = self.data['group']
+        elif self.data_params['lattice_system'] == 'tetragonal':
+            # split_0: a < c
+            # split_1: a > c
+            unit_cell = np.stack(self.data[self.unit_cell_key])[:, [0, 2]]
+            split_1 = unit_cell[:, 0] > unit_cell[:, 1]
+            self.data['split_group'] = self.data['group'].map(
+                lambda x: x.replace('tetragonal_', 'tetragonal_0_')
+                )
+            self.data.loc[split_1, 'split_group'] = self.data.loc[split_1, 'split_group'].map(
+                lambda x: x.replace('tetragonal_0_', 'tetragonal_1_')
+                )
+
+        data_grouped = self.data.groupby('split_group')
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]
         for index, group in enumerate(data_grouped.groups.keys()):
             data_group[index] = data_grouped.get_group(group)
-            data_group[index].insert(loc=0, column='group_label', value=index * np.ones(len(data_group[index])))
+            data_group[index].insert(loc=0, column='split_group_label', value=index * np.ones(len(data_group[index])))
             data_group[index] = data_group[index].sample(
                 n=min(len(data_group[index]), self.data_params['n_max']),
                 replace=False,
@@ -327,8 +363,8 @@ class Indexing:
         # This sets up the training / validation tags so that the validation set is taken
         # evenly from groups
         train_label = np.ones(self.data.shape[0], dtype=bool)
-        for group_index, group in enumerate(self.data_params['groups']):
-            indices = np.where(self.data['group'] == group)[0]
+        for group_index, group in enumerate(self.data_params['split_groups']):
+            indices = np.where(self.data['split_group'] == group)[0]
             n_val = int(indices.size * (1 - self.data_params['train_fraction']))
             val_indices = self.rng.choice(indices, size=n_val, replace=False)
             train_label[val_indices] = False
@@ -548,14 +584,6 @@ class Indexing:
                 if len(hkl_ref_index) == 1:
                     hkl_labels[entry_index, point_index] = hkl_ref_index
         self.data['hkl_labels'] = list(hkl_labels)
-        """
-        print(f'Unlabeled peaks: {(hkl_labels == self.data_params["hkl_ref_length"] - 1).sum()}')
-        print(f'Maximum label: {hkl_labels.max()}')
-        for index in range(self.data_params['hkl_ref_length'] - 1):
-            n = np.sum(hkl_labels == index)
-            if n == 0:
-                print(f'hkl {self.hkl_ref[index]} has no equivalents ({index})')
-        """
 
     def augment_data(self):
         self.augmentor = Augmentor(
@@ -570,12 +598,12 @@ class Indexing:
             hkl_key=self.hkl_key,
             )
         self.augmentor.setup(self.data)
-        data_augmented = [None for _ in range(len(self.data_params['groups']))]
-        for group_index, group in enumerate(self.data_params['groups']):
-            print(f'Augmenting {group}')
-            group_data = self.data[self.data['group'] == group]
-            data_augmented[group_index] = self.augmentor.augment(
-                group_data, f'{self.hkl_prefactor}spacegroup_symbol_hm'
+        data_augmented = [None for _ in range(len(self.data_params['split_groups']))]
+        for split_group_index, split_group in enumerate(self.data_params['split_groups']):
+            print(f'Augmenting {split_group}')
+            split_group_data = self.data[self.data['split_group'] == split_group]
+            data_augmented[split_group_index] = self.augmentor.augment(
+                split_group_data, f'{self.hkl_prefactor}spacegroup_symbol_hm'
                 )
         data_augmented = pd.concat(data_augmented, ignore_index=True)
         self.data = pd.concat((self.data, data_augmented), ignore_index=True)
@@ -675,10 +703,10 @@ class Indexing:
         plot_volume_scale = 1000
 
         # Histogram of Groups
-        x = np.arange(len(self.data_params['groups']))
-        group_counts = np.zeros((len(self.data_params['groups']), 2))
-        for index, group in enumerate(self.data_params['groups']):
-            group_data = self.data[self.data['group'] == group]
+        x = np.arange(len(self.data_params['split_groups']))
+        group_counts = np.zeros((len(self.data_params['split_groups']), 2))
+        for index, group in enumerate(self.data_params['split_groups']):
+            group_data = self.data[self.data['split_group'] == group]
             group_counts[index, 0] = group_data.shape[0]
             group_counts[index, 1] = np.sum(~group_data['augmented'])
 
@@ -686,7 +714,7 @@ class Indexing:
         axes.bar(x, group_counts[:, 0], width=0.8, label='All data')
         axes.bar(x, group_counts[:, 1], width=0.8, alpha=0.5, label='Unaugmented')
         axes.set_xticks(x)
-        axes.set_xticklabels(self.data_params['groups'])
+        axes.set_xticklabels(self.data_params['split_groups'])
         axes.tick_params(axis='x', rotation=90)
         axes.set_ylabel('Number of Entries')
         axes.set_xlabel('Group')
@@ -898,22 +926,22 @@ class Indexing:
             plt.close()
 
     def setup_regression(self):
-        self.unit_cell_generator = dict.fromkeys(self.data_params['groups'])
-        for group_index, group in enumerate(self.data_params['groups']):
-            self.unit_cell_generator[group] = Regression_AlphaBeta(
-                group,
+        self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])
+        for split_group_index, split_group in enumerate(self.data_params['split_groups']):
+            self.unit_cell_generator[split_group] = Regression_AlphaBeta(
+                split_group,
                 self.data_params,
-                self.reg_params[group],
+                self.reg_params[split_group],
                 self.save_to['regression'],
                 self.unit_cell_key,
                 self.random_seed,
                 )
-            self.unit_cell_generator[group].setup()
-            if self.reg_params[group]['load_from_tag']:
-                self.unit_cell_generator[group].load_from_tag()
+            self.unit_cell_generator[split_group].setup()
+            if self.reg_params[split_group]['load_from_tag']:
+                self.unit_cell_generator[split_group].load_from_tag()
             else:
-                group_indices = self.data['group'] == group
-                self.unit_cell_generator[group].train_regression(data=self.data[group_indices])
+                split_group_indices = self.data['split_group'] == split_group
+                self.unit_cell_generator[split_group].train_regression(data=self.data[split_group_indices])
 
     def inferences_regression(self):
         uc_pred_scaled = np.zeros((len(self.data), self.data_params['n_outputs']))
@@ -925,12 +953,12 @@ class Indexing:
             len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']
             ))
 
-        for group_index, group in enumerate(self.data_params['groups']):
-            group_indices = self.data['group'] == group
-            uc_pred_scaled[group_indices, :], uc_pred_scaled_cov[group_indices, :, :] = \
-                self.unit_cell_generator[group].do_predictions(data=self.data[group_indices], batch_size=1024)
-            uc_pred_scaled_trees[group_indices, :], uc_pred_scaled_cov_trees[group_indices, :, :], _ = \
-                self.unit_cell_generator[group].do_predictions_trees(data=self.data[group_indices])
+        for split_group_index, split_group in enumerate(self.data_params['split_groups']):
+            split_group_indices = self.data['split_group'] == split_group
+            uc_pred_scaled[split_group_indices, :], uc_pred_scaled_cov[split_group_indices, :, :] = \
+                self.unit_cell_generator[split_group].do_predictions(data=self.data[split_group_indices], batch_size=1024)
+            uc_pred_scaled_trees[split_group_indices, :], uc_pred_scaled_cov_trees[split_group_indices, :, :], _ = \
+                self.unit_cell_generator[split_group].do_predictions_trees(data=self.data[split_group_indices])
 
         uc_pred, uc_pred_cov = self.revert_predictions(uc_pred_scaled, uc_pred_scaled_cov)
         self.data[self.volume_key + '_pred'] = list(self.infer_unit_cell_volume(uc_pred))
@@ -945,7 +973,6 @@ class Indexing:
         self.data[self.unit_cell_key + '_pred_cov_trees'] = list(uc_pred_cov_trees)
         self.data[self.unit_cell_key + '_pred_scaled_trees'] = list(uc_pred_scaled_trees)
         self.data[self.unit_cell_key + '_pred_scaled_cov_trees'] = list(uc_pred_scaled_cov_trees)
-
 
     def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_cov=None):
         if not uc_pred_scaled is None:
@@ -1031,36 +1058,36 @@ class Indexing:
                 y_indices=self.data_params['y_indices'],
                 trees=True
                 )
-        for group in self.data_params['groups']:
+        for split_group in self.data_params['split_groups']:
             evaluate_regression(
-                data=self.data[self.data['group'] == group],
+                data=self.data[self.data['split_group'] == split_group],
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
-                save_to_name=f'{self.save_to["regression"]}/{group}_reg.png',
+                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg.png',
                 y_indices=self.data_params['y_indices'],
                 trees=False
                 )
             evaluate_regression(
-                data=self.data[self.data['group'] == group],
+                data=self.data[self.data['split_group'] == split_group],
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
-                save_to_name=f'{self.save_to["regression"]}/{group}_reg_tree.png',
+                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_tree.png',
                 y_indices=self.data_params['y_indices'],
                 trees=True
                 )
             calibrate_regression(
-                data=self.data[self.data['group'] == group],
+                data=self.data[self.data['split_group'] == split_group],
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
-                save_to_name=f'{self.save_to["regression"]}/{group}_reg_calibration.png',
+                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration.png',
                 y_indices=self.data_params['y_indices'],
                 trees=False
                 )
             calibrate_regression(
-                data=self.data[self.data['group'] == group],
+                data=self.data[self.data['split_group'] == split_group],
                 n_outputs=self.data_params['n_outputs'],
                 unit_cell_key=self.unit_cell_key,
-                save_to_name=f'{self.save_to["regression"]}/{group}_reg_calibration_tree.png',
+                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration_tree.png',
                 y_indices=self.data_params['y_indices'],
                 trees=True
                 )

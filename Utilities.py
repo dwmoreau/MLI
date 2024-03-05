@@ -84,14 +84,14 @@ class Q2Calculator:
         a = unit_cell[:, 0][:, self.newaxis] 
         b = unit_cell[:, 1][:, self.newaxis]
         c = unit_cell[:, 2][:, self.newaxis]
-        cos_beta = self.sin(unit_cell[:, 3][:, self.newaxis])
-        sin_beta = self.cos(unit_cell[:, 3][:, self.newaxis])
+        cos_beta = self.cos(unit_cell[:, 3][:, self.newaxis])
+        sin_beta = self.sin(unit_cell[:, 3][:, self.newaxis])
 
         term0 = self.hkl[:, 0]**2 / a**2
         term1 = self.hkl[:, 1]**2 * sin_beta**2 / b**2
         term2 = self.hkl[:, 2]**2 / c**2
         term3 = 2 * self.hkl[:, 0] * self.hkl[:, 2] * cos_beta / (a * c)
-        term4 = 1 / sin_beta
+        term4 = 1 / sin_beta**2
         q2_ref = term4 * (term0 + term1 + term2 + term3)
         return q2_ref
 

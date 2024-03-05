@@ -1,6 +1,71 @@
 import numpy as np
 
 
+def reindex_entry(lattice_system, unit_cell, spacegroup_symbol, spacegroup_number):
+    if lattice_system == 'orthorhombic':
+        return reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number)
+    elif lattice_system == 'monoclinic':
+        return reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number)
+
+def get_permutation(unit_cell):
+    order = np.argsort(unit_cell[:3])
+    if np.all(order == [0, 1, 2]):
+        permutation = 'abc'
+    elif np.all(order == [0, 2, 1]):
+        permutation = 'acb'
+    elif np.all(order == [1, 0, 2]):
+        permutation = 'bac'
+    elif np.all(order == [2, 0, 1]):
+        permutation = 'cab'
+    elif np.all(order == [1, 2, 0]):
+        permutation = 'bca'
+    elif np.all(order == [2, 1, 0]):
+        permutation = 'cba'
+    permuter = get_permuter(permutation)
+    return permutation, permuter
+
+
+def get_permuter(permutation):
+    if permutation == 'abc':
+        permuter = np.eye(3)
+    elif permutation == 'acb':
+        # Rx
+        permuter = np.array([
+            [1, 0, 0],
+            [0, 0, -1],
+            [0, 1, 0],
+            ])
+    elif permutation == 'bac':
+        # Rz
+        permuter = np.array([
+            [0, -1, 0],
+            [1, 0, 0],
+            [0, 0, 1],
+            ])
+    elif permutation == 'bca':
+        # Rz Rx
+        permuter = np.array([
+            [0, 0, 1],
+            [1, 0, 0],
+            [0, 1, 0],
+            ])
+    elif permutation == 'cab':
+        # Rx Rz
+        permuter = np.array([
+            [0, -1, 0],
+            [0, 0, -1],
+            [1, 0, 0],
+            ])
+    elif permutation == 'cba':
+        # Ry
+        permuter = np.array([
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+    return permuter
+
+
 def reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number):
     permutation, permuter = get_permutation(unit_cell)
     permuted_unit_cell = np.concatenate((np.matmul(np.abs(permuter), unit_cell[:3]), unit_cell[3:]))
@@ -67,10 +132,170 @@ def reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number):
         74: ['I m c m', 'I m m b', 'I c m m', 'I b m m', 'I m m a', 'I m a m'],
         }
     #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
-    if isinstance(spacegroup_map_table[spacegroup_number], str):
+    permuted_spacegroup_symbol = map_spacegroup_symbol(
+        spacegroup_map_table, spacegroup_number, spacegroup_symbol, permutation
+        )
+    return permuted_spacegroup_symbol, permutation, permuted_unit_cell
+
+
+def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number):
+    if unit_cell[4] != 90:
+        unit_cell, _ = reset_monoclinic(unit_cell, radians=False)
+    permutation, permuter = get_permutation(unit_cell)
+    permuted_unit_cell = permute_monoclinic(unit_cell, permutation, radians=False)
+    #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
+    spacegroup_map_table = {
+        '3i': ['P 1 2 1', 'P 1 1 2', 'P 2 1 1', 'P 2 1 1', 'P 1 1 2', 'P 1 2 1'],
+        '3ii': ['B 1 2 1', 'C 1 1 2', 'A 2 1 1', 'A 2 1 1', 'C 1 1 2', 'B 1 2 1'],
+        '4i': ['P 1 21 1', 'P 1 1 21', 'P 21 1 1', 'P 21 1 1', 'P 1 1 21', 'P 1 21 1'],
+        '4ii': ['B 1 21 1', 'C 1 1 21', 'A 21 1 1', 'A 21 1 1', 'C 1 1 21', 'B 1 21 1'],
+        '5i': ['C 1 2 1', 'A 1 1 2', 'B 2 1 1', 'B 2 1 1', 'A 1 1 2', 'C 1 2 1'],
+        '5ii': ['A 1 2 1', 'B 1 1 2', 'C 2 1 1', 'C 2 1 1', 'B 1 1 2', 'A 1 2 1'],
+        '5iii': ['I 1 2 1', 'I 1 1 2', 'I 2 1 1', 'I 2 1 1', 'I 1 1 2', 'I 1 2 1'],
+        '5iv': ['F 1 2 1', 'F 1 1 2', 'F 2 1 1', 'F 2 1 1', 'F 1 1 2', 'F 1 2 1'],
+        '6i': ['P 1 m 1', 'P 1 1 m', 'P m 1 1', 'P m 1 1', 'P 1 1 m', 'P 1 m 1'],
+        '6ii': ['B 1 m 1', 'C 1 1 m', 'A m 1 1', 'A m 1 1', 'C 1 1 m', 'B 1 m 1'],
+        '7i': ['P 1 c 1', 'P 1 1 a', 'P b 1 1', 'P b 1 1', 'P 1 1 a', 'P 1 c 1'],
+        '7ii': ['P 1 a 1', 'P 1 1 b', 'P c 1 1', 'P c 1 1', 'P 1 1 b', 'P 1 a 1'],
+        '7iii': ['P 1 n 1', 'P 1 1 n', 'P n 1 1', 'P n 1 1', 'P 1 1 n', 'P 1 n 1'],
+        '7iv': ['B 1 a 1', 'C 1 1 a', 'A b 1 1', 'A b 1 1', 'C 1 1 a', 'B 1 a 1'],
+        '7v': ['B 1 d 1', 'C 1 1 d', 'A d 1 1', 'A d 1 1', 'C 1 1 d', 'B 1 d 1'],
+        '8i': ['C 1 m 1', 'A 1 1 m', 'B m 1 1', 'B m 1 1', 'A 1 1 m', 'C 1 m 1'],
+        '8ii': ['A 1 m 1', 'B 1 1 m', 'C m 1 1', 'C m 1 1', 'B 1 1 m', 'A 1 m 1'],
+        '8iii': ['I 1 m 1', 'I 1 1 m', 'I m 1 1', 'I m 1 1', 'I 1 1 m', 'I 1 m 1'],
+        '8iv': ['F 1 m 1', 'F 1 1 m', 'F m 1 1', 'F m 1 1', 'F 1 1 m', 'F 1 m 1'],
+        '9i': ['C 1 c 1', 'A 1 1 a', 'B b 1 1', 'B b 1 1', 'A 1 1 a', 'C 1 c 1'],
+        '9ii': ['A 1 a 1', 'B 1 1 b', 'C c 1 1', 'C c 1 1', 'B 1 1 b', 'A 1 a 1'],
+        '9iii': ['I 1 a 1', 'I 1 1 a', 'I b 1 1', 'I b 1 1', 'I 1 1 a', 'I 1 a 1'],
+        '9iv': ['F 1 d 1', 'F 1 1 d', 'F d 1 1', 'F d 1 1', 'F 1 1 d', 'F 1 d 1'],
+        '10i': ['P 1 2/m 1', 'P 1 1 2/m', 'P 2/m 1 1', 'P 2/m 1 1', 'P 1 1 2/m', 'P 1 2/m 1'],
+        '10ii': ['B 1 2/m 1', 'C 1 1 2/m', 'A 2/m 1 1', 'A 2/m 1 1', 'C 1 1 2/m', 'B 1 2/m 1'],
+        '11i': ['P 1 21/m 1', 'P 1 1 21/m', 'P 21/m 1 1', 'P 21/m 1 1', 'P 1 1 21/m', 'P 1 21/m 1'],
+        '11ii': ['B 1 21/m 1', 'C 1 1 21/m', 'A 21/m 1 1', 'A 21/m 1 1', 'C 1 1 21/m', 'B 1 21/m 1'],
+        '12i': ['C 1 2/m 1', 'A 1 1 2/m', 'B 2/m 1 1', 'B 2/m 1 1', 'A 1 1 2/m', 'C 1 2/m 1'],
+        '12ii': ['A 1 2/m 1', 'B 1 1 2/m', 'C 2/m 1 1', 'C 2/m 1 1', 'B 1 1 2/m', 'A 1 2/m 1'],
+        '12iii': ['I 1 2/m 1', 'I 1 1 2/m', 'I 2/m 1 1', 'I 2/m 1 1', 'I 1 1 2/m', 'I 1 2/m 1'],
+        '12iv': ['F 1 2/m 1', 'F 1 1 2/m', 'F 2/m 1 1', 'F 2/m 1 1', 'F 1 1 2/m', 'F 1 2/m 1'],
+        '13i': ['P 1 2/c 1', 'P 1 1 2/a', 'P 2/b 1 1', 'P 2/b 1 1', 'P 1 1 2/a', 'P 1 2/c 1'],
+        '13ii': ['P 1 2/a 1', 'P 1 1 2/b', 'P 2/c 1 1', 'P 2/c 1 1', 'P 1 1 2/b', 'P 1 2/a 1'],
+        '13iii': ['P 1 2/n 1', 'P 1 1 2/n', 'P 2/n 1 1', 'P 2/n 1 1', 'P 1 1 2/n', 'P 1 2/n 1'],
+        '13iv': ['B 1 2/a 1', 'C 1 1 2/a', 'A 2/b 1 1', 'A 2/b 1 1', 'C 1 1 2/a', 'B 1 2/a 1'],
+        '13v': ['B 1 2/d 1', 'C 1 1 2/d', 'A 2/d 1 1', 'A 2/d 1 1', 'C 1 1 2/d', 'B 1 2/d 1'],
+        '14i': ['P 1 21/c 1', 'P 1 1 21/a', 'P 21/b 1 1', 'P 21/b 1 1', 'P 1 1 21/a', 'P 1 21/c 1'],
+        '14ii': ['P 1 21/a 1', 'P 1 1 21/b', 'P 21/c 1 1', 'P 21/c 1 1', 'P 1 1 21/b', 'P 1 21/a 1'],
+        '14iii': ['P 1 21/n 1', 'P 1 1 21/n', 'P 21/n 1 1', 'P 21/n 1 1', 'P 1 1 21/n', 'P 1 21/n 1'],
+        '14iv': ['B 1 21/a 1', 'C 1 1 21/a', 'A 21/b 1 1', 'A 21/b 1 1', 'C 1 1 21/a', 'B 1 21/a 1'],
+        '14v': ['B 1 21/d 1', 'C 1 1 21/d', 'A 21/d 1 1', 'A 21/d 1 1', 'C 1 1 21/d', 'B 1 21/d 1'],
+        '15i': ['C 1 2/c 1', 'A 1 1 2/a', 'B 2/b 1 1', 'B 2/b 1 1', 'A 1 1 2/a', 'C 1 2/c 1'],
+        '15ii': ['A 1 2/a 1', 'B 1 1 2/b', 'C 2/c 1 1', 'C 2/c 1 1', 'B 1 1 2/b', 'A 1 2/a 1'],
+        '15iii': ['I 1 2/a 1', 'I 1 1 2/a', 'I 2/b 1 1', 'I 2/b 1 1', 'I 1 1 2/a', 'I 1 2/a 1'],
+        '15iv': ['F 1 2/d 1', 'F 1 1 2/d', 'F 2/d 1 1', 'F 2/d 1 1', 'F 1 1 2/d', 'F 1 2/d 1'],
+        }
+    for key in spacegroup_map_table.keys():
+        if key.startswith(str(spacegroup_number)):
+            if spacegroup_symbol in spacegroup_map_table[key]:
+                map_table_key = key
+
+    #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
+    permuted_spacegroup_symbol = map_spacegroup_symbol(
+        spacegroup_map_table, map_table_key, spacegroup_symbol, permutation
+        )
+    return permuted_spacegroup_symbol, permutation, permuted_unit_cell
+
+
+def reset_monoclinic(unit_cell, radians):
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    if unit_cell[3] == check and unit_cell[4] != check and unit_cell[5] == check:
+        permutation = 'abc'
+        permuted_unit_cell = unit_cell
+    elif unit_cell[3] != check and unit_cell[4] == check and unit_cell[5] == check:
+        permutation = 'bac'
+        permuted_unit_cell = np.array([
+            unit_cell[1],
+            unit_cell[0],
+            unit_cell[2],
+            check,
+            unit_cell[3],
+            check,
+            ])
+    elif unit_cell[3] == check and unit_cell[4] == check and unit_cell[5] != check:
+        permutation = 'acb'
+        permuted_unit_cell = np.array([
+            unit_cell[0],
+            unit_cell[2],
+            unit_cell[1],
+            check,
+            2*check - unit_cell[5],
+            check,
+            ])
+    permuter = get_permuter(permutation)
+    return permuted_unit_cell, permuter
+
+
+def permute_monoclinic(unit_cell, permutation, radians):
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    permuted_unit_cell = np.zeros(6)
+    if permutation == 'abc':
+        permuted_unit_cell = unit_cell
+    elif permutation == 'bac':
+        permuted_unit_cell = np.array([
+            unit_cell[1],
+            unit_cell[0],
+            unit_cell[2],
+            2*check - unit_cell[4],
+            check,
+            check,
+            ])
+    elif permutation == 'acb':
+        permuted_unit_cell = np.array([
+            unit_cell[0],
+            unit_cell[2],
+            unit_cell[1],
+            check,
+            check,
+            unit_cell[4],
+            ])
+    elif permutation == 'cba':
+        permuted_unit_cell = np.array([
+            unit_cell[2],
+            unit_cell[1],
+            unit_cell[0],
+            check,
+            2*check - unit_cell[4],
+            check,
+            ])
+    elif permutation == 'bca':
+        permuted_unit_cell = np.array([
+            unit_cell[1],
+            unit_cell[2],
+            unit_cell[0],
+            unit_cell[4],
+            check,
+            check,
+            ])
+    elif permutation == 'cab':
+        permuted_unit_cell = np.array([
+            unit_cell[2],
+            unit_cell[0],
+            unit_cell[1],
+            check,
+            check,
+            2*check - unit_cell[4],
+            ])
+    return permuted_unit_cell
+
+
+def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutation):
+    if isinstance(spacegroup_map_table[key], str):
         permuted_spacegroup_symbol = spacegroup_symbol
-    elif isinstance(spacegroup_map_table[spacegroup_number], list):
-        current_index = spacegroup_map_table[spacegroup_number].index(spacegroup_symbol)
+    elif isinstance(spacegroup_map_table[key], list):
+        current_index = spacegroup_map_table[key].index(spacegroup_symbol)
         if current_index == 0:
             # abc
             if permutation == 'abc':
@@ -155,64 +380,5 @@ def reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number):
                 new_index = 1
             elif permutation == 'cba':
                 new_index = 0
-        permuted_spacegroup_symbol = spacegroup_map_table[spacegroup_number][new_index]
-    return permuted_spacegroup_symbol, permutation, permuted_unit_cell
-
-
-def get_permutation(unit_cell):
-    order = np.argsort(unit_cell[:3])
-    if np.all(order == [0, 1, 2]):
-        permutation = 'abc'
-    elif np.all(order == [0, 2, 1]):
-        permutation = 'acb'
-    elif np.all(order == [1, 0, 2]):
-        permutation = 'bac'
-    elif np.all(order == [2, 0, 1]):
-        permutation = 'bca'
-    elif np.all(order == [1, 2, 0]):
-        permutation = 'cab'
-    elif np.all(order == [2, 1, 0]):
-        permutation = 'cba'
-    permuter = get_permuter(permutation)
-    return permutation, permuter
-
-
-def get_permuter(permutation):
-    if permutation == 'abc':
-        permuter = np.eye(3)
-    elif permutation == 'acb':
-        # Rx
-        permuter = np.array([
-            [1, 0, 0],
-            [0, 0, -1],
-            [0, 1, 0],
-            ])
-    elif permutation == 'bac':
-        # Rz
-        permuter = np.array([
-            [0, -1, 0],
-            [1, 0, 0],
-            [0, 0, 1],
-            ])
-    elif permutation == 'bca':
-        # Rz Rx
-        permuter = np.array([
-            [0, 0, 1],
-            [1, 0, 0],
-            [0, 1, 0],
-            ])
-    elif permutation == 'cab':
-        # Rx Rz
-        permuter = np.array([
-            [0, -1, 0],
-            [0, 0, -1],
-            [1, 0, 0],
-            ])
-    elif permutation == 'cba':
-        # Ry
-        permuter = np.array([
-            [0, 0, 1],
-            [0, 1, 0],
-            [-1, 0, 0],
-            ])
-    return permuter
+        permuted_spacegroup_symbol = spacegroup_map_table[key][new_index]
+    return permuted_spacegroup_symbol

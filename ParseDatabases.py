@@ -1,4 +1,3 @@
-from ccdc.io import CrystalReader
 import gemmi
 import numpy as np
 
@@ -9,7 +8,7 @@ from EntryHelpers import spacegroup_to_symmetry
 from EntryHelpers import verify_crystal_system_bravais_lattice_consistency
 from EntryHelpers import verify_unit_cell_consistency_by_bravais_lattice
 from EntryHelpers import verify_volume
-from Reindexing import reindex_entry_orthorhombic
+from Reindexing import reindex_entry
 
 
 class ProcessEntry:
@@ -161,10 +160,10 @@ class ProcessEntry:
             #print(f'{self.reason} {self.volume} {expected_volume}')
             return None
 
-        if self.lattice_system == 'orthorhombic':
+        if self.lattice_system in ['orthorhombic', 'monoclinic']:
             try:
                 self.reindexed_spacegroup_symbol_hm, self.permutation, self.reindexed_unit_cell = \
-                    reindex_entry_orthorhombic(self.unit_cell, self.spacegroup_symbol_hm, self.spacegroup_number)
+                    reindex_entry(self.lattice_system, self.unit_cell, self.spacegroup_symbol_hm, self.spacegroup_number)
             except:
                 self.reason = 'Could not permute axes'
                 self.status = False
@@ -177,11 +176,6 @@ class ProcessEntry:
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
-        elif self.lattice_system in ['cubic', 'tetragonal']:
-            self.reindexed_unit_cell = self.unit_cell
-            self.permutation = 'abc'
-            self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
-            self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
         else:
             self.reindexed_unit_cell = self.unit_cell
             self.permutation = 'abc'
@@ -196,11 +190,11 @@ class ProcessEntry:
             else:
                 self.split = 1
         elif self.lattice_system == 'monoclinic':
-            if self.unit_cell[3] != 90:
+            if self.reindexed_unit_cell[3] != 90:
                 self.split = 0
-            elif self.unit_cell[4] != 90:
+            elif self.reindexed_unit_cell[4] != 90:
                 self.split = 1
-            elif self.unit_cell[5] != 90:
+            elif self.reindexed_unit_cell[5] != 90:
                 self.split = 2
         else:
             self.split = 0
@@ -297,16 +291,6 @@ class ProcessCODEntry(ProcessEntry):
 
     def verify_entry(self, cif_file_name):
         self.cif_file_name = cif_file_name
-        """
-        # This check becomes a major bottle neck. Pushed off to GenerateDataset.py
-        try:
-            _ = CrystalReader(self.cif_file_name)[0]
-        except:
-            self.reason = 'Could not open with ccdc.io.CrystalReader'
-            self.status = False
-            print(self.reason)
-            return None
-        """
 
         cif_file_block = gemmi.cif.read_file(cif_file_name).sole_block()
 

@@ -506,7 +506,7 @@ class CandidateOptLoss_inv2:
             self.prefactor = np.log(np.sqrt(2*np.pi) * self.sigma) - np.log(self.softmax)
             self.hessian_prefactor = (1 / self.sigma**2)[:, np.newaxis, np.newaxis]
 
-    def get_q2_pred_cubic_tetragonal_orthorhombic(self, uc_inv2, jac=True):
+    def get_q2_pred_cubic_tetragonal_orthorhombic(self, uc_inv2, jac=True, hessian=False):
         arg = self.hkl2 * uc_inv2[np.newaxis, :]
         q2_pred = np.sum(arg, axis=1)
         if jac:

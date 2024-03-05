@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 
 from EntryHelpers import save_identifiers
-from Reindexing import get_permuter
+from Reindexing import get_permutation
+from Reindexing import reset_monoclinic
 
 
 class EntryGenerator:
@@ -107,7 +108,7 @@ class EntryGenerator:
         else:
             return np.ones(peaks.size, dtype=bool)
 
-    def get_pattern(self, crystal, permutation):
+    def get_pattern(self, crystal, unit_cell, lattice_system):
         def reset_peaks(peaks, hkl_order, indices, axes):
             n = np.count_nonzero(indices)
             peaks[:n, :, axes] = peaks[indices, :, axes]
@@ -170,10 +171,16 @@ class EntryGenerator:
         peaks[indices.size:, :, 5] = 0
         hkl_order[:indices.size, :, 5] = hkl_order[indices, :, 0]
         hkl_order[indices.size:, :, 5] = 0
-        permuter = get_permuter(permutation)
+        if lattice_system == 'monoclinic' and unit_cell[4] != 90:
+            unit_cell, reset_permuter = reset_monoclinic(unit_cell, radians=False)
+        _, permuter = get_permutation(unit_cell)
         peaks_df = {}
         for index, tag in enumerate(self.peak_removal_tags):
-            permuted_hkl = np.matmul(permuter, hkl_order[:, :3, index, np.newaxis])[:, :, 0]
+            if lattice_system == 'monoclinic' and unit_cell[4] != 90:
+                hkl = np.matmul(hkl_order[:, :3, index], permuter)
+            else:
+                hkl = hkl_order[:, :3, index]
+            permuted_hkl = np.matmul(hkl, permuter)
             if tag == 'all':
                 check_sa = peaks[:self.peak_length, 1, index]
             elif tag == 'intersect':
@@ -252,7 +259,8 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
         if crystal is not None:
             data_iteration[0]['pattern'], peaks_df = entry_generator.get_pattern(
                 crystal,
-                data_iteration[0]['permutation']
+                data_iteration[0]['unit_cell'],
+                data_iteration[0]['lattice_system'],
                 )
             data_iteration[0] = fill_data_iteration(
                 data_iteration[0], peaks_df, entry_generator.peak_removal_tags, entry_generator.peak_components
@@ -284,7 +292,11 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
             except:
                 crystal = None
         if crystal is not None:
-            data_extra['pattern'], peaks_df = entry_generator.get_pattern(crystal, data_extra['permutation'])
+            data_extra['pattern'], peaks_df = entry_generator.get_pattern(
+                crystal,
+                data_extra['unit_cell'],
+                data_extra['lattice_system'],
+                )
             data_extra = fill_data_iteration(
                 data_extra, peaks_df, entry_generator.peak_removal_tags, entry_generator.peak_components
                 )
@@ -300,7 +312,7 @@ if __name__ == '__main__':
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    entries_per_group = 10000
+    entries_per_group = 5000
     bad_identifiers_csd = []
     bad_identifiers_cod = []
     csd_entry_reader = EntryReader('CSD')
@@ -316,8 +328,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'tetragonal']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'tetragonal']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'monoclinic']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'monoclinic']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')
@@ -397,7 +409,7 @@ if __name__ == '__main__':
                         crystal = None
                 if crystal is not None:
                     data_iteration_rank['pattern'], peaks_df = entry_generator.get_pattern(
-                        crystal, data_iteration_rank['permutation']
+                        crystal, data_iteration_rank['unit_cell'], data_iteration_rank['lattice_system']
                         )
                     data_iteration_rank = fill_data_iteration(
                         data_iteration_rank, peaks_df, entry_generator.peak_removal_tags, entry_generator.peak_components
