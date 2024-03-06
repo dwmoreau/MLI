@@ -420,63 +420,14 @@ def verify_unit_cell_consistency_by_bravais_lattice(bravais_lattice, unit_cell):
             elif alpha == 120 and beta == 90 and gamma == 90:
                 check = True
     elif bravais_lattice in ['mC', 'mP']:
-        if alpha == beta and alpha == 90 and gamma != 90:
-            check = True
-        elif alpha == gamma and alpha == 90 and beta != 90:
-            check = True
-        elif beta == gamma and beta == 90 and alpha != 90:
-            check = True
-    elif bravais_lattice == 'aP':
-        check = True
-    return check
-
-
-def verify_unit_cell_consistency_by_lattice_system(lattice_system, cell_lengths, cell_angles):
-    def square(alpha, beta, gamma):
-        if alpha == 90 and beta == 90 and gamma == 90:
-            return True
-        else:
-            return False
-
-    check = False
-    a, b, c = cell_lengths
-    alpha, beta, gamma = cell_angles
-
-    if lattice_system == 'cubic':
-        if square(alpha, beta, gamma):
-            if a == b and b == c:
-                check = True
-    elif lattice_system == 'tetragonal':
-        if square(alpha, beta, gamma):
-            if a == b or a == c or b == c:
-                check = True
-    elif lattice_system == 'orthorhombic':
-        if square(alpha, beta, gamma):
-            check = True
-    elif lattice_system in ['hexagonal', 'rhombohedral']:
-        # It seems like there are lots of mislabeled hR as hP and visa-versa.
-        if a == b and b == c:
-            if alpha == beta and beta == gamma:
-                check = True
-        if a == b or b == c or a == c:
-            if alpha == 90 and beta == 90 and gamma == 120:
-                check = True
-            elif alpha == 90 and beta == 120 and gamma == 90:
-                check = True
-            elif alpha == 120 and beta == 90 and gamma == 90:
-                check = True
-    elif lattice_system == 'monoclinic':
+        # it is valid for the monoclinic to be set with beta == 90.
+        # However, it is much easier logistically later on to have all the monoclinic
+        # entries initially with beta != 90.
+        # The beta != 90 setting covers over 99% of the monoclinic entries, which there
+        # is no shortage of.
         if alpha == gamma and alpha == 90 and beta != 90:
             check = True
-        """
-        # Unit cell settings with beta == 90 are fine. They make up a small fraction of total entries and
-        # excluding them makes logistics simpler.
-        elif alpha == beta and alpha == 90 and gamma != 90:
-            check = True
-        elif beta == gamma and beta == 90 and alpha != 90:
-            check = True
-        """
-    elif lattice_system == 'triclinic':
+    elif bravais_lattice == 'aP':
         check = True
     return check
 

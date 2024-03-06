@@ -8,7 +8,7 @@ import pandas as pd
 
 from EntryHelpers import save_identifiers
 from Reindexing import get_permutation
-from Reindexing import reset_monoclinic
+from Utilities import Q2Calculator
 
 
 class EntryGenerator:
@@ -108,7 +108,7 @@ class EntryGenerator:
         else:
             return np.ones(peaks.size, dtype=bool)
 
-    def get_pattern(self, crystal, unit_cell, lattice_system):
+    def get_pattern(self, crystal, unit_cell, reindexed_unit_cell, lattice_system):
         def reset_peaks(peaks, hkl_order, indices, axes):
             n = np.count_nonzero(indices)
             peaks[:n, :, axes] = peaks[indices, :, axes]
@@ -171,16 +171,35 @@ class EntryGenerator:
         peaks[indices.size:, :, 5] = 0
         hkl_order[:indices.size, :, 5] = hkl_order[indices, :, 0]
         hkl_order[indices.size:, :, 5] = 0
-        if lattice_system == 'monoclinic' and unit_cell[4] != 90:
-            unit_cell, reset_permuter = reset_monoclinic(unit_cell, radians=False)
-        _, permuter = get_permutation(unit_cell)
+
+        if lattice_system in ['monoclinic', 'orthorhombic']:
+            _, permuter = get_permutation(unit_cell)
         peaks_df = {}
+
+        # I get a "destination is read-only" error without creating new arrays for the unit cell
+        unit_cell_ = np.zeros(6)
+        reindexed_unit_cell_ = np.zeros(6)
+        unit_cell_[:3] = unit_cell[:3]
+        unit_cell_[3:] = np.pi/180 * unit_cell[3:]
+        reindexed_unit_cell_[:3] = reindexed_unit_cell[:3]
+        reindexed_unit_cell_[3:] = np.pi/180 * reindexed_unit_cell[3:]
         for index, tag in enumerate(self.peak_removal_tags):
-            if lattice_system == 'monoclinic' and unit_cell[4] != 90:
-                hkl = np.matmul(hkl_order[:, :3, index], permuter)
+            hkl = hkl_order[:, :3, index]
+            if lattice_system in ['monoclinic', 'orthorhombic']:
+                reindexed_hkl = np.matmul(hkl, permuter)
+
+                q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl, tensorflow=False)
+                q2 = q2_calculator.get_q2(unit_cell_[np.newaxis])
+                reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
+                reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[np.newaxis])
+                check = np.isclose(q2, reindexed_q2).all()
+                if not check:
+                    print('Reindexing Failure')
+                    print(unit_cell_)
+                    print(reindexed_unit_cell_)
+                    print()
             else:
-                hkl = hkl_order[:, :3, index]
-            permuted_hkl = np.matmul(hkl, permuter)
+                reindexed_hkl = hkl
             if tag == 'all':
                 check_sa = peaks[:self.peak_length, 1, index]
             elif tag == 'intersect':
@@ -188,12 +207,12 @@ class EntryGenerator:
             peaks_df.update({
                 f'theta2_{tag}': peaks[:self.peak_length, 0, index],
                 f'd_spacing_{tag}': peaks[:self.peak_length, 1, index],
-                f'h_{tag}': hkl_order[:self.peak_length, 0, index],
-                f'k_{tag}': hkl_order[:self.peak_length, 1, index],
-                f'l_{tag}': hkl_order[:self.peak_length, 2, index],
-                f'reindexed_h_{tag}': permuted_hkl[:self.peak_length, 0],
-                f'reindexed_k_{tag}': permuted_hkl[:self.peak_length, 1],
-                f'reindexed_l_{tag}': permuted_hkl[:self.peak_length, 2],
+                f'h_{tag}': hkl[:self.peak_length, 0],
+                f'k_{tag}': hkl[:self.peak_length, 1],
+                f'l_{tag}': hkl[:self.peak_length, 2],
+                f'reindexed_h_{tag}': reindexed_hkl[:self.peak_length, 0],
+                f'reindexed_k_{tag}': reindexed_hkl[:self.peak_length, 1],
+                f'reindexed_l_{tag}': reindexed_hkl[:self.peak_length, 2],
                 })
 
         check_i = check_i[check_i > check_sa.max()]
@@ -260,6 +279,7 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
             data_iteration[0]['pattern'], peaks_df = entry_generator.get_pattern(
                 crystal,
                 data_iteration[0]['unit_cell'],
+                data_iteration[0]['reindexed_unit_cell'],
                 data_iteration[0]['lattice_system'],
                 )
             data_iteration[0] = fill_data_iteration(
@@ -295,6 +315,7 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
             data_extra['pattern'], peaks_df = entry_generator.get_pattern(
                 crystal,
                 data_extra['unit_cell'],
+                data_extra['reindexed_unit_cell'],
                 data_extra['lattice_system'],
                 )
             data_extra = fill_data_iteration(
@@ -306,6 +327,7 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
             group_data_set.loc[pattern_index] = data_extra
             pattern_index += 1
     return bad_identifiers, group_data_set, pattern_index
+
 
 if __name__ == '__main__':
     COMM = MPI.COMM_WORLD
@@ -409,7 +431,10 @@ if __name__ == '__main__':
                         crystal = None
                 if crystal is not None:
                     data_iteration_rank['pattern'], peaks_df = entry_generator.get_pattern(
-                        crystal, data_iteration_rank['unit_cell'], data_iteration_rank['lattice_system']
+                        crystal,
+                        data_iteration_rank['unit_cell'],
+                        data_iteration_rank['reindexed_unit_cell'],
+                        data_iteration_rank['lattice_system']
                         )
                     data_iteration_rank = fill_data_iteration(
                         data_iteration_rank, peaks_df, entry_generator.peak_removal_tags, entry_generator.peak_components

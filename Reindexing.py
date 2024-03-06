@@ -7,6 +7,7 @@ def reindex_entry(lattice_system, unit_cell, spacegroup_symbol, spacegroup_numbe
     elif lattice_system == 'monoclinic':
         return reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number)
 
+
 def get_permutation(unit_cell):
     order = np.argsort(unit_cell[:3])
     if np.all(order == [0, 1, 2]):
@@ -68,7 +69,7 @@ def get_permuter(permutation):
 
 def reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number):
     permutation, permuter = get_permutation(unit_cell)
-    permuted_unit_cell = np.concatenate((np.matmul(np.abs(permuter), unit_cell[:3]), unit_cell[3:]))
+    permuted_unit_cell = np.concatenate((np.matmul(unit_cell[:3].T, np.abs(permuter)), unit_cell[3:]))
     #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
     spacegroup_map_table = {
         16: 'P 2 2 2',

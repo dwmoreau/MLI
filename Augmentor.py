@@ -21,12 +21,8 @@ class Augmentor:
             seed,
             uc_scaler,
             angle_scale,
-            unit_cell_key,
-            hkl_key
             ):
         self.aug_params = aug_params
-        self.unit_cell_key = unit_cell_key
-        self.hkl_key = hkl_key
         self.n_generated_points = n_generated_points
         self.min_unit_cell_scaled = min_unit_cell_scaled
         self.save_to = save_to
@@ -40,21 +36,17 @@ class Augmentor:
         self.rng = np.random.default_rng(seed)
         self.uc_scaler = uc_scaler
         self.angle_scale = angle_scale
-        if data_params['unit_cell_representation'] == 'reindexed':
-            self.permute_unit_cell = True
-        else:
-            self.permute_unit_cell = False
 
     def setup(self, data):
         print(f'\n Setting up augmentation {self.aug_params["tag"]}')
         # Calculate the number of times each entry is to be augmented
         training_data = data[data['train']]
-        unit_cell_scaled = np.stack(training_data[f'{self.unit_cell_key}_scaled'])[:, self.y_indices]
+        unit_cell_scaled = np.stack(training_data['reindexed_unit_cell_scaled'])[:, self.y_indices]
         if self.aug_params['augment_method'] == 'random':
             self.perturb_unit_cell = self.perturb_unit_cell_std
             self.stddev = unit_cell_scaled.std(axis=0)
             fig, axes = plt.subplots(1, 1, figsize=(5, 3))
-            axes.plot(self.stddev)
+            axes.plot(self.stddev, marker='.')
             axes.set_xlabel('Unit cell index')
             axes.set_ylabel('Unit cell standard deviation')
             fig.tight_layout()
@@ -65,7 +57,7 @@ class Augmentor:
             self.perturb_unit_cell = self.perturb_unit_cell_cov
             self.cov = np.cov(unit_cell_scaled.T)
             fig, axes = plt.subplots(1, 1, figsize=(6, 4))
-            cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov,)
+            cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov)
             cov_display.plot(ax=axes, colorbar=False, values_format='0.2f')
             axes.set_title('Unit cell covariance')
             axes.set_xlabel('')
@@ -80,7 +72,7 @@ class Augmentor:
             unit_cell_scaled_transformed = self.pca.transform(unit_cell_scaled)
             self.stddev = np.std(unit_cell_scaled_transformed, axis=0)
             fig, axes = plt.subplots(2, 1, figsize=(6, 6))
-            pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca.components_,)
+            pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca.components_)
             pca_display.plot(ax=axes[0], colorbar=False, values_format='0.2f')
             axes[1].plot(self.pca.singular_values_, marker='.')
             axes[0].set_title('PCA Components')
@@ -200,20 +192,44 @@ class Augmentor:
     def augment_entry(self, entry):
         augmented_entry = copy.deepcopy(entry)
         augmented_entry['augmented'] = True
-        unit_cell_scaled = np.array(augmented_entry[f'{self.unit_cell_key}_scaled'])
-        perturbed_unit_cell_scaled = unit_cell_scaled.copy()
-        perturbed_unit_cell_scaled[self.y_indices] = self.perturb_unit_cell(unit_cell_scaled[self.y_indices])
-        perturbed_unit_cell = np.zeros(6)
-        perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-        perturbed_unit_cell[3:] = self.angle_scale * perturbed_unit_cell_scaled[3:] + np.pi/2
-        augmented_entry[f'{self.unit_cell_key}_scaled'] = perturbed_unit_cell_scaled
-        augmented_entry[f'{self.unit_cell_key}'] = perturbed_unit_cell
+        reindexed_unit_cell_scaled = np.array(augmented_entry['reindexed_unit_cell_scaled'])
+        perturbed_reindexed_unit_cell_scaled = reindexed_unit_cell_scaled.copy()
+        perturbed_reindexed_unit_cell_scaled[self.y_indices] = self.perturb_unit_cell(reindexed_unit_cell_scaled[self.y_indices])
+        perturbed_reindexed_unit_cell = np.zeros(6)
+        perturbed_reindexed_unit_cell[:3] = perturbed_reindexed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+        perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
+        augmented_entry['reindexed_unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
+        augmented_entry['reindexed_unit_cell'] = perturbed_reindexed_unit_cell
+        if self.lattice_system in ['orthorhombic', 'monoclinic']:
+            # The perturbed unit cell is based on 'reindexed_unit_cell'
+            # The 'reindexed_unit_cell' has alpha = gamma = np.nan
+            # 'unit_cell' requires no nan's and always has the monoclinic angle at beta
+            order = np.concatenate((
+                np.argsort(np.array(augmented_entry['unit_cell_scaled'])[:3]), [3, 4, 5]
+                ))
+            perturbed_unit_cell_scaled = perturbed_reindexed_unit_cell_scaled[order]
+            perturbed_unit_cell_scaled[[3, 5]] = 0
+            perturbed_unit_cell = perturbed_reindexed_unit_cell[order]
+            perturbed_unit_cell[[3, 5]] = np.pi/2
+            augmented_entry['unit_cell_scaled'] = perturbed_unit_cell_scaled
+            augmented_entry['unit_cell'] = perturbed_unit_cell
+        elif self.lattice_system == 'triclinic':
+            assert False
+        elif self.lattice_system in ['cubic', 'tetragonal']:
+            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
+            augmented_entry['unit_cell'] = perturbed_reindexed_unit_cell
+        else:
+            assert False
         # calculate new d-spacings
-        hkl_sa = augmented_entry[f'{self.hkl_key}_sa']
-        q2_calculator = Q2Calculator(self.lattice_system, hkl_sa, tensorflow=False)
-        q2_sa = q2_calculator.get_q2(perturbed_unit_cell[np.newaxis, :])[0]
+        if self.lattice_system == 'monoclinic':
+            q2_calculator = Q2Calculator(self.lattice_system, augmented_entry['hkl_sa'], tensorflow=False)
+            q2_sa = q2_calculator.get_q2(np.array(augmented_entry['unit_cell'])[np.newaxis, :])[0]
+            existing_peaks = np.any(augmented_entry['hkl_sa'] != 0, axis=1)
+        else:
+            q2_calculator = Q2Calculator(self.lattice_system, augmented_entry['reindexed_hkl_sa'], tensorflow=False)
+            q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[np.newaxis, :])[0]
+            existing_peaks = np.any(augmented_entry['reindexed_hkl_sa'] != 0, axis=1)
 
-        existing_peaks = np.any(hkl_sa != 0, axis=1)
         q2_sa = np.sort(q2_sa[existing_peaks])
         augmented_entry['d_spacing_sa'] = 1 / np.sqrt(q2_sa)
         augmented_entry['q2_sa'] = q2_sa
@@ -222,21 +238,27 @@ class Augmentor:
         first_peak_index = self.first_probability['x'][
             np.searchsorted(self.first_probability['cdf'], self.rng.random())
             ]
+        if first_peak_index >= q2_sa.size:
+            return None
         q2 = [q2_sa[first_peak_index]]
-        hkl = [augmented_entry[f'{self.hkl_key}_sa'][first_peak_index]]
+        hkl = [augmented_entry['hkl_sa'][first_peak_index]]
+        reindexed_hkl = [augmented_entry['reindexed_hkl_sa'][first_peak_index]]
         for index in range(first_peak_index + 1, q2_sa.size):
             if self.rng.random() < self.keep_rate(q2_sa[index] - q2_sa[index - 1], *self.keep_rate_params):
                 q2.append(q2_sa[index])
-                hkl.append(augmented_entry[f'{self.hkl_key}_sa'][index])
+                hkl.append(augmented_entry['hkl_sa'][index])
+                reindexed_hkl.append(augmented_entry['reindexed_hkl_sa'][index])
 
         if len(q2) >= self.n_points:
             q2 = np.array(q2)[:self.n_points]
             sort_indices = np.argsort(q2)
             q2 = q2[sort_indices]
             hkl = np.array(hkl)[:self.n_points][sort_indices]
+            reindexed_hkl = np.array(reindexed_hkl)[:self.n_points][sort_indices]
             augmented_entry[f'q2_{self.points_tag}'] = q2
             augmented_entry[f'd_spacing_{self.points_tag}'] = 1 / np.sqrt(q2)
-            augmented_entry[f'{self.hkl_key}'] = hkl
+            augmented_entry['hkl'] = hkl
+            augmented_entry['reindexed_hkl'] = reindexed_hkl
             return augmented_entry
         else:
             return None
@@ -257,7 +279,7 @@ class Augmentor:
     def _permute_perturbed_unit_cell(self, perturbed_unit_cell_scaled):
         if self.lattice_system in ['monoclinic', 'triclinic']:
             perturbed_unit_cell_scaled[:3] = np.sort(perturbed_unit_cell_scaled[:3])
-        else:
+        elif self.lattice_system == 'orthorhombic':
             perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
         return perturbed_unit_cell_scaled
 
@@ -270,12 +292,10 @@ class Augmentor:
                 loc=unit_cell_scaled,
                 scale=self.aug_params['augment_shift'] * self.stddev
                 )[0]
-            #print(f'{unit_cell_scaled} {perturbed_unit_cell_scaled} {self.min_unit_cell_scaled} {i}')
             i += 1
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
-        if self.permute_unit_cell:
-            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
+        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_cov(self, unit_cell_scaled):
@@ -289,8 +309,7 @@ class Augmentor:
                 )[0]
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
-        if self.permute_unit_cell:
-            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
+        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_pca(self, unit_cell_scaled):
@@ -307,6 +326,5 @@ class Augmentor:
                 )[0, :]
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
-        if self.permute_unit_cell:
-            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
+        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
         return perturbed_unit_cell_scaled

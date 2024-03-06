@@ -4,7 +4,6 @@ from mpi4py import MPI
 import numpy as np
 import os
 from sklearn.base import BaseEstimator, TransformerMixin
-import tensorflow as tf
 
 
 class IdentityTransformer(BaseEstimator, TransformerMixin):
@@ -36,6 +35,7 @@ class Q2Calculator:
         self.hkl = hkl
         self.lattice_system = lattice_system
         if tensorflow:
+            import tensorflow as tf
             self.newaxis = tf.newaxis
             self.sin = tf.math.sin
             self.cos = tf.math.cos
@@ -149,25 +149,26 @@ class Q2Calculator:
 
 
 class PairwiseDifferenceCalculator(Q2Calculator):
-    def __init__(self, lattice_system, hkl_ref, tensorflow, q2_scaler, uc_scaler=None):
+    def __init__(self, lattice_system, hkl_ref, tensorflow, q2_scaler, uc_scaler=None, angle_scale=None):
         super().__init__(lattice_system, hkl_ref, tensorflow)
         self.q2_scaler = q2_scaler
         if uc_scaler is not None:
             self.uc_scaler = uc_scaler
+            self.angle_scale = angle_scale
 
     def get_pairwise_differences_from_uc_scaled(self, uc_pred_scaled, q2_scaled):
         uc_pred = self.zeros_like(uc_pred_scaled)
         if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            uc_pred = (uc_pred_scaled * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0])
+            uc_pred = uc_pred_scaled * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
         elif self.lattice_system == 'monoclinic':
-            uc_pred[:, :3] = (uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0])
-            uc_pred[:, 3] = (uc_pred_scaled[:, 3] + np.pi/2)
+            uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+            uc_pred[:, 3] = self.angle_scale * uc_pred_scaled[:, 3] + np.pi/2
         elif self.lattice_system == 'triclinic':
-            uc_pred[:, :3] = (uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0])
-            uc_pred[:, 3:] = (uc_pred_scaled[:, 3:] + np.pi/2)
+            uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+            uc_pred[:, 3:] = self.angle_scale * uc_pred_scaled[:, 3:] + np.pi/2
         elif self.lattice_system == 'rhombohedral':
-            uc_pred[:, 0] = (uc_pred_scaled[:, 0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0])
-            uc_pred[:, 1] = (uc_pred_scaled[:, 1] + np.pi/2)
+            uc_pred[:, 0] = uc_pred_scaled[:, 0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+            uc_pred[:, 1] = self.angle_scale * uc_pred_scaled[:, 1] + np.pi/2
         return self.get_pairwise_differences(uc_pred, q2_scaled)
 
     def get_pairwise_differences(self, uc_pred, q2_scaled):

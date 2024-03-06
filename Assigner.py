@@ -10,7 +10,7 @@ from Utilities import write_params
 
 
 class Assigner:
-    def __init__(self, data_params, model_params, hkl_ref, uc_scaler, q2_scaler, save_to):
+    def __init__(self, data_params, model_params, hkl_ref, uc_scaler, angle_scale, q2_scaler, save_to):
         self.model_params = model_params
         self.model_params['n_uc_params'] = len(data_params['y_indices'])
         self.model_params['n_points'] = data_params['n_points']
@@ -38,6 +38,7 @@ class Assigner:
             tensorflow=True,
             q2_scaler=q2_scaler,
             uc_scaler=uc_scaler,
+            angle_scale=angle_scale,
             )
 
     def save(self):

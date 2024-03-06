@@ -15,12 +15,11 @@ from Utilities import write_params
 
 
 class RegressionBase:
-    def __init__(self, group, data_params, model_params, save_to, unit_cell_key, seed):
+    def __init__(self, group, data_params, model_params, save_to, seed):
         self.model_params = model_params
         self.n_points = data_params['n_points']
         self.n_outputs = data_params['n_outputs']
         self.y_indices = data_params['y_indices']
-        self.unit_cell_key = unit_cell_key
         self.group = group
         self.save_to = save_to
         self.seed = seed
@@ -83,8 +82,8 @@ class RegressionBase:
         train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])}
         val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])}
         if self.model_params['predict_pca']:
-            unit_cell_scaled_train = np.stack(train[f'{self.unit_cell_key}_scaled'])[:, self.y_indices]
-            unit_cell_scaled_val = np.stack(val[f'{self.unit_cell_key}_scaled'])[:, self.y_indices]
+            unit_cell_scaled_train = np.stack(train['reindexed_unit_cell_scaled'])[:, self.y_indices]
+            unit_cell_scaled_val = np.stack(val['reindexed_unit_cell_scaled'])[:, self.y_indices]
             self.pca = PCA(n_components=self.n_outputs).fit(unit_cell_scaled_train)
             train_true = {
                 f'uc_pred_scaled_{self.group}': self.pca.transform(unit_cell_scaled_train)
@@ -94,14 +93,10 @@ class RegressionBase:
                 }
         else:
             train_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(
-                    train[f'{self.unit_cell_key}_scaled']
-                    )[:, self.y_indices],
+                f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.y_indices],
                 }
             val_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(
-                    val[f'{self.unit_cell_key}_scaled']
-                    )[:, self.y_indices],
+                f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.y_indices],
                 }
         return train_inputs, val_inputs, train_true, val_true
 
@@ -114,6 +109,8 @@ class RegressionBase:
             max_depth=self.model_params['random_forest']['max_depth'],
             max_samples=self.model_params['random_forest']['subsample'],
             )
+        # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
+        # function. The true values are 'reindexed_unit_cell_scaled'
         self.random_forest_regressor.fit(train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}'])
 
     def do_predictions_trees(self, data=None, inputs=None, q2_scaled=None):
@@ -353,8 +350,8 @@ class RegressionBase:
 
 
 class Regression_AlphaBeta(RegressionBase):
-    def __init__(self, group, data_params, model_params, save_to, unit_cell_key, seed=12345):
-        super().__init__(group, data_params, model_params, save_to, unit_cell_key, seed)
+    def __init__(self, group, data_params, model_params, save_to, seed=12345):
+        super().__init__(group, data_params, model_params, save_to, seed)
 
     def setup(self):
         model_params_defaults = {
@@ -742,7 +739,7 @@ class Regression_AlphaBeta(RegressionBase):
         if batch_size is None:
             batch_size = self.model_params['batch_size']
 
-        # Predicting on batch helps with a memory leak...
+        # predict_on_batch helps with a memory leak...
         N = len(data)
         n_batches = N // batch_size
         left_over = N % batch_size

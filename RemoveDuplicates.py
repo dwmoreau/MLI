@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 
-source = 'cod'
+source = 'csd'
 
 if source == 'csd':
     print('Removing duplicates from CSD dataset')

@@ -8,7 +8,9 @@ from EntryHelpers import spacegroup_to_symmetry
 from EntryHelpers import verify_crystal_system_bravais_lattice_consistency
 from EntryHelpers import verify_unit_cell_consistency_by_bravais_lattice
 from EntryHelpers import verify_volume
+from Reindexing import get_permuter
 from Reindexing import reindex_entry
+from Utilities import Q2Calculator
 
 
 class ProcessEntry:
@@ -46,6 +48,8 @@ class ProcessEntry:
         self.status = True
         self.reason = None
 
+        self.hkl_ref_monoclinic = np.load('data/hkl_ref_monoclinic.npy')[:60]
+
     def make_output_dict(self):
         self.output_dict = {
             'database': self.database,
@@ -75,6 +79,20 @@ class ProcessEntry:
             'reason': self.reason,
         }
 
+    def verify_reindexing(self):
+        unit_cell = self.unit_cell.copy()
+        unit_cell[3:] *= np.pi/180
+        q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=self.hkl_ref_monoclinic, tensorflow=False)
+        q2 = q2_calculator.get_q2(unit_cell[np.newaxis])
+
+        reindexed_unit_cell = self.reindexed_unit_cell.copy()
+        reindexed_unit_cell[3:] *= np.pi/180
+        reindexed_hkl = np.matmul(self.hkl_ref_monoclinic, get_permuter(self.permutation))
+        reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
+        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
+        check = np.isclose(q2, reindexed_q2).all()
+        return check
+
     def common_verification(self):
         # Apparently there are legitimate unit cells larger than 230. Dan Paley mentioned that they
         if self.spacegroup_number and self.spacegroup_number > 230:
@@ -92,6 +110,13 @@ class ProcessEntry:
             self.reason = 'Crystal system bravais lattice mismatch'
             self.status = False
             #print(f'{self.reason}')
+            return None
+
+        if self.lattice_system == 'monoclinic' and self.spacegroup_symbol_hm.startswith('F'):
+            # There is like one of these entries in all the CSD. I'm excluding these to make
+            # logistics easier.
+            self.reason = 'Excluding F centered monoclinic'
+            self.status = False
             return None
 
         if np.any(self.unit_cell == 0) or (self.volume == 0):
@@ -169,18 +194,17 @@ class ProcessEntry:
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
                 return None
+            if not self.verify_reindexing():
+                self.reason = 'Reindexing Error'
+                self.status = False
+                print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.permutation}')
+                return None
             try:
                 self.reindexed_spacegroup_symbol_hall = gemmi.SpaceGroup(self.reindexed_spacegroup_symbol_hm).hall
             except:
                 self.reason = 'Could not read reindexed spacegroup symbol'
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
-                return None
-            if self.lattice_system == 'monoclinic' and self.spacegroup_symbol_hm.startswith('F'):
-                # There is like one of these entries in all the CSD. I'm excluding these to make
-                # logistics easier.
-                self.reason = 'Excluding F centered monoclinic'
-                self.status = False
                 return None
         else:
             self.reindexed_unit_cell = self.unit_cell
