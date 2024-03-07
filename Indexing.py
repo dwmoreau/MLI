@@ -5,12 +5,6 @@ cubic          | 99.5%
 orthorhombic   | 90%
 
 Monoclinic
-    - debug
-    - redo dataset generation
-        - Generate dataset
-            x redo monoclinic
-            - redo orthorhombic
-    - Reindexing
     - model training
     - optimization
 Document current methods
@@ -18,6 +12,7 @@ Document current methods
 
 - Optimization:
     * SVD optimization
+    - Actual likelihood target function
     - What differentiates a found / not found entry
         - large differences between prediction and true
     - Full softmax array optimization
@@ -36,6 +31,7 @@ Document current methods
     - Incorporate forward model
 
 - Data
+    - Redo orthorhombic dataset generation
     - more strict duplicate removal
         - entries that differ by one atom in the unit cell
     - Rewrite GenerateDataset.py
@@ -47,6 +43,7 @@ Document current methods
     - redo dataset generation with new parameters based on RRUFF database
 
 - SWE:
+    * reshape / flatten hkl's for saving
     * memory leak during cyclic training
     - get working on dials
 
@@ -78,6 +75,7 @@ from Assigner import Assigner
 from Augmentor import Augmentor
 from Evaluations import evaluate_regression
 from Evaluations import calibrate_regression
+from Reindexing import get_permutation
 from Regression import Regression_AlphaBeta
 from Utilities import Q2Calculator
 from Utilities import read_params
@@ -296,20 +294,18 @@ class Indexing:
                 )
         elif self.data_params['lattice_system'] == 'monoclinic':
             self.data['split_group'] = self.data['group']
-            # reset unit cell so beta != 90 <- move this to dataset generation. For now just remove
-            # This has been added to ParseDatabases and could be removed after regenerating the dataset
-            unit_cell = np.stack(self.data['unit_cell'])
-            self.data = self.data.loc[unit_cell[:, 4] != 90]
             # make reindexed unit cell alpha = gamma = nan and beta != 90
             # This is not true, but makes it compatible with y_indices = [0, 1, 2, 4]
             reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
             new_reindexed_unit_cell = reindexed_unit_cell.copy()
             new_reindexed_unit_cell[:, [3, 5]] = np.nan
+            reindexed_angle_index = np.zeros(len(self.data), dtype=int)
             for entry_index in range(len(self.data)):
                 # conversion to radians happens latter
-                angle_index = 3 + np.argwhere(reindexed_unit_cell[entry_index, 3:] != 90)
-                new_reindexed_unit_cell[entry_index, 4] = reindexed_unit_cell[entry_index, angle_index]
+                reindexed_angle_index[entry_index] = 3 + np.argwhere(reindexed_unit_cell[entry_index, 3:] != 90)
+                new_reindexed_unit_cell[entry_index, 4] = reindexed_unit_cell[entry_index, reindexed_angle_index[entry_index]]
             self.data['reindexed_unit_cell'] = list(new_reindexed_unit_cell)
+            self.data['reindexed_angle_index'] = list(reindexed_angle_index)
 
         data_grouped = self.data.groupby('split_group')
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]
@@ -336,24 +332,6 @@ class Indexing:
             #   *_points_tag: Should be 'intersect', the tag for peaks dropped in a realistic manner.
             self.data['q2_sa'] = 1 / self.data['d_spacing_sa']**2
             self.data[f'q2_{self.data_params["points_tag"]}'] = 1 / self.data[f'd_spacing_{self.data_params["points_tag"]}']**2
-
-        """
-        # delete if unnecessary
-        bl_label = np.zeros(self.data.shape[0], dtype=int)
-        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
-            indices = np.where(self.data['bravais_lattice'] == bravais_lattice)[0]
-            bl_label[indices] = bl_index
-        self.data['bravais_lattice_label'] = bl_label
-
-        spacegroups = self.data['spacegroup_number'].unique()
-        spacegroup_label = np.zeros(self.data.shape[0], dtype=int)
-        self.data_params['spacegroups'] = []
-        for spacegroup_index, spacegroup in enumerate(spacegroups):
-            indices = np.where(self.data['spacegroup_number'] == spacegroup)[0]
-            spacegroup_label[indices] = spacegroup_index
-            self.data_params['spacegroups'].append(spacegroup)
-        self.data['spacegroup_label'] = spacegroup_label
-        """
 
         # This sets up the training / validation tags so that the validation set is taken
         # evenly from groups
@@ -1058,19 +1036,17 @@ class Indexing:
             unit_cell_pred_trees = np.zeros((N, 4))
             unit_cell_pred_cov_trees = np.zeros((N, 4, 4))
 
-            ###!!! DEBUGING - THROW OUT LATER
-            reindexed_uc_pred = np.stack(self.data['reindexed_unit_cell'])[:, self.data_params['y_indices']]
+            ###!!! DEBUGING - UNCOMMENT THIS AND THE PRINT STATMENTS BELOW TO VERIFY THAT THE REINDEXING WORKS
+            #reindexed_uc_pred = np.stack(self.data['reindexed_unit_cell'])[:, self.data_params['y_indices']]
 
             for entry_index in range(unit_cell.shape[0]):
-                order = np.argsort(unit_cell[entry_index][:3])
-                if np.all(order == [0, 1, 2]):
-                    permutation = 'abc'
+                permutation, _ = get_permutation(unit_cell[entry_index])
+                if permutation == 'abc':
                     unit_cell_pred[entry_index] = reindexed_uc_pred[entry_index]
                     unit_cell_pred_cov[entry_index] = reindexed_uc_pred_cov[entry_index]
                     unit_cell_pred_trees[entry_index] = reindexed_uc_pred_trees[entry_index]
                     unit_cell_pred_cov_trees[entry_index] = reindexed_uc_pred_cov_trees[entry_index]
-                elif np.all(order == [0, 2, 1]):
-                    permutation = 'acb'
+                elif permutation == 'acb':
                     unit_cell_pred[entry_index] = np.array([
                         reindexed_uc_pred[entry_index, 0],
                         reindexed_uc_pred[entry_index, 2],
@@ -1092,8 +1068,7 @@ class Indexing:
                     unit_cell_pred_cov_trees[entry_index, 1, 1] = reindexed_uc_pred_cov_trees[entry_index, 2, 2]
                     unit_cell_pred_cov_trees[entry_index, 2, 2] = reindexed_uc_pred_cov_trees[entry_index, 1, 1]
                     unit_cell_pred_cov_trees[entry_index, 3, 3] = reindexed_uc_pred_cov_trees[entry_index, 3, 3]
-                elif np.all(order == [1, 0, 2]):
-                    permutation = 'bac'
+                elif permutation == 'bac':
                     unit_cell_pred[entry_index] = np.array([
                         reindexed_uc_pred[entry_index, 1],
                         reindexed_uc_pred[entry_index, 0],
@@ -1115,36 +1090,12 @@ class Indexing:
                     unit_cell_pred_cov_trees[entry_index, 1, 1] = reindexed_uc_pred_cov_trees[entry_index, 0, 0]
                     unit_cell_pred_cov_trees[entry_index, 2, 2] = reindexed_uc_pred_cov_trees[entry_index, 2, 2]
                     unit_cell_pred_cov_trees[entry_index, 3, 3] = reindexed_uc_pred_cov_trees[entry_index, 3, 3]
-                elif np.all(order == [1, 2, 0]):
-                    permutation = 'bca'
+                elif permutation == 'bca':
                     unit_cell_pred[entry_index] = np.array([
-                        reindexed_uc_pred[entry_index, 1],
                         reindexed_uc_pred[entry_index, 2],
                         reindexed_uc_pred[entry_index, 0],
+                        reindexed_uc_pred[entry_index, 1],
                         reindexed_uc_pred[entry_index, 3],
-                        ])
-                    unit_cell_pred_cov[entry_index, 0, 0] = reindexed_uc_pred_cov[entry_index, 1, 1]
-                    unit_cell_pred_cov[entry_index, 1, 1] = reindexed_uc_pred_cov[entry_index, 2, 2]
-                    unit_cell_pred_cov[entry_index, 2, 2] = reindexed_uc_pred_cov[entry_index, 0, 0]
-                    unit_cell_pred_cov[entry_index, 3, 3] = reindexed_uc_pred_cov[entry_index, 3, 3]
-
-                    unit_cell_pred_trees[entry_index] = np.array([
-                        reindexed_uc_pred_trees[entry_index, 1],
-                        reindexed_uc_pred_trees[entry_index, 2],
-                        reindexed_uc_pred_trees[entry_index, 0],
-                        reindexed_uc_pred_trees[entry_index, 3],
-                        ])
-                    unit_cell_pred_cov_trees[entry_index, 0, 0] = reindexed_uc_pred_cov_trees[entry_index, 1, 1]
-                    unit_cell_pred_cov_trees[entry_index, 1, 1] = reindexed_uc_pred_cov_trees[entry_index, 2, 2]
-                    unit_cell_pred_cov_trees[entry_index, 2, 2] = reindexed_uc_pred_cov_trees[entry_index, 0, 0]
-                    unit_cell_pred_cov_trees[entry_index, 3, 3] = reindexed_uc_pred_cov_trees[entry_index, 3, 3]
-                elif np.all(order == [2, 0, 1]):
-                    permutation = 'cab'
-                    unit_cell_pred[entry_index] = np.array([
-                        reindexed_uc_pred[entry_index, 2],
-                        reindexed_uc_pred[entry_index, 0],
-                        reindexed_uc_pred[entry_index, 1],
-                        np.pi - reindexed_uc_pred[entry_index, 3],
                         ])
                     unit_cell_pred_cov[entry_index, 0, 0] = reindexed_uc_pred_cov[entry_index, 2, 2]
                     unit_cell_pred_cov[entry_index, 1, 1] = reindexed_uc_pred_cov[entry_index, 0, 0]
@@ -1155,14 +1106,35 @@ class Indexing:
                         reindexed_uc_pred_trees[entry_index, 2],
                         reindexed_uc_pred_trees[entry_index, 0],
                         reindexed_uc_pred_trees[entry_index, 1],
-                        np.pi - reindexed_uc_pred_trees[entry_index, 3],
+                        reindexed_uc_pred_trees[entry_index, 3],
                         ])
                     unit_cell_pred_cov_trees[entry_index, 0, 0] = reindexed_uc_pred_cov_trees[entry_index, 2, 2]
                     unit_cell_pred_cov_trees[entry_index, 1, 1] = reindexed_uc_pred_cov_trees[entry_index, 0, 0]
-                    unit_cell_pred_cov_trees[entry_index, 2, 2] = reindexed_uc_pred_cov_trees[entry_index, 1, 2]
+                    unit_cell_pred_cov_trees[entry_index, 2, 2] = reindexed_uc_pred_cov_trees[entry_index, 1, 1]
                     unit_cell_pred_cov_trees[entry_index, 3, 3] = reindexed_uc_pred_cov_trees[entry_index, 3, 3]
-                elif np.all(order == [2, 1, 0]):
-                    permutation = 'cba'
+                elif permutation == 'cab':
+                    unit_cell_pred[entry_index] = np.array([
+                        reindexed_uc_pred[entry_index, 1],
+                        reindexed_uc_pred[entry_index, 2],
+                        reindexed_uc_pred[entry_index, 0],
+                        np.pi - reindexed_uc_pred[entry_index, 3],
+                        ])
+                    unit_cell_pred_cov[entry_index, 0, 0] = reindexed_uc_pred_cov[entry_index, 1, 1]
+                    unit_cell_pred_cov[entry_index, 1, 1] = reindexed_uc_pred_cov[entry_index, 2, 2]
+                    unit_cell_pred_cov[entry_index, 2, 2] = reindexed_uc_pred_cov[entry_index, 0, 0]
+                    unit_cell_pred_cov[entry_index, 3, 3] = reindexed_uc_pred_cov[entry_index, 3, 3]
+
+                    unit_cell_pred_trees[entry_index] = np.array([
+                        reindexed_uc_pred_trees[entry_index, 1],
+                        reindexed_uc_pred_trees[entry_index, 2],
+                        reindexed_uc_pred_trees[entry_index, 0],
+                        np.pi - reindexed_uc_pred_trees[entry_index, 3],
+                        ])
+                    unit_cell_pred_cov_trees[entry_index, 0, 0] = reindexed_uc_pred_cov_trees[entry_index, 1, 1]
+                    unit_cell_pred_cov_trees[entry_index, 1, 1] = reindexed_uc_pred_cov_trees[entry_index, 2, 2]
+                    unit_cell_pred_cov_trees[entry_index, 2, 2] = reindexed_uc_pred_cov_trees[entry_index, 0, 0]
+                    unit_cell_pred_cov_trees[entry_index, 3, 3] = reindexed_uc_pred_cov_trees[entry_index, 3, 3]
+                elif permutation == 'cba':
                     unit_cell_pred[entry_index] = np.array([
                         reindexed_uc_pred[entry_index, 2],
                         reindexed_uc_pred[entry_index, 1],
@@ -1184,13 +1156,16 @@ class Indexing:
                     unit_cell_pred_cov_trees[entry_index, 1, 1] = reindexed_uc_pred_cov_trees[entry_index, 1, 1]
                     unit_cell_pred_cov_trees[entry_index, 2, 2] = reindexed_uc_pred_cov_trees[entry_index, 0, 0]
                     unit_cell_pred_cov_trees[entry_index, 3, 3] = reindexed_uc_pred_cov_trees[entry_index, 3, 3]
-                #if unit_cell_pred[entry_index, 3] != unit_cell[entry_index, 4]:
-                if permutation == 'cba':
-                    print(permutation)
-                    print(reindexed_uc_pred[entry_index]) # True Reindexed Unit cell
-                    print(unit_cell_pred[entry_index]) # Unreindexed true unit cell
-                    print(unit_cell[entry_index])  # True Unit cell
-                    print()
+
+                #check = np.isclose(unit_cell_pred[entry_index, :], unit_cell[entry_index, [0, 1, 2, 4]])
+                #if not np.all(check):
+                #    print(self.data.iloc[entry_index]['augmented'])
+                #    print(permutation)
+                #    print(reindexed_uc_pred[entry_index]) # True Reindexed Unit cell
+                #    print(unit_cell_pred[entry_index]) # Unreindexed true unit cell
+                #    print(unit_cell[entry_index])  # True Unit cell
+                #    print()
+
             self.data['unit_cell_pred'] = list(unit_cell_pred)
             self.data['unit_cell_pred_cov'] = list(unit_cell_pred_cov)
             self.data['unit_cell_pred_trees'] = list(unit_cell_pred_trees)

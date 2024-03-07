@@ -22,6 +22,9 @@ def get_permutation(unit_cell):
         permutation = 'bca'
     elif np.all(order == [2, 1, 0]):
         permutation = 'cba'
+    else:
+        print(f'Valid permutation could not be determined from {unit_cell}')
+        assert False
     permuter = get_permuter(permutation)
     return permutation, permuter
 
@@ -64,6 +67,9 @@ def get_permuter(permutation):
             [0, 1, 0],
             [-1, 0, 0],
             ])
+    else:
+        print(f'Permuter could not be determined from {permutation}')
+        assert False
     return permuter
 
 
@@ -140,8 +146,6 @@ def reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number):
 
 
 def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number):
-    if unit_cell[4] != 90:
-        unit_cell, _ = reset_monoclinic(unit_cell, radians=False)
     permutation, permuter = get_permutation(unit_cell)
     permuted_unit_cell = permute_monoclinic(unit_cell, permutation, radians=False)
     #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
@@ -204,38 +208,6 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number):
     return permuted_spacegroup_symbol, permutation, permuted_unit_cell
 
 
-def reset_monoclinic(unit_cell, radians):
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    if unit_cell[3] == check and unit_cell[4] != check and unit_cell[5] == check:
-        permutation = 'abc'
-        permuted_unit_cell = unit_cell
-    elif unit_cell[3] != check and unit_cell[4] == check and unit_cell[5] == check:
-        permutation = 'bac'
-        permuted_unit_cell = np.array([
-            unit_cell[1],
-            unit_cell[0],
-            unit_cell[2],
-            check,
-            unit_cell[3],
-            check,
-            ])
-    elif unit_cell[3] == check and unit_cell[4] == check and unit_cell[5] != check:
-        permutation = 'acb'
-        permuted_unit_cell = np.array([
-            unit_cell[0],
-            unit_cell[2],
-            unit_cell[1],
-            check,
-            2*check - unit_cell[5],
-            check,
-            ])
-    permuter = get_permuter(permutation)
-    return permuted_unit_cell, permuter
-
-
 def permute_monoclinic(unit_cell, permutation, radians):
     if radians:
         check = np.pi/2
@@ -244,15 +216,6 @@ def permute_monoclinic(unit_cell, permutation, radians):
     permuted_unit_cell = np.zeros(6)
     if permutation == 'abc':
         permuted_unit_cell = unit_cell
-    elif permutation == 'bac':
-        permuted_unit_cell = np.array([
-            unit_cell[1],
-            unit_cell[0],
-            unit_cell[2],
-            2*check - unit_cell[4],
-            check,
-            check,
-            ])
     elif permutation == 'acb':
         permuted_unit_cell = np.array([
             unit_cell[0],
@@ -262,13 +225,13 @@ def permute_monoclinic(unit_cell, permutation, radians):
             check,
             unit_cell[4],
             ])
-    elif permutation == 'cba':
+    elif permutation == 'bac':
         permuted_unit_cell = np.array([
-            unit_cell[2],
             unit_cell[1],
             unit_cell[0],
-            check,
+            unit_cell[2],
             2*check - unit_cell[4],
+            check,
             check,
             ])
     elif permutation == 'bca':
@@ -289,7 +252,72 @@ def permute_monoclinic(unit_cell, permutation, radians):
             check,
             2*check - unit_cell[4],
             ])
+    elif permutation == 'cba':
+        permuted_unit_cell = np.array([
+            unit_cell[2],
+            unit_cell[1],
+            unit_cell[0],
+            check,
+            2*check - unit_cell[4],
+            check,
+            ])
     return permuted_unit_cell
+
+
+def unpermute_monoclinic(permuted_unit_cell, permutation, radians):
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    unit_cell = np.zeros(6)
+    if permutation == 'abc':
+        unit_cell = permuted_unit_cell
+    elif permutation == 'acb':
+        unit_cell = np.array([
+            permuted_unit_cell[0],
+            permuted_unit_cell[2],
+            permuted_unit_cell[1],
+            check,
+            permuted_unit_cell[5],
+            check,
+            ])
+    elif permutation == 'bac':
+        unit_cell = np.array([
+            permuted_unit_cell[1],
+            permuted_unit_cell[0],
+            permuted_unit_cell[2],
+            check,
+            2*check - permuted_unit_cell[3],
+            check,
+            ])
+    elif permutation == 'bca':
+        unit_cell = np.array([
+            permuted_unit_cell[2],
+            permuted_unit_cell[0],
+            permuted_unit_cell[1],
+            check,
+            permuted_unit_cell[3],
+            check,
+            ])
+    elif permutation == 'cab':
+        unit_cell = np.array([
+            permuted_unit_cell[1],
+            permuted_unit_cell[2],
+            permuted_unit_cell[0],
+            check,
+            2*check - permuted_unit_cell[5],
+            check,
+            ])
+    elif permutation == 'cba':
+        unit_cell = np.array([
+            permuted_unit_cell[2],
+            permuted_unit_cell[1],
+            permuted_unit_cell[0],
+            check,
+            2*check - permuted_unit_cell[4],
+            check,
+            ])
+    return unit_cell
 
 
 def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutation):

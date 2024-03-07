@@ -7,6 +7,8 @@ import scipy.optimize
 from sklearn.decomposition import PCA
 from sklearn.metrics import ConfusionMatrixDisplay
 
+from Reindexing import get_permutation
+from Reindexing import unpermute_monoclinic
 from Utilities import Q2Calculator
 
 
@@ -200,19 +202,41 @@ class Augmentor:
         perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
         augmented_entry['reindexed_unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
         augmented_entry['reindexed_unit_cell'] = perturbed_reindexed_unit_cell
-        if self.lattice_system in ['orthorhombic', 'monoclinic']:
+        if self.lattice_system == 'monoclinic':
             # The perturbed unit cell is based on 'reindexed_unit_cell'
-            # The 'reindexed_unit_cell' has alpha = gamma = np.nan
+            # The 'reindexed_unit_cell' has alpha = gamma = np.nan as a convenience, even though the true reindexed
+            # monoclinic angle might be alpha or gamma.
+            # Perturbation does not change the monoclinic angle.
             # 'unit_cell' requires no nan's and always has the monoclinic angle at beta
+
+            # This sets up a perturbed_reindexed_unit_cell with the monoclinic angle at the correct location
+            perturbed_reindexed_unit_cell_ = np.zeros(6)
+            perturbed_reindexed_unit_cell_[:3] = perturbed_reindexed_unit_cell[:3]
+            perturbed_reindexed_unit_cell_[3:] = np.pi/2
+            perturbed_reindexed_unit_cell_[augmented_entry['reindexed_angle_index']] = perturbed_reindexed_unit_cell[4]
+            # This unreindexes the perturbed_reindexed_unit_cell
+            # Conversion to radians happens before augmentation
+            permutation, _ = get_permutation(augmented_entry['unit_cell'])
+            perturbed_unit_cell = unpermute_monoclinic(perturbed_reindexed_unit_cell_, permutation, radians=True)
+            perturbed_unit_cell_scaled = np.zeros(6)
+            perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+            perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
+
+            augmented_entry['unit_cell_scaled'] = perturbed_unit_cell_scaled
+            augmented_entry['unit_cell'] = perturbed_unit_cell
+            if np.all(perturbed_unit_cell[3:] == np.pi/2):
+                print('FAILED')
+                print(permutation)
+                print(perturbed_reindexed_unit_cell)
+                print(perturbed_reindexed_unit_cell_)
+                print(perturbed_unit_cell)
+                print()
+        elif self.lattice_system == 'orthorhombic':
             order = np.concatenate((
                 np.argsort(np.array(augmented_entry['unit_cell_scaled'])[:3]), [3, 4, 5]
                 ))
-            perturbed_unit_cell_scaled = perturbed_reindexed_unit_cell_scaled[order]
-            perturbed_unit_cell_scaled[[3, 5]] = 0
-            perturbed_unit_cell = perturbed_reindexed_unit_cell[order]
-            perturbed_unit_cell[[3, 5]] = np.pi/2
-            augmented_entry['unit_cell_scaled'] = perturbed_unit_cell_scaled
-            augmented_entry['unit_cell'] = perturbed_unit_cell
+            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled[order]
+            augmented_entry['unit_cell'] =  perturbed_reindexed_unit_cell[order]
         elif self.lattice_system == 'triclinic':
             assert False
         elif self.lattice_system in ['cubic', 'tetragonal']:
