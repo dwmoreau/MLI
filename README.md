@@ -74,7 +74,7 @@ Entries that do not pass the QC check are stored in files data/failed_read_csd_r
 
 The COD database can be obtained via rsync. The command can be found at .../data/download_cod.sh. This is a single line rsync command, just change the destination directory.
 
-Next, run ParseCOD.py. This is essentially the same processes as ParseCSD.py, also run it in parallel.
+Next, run ParseCOD.py. This is essentially the same processes as ParseCSD.py, also run it in parallel. The directory to the COD cif files is specified absolutely in ParseCSD.py. This needs to be updated. It might be okay to change to a relative path  
 
 ### Step 3: Duplicate removal and database combination.
 A duplicate is defined as:
