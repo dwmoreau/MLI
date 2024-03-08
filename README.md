@@ -1,32 +1,54 @@
-# unit_cell_ML
+# MLI
 
 ## Dependencies
+Two separate python environments are used, one for dataset generation and another for ML training. Dataset generation requires the CCDC python API. It is a fairly complex library and I felt it was best to keep it separate from the ML libraries.
+
+### For the dataset generation environment:
 1: CCDC API
 You need access through a subscription. These are the relevant links for LBL:
 
 https://software.chem.ucla.edu/CSD/
 
-https://software.chem.ucla.edu/CSD/protected/distribution/release_install_2022_3.pdf
+Command to activate the csd python environment: "source /Path/To/CCDCInstallation/ccdc-software/csd-python-api/miniconda/bin/activate base"
 
 I would recommend installing mamba, adding programs on top of the CCDC's python package is incredibly slow
 
-2: mpi4py
+Additional python libraries, all can be installed through conda-forge
 
-I am running this on a M1 mac. I just install mpi4py and mpich through conda-forge
+- mpi4py & mpich/openmpi
 
-3: pandas & pyarrow
+- pandas & pyarrow
 
-I am saving my dataframes to parquet format. It saves so much time over json format.
+I am saving my dataframes to parquet format which requires the pyarrow library. It saves so much time over json format. In retrospect, saving to an hdf5 format would probably be best, but I don't feel like it would be worth refactoring the code.
 
-4: tensorflow
+- gemmi
 
-The basic ML uses tensorflow. At no point do you need the CCDC's api and tensorflow at the same time. So I install this is in a separate environment
+This is a crystallography library that I use to extract information from cif files and parse and convert spacegroup symbols.
+
+- ipython & jupyterlab
+
+I don't believe these are strictly neccessary. I do a lot of testing in Jupyter notebooks.
+
+### For the ML training environment:
+
+- tensorflow
+
+- sklearn
+
+- pandas & pyarrow
+
+- gemmi
+  
+- ipython & jupyterlab
+
+- mpi4py & mpich/openmpi
+
 
 ## Dataset generation
 
-### Step 1: Run convert_ccdc_mpi.py
+### Step 1: Prepare the CSD database.
 
-This goes through all the entries in the CSD and does a quality control check and duplicate removal check. The output file is stored in ...data/unique_entries.parquet The QC checks for the following:
+In the CCDI environment, run ParseCSD.py. This is setup to be run parallelized with mpi, to run with 8 ranks for example: mpiexec -n 8 python ParseCSD.py. This goes through all the entries in the CSD and does a quality control check. Each entry and relevant information is stored in pandas data frames. The outputs from each rank are saved individually to data/csd_rank.parquet - There will be one data frame for each MPI rank. The QC checks for the following:
 
   1: No chemical formula
 
@@ -46,17 +68,26 @@ This goes through all the entries in the CSD and does a quality control check an
 
   9: Unit cell volume is within an order of magnitude of 18 X number of non hydrogen atoms in the unit cell
 
-Each entry and relevant information is stored in pandas data frames. There will be one data frame for each MPI rank.
+Entries that do not pass the QC check are stored in files data/failed_read_csd_rank.parquet.
 
-A duplicate removal step is then performed. A duplicate is defined as:
+### Step 2: Prepare the COD database.
+
+The COD database can be obtained via rsync. The command can be found at .../data/download_cod.sh. This is a single line rsync command, just change the destination directory.
+
+Next, run ParseCOD.py. This is essentially the same processes as ParseCSD.py, also run it in parallel.
+
+### Step 3: Duplicate removal and database combination.
+A duplicate is defined as:
 
 1: Belongs to the same crystal family
 
 2: Has unit cell volume within 5%
 
-The duplicate removal step was a stand alone function. This was recently combined into convert_ccdc_mpi.py to reduce the number of steps. The stand alone function works, the combination has not been bug tested.
+The program RemoveDuplicates.py removes duplicates from the CSD and COD databases separately and needs to be run twice, once for the CSD and COD. Edit the first two lines to specify the database and the number of ranks used to run ParseCSD.py or ParseCOD.py. This reads each file resulting from ParseCSD.py or ParseCOD.py and removes duplicates within a database. The unique entries are save to data/unique_entries_csd.parquet or data/unique_entries_cod.parquet. This program is not parallelized. It must be run serially.
 
-### Step 2: Run GenerateDataset_mpi.py
+Run CombineDatabases.py to combine the unique CSD and COD entries. This file is stored at data/unique_cod_entries_not_in_csd.parquet. This program is not parallelized. It must be run serially.
+
+### Step 4: Run GenerateDataset.py
 
 This uses the unique_entries.parquet file from Step 1 to generate a data set. This data set includes the following components for each entry:
 - identifier
