@@ -41,12 +41,16 @@ class Q2Calculator:
             self.cos = tf.math.cos
             self.zeros = tf.zeros
             self.zeros_like = tf.zeros_like
+            self.array = tf.constant
+            self.dtype = tf.float32
         else:
             self.newaxis = np.newaxis
             self.sin = np.sin
             self.cos = np.cos
             self.zeros = np.zeros
             self.zeros_like = np.zeros_like
+            self.array = np.array
+            self.dtype = None
         if self.lattice_system == 'cubic':
             self.get_q2 = self.get_q2_cubic
         elif self.lattice_system == 'tetragonal':
@@ -155,20 +159,47 @@ class PairwiseDifferenceCalculator(Q2Calculator):
         if uc_scaler is not None:
             self.uc_scaler = uc_scaler
             self.angle_scale = angle_scale
+        if lattice_system == 'monoclinic':
+            self.scale = self.array([
+                self.uc_scaler.scale_[0], self.uc_scaler.scale_[0], self.uc_scaler.scale_[0],
+                self.angle_scale,
+                ],
+                dtype=self.dtype
+                )
+            self.mean = self.array([
+                self.uc_scaler.mean_[0], self.uc_scaler.mean_[0], self.uc_scaler.mean_[0],
+                np.pi/2,
+                ],
+                dtype=self.dtype
+                )
+        elif lattice_system == 'triclinic':
+            self.scale = self.array([
+                self.uc_scaler.scale_[0], self.uc_scaler.scale_[0], self.uc_scaler.scale_[0],
+                self.angle_scale, self.angle_scale, self.angle_scale,
+                ],
+                dtype=self.dtype
+                )
+            self.mean = self.array([
+                self.uc_scaler.mean_[0], self.uc_scaler.mean_[0], self.uc_scaler.mean_[0],
+                np.pi/2, np.pi/2, np.pi/2,
+                ],
+                dtype=self.dtype
+                )
+        elif lattice_system == 'rhombohedral':
+            self.scale = self.array(
+                [self.uc_scaler.scale_[0], self.angle_scale],
+                dtype=self.dtype
+                )
+            self.mean = self.array(
+                [self.uc_scaler.mean_[0], np.pi/2],
+                dtype=self.dtype
+                )
 
     def get_pairwise_differences_from_uc_scaled(self, uc_pred_scaled, q2_scaled):
-        uc_pred = self.zeros_like(uc_pred_scaled)
         if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
             uc_pred = uc_pred_scaled * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-        elif self.lattice_system == 'monoclinic':
-            uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            uc_pred[:, 3] = self.angle_scale * uc_pred_scaled[:, 3] + np.pi/2
-        elif self.lattice_system == 'triclinic':
-            uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            uc_pred[:, 3:] = self.angle_scale * uc_pred_scaled[:, 3:] + np.pi/2
-        elif self.lattice_system == 'rhombohedral':
-            uc_pred[:, 0] = uc_pred_scaled[:, 0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            uc_pred[:, 1] = self.angle_scale * uc_pred_scaled[:, 1] + np.pi/2
+        elif self.lattice_system in ['monoclinic', 'triclinic', 'rhombohedral']:
+            uc_pred = uc_pred_scaled * self.scale + self.mean
         return self.get_pairwise_differences(uc_pred, q2_scaled)
 
     def get_pairwise_differences(self, uc_pred, q2_scaled):

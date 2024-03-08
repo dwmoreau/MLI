@@ -4,11 +4,18 @@ lattice system | accuracy
 cubic          | 99.5%
 orthorhombic   | 90%
 
-Monoclinic
-    - Train without the LSTM
-    - optimization
-Document current methods
+- Documentation
+    - Update README.md
+    - Write method "introduction"
 
+- DIALS GPU
+    - Generate datasets with as many entries as possible
+        - Cubic
+        - Tetragonal
+        - Monoclinic
+        - Orthorhombic
+    - Update counts
+    - Train ML models on
 
 - Optimization:
     * SVD optimization
@@ -45,10 +52,9 @@ Document current methods
     * memory leak during cyclic training
     * reshape / flatten hkl's for saving
     * get working on dials
-        - install ccdc api
         - generate data
+        - redo counts
         - get MLI working
-        -
 
 - Regression:
     * convert random forest variance to covariance.
