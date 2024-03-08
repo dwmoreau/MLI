@@ -4,20 +4,21 @@ lattice system | accuracy
 cubic          | 99.5%
 orthorhombic   | 90%
 
-- Documentation
+* Documentation
     - Update README.md
     - Write method "introduction"
 
 - DIALS GPU
     - Generate datasets with as many entries as possible
-        - Cubic
-        - Tetragonal
         - Monoclinic
         - Orthorhombic
+        - Cubic
+        - Tetragonal
     - Update counts
     - Train ML models on
 
 - Optimization:
+    * monoclinic implementation
     * SVD optimization
     - Actual likelihood target function
     - What differentiates a found / not found entry
@@ -37,7 +38,6 @@ orthorhombic   | 90%
     - Incorporate forward model
 
 - Data
-    - Redo orthorhombic dataset generation
     - more strict duplicate removal
         - entries that differ by one atom in the unit cell
     - Rewrite GenerateDataset.py
@@ -49,15 +49,15 @@ orthorhombic   | 90%
     - redo dataset generation with new parameters based on RRUFF database
 
 - SWE:
-    * memory leak during cyclic training
-    * reshape / flatten hkl's for saving
     * get working on dials
         - generate data
         - redo counts
         - get MLI working
+    * memory leak during cyclic training
+    * reshape / flatten hkl's for saving
+
 
 - Regression:
-    * convert random forest variance to covariance.
     - Read about ensembles of weak learners - what other types of models can I utilize
     - Improve hyperparameters
         - variance estimate almost always overfits
@@ -1023,14 +1023,18 @@ class Indexing:
             reindexed_uc_pred_scaled_trees[split_group_indices, :], reindexed_uc_pred_scaled_cov_trees[split_group_indices, :, :], _ = \
                 self.unit_cell_generator[split_group].do_predictions_trees(data=self.data[split_group_indices])
 
-        reindexed_uc_pred, reindexed_uc_pred_cov = self.revert_predictions(reindexed_uc_pred_scaled, reindexed_uc_pred_scaled_cov)
+        reindexed_uc_pred, reindexed_uc_pred_cov = self.revert_predictions(
+            reindexed_uc_pred_scaled, reindexed_uc_pred_scaled_cov
+            )
         self.data['volume_pred'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred))
         self.data['reindexed_unit_cell_pred'] = list(reindexed_uc_pred)
         self.data['reindexed_unit_cell_pred_cov'] = list(reindexed_uc_pred_cov)
         self.data['reindexed_unit_cell_pred_scaled'] = list(reindexed_uc_pred_scaled)
         self.data['reindexed_unit_cell_pred_scaled_cov'] = list(reindexed_uc_pred_scaled_cov)
 
-        reindexed_uc_pred_trees, reindexed_uc_pred_cov_trees = self.revert_predictions(reindexed_uc_pred_scaled_trees, reindexed_uc_pred_scaled_cov_trees)
+        reindexed_uc_pred_trees, reindexed_uc_pred_cov_trees = self.revert_predictions(
+            reindexed_uc_pred_scaled_trees, reindexed_uc_pred_scaled_cov_trees
+            )
         self.data['volume_pred_trees'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred_trees))
         self.data['reindexed_unit_cell_pred_trees'] = list(reindexed_uc_pred_trees)
         self.data['reindexed_unit_cell_pred_cov_trees'] = list(reindexed_uc_pred_cov_trees)
@@ -1200,11 +1204,20 @@ class Indexing:
             if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
                 uc_pred_cov = uc_pred_scaled_cov * self.uc_scaler.scale_[0]**2
             elif self.data_params['lattice_system'] == 'monoclinic':
-                pass
+                uc_pred_cov[:, :3, :3] = uc_pred_scaled_cov[:, :3, :3] * self.uc_scaler.scale_[0]**2
+                uc_pred_cov[:, 3, 3] = uc_pred_scaled_cov[:, 3, 3] * self.angle_scale**2
+                uc_pred_cov[:, :3, 3] = uc_pred_scaled_cov[:, :3, 3] * self.uc_scaler.scale_[0] * self.angle_scale
+                uc_pred_cov[:, 3, :3] = uc_pred_scaled_cov[:, 3, :3] * self.uc_scaler.scale_[0] * self.angle_scale
             elif self.data_params['lattice_system'] == 'triclinic':
-                pass
+                uc_pred_cov[:, :3, :3] = uc_pred_scaled_cov[:, :3, :3] * self.uc_scaler.scale_[0]**2
+                uc_pred_cov[:, 3:, 3:] = uc_pred_scaled_cov[:, 3:, 3:] * self.angle_scale**2
+                uc_pred_cov[:, :3, 3:] = uc_pred_scaled_cov[:, :3, 3:] * self.uc_scaler.scale_[0] * self.angle_scale
+                uc_pred_cov[:, 3:, :3] = uc_pred_scaled_cov[:, 3:, :3] * self.uc_scaler.scale_[0] * self.angle_scale
             elif self.data_params['lattice_system'] == 'rhombohedral':
-                pass
+                uc_pred_cov[:, 0, 0] = uc_pred_scaled_cov[:, 0, 0] * self.uc_scaler.scale_[0]**2
+                uc_pred_cov[:, 1, 1] = uc_pred_scaled_cov[:, 1, 1] * self.angle_scale**2
+                uc_pred_cov[:, 0, 1] = uc_pred_scaled_cov[:, 0, 1] * self.uc_scaler.scale_[0] * self.angle_scale
+                uc_pred_cov[:, 1, 0] = uc_pred_scaled_cov[:, 1, 0] * self.uc_scaler.scale_[0] * self.angle_scale
 
         if not uc_pred_scaled is None and not uc_pred_scaled_cov is None:
             return uc_pred, uc_pred_cov

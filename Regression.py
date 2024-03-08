@@ -129,12 +129,18 @@ class RegressionBase:
                 uc_pred_scaled_tree[:, :, tree] = prediction[:, np.newaxis]
             else:
                 uc_pred_scaled_tree[:, :, tree] = prediction
-        uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
 
+        print(uc_pred_scaled_tree.shape)
+        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
+        for index in range(N):
+            uc_pred_scaled_cov[index] = np.cov(uc_pred_scaled_tree[index])
+        """
+        uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
         diag_indices = np.diag_indices(self.n_outputs, ndim=2)
         uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
         for index in range(N):
             uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = uc_pred_scaled_var[index]
+        """
         return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
 
     def fit_model_cycles(self, data):
