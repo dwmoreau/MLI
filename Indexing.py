@@ -5,7 +5,7 @@ cubic          | 99.5%
 orthorhombic   | 90%
 
 Monoclinic
-    - model training
+    - Train without the LSTM
     - optimization
 Document current methods
 
@@ -14,7 +14,6 @@ Document current methods
     * SVD optimization
     - Actual likelihood target function
     - What differentiates a found / not found entry
-        - large differences between prediction and true
     - Full softmax array optimization
     - Levenberg-Marquardt optimization
     - common assignments:
@@ -43,9 +42,13 @@ Document current methods
     - redo dataset generation with new parameters based on RRUFF database
 
 - SWE:
-    * reshape / flatten hkl's for saving
     * memory leak during cyclic training
-    - get working on dials
+    * reshape / flatten hkl's for saving
+    * get working on dials
+        - install ccdc api
+        - generate data
+        - get MLI working
+        -
 
 - Regression:
     * convert random forest variance to covariance.
