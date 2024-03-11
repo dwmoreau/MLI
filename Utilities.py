@@ -3,31 +3,6 @@ import logging
 from mpi4py import MPI
 import numpy as np
 import os
-from sklearn.base import BaseEstimator, TransformerMixin
-
-
-class IdentityTransformer(BaseEstimator, TransformerMixin):
-    """
-    If you try to do regression on only cubic, tetragonal and orthorhombic crystals, all the angles
-    are 90 degrees and excluded from the training the transformer. This is a bit of a hack, where
-    that case is caught and the transformer is switch to the IdentityTransformer. The rest of the
-    code just runs without any changes.
-    Copied from:
-        https://gist.github.com/laurentmih/e2efed8d1e0679e88c03460c5a9e2520
-    """
-    def __init__(self):
-        self.scale_ = [1]
-        self.mean_ = [0]
-        pass
-
-    def fit(self, input_array, y=None):
-        return self
-
-    def transform(self, input_array):
-        return input_array
-
-    def inverse_transform(self, input_array):
-        return input_array
 
 
 class Q2Calculator:

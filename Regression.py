@@ -130,7 +130,6 @@ class RegressionBase:
             else:
                 uc_pred_scaled_tree[:, :, tree] = prediction
 
-        print(uc_pred_scaled_tree.shape)
         uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
         for index in range(N):
             uc_pred_scaled_cov[index] = np.cov(uc_pred_scaled_tree[index])

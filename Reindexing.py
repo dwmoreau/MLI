@@ -264,7 +264,10 @@ def permute_monoclinic(unit_cell, permutation, radians):
     return permuted_unit_cell
 
 
-def unpermute_monoclinic(permuted_unit_cell, permutation, radians):
+def unpermute_monoclinic_full_unit_cell(permuted_unit_cell, permutation, radians):
+    """
+    the 'permutation' variable is the permutation that resulted in this unit cell
+    """
     if radians:
         check = np.pi/2
     else:
@@ -318,6 +321,94 @@ def unpermute_monoclinic(permuted_unit_cell, permutation, radians):
             check,
             ])
     return unit_cell
+
+
+def unpermute_monoclinic_partial_unit_cell(permuted_unit_cell, permuted_unit_cell_cov, permutation, radians):
+    """
+    the 'permutation' variable is the permutation that resulted in this unit cell
+    """
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    if not permuted_unit_cell is None:
+        if permutation == 'abc':
+            unit_cell = permuted_unit_cell
+        elif permutation == 'acb':
+            unit_cell = np.array([
+                permuted_unit_cell[0],
+                permuted_unit_cell[2],
+                permuted_unit_cell[1],
+                permuted_unit_cell[3],
+                ])
+        elif permutation == 'bac':
+            unit_cell = np.array([
+                permuted_unit_cell[1],
+                permuted_unit_cell[0],
+                permuted_unit_cell[2],
+                2 * check - permuted_unit_cell[3],
+                ])
+        elif permutation == 'bca':
+            unit_cell = np.array([
+                permuted_unit_cell[2],
+                permuted_unit_cell[0],
+                permuted_unit_cell[1],
+                permuted_unit_cell[3],
+                ])
+        elif permutation == 'cab':
+            unit_cell = np.array([
+                permuted_unit_cell[1],
+                permuted_unit_cell[2],
+                permuted_unit_cell[0],
+                2 * check - permuted_unit_cell[3],
+                ])
+        elif permutation == 'cba':
+            unit_cell = np.array([
+                permuted_unit_cell[2],
+                permuted_unit_cell[1],
+                permuted_unit_cell[0],
+                2 * check - permuted_unit_cell[3],
+                ])
+    if not permuted_unit_cell_cov is None:
+        if permutation == 'abc':
+            unit_cell_cov = permuted_unit_cell_cov
+        elif permutation == 'acb':
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation == 'bac':
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation == 'bca':
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation == 'cab':
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation == 'cba':
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+
+    if permuted_unit_cell is None and not permuted_unit_cell_cov is None:
+        return unit_cell_cov
+    elif not permuted_unit_cell is None and permuted_unit_cell_cov is None:
+        return unit_cell
+    elif not permuted_unit_cell is None and not permuted_unit_cell_cov is None:
+        return unit_cell, unit_cell_cov
 
 
 def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutation):

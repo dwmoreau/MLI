@@ -8,7 +8,7 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import ConfusionMatrixDisplay
 
 from Reindexing import get_permutation
-from Reindexing import unpermute_monoclinic
+from Reindexing import unpermute_monoclinic_full_unit_cell
 from Utilities import Q2Calculator
 
 
@@ -217,7 +217,9 @@ class Augmentor:
             # This unreindexes the perturbed_reindexed_unit_cell
             # Conversion to radians happens before augmentation
             permutation, _ = get_permutation(augmented_entry['unit_cell'])
-            perturbed_unit_cell = unpermute_monoclinic(perturbed_reindexed_unit_cell_, permutation, radians=True)
+            perturbed_unit_cell = unpermute_monoclinic_full_unit_cell(
+                perturbed_reindexed_unit_cell_, permutation, radians=True
+                )
             perturbed_unit_cell_scaled = np.zeros(6)
             perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
             perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
