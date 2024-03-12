@@ -18,8 +18,6 @@ orthorhombic   | 90%
     - Train ML models
 
 - Optimization:
-    - add found explainer, but not unit cell
-    - montecarlo approach
     - random angle perturbations
     - Full softmax array optimization - Actual likelihood target function
     - What differentiates a found / not found entry

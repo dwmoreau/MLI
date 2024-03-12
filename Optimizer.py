@@ -1,3 +1,4 @@
+import copy
 import itertools
 import matplotlib.pyplot as plt
 from mpi4py import MPI
@@ -272,15 +273,8 @@ class Candidates:
             elif found_off_by_two:
                 report_counts['Found but off by two'] += 1
             else:
-                report_counts['Not found'] += 1
+                report_counts['Found explainers'] += 1
 
-        #difference = np.linalg.norm(uc_true[np.newaxis] - candidate_uc, axis=1)
-        #uc_best_cand = candidate_uc[np.argmin(difference)]
-        #print(f'{np.abs(uc_best_cand - uc_true)}')
-        #print(f'{uc_best_cand} {loss[np.argmin(difference)]}')
-        #for i in range(5):
-        #    print(f'{candidate_uc[i]} {loss[i]}')
-        #print()
         return uc_best_opt, report_counts
 
 
@@ -470,6 +464,7 @@ class Optimizer:
             'Found and best': 0,
             'Found but not best': 0,
             'Found but off by two': 0,
+            'Found explainers': 0,
             }
         for entry_index in range(self.N):
             start = time.time()
@@ -569,7 +564,11 @@ class Optimizer:
         return candidates
 
     def optimize_entry(self, candidates):
-        candidates = self.update_candidates(candidates, self.opt_params['iteration_info'][0]['assigner_tag'])
+        candidates = self.update_candidates(
+            candidates,
+            self.opt_params['iteration_info'][0]['assigner_tag'],
+            acceptance_method='always',
+            )
         candidates.diagnostics()
         for iteration_info in self.opt_params['iteration_info']:
             for iter_index in range(iteration_info['n_iterations']):
@@ -579,7 +578,12 @@ class Optimizer:
                     optimized_unit_cell = self.deterministic_subsampling(candidates, iteration_info)
                 elif iteration_info['worker'] == 'no_subsampling':
                     optimized_unit_cell = self.no_subsampling(candidates, iteration_info)
-                candidates = self.update_candidates(candidates, iteration_info['assigner_tag'], optimized_unit_cell)
+                candidates = self.update_candidates(
+                    candidates,
+                    iteration_info['assigner_tag'],
+                    iteration_info['acceptance_method'],
+                    optimized_unit_cell
+                    )
                 if candidates.n <= 1:
                     return candidates
                 #candidates.diagnostics()
@@ -605,7 +609,7 @@ class Optimizer:
         n_batchs = candidates.n // self.opt_params['assignment_batch_size']
         left_over = candidates.n % self.opt_params['assignment_batch_size']
         batch_q2_scaled = np.repeat(
-            candidates.q2_obs_scaled[np.newaxis, :], 
+            candidates.q2_obs_scaled[np.newaxis, :],
             repeats=self.opt_params['assignment_batch_size'],
             axis=0
             )
@@ -661,7 +665,19 @@ class Optimizer:
         candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmax_all))
         return candidates
 
-    def update_candidates(self, candidates, assigner_key, optimized_unit_cell=None):
+    def montecarlo_acceptance(self, candidates, new_candidates, acceptance_method):
+        if acceptance_method == 'montecarlo':
+            ratio = np.exp(-(new_candidates.candidates['loss'] - candidates.candidates['loss']))
+            probability = self.rng.random(candidates.n)
+            accepted = probability < ratio
+            candidates.candidates.loc[accepted] = new_candidates.candidates.loc[accepted]
+        elif acceptance_method == 'always':
+            candidates = new_candidates
+        else:
+            assert False, 'Unrecognized acceptance method'
+        return candidates
+
+    def update_candidates(self, candidates, assigner_key, acceptance_method, optimized_unit_cell=None):
         if optimized_unit_cell is None:
             optimized_unit_cell = np.stack(candidates.candidates['unit_cell'])[:, np.newaxis, :]
         n_subsample = optimized_unit_cell.shape[1]
@@ -670,24 +686,25 @@ class Optimizer:
             lattice_system=self.indexer.data_params['lattice_system']
             )
         if n_subsample == 1:
-            candidates.candidates['unit_cell'] = list(optimized_unit_cell[:, 0, :])
-            candidates.candidates['unit_cell_scaled'] = \
-                list(self.indexer.scale_predictions(optimized_unit_cell[:, 0, :]))
+            new_candidates = copy.deepcopy(candidates)
+            new_candidates.candidates['unit_cell'] = list(optimized_unit_cell[:, 0, :])
+            new_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(optimized_unit_cell[:, 0, :]))
             if assigner_key == 'closest':
-                candidates = self.assign_hkls_closest(candidates)
+                new_candidates = self.assign_hkls_closest(new_candidates)
             else:
-                candidates = self.assign_hkls(candidates, assigner_key)
-            loss = np.zeros(candidates.n)
-            hkl = np.stack(candidates.candidates['hkl'])
-            unit_cell = np.stack(candidates.candidates['unit_cell'])
-            for candidate_index in range(candidates.n):
+                new_candidates = self.assign_hkls(new_candidates, assigner_key)
+            new_loss = np.zeros(new_candidates.n)
+            new_hkl = np.stack(new_candidates.candidates['hkl'])
+            new_unit_cell = np.stack(new_candidates.candidates['unit_cell'])
+            for candidate_index in range(new_candidates.n):
                 unit_cell_inv2 = target_function.update(
-                    hkl[candidate_index],
+                    new_hkl[candidate_index],
                     np.ones(self.indexer.data_params['n_points']),
-                    unit_cell[candidate_index]
+                    new_unit_cell[candidate_index]
                     )
-                loss[candidate_index] = target_function.get_loss(unit_cell_inv2)
-            candidates.candidates['loss'] = loss
+                new_loss[candidate_index] = target_function.get_loss(unit_cell_inv2)
+            new_candidates.candidates['loss'] = new_loss
+            candidates = self.montecarlo_acceptance(candidates, new_candidates, acceptance_method)
         else:
             subsampled_candidates = [candidates.candidates.copy() for _ in range(n_subsample)]
             subsampled_loss = np.zeros((candidates.n, n_subsample))
@@ -722,12 +739,13 @@ class Optimizer:
                 unit_cell_scaled[candidate_index] = best['unit_cell_scaled']
                 hkl[candidate_index] = best['hkl']
                 softmax[candidate_index] = best['softmax']
-            candidates.candidates['unit_cell'] = list(unit_cell)
-            candidates.candidates['unit_cell_scaled'] = list(unit_cell_scaled)
-            candidates.candidates['hkl'] = list(hkl)
-            candidates.candidates['softmax'] = list(softmax)
-            candidates.candidates['loss'] = best_loss
-
+            new_candidates = copy.deepcopy(candidates)
+            new_candidates.candidates['unit_cell'] = list(unit_cell)
+            new_candidates.candidates['unit_cell_scaled'] = list(unit_cell_scaled)
+            new_candidates.candidates['hkl'] = list(hkl)
+            new_candidates.candidates['softmax'] = list(softmax)
+            new_candidates.candidates['loss'] = best_loss
+            candidates = self.montecarlo_acceptance(candidates, new_candidates, acceptance_method)
         candidates.update()
         return candidates
 
