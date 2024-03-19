@@ -3,63 +3,75 @@ lattice system | accuracy
 -------------------------
 cubic          | 99.5%
 orthorhombic   | 90%
+Monoclinic
+    {'Not found': 157, 'Found and best': 86, 'Found but not best': 28, 'Found but off by two': 0, 'Found explainers': 66}
 
-* Documentation
+* Startover
+    * Redo ParseDatabase & duplicate removal
+    * Redo Generate dataset
+        - stricter intensity requirement
+            - I > 0.005
+            - d2I < -1
+            - breadth = 0.10
+    * Get reasonable hyperparameters for NN
+    * Retest optimization
+
+- Documentation
+    * Add figures to Methods.md
     - Update README.md
-    - Write methods
-
-- DIALS GPU
-    - Generate datasets with as many entries as possible
-        - Monoclinic
-        - Orthorhombic
-        - Cubic
-        - Tetragonal
-    - Update counts
-    - Train ML models
+    - Reread papers on indexing and update document
+    - Reread ML technique papers
+    - read about powder extinction classes
+        Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
 
 - Optimization:
-    - random angle perturbations
-    - Full softmax array optimization - Actual likelihood target function
+    * Make the Miller index assignment / subsampling sensible & Add resampling worker
+    * profile
+    * Full softmax array optimization - Actual likelihood target function
     - What differentiates a found / not found entry
     - common assignments:
         - drop during optimization but include in loss
         - use all hkl assignments with largest N likelihoods
-    - SVD optimization
 
 - Indexing.py
 
 - Augmentation
-    * make peak drop rate a function of distance and q2
 
 - Assignments
+    * smallest model that works
+    - Figure out how to take a more holistic look at the pairwise difference array.
     - Penalize multiple assignments to the same hkl
-    - Incorporate forward model
 
 - Data
-    - more strict duplicate removal
-        - entries that differ by one atom in the unit cell
+    * Fix Hexagonal / Rhombohedral setting issues.
+    - experimental data from rruff
+        - verify that unit cell is consistent with diffraction
+    - redo dataset generation with new parameters based on RRUFF database
     - Rewrite GenerateDataset.py
     - Get data from other databases:
         - Materials project
         - ICSD
-    - experimental data from rruff
-        - verify that unit cell is consistent with diffraction
-    - redo dataset generation with new parameters based on RRUFF database
 
 - SWE:
+    * Refactor code to work with reciprocal space unit cell parameters
+    * CombineDatabases.py bug where entries are being added more than once.
     * memory leak during cyclic training
-    * get working on dials
+        - Try saving and loading weights with two different models
+    - MPI error: https://github.com/pmodels/mpich/issues/6547
+    - get working on dials
         - generate data
-        - redo counts
+        - get materials project cif files
+        - redo counts & groups
         - get MLI working
-    - reshape / flatten hkl's for saving
+        - Train ML models
+    - profile optimization
 
 - Regression:
-    - Read about ensembles of weak learners - what other types of models can I utilize
-    - Improve hyperparameters
     - prediction of PCA components
         - evaluation of fitting in the PCA / Scaled space
         - evaluation of covariance
+    - Read about ensembles of weak learners - what other types of models can I utilize
+    - Improve hyperparameters
     - read Stirn 2023 and implement
     Detlefsen 2019:
         - cluster input d-spacings
@@ -339,10 +351,10 @@ class Indexing:
             self.data[f'q2_{self.data_params["points_tag"]}'] = 1 / self.data[f'd_spacing_{self.data_params["points_tag"]}']**2
 
         # This sets up the training / validation tags so that the validation set is taken
-        # evenly from groups
+        # evenly from the spacegroup symbols. This is the finests hierarchy of the data
         train_label = np.ones(self.data.shape[0], dtype=bool)
-        for group_index, group in enumerate(self.data_params['split_groups']):
-            indices = np.where(self.data['split_group'] == group)[0]
+        for symbol_index, symbol in enumerate(self.data['reindexed_spacegroup_symbol_hm'].unique()):
+            indices = np.where(self.data['reindexed_spacegroup_symbol_hm'] == symbol)[0]
             n_val = int(indices.size * (1 - self.data_params['train_fraction']))
             val_indices = self.rng.choice(indices, size=n_val, replace=False)
             train_label[val_indices] = False

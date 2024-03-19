@@ -369,20 +369,42 @@ class Regression_AlphaBeta(RegressionBase):
             'beta_nll': 0.5,
             'batch_size': 64,
             'learning_rate': 0.0001,
-            'dropout_rate': 0.5,
             'mean_params': {
                 'layers': [200, 100, 60],
+                'dropout_rate': 0.0,
+                'epsilon': 0.001,
+                'output_activation': 'linear',
+                'output_name': 'uc_mean_scaled',
                 },
             'alpha_params': {
                 'layers': [100, 60],
+                'dropout_rate': 0.0,
+                'epsilon': 0.001,
+                'output_activation': 'softplus',
+                'output_name': 'uc_alpha_scaled',
                 },
             'beta_params': {
                 'layers': [100, 60],
+                'dropout_rate': 0.0,
+                'epsilon': 0.001,
+                'output_activation': 'softplus',
+                'output_name': 'uc_beta_scaled',
                 },
             'head_params': {
-                'layers': [100]
+                'layers': [100],
+                'dropout_rate': 0.0,
+                'epsilon': 0.001,
+                'layers': [60],
+                'output_activation': 'linear',
+                'output_name': 'head',
                 },
-            'random_forest': {},
+            'random_forest': {
+                'random_state': 0,
+                'n_estimators': 80,
+                'min_samples_leaf': 10,
+                'max_depth': None,
+                'subsample': 0.1,
+                },
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
@@ -402,67 +424,33 @@ class Regression_AlphaBeta(RegressionBase):
         self.optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
 
         if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
-            head_params_defaults = {
-                'dropout_rate': 0.0,
-                'epsilon': 0.001,
-                'layers': [60],
-                'output_activation': 'linear',
-                'output_name': 'head',
-                }
-            for key in head_params_defaults.keys():
+            for key in model_params_defaults['head_params'].keys():
                 if key not in self.model_params['head_params'].keys():
-                    self.model_params['head_params'][key] = head_params_defaults[key]
+                    self.model_params['head_params'][key] = model_params_defaults['head_params'][key]
         self.model_params['head_params']['kernel_initializer'] = None
         self.model_params['head_params']['bias_initializer'] = None
 
-        mean_params_defaults = {        
-            'dropout_rate': 0.0,
-            'epsilon': 0.001,
-            'layers': [60, 60],
-            'output_activation': 'linear',
-            'output_name': 'uc_mean_scaled',
-            }
-        for key in mean_params_defaults.keys():
+        for key in model_params_defaults['mean_params'].keys():
             if key not in self.model_params['mean_params'].keys():
-                self.model_params['mean_params'][key] = mean_params_defaults[key]
+                self.model_params['mean_params'][key] = model_params_defaults['mean_params'][key]
         self.model_params['mean_params']['kernel_initializer'] = None
         self.model_params['mean_params']['bias_initializer'] = None
 
-        alpha_params_defaults = {        
-            'dropout_rate': 0.0,
-            'epsilon': 0.001,
-            'layers': [60, 60],
-            'output_activation': 'softplus',
-            'output_name': 'uc_alpha_scaled',
-            }
-        for key in alpha_params_defaults.keys():
+        for key in model_params_defaults['alpha_params'].keys():
             if key not in self.model_params['alpha_params'].keys():
-                self.model_params['alpha_params'][key] = alpha_params_defaults[key]
+                self.model_params['alpha_params'][key] = model_params_defaults['alpha_params'][key]
         self.model_params['alpha_params']['kernel_initializer'] = None
         self.model_params['alpha_params']['bias_initializer'] = \
             tf.keras.initializers.RandomNormal(mean=2, stddev=0.05, seed=self.seed)
 
-        beta_params_defaults = {
-            'dropout_rate': 0.0,
-            'epsilon': 0.001,
-            'layers': [60, 60],
-            'output_activation': 'softplus',
-            'output_name': 'uc_beta_scaled',
-            }
-        for key in beta_params_defaults.keys():
+        for key in model_params_defaults['beta_params'].keys():
             if key not in self.model_params['beta_params'].keys():
-                self.model_params['beta_params'][key] = beta_params_defaults[key]
+                self.model_params['beta_params'][key] = model_params_defaults['beta_params'][key]
         self.model_params['beta_params']['kernel_initializer'] = None
         self.model_params['beta_params']['bias_initializer'] = \
             tf.keras.initializers.RandomNormal(mean=0.5, stddev=0.05, seed=self.seed)
-        random_forest_defaults = {
-            'random_state': 0,
-            'n_estimators': 80,
-            'min_samples_leaf': 10,
-            'max_depth': None,
-            'subsample': 0.1,
-            }
-        for key in random_forest_defaults.keys():
+
+        for key in model_params_defaults['random_forest'].keys():
             if key not in self.model_params['random_forest'].keys():
                 self.model_params['random_forest'][key] = random_forest_defaults[key]
 

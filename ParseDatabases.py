@@ -22,6 +22,7 @@ class ProcessEntry:
         self.chemical_formula = None
         self.chemical_composition_dict = None
         self.chemical_composition_string = None
+        self.chemical_composition_string_strict = None
 
         self.spacegroup_number = None
         self.bravais_lattice = None
@@ -58,6 +59,7 @@ class ProcessEntry:
             'chemical_formula': self.chemical_formula,
             'chemical_composition_dict': self.chemical_composition_dict,
             'chemical_composition_string': self.chemical_composition_string,
+            'chemical_composition_string_strict': self.chemical_composition_string_strict,
             'spacegroup_number': self.spacegroup_number,
             'bravais_lattice': self.bravais_lattice,
             'lattice_system': self.lattice_system,
@@ -157,6 +159,7 @@ class ProcessEntry:
             chemical_formula_handler.get_chemical_composition_string()
             self.chemical_composition_dict = chemical_formula_handler.chemical_dict
             self.chemical_composition_string = chemical_formula_handler.chemical_string
+            self.chemical_composition_string_strict = chemical_formula_handler.chemical_string_strict
         except:
             self.reason = 'Could not parse chemical formula'
             self.status = False
@@ -303,6 +306,15 @@ class ProcessCSDEntry(ProcessEntry):
             self.status = False
             #print(f'{self.reason}')
             return None
+
+        try:
+            self.r_factor = csd_entry.r_factor
+        except:
+            self.reason = 'Could not read r-factor'
+            self.status = False
+            #print(f'{self.reason}')
+            return None
+
         self.common_verification()
 
 
@@ -406,5 +418,13 @@ class ProcessCODEntry(ProcessEntry):
         gv.niggli_reduce()
         self.reduced_unit_cell = np.round(gv.cell_parameters(), decimals=6)
         self.reduced_volume = get_unit_cell_volume(self.reduced_unit_cell)
+
+        try:
+            self.r_factor = cif_file_block.find_value('_refine_ls_R_factor_gt')
+        except:
+            self.reason = 'Could not read r-factor'
+            self.status = False
+            #print(f'{self.reason}')
+            return None
 
         self.common_verification()

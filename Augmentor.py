@@ -10,6 +10,7 @@ from sklearn.metrics import ConfusionMatrixDisplay
 from Reindexing import get_permutation
 from Reindexing import unpermute_monoclinic_full_unit_cell
 from Utilities import Q2Calculator
+from Utilities import get_fwhm_and_overlap_threshold
 
 
 class Augmentor:
@@ -46,14 +47,6 @@ class Augmentor:
         unit_cell_scaled = np.stack(training_data['reindexed_unit_cell_scaled'])[:, self.y_indices]
         if self.aug_params['augment_method'] == 'random':
             self.perturb_unit_cell = self.perturb_unit_cell_std
-            self.stddev = unit_cell_scaled.std(axis=0)
-            fig, axes = plt.subplots(1, 1, figsize=(5, 3))
-            axes.plot(self.stddev, marker='.')
-            axes.set_xlabel('Unit cell index')
-            axes.set_ylabel('Unit cell standard deviation')
-            fig.tight_layout()
-            fig.savefig(f'{self.save_to}/aug_unit_cell_std_{self.aug_params["tag"]}.png')
-            plt.close()
 
         elif self.aug_params['augment_method'] == 'cov':
             self.perturb_unit_cell = self.perturb_unit_cell_cov
@@ -87,8 +80,9 @@ class Augmentor:
 
         # calculate the order of the peak in the list of sa peaks
         n_bins = 100
-        difference_bins = np.logspace(-4, -1.75, n_bins + 1)
+        difference_bins = np.logspace(-4, -2, n_bins + 1)
         difference_centers = (difference_bins[1:] + difference_bins[:-1]) / 2
+
         keep_sum = np.zeros(n_bins)
         drop_sum = np.zeros(n_bins)
         first_peak = np.zeros(len(training_data))
@@ -99,19 +93,28 @@ class Augmentor:
             q2_sa = q2_sa[~np.isinf(q2_sa)]
             q2 = q2[~np.isinf(q2)]
             first_peak_index = np.argwhere(q2_sa == q2[0])
+            # this catches two cases in oP that are problematic entries
             if len(first_peak_index) > 0:
-                # this catches two cases in oP that are problematic entries
                 first_peak[entry_index] = first_peak_index[0][0]
                 difference = q2_sa[1:] - q2_sa[:-1]
                 differences.append(difference)
-                for peak_index in range(q2.size - 1):
-                    insert_index = np.searchsorted(difference_bins, difference[peak_index])
+                for peak_index in range(1, q2.size - 1):
+                    #diff_0 = q2_1 - q2_0
+                    #diff_1 = q2_2 - q2_1
+                    #diff_n-1 = q2_n - q2_n-1
+                    if peak_index < q2.size - 2:
+                        min_separation = min(difference[peak_index], difference[peak_index + 1])
+                    else:
+                        min_separation = difference[peak_index] 
+                    insert_index = min(max(np.searchsorted(difference_bins, min_separation) - 1, 0), n_bins - 1)
+
                     if n_bins > insert_index >= 0:
                         if q2[peak_index] in q2_sa:
                             if q2[peak_index + 1] in q2_sa:
                                 keep_sum[insert_index] += 1
                             else:
-                                drop_sum[insert_index] += 1            
+                                drop_sum[insert_index] += 1
+
         total_sum = keep_sum + drop_sum
 
         centers = np.arange(self.n_generated_points)
@@ -269,11 +272,54 @@ class Augmentor:
         q2 = [q2_sa[first_peak_index]]
         hkl = [augmented_entry['hkl_sa'][first_peak_index]]
         reindexed_hkl = [augmented_entry['reindexed_hkl_sa'][first_peak_index]]
+
+        previous_kept_index = first_peak_index
+        # overlap_threshold is the minimum separation from allowed during GenerateDataset.py
+        # overlap_threshold = q2(2theta + overlap_threshold_theta2 / 2) - q2(2theta - overlap_threshold_theta2 / 2)
+        # overlap_threshold = dq2_dtheta2 * overlap_threshold_theta2
+        def get_overlap_threshold_q2(q2, fwhm, overlap_threshold_theta2, wavelength):
+            fwhm = 0.1 * np.pi/180 # in radians
+            overlap_threshold_theta2 = fwhm / 1.5
+            theta2 = 2*np.arcsin(np.sqrt(q2)*wavelength/2)
+            dq2_dtheta2 = (2/wavelength)**2 * np.sin(theta2/2) * np.cos(theta2/2)
+            overlap_threshold_q2 = dq2_dtheta2 * overlap_threshold_theta2
+            return overlap_threshold_q2
+
+        keep_next = False
+        fwhm, overlap_threshold_theta2, wavelength = get_fwhm_and_overlap_threshold()
         for index in range(first_peak_index + 1, q2_sa.size):
-            if self.rng.random() < self.keep_rate(q2_sa[index] - q2_sa[index - 1], *self.keep_rate_params):
+            # cases:
+            # 1) Close to previous_kept: Reject
+            # 2) Far from previous_kept and next: Use formula
+            # 3) Far from previous_kept, close to next: Accept with 50% probability. If rejected, accept the next
+            overlap_threshold_q2 = get_overlap_threshold_q2(q2_sa[index], fwhm, overlap_threshold_theta2, wavelength)
+            distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
+            if index == q2_sa.size - 1:
+                separation = distance_previous
+            else:
+                distance_next = q2_sa[index + 1] - q2_sa[index]
+                separation = min(distance_previous, distance_next)
+            #print(f'{overlap_threshold_q2} {distance_previous} {distance_next}')
+            keep = False
+            if keep_next:
+                keep = True
+                keep_next = False
+            elif distance_previous > overlap_threshold_q2:
+                keep_next = False
+                if distance_next > overlap_threshold_q2:
+                    if self.rng.random() < self.keep_rate(separation, *self.keep_rate_params):
+                        keep = True
+                else:
+                    if self.rng.random() < 1/2:
+                        keep = True
+                        keep_next = False
+                    else:
+                        keep_next = True
+            if keep:
                 q2.append(q2_sa[index])
                 hkl.append(augmented_entry['hkl_sa'][index])
                 reindexed_hkl.append(augmented_entry['reindexed_hkl_sa'][index])
+                previous_kept_index = index
 
         if len(q2) >= self.n_points:
             q2 = np.array(q2)[:self.n_points]
@@ -316,7 +362,7 @@ class Augmentor:
         while status:
             perturbed_unit_cell_scaled = self.rng.normal(
                 loc=unit_cell_scaled,
-                scale=self.aug_params['augment_shift'] * self.stddev
+                scale=self.aug_params['augment_shift'],
                 )[0]
             i += 1
             if self._check_in_range(perturbed_unit_cell_scaled):

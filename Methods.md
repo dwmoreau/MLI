@@ -1,16 +1,20 @@
 # 0: Introduction to this document
 This write-up is meant to explain the methods in the data-driven indexing approach. 
 
-I am very interested in feedback on the methods. I feel that there is large room for improvement in the Miller index assignment and unit cell optimization aspects of this algorithm. We have devoted an enormous amount of time to the unit cell regression aspect of this algorithm and I don't believe there is much room for improvement there. There has been no refinement whatsoever. No hyperparameter training, equal amounts of under and overfitting.
+I am very interested in feedback on the methods. I feel that there is large room for improvement in the Miller index assignment and unit cell optimization aspects of this algorithm. We have devoted an enormous amount of time to the unit cell regression aspect of this algorithm and I don't believe there is much room for improvement there. 
+
+There has been no refinement whatsoever. No hyperparameter training, equal amounts of under and overfitting.
 
 Text in italics is commentary. For example, my hunches, opinions, acknowledgments of errors and bugs in the code, or features and approaches I would like to take, and features that are implemented but not used. Normal case text describes currently implemented methods.
 
 Coehlo's 2003 algorithm that this is based on is called SVD-Index, I'm thinking of calling this algorithm ML-Index. It sounds like Windex.
 
-# 1: Introduction
-Powder diffraction indexing is the process of using a 1-dimensional projection of the 3-dimensional diffraction to infer the symmetries that exist within a material. This is a problem as old as crystallography and has been the subject of many analytical efforts. Current trends in machine learning and artificial intelligence have produced new knowledge and tools for data-driven analytics. This project merges recent advancements in analytical methods with knowledge from existing indexing algorithms to produce a new approach to powder diffraction indexing. 
+My understand of reading through powder diffraction indexing methods papers is that these algorithms work really well on good data. The SVD-Index index algorithm showed 100% accuracy in their paper with peak lists generated with random unit cells. The biggest issue is the generalization of these algorithms to real experimental data, especially low quality data. So the benchmark for this project is near perfect results on calculated data, or demonstrating superior generality to experimental data.
 
-This algorithm is developed with general use in mind, but the foremost use case is the small molecule serial crystallography community. This software is developed as an open-source Python program, in line with the Computational Crystallography Initiative. More substantially, serial crystallography data analysis is performed exclusively on super-computers and computational clusters. ML-Index is developed specifically for mass-distributed computing.
+# 1: Introduction
+Powder diffraction indexing is the process of using a 1-dimensional projection of the 3-dimensional diffraction to infer the symmetries that exist within a material. This is a problem as old as crystallography (Ringe 1917) and has been the subject of many analytical efforts. Current trends in machine learning and artificial intelligence have produced new knowledge and tools for data-driven analytics. This project merges recent advancements in analytical methods with knowledge from existing indexing algorithms to produce a new approach to powder diffraction indexing. 
+
+This algorithm is developed with general use in mind, but the foremost use case is the small molecule serial crystallography community (Schriber, et. al. 202X). This software is developed as an open-source Python program, in line with the Computational Crystallography Initiative (CITE). Serial femtosecond crystallography data analysis is performed exclusively on super-computers and computational clusters. ML-Index is developed specifically for mass-distributed computing. 
 
 ## 1.0 Inspirational quotes:
 
@@ -67,16 +71,57 @@ $\ \ \ \ q_{hkl}^2 = \frac{h^2}{a^2} + \frac{k^2}{b^2} + \frac{l^2}{c^2}  \ \ \ 
 
 $\mathrm{monoclinic}: a\neq b\neq c, \ \alpha=\gamma=90^o, \beta\neq 90$
 
-$\ \ \ \ q_{hkl}^2 = \frac{h^2}{a^2\sin^2(\beta)} + \frac{k^2}{b^2} + \frac{l^2}{c^2\sin^2(\beta)} - \frac{2hl\cos(\beta)}{ac\sin^2(\beta)}$  \ \ \ \ \ $(7)
+$\ \ \ \ q_{hkl}^2 = \frac{h^2}{a^2\sin^2(\beta)} + \frac{k^2}{b^2} + \frac{l^2}{c^2\sin^2(\beta)} - \frac{2hl\cos(\beta)}{ac\sin^2(\beta)}  \ \ \ \ \ $(7)
 
 $\mathrm{triclinic}: a\neq b\neq c, \ \alpha\neq \beta\neq \gamma\neq 90$
 
 The triclinic lattice system imposes no unit cell parameter constraints and is known as the triclinic lattice system. The general case gives the peak spacing formula.
 
-In practice, obtaining the solution to the inverse problem of Eq. 1-7 is hindered by numerous obstacles which can be separated into two types of obstacles; those that will occur with "perfect data" and those that occur due to measurement errors.
+These equations can be rewritten in the reciprocal space unit cell parameters, $a*$, $b*$, $c*$, $\alpha*$, $\beta*$, $\gamma*$, which are related to the real-space unit cell parameters through the inverse of the metric tensor,
+
+$S = \left[[a^2, ab\cos(\gamma), ac\cos(\beta)], [ab\cos(\gamma), b^2, bc\cos(\gamma)], [ac\cos(\beta), bc\cos(\gamma, c^2]\right]^{-1}$
+
+$\ \ \ = \left[[a^{*2}, a^*b^*\cos(\gamma^*), a^*c^*\cos(\beta^*)], [a^*b^*\cos(\gamma^*), b^{*2}, b^*c^*\cos(\alpha^*)], [a^*c^*\cos(\beta^*), b^*c^*\cos(\alpha^*), c^{*2}]\right]\ \ \ (8)$.
+
+Eq. 1-7 can be rewritten using reciprocal space unit cells,
+
+$\mathrm{triclinic}: a^*\neq b^*\neq c^*, \ \alpha^*\neq \beta^*\neq \gamma^*\neq 90$
+
+$\ \ \ \ q_{hkl}^2 = a^{*2}h^2 + b^{*2}k^2 + c^{*2}l^2 + 2a^*b^*\cos(\gamma^*)hk + 2a^*c^*\cos(\beta^*)hl + 2b^*c^*\cos(\alpha^*)kl\ \ \   (9)$,
+
+$\mathrm{cubic}: a^*=b^*=c^*, \ \alpha^*=\beta^*=\gamma^*=90^o$
+
+$\ \ \ \ q_{hkl}^2 = \left(h^2 + k^2 + l^2\right)a^{*2} \ \ \ \ \ $(10)
+
+$\mathrm{tetragonal}: a^*=b^*\neq c^*, \ \alpha^*=\beta^*=\gamma^*=90^o$
+
+$\ \ \ \ q_{hkl}^2 = \left(h^2 + k^2\right)a^{*2} + l^2c^{*2}  \ \ \ \ \ $(11)
+
+$\mathrm{hexagonal}: a^*=b^*\neq c^*, \ \alpha^*=\beta^*=90^o\ \gamma^*=120^o$
+
+$\ \ \ \ q_{hkl}^2 = \left(h^2 + hk + k^2\right)a^{*2} + l^2c^{*2}  \ \ \ \ \ $(12)
+
+$\mathrm{rhombohedral}: a^*=b^*=c^*, \ \alpha^*=\beta^*=\gamma^*\neq90^o$
+
+$\ \ \ \ q_{hkl}^2 = (h^2 + k^2 + l^2)a^{*2} + 2(hk + kl + hl)a^{*2}\cos^2(\alpha^*)  \ \ \ \ \ $(13)
+
+$\mathrm{orthorhombic}: a^*\neq b^*\neq c^*, \ \alpha^*=\beta^*=\gamma^*=90^o$
+
+$\ \ \ \ q_{hkl}^2 = h^2a^{*2} + k^2b^{*2} + l^2c^{*2}  \ \ \ \ \ $(14)
+
+$\mathrm{monoclinic}: a^*\neq b^*\neq c^*, \ \alpha^*=\gamma^*=90^o, \beta^*\neq 90$
+
+$\ \ \ \ q_{hkl}^2 = h^2a^{*2} + k^2b^{*2} + l^2c^{*2} + 2a^*c^*\cos(\beta^*)hl  \ \ \ \ \ $(15)
+
+An advantage of working in reciprocal space is that the Eq. 8-15 can be rewritten as a linear function of reciprocal unit cell parameters and Miller indices,
+
+$q_{hkl}^2 = x_{hh}h^2 + x_{kk}k^2 + x_{ll}l^2 + x_{hk}hk + x_{hl}hl + x_{kl}kl$,
+
+$\vec{q}_{hkl}^2 = H\cdot\vec{x}$.
+
 
 # 1.1.1 Difficulties with perfect data
-In the case of perfect data, such as powder diffraction patterns calculated from known crystal structures, existing algorithms exist which have claimed to be 
+In practice, obtaining the solution to the inverse problem of Eq. 1-7 is hindered by numerous obstacles which can be separated into two types of obstacles; those that will occur with "perfect data" and those that occur due to measurement errors. In the case of perfect data, such as powder diffraction patterns calculated from known crystal structures, existing algorithms exist which have claimed to be 
 
 The "unit cell" in these relations is an arbitrary mathematic representation of the repeating unit within a crystal as defined by convention. The IUCR defines the conventional unit cell as INSERT DEFINITION. The unit cell is ambiguous, and there are multiple "settings" that describe the same unit cell. For example, the orthorhombic unit cell can be placed with any permutation of the unit cell lattices. However, convention dictates that WHAT IS THIS CONVENTION. In the monoclinic lattice system, convention dictates that the unit cell be so the monoclinic angle is $\beta$. The monoclinic unit cell can be defined just as well with the monoclinic angle at $\alpha$ or $\gamma$. Further, there exist two permutations of the monoclinic unit cell axes that retain the monoclinic angle at $\beta$, forming a six-fold ambiguity for the monoclinic lattice system.
 
@@ -104,7 +149,7 @@ ADD DISCUSSION ON THE RUNGE-ITO-DEWOLFF-VISSER METHOD THAT IS IMPLEMENTED IN ITO
 ### 1.2.3 SVD-Index
 The method presented here draws inspiration heavily from the SVD-Index indexing presented by Coehlo (2003). This algorithm takes a generate-and-test approach to the problem, it starts with random guesses of the lattice parameters, then iteratively assigns Miller indices and optimizes the lattice parameters to explain the observed diffraction spacings. This is a complex algorithm and an abridged overview is given here to support the development of ML-Index. SVD-Index consists of three primary components: 1) Initial unit cell generation; 2) Miller index assignment; and 3) Unit cell optimization. 
 
-SVD-Index generates initial unit cell candidates by randomly generating numbers for the unit cell parameters, then rescaling the parameters to match a given unit cell volume. The algorithm incrementally increases the unit cell volume that is used for rescaling until a solution is found. 
+SVD-Index generates initial unit cell candidates by randomly generating numbers for the unit cell parameters, then rescaling the parameters to match a given unit cell volume. The algorithm incrementally increases the unit cell volume that is used for rescaling until a solution is found. This is a brute-force grid search of the entire parameter space. While inefficient, SVD-Index compensates with speed. Candidate entries are rapidly tested, with nearly 100,000 candidates tested in a matter of seconds. This is a very powerful approach, no assumptions are made regarding how the input diffraction maps onto unit cell parameters. These assumptions could easily lead to algorithm omitting the neighborhood of the true unit cell parameters from the search space in the presence of contaminate diffraction or heavily missing peaks, causing it to fail to find the correct unit cell parameters.
 
 Miller index assignment starts by establishing a reference set of Miller indices. This is done by calculating all possible Miller indices up to a certain resolution cutoff given by the unit cell volume. For each reference Miller index and candidate unit cell, the forward models (Eq. 1-7), are used to calculate reference peak spacings, $\{q_{ref}\}_{hkl}$. Observed peaks are assigned the Miller index associated with the closest reference peak.
 
@@ -151,21 +196,15 @@ The first step of the dataset generation process is an initial quality control o
 
 The next step is a duplicate removal step performed on the CSD and COD independently. A duplicate is defined as the following:
 
-1. Belongs to the same crystal system. 
-2. The unit cell has the same chemical composition deduced from the chemical formula.
-3. Unit cell volume is within 5%.
+1. Belongs to the same Bravais lattice and,
+2. The unit cell has the same chemical composition deduced from the chemical formula & the unit cell volume is within 5%.
+3. or, The unit cell volume is exactly the same.
 
-In the case of duplicate entries, the entry with the lowest reported r-factor is chosen.
+In the case of duplicate entries, the entry with the lowest reported r-factor is chosen. Databases are merged by first taking all the unique entries from the CSD, then only adding entries from the COD if they are not duplicated with an existing CSD entry. For the chemical composition of the unit cell, hydrogen and deuterium atoms, and atoms that comprise less than 5% of the total number of atoms in the unit cell are not taken into consideration. Many studies test the effects of changing one atom in a material. These entries could have nearly the same unit cell and very similar diffraction patterns. Omitting atoms that make up a small portion of the total number of atoms in the unit cell should consider these entries as duplicates.
 
-$\textit{Also, I just noticed a bug in the code, the refinement r-factor is not being retained. Currently, a random duplicate is chosen. Also, the duplicate removal should be in the same lattice system.}$
-
-Databases are merged by first taking all the unique entries from the CSD, then only adding entries from the COD if they are not duplicated with an existing CSD entry.
-
-$\textit{I would like to be a bit more strict with the duplicate removal process, so condition 2 needs to change to the chemical composition differs by at most one}$
-$\textit{atom. Many studies test the effects of changing one atom in a material. These entries are essentially the same unit cell but the contents}$
-$\textit{differ by one atom. These studies will contribute to data leakage, essentially identical entries in the training and validation sets. I get the best}$
-$\textit{performance when I use wide shallow neural networks, this was also observed by Vanessa. My understanding of wide shallow neural networks is they tend to}$
-$\textit{work more by memorization as opposed to generalization. My concern is that models are memorizing identical patterns as opposed to generalization.}$
+$\textit{I get the best performance when I use wide shallow neural networks, this was also observed by Vanessa.}$
+$\textit{My understanding of wide shallow neural networks is they tend to work more by memorization as opposed to generalization.}$
+$\textit{A strict duplication removal procedure could prevent the models memorizing identical patterns as opposed to generalization.}$
 
 Datasets are generated from the unique entries in both the CSD and COD using the CCDI API. The following information is extracted from each entry:
 
@@ -186,11 +225,11 @@ The diffraction pattern is calculated between $2\theta = 0^o -> 60^o$ in steps o
 Two peak lists are included, these are 1) the first 60 non-systematically absent peaks and 2) the first 60 peaks that could be realistically observed in a diffraction pattern. For a diffraction peak to be included in peak list 2, each of the following conditions must be met:
 
 1. Not systematically absent.
-2. The diffraction pattern is normalized such that $\Sigma\ I^2 = 1$. The intensity at the peak position of the normalized diffraction pattern must be larger than 0.001.
-3. The second derivative of the diffraction pattern at the peak position must be negative
+2. The diffraction pattern is normalized such that $\Sigma\ I^2 = 1$. The intensity at the peak position of the normalized diffraction pattern must be larger than 0.005.
+3. The second derivative of the diffraction pattern at the peak position must be less than -1.
 4. The peak must not be within 0.1$^o$ / 1.5 of another peak. If so, the peak with the largest intensity is retained.
 
-$\textit{The 0.1 FWHM figure is arbitrary. My impression is that real diffraction patterns are narrower.}$
+$\textit{The 0.1 FWHM figure is arbitrary. My impression is that a good diffraction pattern will be narrower.}$
 $\textit{de Wolff 1957 provides 0.05 (FWHM) as their instrumental broadening resolution.}$
 $\textit{The 1.5 was chosen by adjusting to a point where peaks were discarded when they were too close}$.
 $\textit{I feel like there should be a simple rule of thumb for this}$
@@ -218,9 +257,7 @@ $\textit{patterns in missing peaks, regardless if they are from systematic absen
 
 ### 2.1.3 Training / Validation split
 
-An 80 / 20% split is made for the training and validation sets. This split occurs at the level of the grouped entries. So the testing/validation split is performed on each group at grouping hierarchy 3.
-
-$\textit{Splitting up the training and validation sets at the spacegroup symbol level seems to make more sense}$
+An 80 / 20% split is made for the training and validation sets. This split occurs at the level of the the Hermann–Mauguin spacegroup symbol. So the separation of training and validation data is performed in groups of common Hermann–Mauguin spacegroup symbol.
 
 ### 2.1.4 Parameter scaling
 
@@ -247,20 +284,18 @@ The random perturbation method is used only for the cubic lattice system because
 
 The peak list is augmented by resampling peaks from the list of non-systematically absent peaks. This resampling method was developed so the distribution of peaks in the augmented entries matched the distribution of the unaugmented entries.
 
-There are two peak lists available at this time; Peak list 1, the first 60 non-systematically absent peaks. Peak list 2, the first 60 peaks that could be realistically observed in a diffraction pattern. Again, only using the training data to set up this augmentation. 
+There are two peak lists available at this time; Peak list 1, the first 60 non-systematically absent peaks. Peak list 2, the first 60 peaks that could be realistically observed in a diffraction pattern. Again, only using the training data to set up this augmentation. The position of the first observed peak in the list of all non-systematically absent peaks is recorded. An empirical distribution is made from a histogram of this position list. For the augmented entries, the empirical distribution is used to randomly select a first peak from the list of all non-systematically absent peaks. 
 
-The position of the first observed peak in the list of all non-systematically absent peaks is recorded. An empirical distribution is made from a histogram of this position list. For the augmented entries, the empirical distribution is used to randomly select a first peak from the list of all non-systematically absent peaks. 
+After the first peak is picked, the list of non-systematically absent peaks is stepped through and the next peak is picked based on its distance from its neighboring peaks. Selecting the next peak based only on its separation is chosen to make observability only based on whether or not the peak will overlap another peak. The intensity of the peak is not a consideration. This approach is set up by calculating the minimum separation, $\Delta q^2$ in units of $q^2$, between each peak in Peak list 1 and its neighbors. The fraction of neighboring peaks in Peak List 2 that are also neighboring in Peak List 1 are calculated in binned units of $\Delta q^2$. This binning is in 100 bins log spaced between $10^{-4}$ to $10^{-2}$. A function of the form, $\rho(\Delta q^2) = \left[1 - \exp(-r_0 \Delta q^2)\right]^{r_1}$ is fit to the binned fraction and is used as and acceptance probability. This form was chosen because when $\Delta q^2 = 0$ the probability of acceptance is zero and as $\Delta q^2 => \inf$, the probability of acceptance approaches one. It should be noted that $\rho(\Delta q^2)$ remains less than one in the observed range of $\Delta q^2$ so a well separated peak can be rejected. The probability increases monotonically between these two extremes.
 
-After the first peak is picked, the list of non-systematically absent peaks is stepped through and the next peak is picked based on its distance from the current peak. Selecting the next peak based only on its separation from the current peak is chosen to make observability only based on whether or not the peak will overlap another peak. The intensity of the peak is not a consideration. This approach is set up by calculating the separation, $\Delta q^2$ in units of $q^2$, between each neighboring peak in Peak list 2, the realistic peak list. The fraction of neighboring peaks in Peak List 2 that are also neighboring in Peak List 1 are calculated in binned units of separation. This binning is in 100 bins log spaced between $10^{-4}$ to $10^{-1.75}$. A function of the form, $\rho(\Delta q^2) = \left[1 - \exp(-r_0 \Delta q^2)\right]^{r_1}$ is fit to the binned fraction and is used as the acceptance probability of the next peak based on its separation from the current peak. This form was chosen because when $\Delta q^2 = 0$ the probability of acceptance is zero and as $\Delta q^2 => \inf$, the probability of acceptance approaches one. The probability increases monotonically between these two extremes.
+After the first peak is selected, there are three different cases for peaks:
+
+1) Peak is within 0.1$^o$ / 1.5 of the preceeding selected peak. Reject peak.
+2) Peak is further than 0.1$^o$ / 1.5 of the preceeding selected peak and the next peak in Peak list 1. Accept peak with probability $\rho(\Delta q^2)$.
+3) Peak is further than 0.1$^o$ / 1.5 of the preceeding selected peak and with 0.1$^o$ / 1.5 of the next peak in Peak list 1. Accept peak with 50% probability. If rejected, select the next peak. This assumes that if two peaks overlap, only one will be observed. Which peak is completely random.
 
 $\textit{The peak resampling method is a bit complicated. I arrived at it by trying to ensure the distribution of}$
-$\textit{peaks in the augmented set matched the distribution in the unaugmented set. There are two changes that}$
-$\textit{I want to make to this method:}$
-
-$\textit{  1) There needs to be bidirectionality, currently the algorithm is biased to always pick the lower}$
-$\textit{angle peak in the case of an overlap.}$
-$\textit{  2) Make the functional form also dependent on q^2. This should result in high-angle peaks being}$
-$\textit{dropped at a higher rate.}$
+$\textit{peaks in the augmented set matched the distribution in the unaugmented set.}$
 
 ### 2.2 Regression models
 
@@ -302,8 +337,6 @@ The default $\alpha_{\sigma^2}$ and $\beta_{\sigma^2}$ networks use two hidden l
 
 All training occurs with the Adam optimizer using a learning rate of 0.0001 and a batch size of 64. The Neural networks are implemented in TensorFlow.
 
-$\textit{I am looking through the code right now and it looks like the way I am setting the defaults is laden with bugs}$
-$\textit{For example, the dropout rate is 0 due to a bug. The listed hyperparameters are likely inaccurate}$
 $\textit{I have not done any hyperparameter optimization. There is a lot of over and underfitting.}$
 
 ### 2.2.3 Random forest
@@ -357,6 +390,14 @@ $\Delta^*_{\vec{q}^2}$ is used as the input to a dense neural network. The defau
 In other words, the same kernel operates on each peak dimension in the hidden layer independently. I believe the implications of this are 1) information isn't being shared between peak dimensions, and 2) Each peak dimension is considered equivalently.
 
 The final layer is a dense layer that outputs with softmax activation. Instead of one dense layer output, the network is branched for each peak and a separate dense layer - meaning a separate kernel - acts on the one-dimensional input for the given peak.
+
+$\textit{An important aspect of this NN is fast inference. I would like to find the smallest possible NN}$.
+$\textit{that provides reasonable results. Some testing shows that I can move to a one hidden layer NN}$.
+$\textit{with minimal loss of accuracy}$.
+
+$\textit{It is tempting to try to use a convolutional neural network here. I did see improved accuracy with}$.
+$\textit{cubic. In that case, the reference set of Miller indices increases with q2. There is a well defined}$
+$\textit{spatial relationship in the pairwise difference array. This is lost in the other lattice systems}$.
 
 An important question is, what data should these networks be trained with? One option is the true unit cell parameters, this results in 100% accurate Miller index assignments (and it does). On the other hand, they could be trained using the predicted unit cell parameters from the regression networks. This should represent a worst-case scenario for unit cells. There should be a few randomly generated unit cells better than the expected value. After several rounds of optimization, the best candidate unit cells should be much better than their initial value. Ideally, the Miller index assignment networks would be trained on unit cell parameters that differ from the true values by amounts consistent with the current best candidate unit cells during optimization. To these means, a series of assignment networks are trained. The first network is trained using predicted unit cells, where the predictions are performed with the neural network model corresponding to the true group that the entry belongs to. Subsequent networks are trained with randomly perturbed unit cells. This is performed by adding Gaussian noise to the scaled unit cell parameters before they are used to calculate pairwise differences. This is set up in a way that each entry receives a different perturbation for each training epoch for additional regularization.
 
@@ -505,6 +546,8 @@ Lafuente B, Downs R T, Yang H, Stone N (2015) The power of databases: the RRUFF 
 Nix, D. A., & Weigend, A. S., (1994) IEEE, 
 
 Oishi-Tomiyasu, R. (2016) Acta Cryst. A72, 73-80.
+
+Ringe (1917)
 
 Seitzer, M., (2022) arXiv:2203.09168v2
 

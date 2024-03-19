@@ -9,6 +9,7 @@ import pandas as pd
 from EntryHelpers import save_identifiers
 from Reindexing import get_permutation
 from Utilities import Q2Calculator
+from Utilities import get_fwhm_and_overlap_threshold
 
 
 class EntryGenerator:
@@ -69,12 +70,11 @@ class EntryGenerator:
             for component in self.peak_components.keys():
                 self.data_set_components.update({f'{component}_{tag}': self.peak_components[component]})
 
-        fwhm = 0.1
+        fwhm, self.overlap_threshold, wavelength = get_fwhm_and_overlap_threshold()
         self.dtheta2 = 0.02
         theta2_min = 0
         theta2_max = 60
         self.theta2 = np.arange(theta2_min, theta2_max, self.dtheta2)[:, np.newaxis]
-        self.overlap_threshold = fwhm / 1.5
 
         self.pattern_generator = CrystalDescriptors.PowderPattern
         self.pattern_generator.Settings.full_width_at_half_maximum = fwhm
@@ -141,12 +141,12 @@ class EntryGenerator:
 
         locations = np.argmin(np.abs(self.theta2 - peaks[:, 0, 0][np.newaxis]), axis=0)
         I_peaks = I_pattern[locations]
-        large = I_peaks > 0.001
+        large = I_peaks > 0.005
         peaks, hkl_order = reset_peaks(peaks, hkl_order, large, 2)
 
         diff2_I = np.gradient(np.gradient(I_pattern)) / (self.dtheta2**2)
         diff2_peaks = diff2_I[locations]
-        with_2nd_der = diff2_peaks < 0
+        with_2nd_der = diff2_peaks < -1
         peaks, hkl_order = reset_peaks(peaks, hkl_order, with_2nd_der, 3)
 
         not_overlapped = self.remove_overlaps(peaks[:, 0, 0], I_pattern)

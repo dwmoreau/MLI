@@ -2,52 +2,81 @@ import numpy as np
 import pandas as pd
 
 
-source = 'csd'
+source = 'cod'
+n_ranks = 8
 
 if source == 'csd':
     print('Removing duplicates from CSD dataset')
-    n_ranks = 8
     entries = pd.concat([
         pd.read_parquet(f'data/csd_{rank:02d}.parquet') for rank in range(n_ranks)
         ], ignore_index=True)
 elif source == 'cod':
     print('Removing duplicates from COD dataset')
-    entries = pd.read_parquet(f'data/cod_00.parquet')
+    entries = pd.concat([
+        pd.read_parquet(f'data/cod_{rank:02d}.parquet') for rank in range(n_ranks)
+        ], ignore_index=True)
 else:
     print('Source must be either csd or cod')
     assert False
 
 all_unique_entries = []
 all_duplicated_entries = []
-groups = entries.groupby('crystal_family')
+groups = entries.groupby('bravais_lattice')
 for key in groups.groups.keys():
-    unique_entries = []
     duplicated_entries = []
     group_entries = groups.get_group(key)
-    compositions_group = group_entries.groupby('chemical_composition_string')
-    n_entries = len(group_entries)
-    print(f'Group {key} has {n_entries} entries')
+    print(f'Group {key} has {len(group_entries)} entries')
+
+    # chemical_composition_string: All elements and counts in the unit cell
+    # chemical_composition_string_string: remove hydrogrens & deuteriums and elements 
+    # that make up less than 5% of the total atoms.
+    unique_entries_composition = []
+    compositions_group = group_entries.groupby('chemical_composition_string_strict')
     for composition in compositions_group.groups.keys():
         common_composition = compositions_group.get_group(composition)
         if len(common_composition) == 1:
-            unique_entries.append(common_composition)
+            unique_entries_composition.append(common_composition)
         else:
             while len(common_composition) > 0:
+                # Get the first entries volume
                 volume = common_composition.iloc[0]['volume']
+                # Get all entries with the volume within 5%
                 close_volume = common_composition.loc[
                     np.isclose(common_composition['volume'], volume, rtol=0.05)
                     ]
                 if len(close_volume) == 1:
-                    unique_entries.append(close_volume)
+                    # If there is only one entry with this volume, add it to unit_entries_compostion
+                    unique_entries_composition.append(close_volume)
                 else:
+                    # Otherwise, get the entry with the lowest r-factor and get rid of the rest.
                     close_volume = close_volume.sort_values(by='r_factor')
-                    unique_entries.append(close_volume.iloc[[0]])
+                    unique_entries_composition.append(close_volume.iloc[[0]])
                     duplicated_entries.append(close_volume.iloc[1:])
+                # Remove entries that have been verified to not be duplicates
                 common_composition = common_composition.drop(close_volume.index)
-    if len(unique_entries) > 0:
-        unique_entries = pd.concat(unique_entries)
-        all_unique_entries.append(unique_entries)
-        print(f'  {len(unique_entries)} unique entries')
+    print(f'  {len(unique_entries_composition)} unique entries after common composition removal')
+
+    # This removes entries with exactly the same unit cell volume
+    # I am trying to find entries with the same unit cell, so a,b,c, alpha, beta, gamma are 
+    # exactly the same. Unit cell is a numpy array and unhashable, so it cannot be used in groupby
+    if len(unique_entries_composition) > 0:
+        group_entries = pd.concat(unique_entries_composition)
+        unique_entries_unit_cell = []
+        unit_cell_group = group_entries.groupby('volume')
+        for unit_cell in unit_cell_group.groups.keys():
+            common_unit_cell = unit_cell_group.get_group(unit_cell)
+            if len(common_unit_cell) == 1:
+                unique_entries_unit_cell.append(common_unit_cell)
+            else:
+                common_unit_cell = common_unit_cell.sort_values(by='r_factor')
+                unique_entries_unit_cell.append(common_unit_cell.iloc[[0]])
+                duplicated_entries.append(common_unit_cell.iloc[1:])
+
+        if len(unique_entries_unit_cell) > 0:
+            unique_entries_unit_cell = pd.concat(unique_entries_unit_cell)
+            all_unique_entries.append(unique_entries_unit_cell)
+            print(f'  {len(unique_entries_unit_cell)} unique entries after common unit cell removal')
+
     if len(duplicated_entries) > 0:
         duplicated_entries = pd.concat(duplicated_entries)
         all_duplicated_entries.append(duplicated_entries)

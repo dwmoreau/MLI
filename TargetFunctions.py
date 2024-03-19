@@ -63,9 +63,8 @@ class LikelihoodLoss:
         term3 = (alpha + 1/2) * tf.math.log(beta + 1/2 * (y_true - mean)**2)
         likelihoods = self.prefactor + term0 + term1 + term2 + term3
         if self.beta_likelihood:
-            #var = alpha / beta
             var = beta / (alpha - 1)
-            likelihoods = likelihoods * tf.stop_gradient(var)**self.beta_nll
+            likelihoods = likelihoods * tf.stop_gradient(var**self.beta_nll)
         return tf.reduce_sum(likelihoods, axis=1)
 
     def normal_likelihood(self, y_true, y_pred):
@@ -76,7 +75,7 @@ class LikelihoodLoss:
         # likelihoods: n_batch x n_lattice_params
         likelihoods = self.prefactor + term0 + term1
         if self.beta_likelihood:
-            likelihoods = likelihoods * tf.stop_gradient(var)**self.beta_nll
+            likelihoods = likelihoods * tf.stop_gradient(var**self.beta_nll)
         return tf.reduce_sum(likelihoods, axis=1)
 
     def cauchy_likelihood(self, y_true, y_pred):
@@ -87,7 +86,7 @@ class LikelihoodLoss:
         term1 = tf.math.log(1 + z2)
         likelihoods = term0 + term1 + self.prefactor
         if self.beta_likelihood:
-            likelihoods = likelihoods * tf.stop_gradient(var)**self.beta_nll
+            likelihoods = likelihoods * tf.stop_gradient(var**self.beta_nll)
         return tf.reduce_sum(likelihoods, axis=1)
 
     def t_dist_likelihood(self, y_true, y_pred):
@@ -98,7 +97,7 @@ class LikelihoodLoss:
         term1 = (self.tuning_param + 1) / 2 * tf.math.log(1 + 1/self.tuning_param * z2)
         likelihoods = term0 + term1 + self.prefactor
         if self.beta_likelihood:
-            likelihoods = likelihoods * tf.stop_gradient(var)**self.beta_nll
+            likelihoods = likelihoods * tf.stop_gradient(var**self.beta_nll)
         return tf.reduce_sum(likelihoods, axis=1)
 
     def mean_squared_error(self, y_true, y_pred):

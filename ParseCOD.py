@@ -5,6 +5,13 @@ import pandas as pd
 from ParseDatabases import ProcessCODEntry
 
 
+def get_next_dirs(dir):
+    next_dirs = []
+    for d in os.listdir(dir):
+        if not d.startswith('.'):
+            next_dirs.append(d)
+    return next_dirs
+
 COMM = MPI.COMM_WORLD
 rank = COMM.Get_rank()
 n_ranks = COMM.Get_size()
@@ -16,11 +23,11 @@ if rank == 0:
     cif_file_names = []
     for dir_0_index in range(1, 10):
         dir_0 = os.path.join(cod_dir, str(dir_0_index))
-        for dir_1_index in os.listdir(dir_0):
+        for dir_1_index in get_next_dirs(dir_0):
             dir_1 = os.path.join(dir_0, dir_1_index)
-            for dir_2_index in os.listdir(dir_1):
+            for dir_2_index in get_next_dirs(dir_1):
                 dir_2 = os.path.join(dir_1, dir_2_index)
-                for cif_file_name in os.listdir(dir_2):
+                for cif_file_name in get_next_dirs(dir_2):
                     cif_file_names.append(os.path.join(dir_2, cif_file_name))
 else:
     cif_file_names = 0

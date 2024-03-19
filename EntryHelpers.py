@@ -513,6 +513,16 @@ class ChemicalFormulaHandler:
                 [f'{keys[i]}{values[i]}' for i in range(len(keys))]
             )
 
+        total_count = 0
+        for index, key in enumerate(keys):
+            if key != 'H':
+                total_count += values[index]
+        self.chemical_string_strict = ''
+        for index, key in enumerate(keys):
+            if key != 'H':
+                fraction = values[index] / total_count
+                if fraction > 0.05:
+                    self.chemical_string_strict += f'{key}{str(values[index])} '
 
 def get_empty_chemical_dict():
     symbols = [

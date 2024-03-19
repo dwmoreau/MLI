@@ -5,6 +5,63 @@ import numpy as np
 import os
 
 
+def reciprocal_uc_conversion(unit_cell):
+    a = unit_cell[0]
+    b = unit_cell[1]
+    c = unit_cell[2]
+    alpha = multiplicative_factor * unit_cell[3]
+    beta = multiplicative_factor * unit_cell[4]
+    gamma = multiplicative_factor * unit_cell[5]
+    S = np.array([
+        [a**2, a*b*np.cos(gamma), a*c*np.cos(beta)],
+        [a*b*np.cos(gamma), b**2, b*c*np.cos(alpha)],
+        [a*c*np.cos(beta), b*c*np.cos(alpha), c**2]
+        ])
+    Sinv = np.linalg.inv(S)
+    a_inv = np.sqrt(Sinv[0, 0])
+    b_inv = np.sqrt(Sinv[1, 1])
+    c_inv = np.sqrt(Sinv[2, 2])
+    alpha_inv = np.arccos(S_inv[1, 2] / (b_inv * c_inv))
+    beta_inv = np.arccos(S_inv[0, 2] / (a_inv * c_inv))
+    gamma_inv = np.arccos(S_inv[0, 1] / (a_inv * b_inv))
+    unit_cell_inv = np.array([a_inv, b_inv, c_inv, alpha_inv, beta_inv, gamma_inv])
+    return unit_cell_inv
+
+
+def get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell):
+    xnn = np.array([
+        reciprocal_unit_cell[0]**2,
+        reciprocal_unit_cell[1]**2,
+        reciprocal_unit_cell[2]**2,
+        reciprocal_unit_cell[1] * reciprocal_unit_cell[2] * np.cos(reciprocal_unit_cell[3]),
+        reciprocal_unit_cell[0] * reciprocal_unit_cell[2] * np.cos(reciprocal_unit_cell[4]),
+        reciprocal_unit_cell[0] * reciprocal_unit_cell[1] * np.cos(reciprocal_unit_cell[5]),
+        ])
+    return xnn
+
+
+def get_reciprocal_unit_cell_from_xnn(xnn):
+    ra = np.sqrt(xnn[0])
+    rb = np.sqrt(xnn[1])
+    rc = np.sqrt(xnn[2])
+    ralpha = np.arccos(xnn[3] / (xnn[1] * xnn[2]))
+    rbeta = np.arccos(xnn[4] / (xnn[0] * xnn[2]))
+    rgamma = np.arccos(xnn[5] / (xnn[0] * xnn[1]))
+    reciprocal_unit_cell = np.array([ra, rb, rc, ralpha, rbeta, rgamma])
+    return reciprocal_unit_cell
+
+
+def get_fwhm_and_overlap_threshold():
+    # This information gets used in GenerateDataset.py and Augmentor.py
+    # This function removes duplicatation
+    # The CCDC API generates diffraction patterns with the wavelength 1.54 (Cu K alpha)
+    # by default.
+    fwhm = 0.1
+    overlap_threshold = fwhm / 1.5
+    wavelength = 1.54
+    return fwhm, overlap_threshold, wavelength
+
+
 class Q2Calculator:
     def __init__(self, lattice_system, hkl, tensorflow):
         self.hkl = hkl
