@@ -570,38 +570,38 @@ class Optimizer:
             2: Optimize given the assigned Miller indices
             3: Accept or reject new params.
         """
-        candidates = self.update_candidates(
+        candidates = self.assign_hkls(
             candidates,
             self.opt_params['iteration_info'][0]['assigner_tag'],
-            acceptance_method='always',
+            assignment_method='best',
             )
+        candidates = self.get_loss(candidates)
         candidates.diagnostics()
         for iteration_info in self.opt_params['iteration_info']:
             for iter_index in range(iteration_info['n_iterations']):
                 next_candidates = copy.deepcopy(candidates)
-                next_candidates = self.assign_hkls(
-                    candidates,
-                    iteration_info['assigner_key'],
-                    iteration_info['worker'],
-                    next_candidates
-                    )
                 if iteration_info['worker'] in ['softmax_subsampling', 'random_subsampling']:
-                    optimized_unit_cell = self.random_subsampling(candidates, iteration_info)
+                    next_candidates = self.assign_hkls(
+                        next_candidates, iteration_info['assigner_tag'], 'best'
+                        )
+                    next_candidates = self.random_subsampling(next_candidates, iteration_info)
                 elif iteration_info['worker'] == 'resampling':
-                    optimized_unit_cell = self.random_resampling(candidates, iteration_info)
-                candidates = self.update_candidates(
+                    next_candidates = self.assign_hkls(
+                        next_candidates, iteration_info['assigner_tag'], 'random'
+                        )
+                    next_candidates = self.no_subsampling(next_candidates, iteration_info)
+                candidates = self.montecarlo_acceptance(
                     candidates,
-                    iteration_info['assigner_tag'],
-                    iteration_info['acceptance_method'],
-                    optimized_unit_cell
+                    next_candidates,
+                    iteration_info['acceptance_method']
                     )
+                candidates.update()
                 if candidates.n <= 1:
                     return candidates
-                #candidates.diagnostics()
                 print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
         return candidates
 
-    def assign_hkls(self, candidates, assigner_key, assignment_method, assignment_worker, next_candidates=None):
+    def get_softmaxes(self, candidates, assigner_key):
         """
         I'm using model.predict_on_batch as a workaround for memory leak issues
         - Inputs must be the same size each time predict_on_batch is called.
@@ -612,13 +612,9 @@ class Optimizer:
         https://github.com/keras-team/keras/issues/13118
         https://github.com/tensorflow/tensorflow/issues/33009        
         """
-        if next_candidates is None:
-            unit_cell_scaled = np.stack(candidates.candidates['unit_cell_scaled'])
-        else:
-            unit_cell_scaled = np.stack(next_candidates['unit_cell_scaled'])
-
         n_batchs = candidates.n // self.opt_params['assignment_batch_size']
         left_over = candidates.n % self.opt_params['assignment_batch_size']
+        unit_cell_scaled = np.stack(candidates.candidates['unit_cell_scaled'])
         batch_q2_scaled = np.repeat(
             candidates.q2_obs_scaled[np.newaxis, :],
             repeats=self.opt_params['assignment_batch_size'],
@@ -649,29 +645,38 @@ class Optimizer:
                 softmaxes[start: start + left_over] = softmaxes_batch[:left_over]
             else:
                 softmaxes[start: end] = softmaxes_batch
+        return softmaxes
 
-        if next_candidates is None:
-            if assignment_worker in ['softmax_subsampling', 'random_subsampling']:
-                candidates.candidates['softmax'] = list(softmaxes.max(axis=2))
-            elif assignment_worker == 'resampling':
-                # softmaxes: n_candidates, n_points, ref_length
-                indices = np.repeat(np.repeat(
-                    np.arange(self.indexer.data_params['hkl_ref_length'])[np.newaxis],
-                    self.indexer.data_params['n_points'],
-                    axis=0
-                    )[np.newaxis],
-                    candidates.n,
-                    axis=0
-                    )
-                labels = self.rng.choice()
-                candidates.candidates['softmax'] = list(softmaxes.max(axis=2))
-            candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmaxes))
-            return candidates
+    def assign_hkls(self, candidates, assigner_key, assignment_method):
+        softmaxes = self.get_softmaxes(candidates, assigner_key)
+        if assignment_method == 'best':
+            hkl_assign = softmaxes.argmax(axis=2)
+            candidates.candidates['softmax'] = list(softmaxes.max(axis=2))
+        elif assignment_method == 'random':
+            # softmax output from tensorflow doesn't sum close enough to one for rng.choice
+            softmaxes /= softmaxes.sum(axis=2)[:, :, np.newaxis]
+            hkl_assign = np.zeros((candidates.n, self.indexer.data_params['n_points']), dtype=int)
+            softmax = np.zeros((candidates.n, self.indexer.data_params['n_points']))
+            for candidate_index in range(candidates.n):
+                for point_index in range(self.indexer.data_params['n_points']):
+                    hkl_assign[candidate_index, point_index] = self.rng.choice(
+                        self.indexer.data_params['hkl_ref_length'],
+                        size=1,
+                        p=softmaxes[candidate_index, point_index]
+                        )
+                    softmax[candidate_index, point_index] = softmaxes[
+                        candidate_index,
+                        point_index,
+                        hkl_assign[candidate_index, point_index]
+                        ]
+            candidates.candidates['softmax'] = list(softmax)
         else:
-            subsampled_candidates['softmax'] = list(softmaxes.max(axis=2))
-            for peak_index in range()
-            subsampled_candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmaxes))
-            return subsampled_candidates
+            assert False
+        hkl_pred = np.zeros((candidates.n, self.indexer.data_params['n_points'], 3))
+        for entry_index in range(candidates.n):
+            hkl_pred[entry_index] = self.indexer.hkl_ref[hkl_assign[entry_index]]
+        candidates.candidates['hkl'] = list(hkl_pred)
+        return candidates
 
     def assign_hkls_closest(self, candidates):
         unit_cell_scaled = np.stack(candidates.candidates['unit_cell_scaled'])
@@ -688,48 +693,37 @@ class Optimizer:
         softmax_all = scipy.special.softmax(pds_inv, axis=2)
         candidates.candidates['softmax'] = list(softmax_all.max(axis=2))
         candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmax_all))
-        return candidates
+        return candidates        
 
-    def montecarlo_acceptance(self, candidates, new_candidates, acceptance_method):
+    def montecarlo_acceptance(self, candidates, next_candidates, acceptance_method):
+        next_candidates = self.get_loss(next_candidates)
         if acceptance_method == 'montecarlo':
-            ratio = np.exp(-(new_candidates.candidates['loss'] - candidates.candidates['loss']))
+            ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']))
             probability = self.rng.random(candidates.n)
             accepted = probability < ratio
-            candidates.candidates.loc[accepted] = new_candidates.candidates.loc[accepted]
+            candidates.candidates.loc[accepted] = next_candidates.candidates.loc[accepted]
         elif acceptance_method == 'always':
             candidates = new_candidates
         else:
             assert False, 'Unrecognized acceptance method'
         return candidates
 
-    def update_candidates(self, candidates, assigner_key, acceptance_method, optimized_unit_cell=None):
-        if optimized_unit_cell is None:
-            optimized_unit_cell = np.stack(candidates.candidates['unit_cell'])[:, np.newaxis, :]
+    def get_loss(self, candidates):
         target_function = CandidateOptLoss(
             q2_obs=candidates.q2_obs,
             lattice_system=self.indexer.data_params['lattice_system']
             )
-
-        new_candidates = copy.deepcopy(candidates)
-        new_candidates.candidates['unit_cell'] = list(optimized_unit_cell[:, 0, :])
-        new_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(optimized_unit_cell[:, 0, :]))
-        if assigner_key == 'closest':
-            new_candidates = self.assign_hkls_closest(new_candidates)
-        else:
-            new_candidates = self.assign_hkls(new_candidates, assigner_key)
-        new_loss = np.zeros(new_candidates.n)
-        new_hkl = np.stack(new_candidates.candidates['hkl'])
-        new_unit_cell = np.stack(new_candidates.candidates['unit_cell'])
-        for candidate_index in range(new_candidates.n):
+        loss = np.zeros(candidates.n)
+        hkl = np.stack(candidates.candidates['hkl'])
+        unit_cell = np.stack(candidates.candidates['unit_cell'])
+        for candidate_index in range(candidates.n):
             unit_cell_inv2 = target_function.update(
-                new_hkl[candidate_index],
+                hkl[candidate_index],
                 np.ones(self.indexer.data_params['n_points']),
-                new_unit_cell[candidate_index]
+                unit_cell[candidate_index]
                 )
-            new_loss[candidate_index] = target_function.get_loss(unit_cell_inv2)
-        new_candidates.candidates['loss'] = new_loss
-        candidates = self.montecarlo_acceptance(candidates, new_candidates, acceptance_method)
-        candidates.update()
+            loss[candidate_index] = target_function.get_loss(unit_cell_inv2)
+        candidates.candidates['loss'] = loss
         return candidates
 
     def optimize_unit_cell(self, q2_obs, hkl, softmax, unit_cell, optimizer):
@@ -765,97 +759,44 @@ class Optimizer:
         return optimized_unit_cell
 
     def no_subsampling(self, candidates, iteration_info):
-        optimized_unit_cell = np.zeros((
-            candidates.n,
-            1,
-            self.indexer.data_params['n_outputs']
-            ))
         hkl = np.stack(candidates.candidates['hkl'])
         softmax = np.stack(candidates.candidates['softmax'])
         unit_cell = np.stack(candidates.candidates['unit_cell'])
         for candidate_index in range(candidates.n):
-            optimized_unit_cell[candidate_index, 0] = self.optimize_unit_cell(
+            unit_cell[candidate_index] = self.optimize_unit_cell(
                 q2_obs=candidates.q2_obs,
                 hkl=hkl[candidate_index],
                 softmax=softmax[candidate_index],
                 unit_cell=unit_cell[candidate_index],
                 optimizer=iteration_info['optimizer'],
                 )
-        return optimized_unit_cell
+        candidates.candidates['unit_cell'] = list(unit_cell)
+        return candidates
 
     def random_subsampling(self, candidates, iteration_info):
-        optimized_unit_cell = np.zeros((
-            candidates.n,
-            iteration_info['n_subsample'],
-            self.indexer.data_params['n_outputs']
-            ))
         hkl = np.stack(candidates.candidates['hkl'])
         softmax = np.stack(candidates.candidates['softmax'])
         unit_cell = np.stack(candidates.candidates['unit_cell'])
         for candidate_index in range(candidates.n):
-            subsampled_indices = np.zeros((
-                iteration_info['n_subsample'],
-                self.indexer.data_params['n_points'] - iteration_info['n_drop']
-                ),
-                dtype=int
+            if iteration_info['worker'] == 'random_subsampling':
+                p = None
+            elif iteration_info['worker'] == 'softmax_subsampling':
+                p = softmax[candidate_index] / softmax[candidate_index].sum()
+            subsampled_indices = np.sort(self.rng.choice(
+                self.indexer.data_params['n_points'],
+                size=self.indexer.data_params['n_points'] - iteration_info['n_drop'],
+                replace=False,
+                p=p,
+                ))
+            unit_cell[candidate_index] = self.optimize_unit_cell(
+                q2_obs=candidates.q2_obs[subsampled_indices],
+                hkl=hkl[candidate_index][subsampled_indices],
+                softmax=softmax[candidate_index][subsampled_indices],
+                unit_cell=unit_cell[candidate_index],
+                optimizer=iteration_info['optimizer'],
                 )
-            n_duplicates = iteration_info['n_subsample']
-            n_unique = 0
-            while n_duplicates > 0:
-                for subsampled_index in range(n_duplicates):
-                    if iteration_info['worker'] == 'random_subsampling':
-                        p = None
-                    elif iteration_info['worker'] == 'softmax_subsampling':
-                        p = softmax[candidate_index] / softmax[candidate_index].sum()
-                    subsampled_indices[n_unique + subsampled_index] = np.sort(self.rng.choice(
-                        self.indexer.data_params['n_points'],
-                        size=self.indexer.data_params['n_points'] - iteration_info['n_drop'],
-                        replace=False,
-                        p=p,
-                        ))
-                unique_subsampled_indices = np.unique(subsampled_indices, axis=0)
-                n_unique = unique_subsampled_indices.shape[0]
-                n_duplicates = iteration_info['n_subsample'] - n_unique
-                subsampled_indices[:n_unique] = unique_subsampled_indices
-
-            for subsampled_index in range(iteration_info['n_subsample']):
-                optimized_unit_cell[candidate_index, subsampled_index] = self.optimize_unit_cell(
-                    q2_obs=candidates.q2_obs[subsampled_indices[subsampled_index]],
-                    hkl=hkl[candidate_index][subsampled_indices[subsampled_index]],
-                    softmax=softmax[candidate_index][subsampled_indices[subsampled_index]],
-                    unit_cell=unit_cell[candidate_index],
-                    optimizer=iteration_info['optimizer'],
-                    )
-        return optimized_unit_cell
-
-    def deterministic_subsampling(self, candidates, iteration_info):
-        n_keep = self.indexer.data_params['n_points'] - iteration_info['n_drop']
-        n_subsamples = int(scipy.special.comb(N=self.indexer.data_params['n_points'], k=iteration_info['n_drop']))
-        optimized_unit_cell = np.zeros((
-            candidates.n,
-            n_subsamples,
-            self.indexer.data_params['n_outputs']
-            ))
-        if candidates.n == 1:
-            hkl = np.array(candidates.candidates['hkl'])[np.newaxis]
-            softmax = np.array(candidates.candidates['softmax'])[np.newaxis]
-            unit_cell = np.array(candidates.candidates['unit_cell'])[np.newaxis]
-        else:
-            hkl = np.stack(candidates.candidates['hkl'])
-            softmax = np.stack(candidates.candidates['softmax'])
-            unit_cell = np.stack(candidates.candidates['unit_cell'])
-        comb_generator = itertools.combinations(np.arange(self.indexer.data_params['n_points']), n_keep)
-        combinations = [list(comb) for comb in comb_generator]
-        for candidate_index in range(candidates.n):
-            for subsampled_index, subsampled_indices in enumerate(combinations):
-                optimized_unit_cell[candidate_index, subsampled_index] = self.optimize_unit_cell(
-                    q2_obs=candidates.q2_obs[subsampled_indices],
-                    hkl=hkl[candidate_index, subsampled_indices, :],
-                    softmax=softmax[candidate_index, subsampled_indices],
-                    unit_cell=unit_cell[candidate_index],
-                    optimizer=iteration_info['optimizer'],
-                    )
-        return optimized_unit_cell
+        candidates.candidates['unit_cell'] = list(unit_cell)
+        return candidates
 
     def gather_optimized_unit_cells(self):
         if self.rank == 0:

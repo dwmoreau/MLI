@@ -7,8 +7,10 @@ Monoclinic
     {'Not found': 157, 'Found and best': 86, 'Found but not best': 28, 'Found but off by two': 0, 'Found explainers': 66}
 
 * Startover
-    * Redo ParseDatabase & duplicate removal
     * Redo Generate dataset
+        * orthorhombic
+        * monoclinic
+
         - stricter intensity requirement
             - I > 0.005
             - d2I < -1
@@ -25,8 +27,7 @@ Monoclinic
         Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
 
 - Optimization:
-    * Make the Miller index assignment / subsampling sensible & Add resampling worker
-    * profile
+    * profile with orthorhombic
     * Full softmax array optimization - Actual likelihood target function
     - What differentiates a found / not found entry
     - common assignments:
@@ -36,6 +37,7 @@ Monoclinic
 - Indexing.py
 
 - Augmentation
+    - Edit so the peak distributions match
 
 - Assignments
     * smallest model that works
@@ -54,6 +56,9 @@ Monoclinic
 
 - SWE:
     * Refactor code to work with reciprocal space unit cell parameters
+        - verify conversions in Utilities.py
+        - Refactor Optimizer.py
+        - Refactor training
     * CombineDatabases.py bug where entries are being added more than once.
     * memory leak during cyclic training
         - Try saving and loading weights with two different models
@@ -607,16 +612,25 @@ class Indexing:
             len(self.data), self.data_params['n_points']),
             dtype=int
             )
-
         # This is slow, and I am sure it could be sped up.
         for entry_index in tqdm(range(len(self.data))):
             for point_index in range(self.data_params['n_points']):
+
                 hkl_ref_index = np.argwhere(np.all(
                     check_ref[:, :] == check_data[entry_index, point_index, :],
                     axis=1
                     ))
                 if len(hkl_ref_index) == 1:
                     hkl_labels[entry_index, point_index] = hkl_ref_index
+                    """
+                    if hkl_ref_index < point_index:
+                        print(check_ref[:, :])
+                        print(self.data.iloc[entry_index])
+                        print(f'{point_index} {hkl_ref_index} {check_data[entry_index, point_index, :]}')
+                        print(self.data.iloc[entry_index]['hkl'])
+                        print(self.data.iloc[entry_index]['q2'])
+                        print()
+                    """
         self.data['hkl_labels'] = list(hkl_labels)
 
     def augment_data(self):

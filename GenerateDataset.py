@@ -4,6 +4,7 @@ from ccdc.descriptors import CrystalDescriptors
 from functools import reduce
 from mpi4py import MPI
 import numpy as np
+import os
 import pandas as pd
 
 from EntryHelpers import save_identifiers
@@ -88,7 +89,9 @@ class EntryGenerator:
         new_peaks = peaks.copy()
         peaks = peaks[np.newaxis]
         diff = peaks - peaks.T
-        too_close = np.argwhere(np.logical_and(diff > 0, diff < self.overlap_threshold))
+        indices = np.tril_indices(peaks.size)
+        diff[indices[0], indices[1]] = -1
+        too_close = np.argwhere(np.logical_and(diff >= 0, diff <= self.overlap_threshold))
         if too_close.shape[0] > 0:
             I_peaks = np.zeros(peaks.size)
             unique_all = np.unique(too_close)
@@ -114,7 +117,7 @@ class EntryGenerator:
             peaks[:n, :, axes] = peaks[indices, :, axes]
             peaks[n:, :, axes] = 0
             hkl_order[:n, :, axes] = hkl_order[indices, :, axes]
-            hkl_order[n:, :, axes] = -1
+            hkl_order[n:, :, axes] = -100
             return peaks, hkl_order
 
         base = self.pattern_generator.from_crystal(crystal)
@@ -129,7 +132,7 @@ class EntryGenerator:
 
         peaks = np.zeros((len(ticks), 2, 6))
         absent = np.ones(len(ticks), dtype=bool)
-        hkl_order = -1 * np.ones((len(ticks), 4, 6), dtype=int)
+        hkl_order = -100 * np.ones((len(ticks), 4, 6), dtype=int)
         for i in range(len(ticks)):
             peaks[i, 0, :] = ticks[i].two_theta
             peaks[i, 1, :] = ticks[i].miller_indices.d_spacing
@@ -204,6 +207,10 @@ class EntryGenerator:
                 check_sa = peaks[:self.peak_length, 1, index]
             elif tag == 'intersect':
                 check_i = peaks[:self.peak_length, 1, index]
+                n_unique = np.unique(check_i[check_i != 0]).size
+                n = np.count_nonzero(check_i != 0)
+                if n != n_unique:
+                    print('OVERLAPPING PEAK INCLUDED')
             peaks_df.update({
                 f'theta2_{tag}': peaks[:self.peak_length, 0, index],
                 f'd_spacing_{tag}': peaks[:self.peak_length, 1, index],
@@ -341,6 +348,8 @@ if __name__ == '__main__':
     entry_generator = EntryGenerator()
     rng = np.random.default_rng(seed=12345)
     if rank == 0:
+        if not os.path.exists('data/GeneratedDatasets'):
+            os.mkdir('data/GeneratedDatasets')
         # opening and accessing the giant data frame is only done on rank 0
         entries_csd = pd.read_parquet(
             'data/unique_entries_csd.parquet',
@@ -350,8 +359,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'monoclinic']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'monoclinic']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'cubic']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'cubic']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')
@@ -373,7 +382,7 @@ if __name__ == '__main__':
                 else:
                     group_entries_cod = None
                     counts_cod = 0
-                print(f'{hm_group_key} {counts_csd} {counts_cod}')
+                print(f'{hm_group_key} {counts_csd} {counts_cod} {counts_csd + counts_cod}')
 
                 # One iteration is when one identifier is sent out to each rank.
                 # There is an extra iteration where the remainder get processed with rank 0

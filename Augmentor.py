@@ -79,7 +79,7 @@ class Augmentor:
             plt.close()
 
         # calculate the order of the peak in the list of sa peaks
-        n_bins = 100
+        n_bins = 50
         difference_bins = np.logspace(-4, -2, n_bins + 1)
         difference_centers = (difference_bins[1:] + difference_bins[:-1]) / 2
 
@@ -88,32 +88,29 @@ class Augmentor:
         first_peak = np.zeros(len(training_data))
         differences = []
         for entry_index in range(len(training_data)):
+            p = False
             q2_sa = np.array(training_data.iloc[entry_index]['q2_sa'])
             q2 = np.array(training_data.iloc[entry_index][f'q2_{self.points_tag}'])
             q2_sa = q2_sa[~np.isinf(q2_sa)]
             q2 = q2[~np.isinf(q2)]
             first_peak_index = np.argwhere(q2_sa == q2[0])
             # this catches two cases in oP that are problematic entries
-            if len(first_peak_index) > 0:
-                first_peak[entry_index] = first_peak_index[0][0]
-                difference = q2_sa[1:] - q2_sa[:-1]
-                differences.append(difference)
-                for peak_index in range(1, q2.size - 1):
-                    #diff_0 = q2_1 - q2_0
-                    #diff_1 = q2_2 - q2_1
-                    #diff_n-1 = q2_n - q2_n-1
-                    if peak_index < q2.size - 2:
-                        min_separation = min(difference[peak_index], difference[peak_index + 1])
-                    else:
-                        min_separation = difference[peak_index] 
-                    insert_index = min(max(np.searchsorted(difference_bins, min_separation) - 1, 0), n_bins - 1)
-
-                    if n_bins > insert_index >= 0:
-                        if q2[peak_index] in q2_sa:
-                            if q2[peak_index + 1] in q2_sa:
-                                keep_sum[insert_index] += 1
-                            else:
-                                drop_sum[insert_index] += 1
+            #if len(first_peak_index) > 0:
+            first_peak[entry_index] = first_peak_index[0][0]
+            difference = q2_sa[1:] - q2_sa[:-1]
+            differences.append(difference)
+            for peak_index in range(1, q2_sa.size - 2):
+                #diff_0 = q2_1 - q2_0
+                #diff_1 = q2_2 - q2_1
+                #diff_n-1 = q2_n - q2_n-1
+                min_separation = min(difference[peak_index], difference[peak_index - 1])
+                insert_index = np.searchsorted(difference_bins, min_separation) - 1
+                if n_bins > insert_index >= 0:
+                    if q2_sa[peak_index] in q2:
+                        if q2_sa[peak_index + 1] in q2:
+                            keep_sum[insert_index] += 1
+                        else:
+                            drop_sum[insert_index] += 1
 
         total_sum = keep_sum + drop_sum
 
@@ -129,13 +126,13 @@ class Augmentor:
             'cdf': cdf
             }
 
-        self.keep_rate = lambda x, r0, r1: (1 - np.exp(-r0 * x))**r1
+        self.keep_rate = lambda x, r0, r1, c: c*(1 - np.exp(-r0 * x))**r1
         y = keep_sum / total_sum
         self.keep_rate_params, _ = scipy.optimize.curve_fit(
             f=self.keep_rate,
             xdata=difference_centers[~np.isnan(y)],
             ydata=y[~np.isnan(y)],
-            p0=(10, 0.001),
+            p0=(10, 0.001, 1),
             )
 
         difference_hist, _ = np.histogram(np.concatenate(differences), bins=difference_bins, density=True)
@@ -322,11 +319,12 @@ class Augmentor:
                 previous_kept_index = index
 
         if len(q2) >= self.n_points:
-            q2 = np.array(q2)[:self.n_points]
+            q2 = np.array(q2)
             sort_indices = np.argsort(q2)
-            q2 = q2[sort_indices]
-            hkl = np.array(hkl)[:self.n_points][sort_indices]
-            reindexed_hkl = np.array(reindexed_hkl)[:self.n_points][sort_indices]
+            q2 = q2[sort_indices][:self.n_points]
+
+            hkl = np.array(hkl)[sort_indices][:self.n_points]
+            reindexed_hkl = np.array(reindexed_hkl)[sort_indices][:self.n_points]
             augmented_entry[f'q2_{self.points_tag}'] = q2
             augmented_entry[f'd_spacing_{self.points_tag}'] = 1 / np.sqrt(q2)
             augmented_entry['hkl'] = hkl

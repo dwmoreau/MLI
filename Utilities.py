@@ -9,9 +9,9 @@ def reciprocal_uc_conversion(unit_cell):
     a = unit_cell[0]
     b = unit_cell[1]
     c = unit_cell[2]
-    alpha = multiplicative_factor * unit_cell[3]
-    beta = multiplicative_factor * unit_cell[4]
-    gamma = multiplicative_factor * unit_cell[5]
+    alpha = unit_cell[3]
+    beta = unit_cell[4]
+    gamma = unit_cell[5]
     S = np.array([
         [a**2, a*b*np.cos(gamma), a*c*np.cos(beta)],
         [a*b*np.cos(gamma), b**2, b*c*np.cos(alpha)],
