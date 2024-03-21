@@ -79,12 +79,20 @@ class Augmentor:
             plt.close()
 
         # calculate the order of the peak in the list of sa peaks
-        n_bins = 50
-        difference_bins = np.logspace(-4, -2, n_bins + 1)
+        if self.lattice_system == 'cubic':
+            n_bins = 20
+            n_bins_q2 = 4
+            difference_bins = np.logspace(-3, -2, n_bins + 1)
+        else:
+            n_bins = 50
+            n_bins_q2 = 5
+            difference_bins = np.logspace(-4, -2, n_bins + 1)
         difference_centers = (difference_bins[1:] + difference_bins[:-1]) / 2
 
-        keep_sum = np.zeros(n_bins)
-        drop_sum = np.zeros(n_bins)
+        q2_bins = np.linspace(0, 0.2, n_bins_q2 + 1)
+        q2_centers = (q2_bins[1:] + q2_bins[:-1]) / 2
+        keep_sum = np.zeros((n_bins, n_bins_q2))
+        drop_sum = np.zeros((n_bins, n_bins_q2))
         first_peak = np.zeros(len(training_data))
         differences = []
         for entry_index in range(len(training_data)):
@@ -105,12 +113,13 @@ class Augmentor:
                     #diff_n-1 = q2_n - q2_n-1
                     min_separation = min(difference[peak_index], difference[peak_index - 1])
                     insert_index = np.searchsorted(difference_bins, min_separation) - 1
+                    insert_index_q2 = min(np.searchsorted(q2_bins, q2_sa[peak_index]) - 1, n_bins_q2 - 1)
                     if n_bins > insert_index >= 0:
                         if q2_sa[peak_index] in q2:
                             if q2_sa[peak_index + 1] in q2:
-                                keep_sum[insert_index] += 1
+                                keep_sum[insert_index, insert_index_q2] += 1
                             else:
-                                drop_sum[insert_index] += 1
+                                drop_sum[insert_index, insert_index_q2] += 1
 
         total_sum = keep_sum + drop_sum
 
@@ -126,14 +135,15 @@ class Augmentor:
             'cdf': cdf
             }
 
-        self.keep_rate = lambda x, r0, r1, c: c*(1 - np.exp(-r0 * x))**r1
         y = keep_sum / total_sum
-        self.keep_rate_params, _ = scipy.optimize.curve_fit(
-            f=self.keep_rate,
-            xdata=difference_centers[~np.isnan(y)],
-            ydata=y[~np.isnan(y)],
-            p0=(10, 0.001, 1),
+        y[total_sum == 0] = 0.5
+        results = scipy.optimize.minimize(
+            fun=lambda x, y, difference, q2 : np.linalg.norm(self.keep_rate(difference, q2, x) - y)**2,
+            method='L-BFGS-B',
+            x0=(100, 0.5, 0.5, 0),
+            args=(y, difference_centers, q2_centers),
             )
+        self.keep_rate_params = results.x
 
         difference_hist, _ = np.histogram(np.concatenate(differences), bins=difference_bins, density=True)
         fig, axes = plt.subplots(2, 2, figsize=(8, 4), sharex='col')
@@ -144,15 +154,31 @@ class Augmentor:
         axes[1, 0].set_ylabel('CDF')
         axes[1, 0].set_xlabel('Peak index')
         
-        axes[0, 1].plot(difference_centers, keep_sum / total_sum)
-        axes[0, 1].plot(difference_centers, self.keep_rate(difference_centers, *self.keep_rate_params))
-        axes[1, 1].bar(difference_centers, difference_hist, width=difference_bins[1:] - difference_bins[:-1])
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        for index in range(n_bins_q2):        
+            axes[0, 1].plot(difference_centers, y[:, index], color=colors[index], linestyle='none', marker='.')
+            curve = self.keep_rate(difference_centers, q2_centers[index], self.keep_rate_params)
+            axes[0, 1].plot(difference_centers, curve, color=colors[index], label=f'{q2_centers[index]:0.3f}')
+        axes[0, 1].legend(frameon=False, title='$q^2$', labelspacing=0.1)
         axes[0, 1].set_ylabel('Keep Rate')
+
+        axes[1, 1].bar(difference_centers, difference_hist, width=difference_bins[1:] - difference_bins[:-1])
         axes[1, 1].set_ylabel('Distribution')
         axes[1, 1].set_xlabel('$q^2$ spacing')
         fig.tight_layout()
         fig.savefig(f'{self.save_to}/aug_setup_{self.aug_params["tag"]}.png')
         plt.close()
+
+    def keep_rate(self, difference, q2, x):
+        r0 = x[0]
+        r1 = x[1]
+        c = x[2] + x[3] * q2
+        if q2.size == 1:
+            prob = c*((1 - np.exp(-r0 * difference))**r1)
+            return prob
+        else:
+            curve = c[np.newaxis]*((1 - np.exp(-r0 * difference))**r1)[:, np.newaxis]
+            return curve
 
     def augment(self, data, subgroup_label):
         sub_groups = data[subgroup_label].unique()
@@ -307,7 +333,7 @@ class Augmentor:
                 elif distance_previous > overlap_threshold_q2:
                     keep_next = False
                     if distance_next > overlap_threshold_q2:
-                        if self.rng.random() < self.keep_rate(separation, *self.keep_rate_params):
+                        if self.rng.random() < self.keep_rate(separation, q2_sa[index], self.keep_rate_params):
                             keep = True
                     else:
                         if self.rng.random() < 1/2:
