@@ -116,6 +116,7 @@ class CandidateOptLoss:
         self.q2_obs = q2_obs
         self.lattice_system = lattice_system
         self.delta_q_eps = 1e-10
+        #self.delta_q_eps = np.exp(-10)
         self.n_points = q2_obs.size
 
         if lattice_system == 'cubic':

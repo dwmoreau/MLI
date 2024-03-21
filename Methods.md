@@ -143,8 +143,13 @@ Shirley (2003) gives a good overview of the history of powder diffraction indexi
 ADD DISCUSSION ON DICVOL.
 
 ### 1.2.2 Zone Indexing
-ADD DISCUSSION ON THE RUNGE-ITO-DEWOLFF-VISSER METHOD THAT IS IMPLEMENTED IN ITO
-    - I think this is a very important technique to understand. It seems like Oishi-Tomiyasu's work on the Conograph program is also a further extension of this method.
+The zone indexing method, first described by Runge (1917), rediscovered by Ito (1949), refined by de Wolff (1957, 1958), and implemented computationally by Visser (1969) demonstrates a methodological approach to determining the angles of a triclinic lattice. For the monoclinic case, the method starts with the assumption that the reciprocal lattice vectors $a^*$ and $ca^*$ have been determined by the position of the low angle reflections. If the monoclinic angle, $\beta^*$ is $90^o$, there will be a diffraction peak at $q_{h0l}^2 = h^2a^{*2} + l^2c^{*2}$. When the monoclinic angle is not $90^o$, this peak will be split, with two peaks occuring at $q_{h0l}^2 = h^2a^{*2} + l^2c^{*2} + 2hla^*c^*\cos(\beta^*)$ and $q_{h0-l}^2 = h^2a^{*2} + l^2c^{*2} - 2hla^*c^*\cos(\beta^*)$. The monoclinic angle is obtained from difference of these two peaks, $\cos(\beta^*) = \frac{q_{h0l}^2 - q_{h0-l}^2}{4hla^*c^*}$.
+
+This method demonstrates the difficulty in determining lattice angles from powder diffraction. First, an assumption is made that the lattice parameter lengths have been accurately determined. Then, a both sides of the split peak must be observed and identified. Lastly, the angle is determined from a combination of two peak positions and two lattice parameters. In practice, this is performed through a guess and check method and requires powder diffraction patterns determined at high accuracy. 
+
+This method should struggle with poor data. Missing low angle peaks will preclude lattice parameter determination. Contaminant peaks will add confusion to lattice parameter determination and identification of peak pairs. Error in peak positions will compound to a larger error in angle. 
+
+Machine learning methods for unit cell determination have not been demonstrated to determine unit cell lengths to the precision neccessary to use in the zone indexing algorithm.
 
 ### 1.2.3 SVD-Index
 The method presented here draws inspiration heavily from the SVD-Index indexing presented by Coehlo (2003). This algorithm takes a generate-and-test approach to the problem, it starts with random guesses of the lattice parameters, then iteratively assigns Miller indices and optimizes the lattice parameters to explain the observed diffraction spacings. This is a complex algorithm and an abridged overview is given here to support the development of ML-Index. SVD-Index consists of three primary components: 1) Initial unit cell generation; 2) Miller index assignment; and 3) Unit cell optimization. 
@@ -249,7 +254,7 @@ To be clear what is meant by patterns in reflection conditions, consider the pri
 
 It should be noted that Hierarchy 3 splits up entries with the same space group. Consider spacegroup 18 which has two screw axes and one axis without a symmetry element. This one spacegroup contains spacegroup symbols P 21 21 2, P 21 2 21, and P 2 21 21. The P 21 21 2 spacegroup will have two reflection conditions $h00; h=2n$ and $0k0; k=2n$, and no reflection condition for $l$. The other two space symbols represent different permutations of the axes and reflection conditions. Again, orthorhombic crystals are reindexed so $a<b<c$, so all three settings will be contained in the training/testing datasets. Spacegroup 18 is split into three different groups, where they will be grouped with entries from other spacegroups with similar reflection conditions. On the other hand, consider spacegroup 17, with one screw axis and two axes without a symmetry element. This spacegroup contains symbols P 21 2 2, P 2 21 2, and P 2 2 21. Ideally, they would be split into different groups like Spacegroup 18, however, spacegroup 17, and other spacegroups with similar patterns in reflection conditions, have very few entries, so they are grouped into a single group due to limited data.
 
-Specifications for the different groups can be found at "data/GroupSpec_$\textit{lattice_system}$.xlsx"
+Specifications for the different groups can be found at "data/GroupSpec_$lattice\_system$.xlsx"
 
 $\textit{I have a hunch that this grouping will help with generalization. Absent peaks, for whatever reason, should look like systematic}$
 $\textit{absent patterns in a different group, so there should always be a random unit cell generator that matches the observed}$
@@ -267,6 +272,11 @@ Unit cell length parameters are also scaled using a standard scaler. For a given
 
 Unit cell angle parameters are converted to radians and subtracted by $\pi/2$. This puts right angles ($90^o$) at zero. Then the standard deviation of all angles, which were not originally $90^o$, is calculated in radians, and the zero-centered unit cell angles are divided by this scale.
 
+Figure 1 shows the distribution of unit cell parameter and observed peak spacing for cubic. The top row shows the original values and the bottom row shows the values after scaling. The original entries from the databases are in the blue histogram, the augmented entries are in the orange histogram.
+
+$\textit{parameters a, b, and c don't look exactly the same, especially for the augmented entries.}$
+![alt text](models/cubic_V1/data/regression_inputs.png)
+FIGURE 1
 
 ### 2.1.5 Augmentation
 
@@ -286,7 +296,12 @@ The peak list is augmented by resampling peaks from the list of non-systematical
 
 There are two peak lists available at this time; Peak list 1, the first 60 non-systematically absent peaks. Peak list 2, the first 60 peaks that could be realistically observed in a diffraction pattern. Again, only using the training data to set up this augmentation. The position of the first observed peak in the list of all non-systematically absent peaks is recorded. An empirical distribution is made from a histogram of this position list. For the augmented entries, the empirical distribution is used to randomly select a first peak from the list of all non-systematically absent peaks. 
 
-After the first peak is picked, the list of non-systematically absent peaks is stepped through and the next peak is picked based on its distance from its neighboring peaks. Selecting the next peak based only on its separation is chosen to make observability only based on whether or not the peak will overlap another peak. The intensity of the peak is not a consideration. This approach is set up by calculating the minimum separation, $\Delta q^2$ in units of $q^2$, between each peak in Peak list 1 and its neighbors. The fraction of neighboring peaks in Peak List 2 that are also neighboring in Peak List 1 are calculated in binned units of $\Delta q^2$. This binning is in 100 bins log spaced between $10^{-4}$ to $10^{-2}$. A function of the form, $\rho(\Delta q^2) = \left[1 - \exp(-r_0 \Delta q^2)\right]^{r_1}$ is fit to the binned fraction and is used as and acceptance probability. This form was chosen because when $\Delta q^2 = 0$ the probability of acceptance is zero and as $\Delta q^2 => \inf$, the probability of acceptance approaches one. It should be noted that $\rho(\Delta q^2)$ remains less than one in the observed range of $\Delta q^2$ so a well separated peak can be rejected. The probability increases monotonically between these two extremes.
+After the first peak is picked, the list of non-systematically absent peaks is stepped through and the next peak is picked based on its distance from its neighboring peaks. Selecting the next peak based only on its separation is chosen to make observability only based on whether or not the peak will overlap another peak. The intensity of the peak is not a consideration. This approach is set up by calculating the minimum separation, $\Delta q^2$ in units of $q^2$, between each peak in Peak list 1 and its neighbors. The fraction of neighboring peaks in Peak List 2 that are also neighboring in Peak List 1 are calculated in binned units of $\Delta q^2$. This binning is in 100 bins log spaced between $10^{-4}$ to $10^{-2}$. A function of the form, $\rho(\Delta q^2) = c\left[1 - \exp(-r_0 \Delta q^2)\right]^{r_1}$ is fit to the binned fraction and is used as and acceptance probability. This form was chosen because when $\Delta q^2 = 0$ the probability of acceptance is zero and as $\Delta q^2 => \inf$, the probability of acceptance approaches one. It should be noted that $\rho(\Delta q^2)$ remains less than one in the observed range of $\Delta q^2$ so a well separated peak can be rejected. The probability increases monotonically between these two extremes.
+
+For cubic, Figure 2 shows the probability distribution of the position of the first peak in the left column. The bottom right displays the distribution of $\Delta q^2$ and the top left shows $\rho(\Delta q^2)$ as calculated from the data (blue) and the fitting curve (orange).
+![alt text](models/cubic_V1/augmentor/aug_setup_cubic.png)
+
+FIGURE 2
 
 After the first peak is selected, there are three different cases for peaks:
 
@@ -296,6 +311,18 @@ After the first peak is selected, there are three different cases for peaks:
 
 $\textit{The peak resampling method is a bit complicated. I arrived at it by trying to ensure the distribution of}$
 $\textit{peaks in the augmented set matched the distribution in the unaugmented set.}$
+
+For the cubic face centered Bravais lattice cF, the distribution of the Miller index label, position of the peak in the reference peak list, for each peak in the 10 peak list is show in Figure 3. This is for unaugmented data.
+
+![alt text](models/cubic_V1/data/hkl_labels_unaugmented_cF.png)
+
+Figure 3
+
+Figure 4 shows this same plot, but for the augmented data. The distribution of the first peak's position seem to match. However the distribution of the subsequent peaks appear to suggest that peaks are dropped at higher frequencies in the augmented data.
+
+![alt text](models/cubic_V1/data/hkl_labels_augmented_cF.png)
+
+Figure 4
 
 ### 2.2 Regression models
 
@@ -347,6 +374,8 @@ $\textit{If the predictions overlap 100\%, but the neural networks are more accu
 $\textit{If the predictions occasionally produce very different estimates, it would make sense to keep both models}$
 
 ### 2.2.4 Evaluations
+
+
 
 ### 2.3 Miller Index Assignment Model
 The second primary component of an indexing algorithm is the assignment of Miller indices given a unit cell and observed peak spacings. This is performed by establishing a reference set of Miller indices. These are all the possible Miller indices for a given lattice system without consideration for systematic absences. The forward diffraction models, (Eq. 1-7) are used to calculate a reference set of peak spacings from this reference set of Miller indices and a given unit cell. A pairwise difference array is then calculated between the observed and reference set of peak spacings. This array is then used as inputs to a neural network which produces a probability distribution, for each observed peak, for the correct Miller index assignment over the reference set of Miller indices.
@@ -401,7 +430,7 @@ $\textit{spatial relationship in the pairwise difference array. This is lost in 
 
 An important question is, what data should these networks be trained with? One option is the true unit cell parameters, this results in 100% accurate Miller index assignments (and it does). On the other hand, they could be trained using the predicted unit cell parameters from the regression networks. This should represent a worst-case scenario for unit cells. There should be a few randomly generated unit cells better than the expected value. After several rounds of optimization, the best candidate unit cells should be much better than their initial value. Ideally, the Miller index assignment networks would be trained on unit cell parameters that differ from the true values by amounts consistent with the current best candidate unit cells during optimization. To these means, a series of assignment networks are trained. The first network is trained using predicted unit cells, where the predictions are performed with the neural network model corresponding to the true group that the entry belongs to. Subsequent networks are trained with randomly perturbed unit cells. This is performed by adding Gaussian noise to the scaled unit cell parameters before they are used to calculate pairwise differences. This is set up in a way that each entry receives a different perturbation for each training epoch for additional regularization.
 
-Training of the assignment neural networks is performed with all the unaugmented entries for a given lattice system. Augmented entries are omitted because there is plenty of unaugmented data to train the networks. The sparse categorical cross-entropy target function is chosen and the Adam optimizer is used with a learning rate of 0.002 and a batch size of 256. Networks are trained with Gaussian noise levels of 0.10, 0.05, 0.025, and 0.01. For monoclinic, the associated $\epsilon_\Delta$ values were 0.01, 0.0075, 0.01, and 0.005.
+Training of the assignment neural networks is performed with all the unaugmented entries for a given lattice system. Augmented entries are omitted because there is plenty of unaugmented data to train the networks - and I have a bug somewhere in the augmentation algorithm regarding the Miller index assignments. The sparse categorical cross-entropy target function is chosen and the Adam optimizer is used with a learning rate of 0.002 and a batch size of 256. Networks are trained with Gaussian noise levels of 0.10, 0.05, 0.025, and 0.01. For monoclinic, the associated $\epsilon_\Delta$ values were 0.01, 0.0075, 0.01, and 0.005.
 
 ### 2.3.4 Evaluations
 
@@ -410,7 +439,7 @@ Training of the assignment neural networks is performed with all the unaugmented
 The third component of the indexing algorithm is the optimization of unit cell parameters given initial unit cell candidates and a mechanism to assign Miller indices. Currently, the program only considers one lattice system at a time. So if a crystal is known to be monoclinic, it will be optimized with that as a known fact. After getting this working with all lattice systems, I will work on the case where the lattice system is unknown.
 
 ### 2.4.1 Target function
-The optimization seeks the most probable Miller index, $H$, and unit cell, $\vec{c}$, given a set of observed peak spacings, \vec{q}_{obs}. This can be expanded using Baye's formula.
+The optimization seeks the most probable Miller index, $H$, and unit cell, $\vec{c}$, given a set of observed peak spacings, $\vec{q}_{obs}$. This can be expanded using Baye's formula.
 
 $\rho(H,\vec{c}|\vec{q}_{obs}) = \frac{\rho(\vec{q}_{obs}|H, \vec{c})\rho(H, \vec{c})}{\rho(\vec{q}_{obs})}$.
 
@@ -453,29 +482,32 @@ $\sigma^2_{q^2} = q^2_{obs,k} |q^2_{obs,k} - q^2_{cal,kj} + \epsilon_{q^2}|$.
 
 Notably, the $\sigma^2_{q^2}$ presented here does not include the randomness in the same way as the weighting in SVD-Index. Randomness is important to the algorithm and is included by other means.
 
-### 2.4.2 Random Unit Cell Generation and Miller Index Assignments
+### 2.4.2 Random Unit Cell Generation
 
 Random unit cells are generated from the neural networks. For each entry, a set of mean and variance estimates are taken from each neural network trained on the different groups. Each set of mean and variance estimates are used as parameters for a Normal distribution and $n_{nn}$ random unit cell parameters are generated. $n_{rf}$ random unit cells are also selected from individual decision trees in the random forest model.
 
-Once random unit cells are generated, there will be $n_g(n_{nn} + n_{rf})$ candidate unit cells where $n_g$ is the number of groups. For each candidate unit cell, Miller indices are assigned to each peak using the assignment neural network.
+Once random unit cells are generated, there will be $n_g(n_{nn} + n_{rf})$ candidate unit cells where $n_g$ is the number of groups.
 
 ### 2.4.3 Unit Cell Optimization
 
-At this point, there are candidate unit cells, assigned Miller indices with confidences $\rho(H_{k,j}|\vec{c})$. An algorithm within the Markov Chain Monte Carlo (MCMC) framework is used to perform statistical optimization of the unit cell parameters. MCMC algorithms are used to estimate posterior distributions or perform numerical integration. They roughly follow these steps 0) Start with an initial set of parameters and a posterior or likelihood function. 1) Select a new set of parameters according to a well-defined protocol that includes a randomness aspect. 2) Either accept or reject the new set of parameters based on the ratio of the likelihoods and/or priors) calculated from the new set and original set of parameters. Then iteratively repeat steps 1) and 2), until a predefined stopping point or criteria.
+At this point, there are candidate unit cells. An algorithm within the Markov Chain Monte Carlo (MCMC) framework is used to perform statistical optimization of the unit cell parameters. MCMC algorithms are used to estimate posterior distributions. They roughly follow these steps 0) Start with an initial set of parameters and a posterior or likelihood function. 1) Select a new set of parameters according to a well-defined protocol that includes a randomness aspect. 2) Either accept or reject the new set of parameters based on the ratio of the likelihoods and/or priors) calculated from the new set and original set of parameters. Then iteratively repeat steps 1) and 2), until a predefined stopping point or criteria.
 
 For this algorithm, MCMC Step 0) is described in section 2.4.2. For MCMC Step 1), unit cell parameters for the next iteration are selected according to this protocol:
 
-1.1) Calculate $\sigma^2_{q^2}$ based on the current unit cell.
+1.1) Perform inference using the assignment Neural networks. There are four different assignment neural networks that were trained on data with varying degrees of random perturbation to the unit cell parameters. One of these neural networks is randomly selected and used for inference for all candidate unit cells.
 
-1.2) Subsample the peaks, so if there are 20 peaks, 15 peaks are randomly selected. Options exist for purely random subsampling and for subsampling based on softmax probabilities.
+1.2) Assign Miller indices. There are two options, a) resampling, Miller indices are randomly assigned with probabilities equal to their softmaxes, and b) subsampling: the most probable Miller index is assigned.
+
+1.3) Calculate $\sigma^2_{q^2}$ based on the current unit cell and Miller index assignment
+
+1.4) If using option b, subsampling, subsample the peaks. If there are 20 peaks, 15 peaks are randomly selected. Options exist for purely random subsampling and for subsampling based on softmax probabilities.
 
 $\textit{Subsampling peaks might not work for triclinic. There might not be enough peaks to ensure there is a constraint for each unit cell parameter.}$
 $\textit{Well, Coehlo 2003 shows that 20 peaks will result in 12\% of triclinic unit cells will be unsolvable. 9\% for monoclinic}$
 $\textit{These numbers go up a lot at 10 peaks.}$
-$\textit{I plan on implementing a resampling approach where Miller indices are chosen instead of the most probable (largest softmax), the resampling}$
-$\textit{approach will assign Miller indices by random selection based on the softmax probabilities.}$
+$\textit{On the otherhand, resampling is slower.}$
 
-1.3) Optimize the unit cell parameters by minimizing the negative log-likelihood given by Eq. 8. This is performed with $\textit{scipy.optimize.minize}$, both analytically calculated gradients and Hessians are available. The optimization is formulated so the second derivatives of $q^2_{cal}$ are zero with respect to the optimizable parameters, easing the calculation of the Hessian.
+1.5) Optimize the unit cell parameters by minimizing the negative log-likelihood given by Eq. 8. This is performed with $\textit{scipy.optimize.minize}$, both analytically calculated gradients and Hessians are available. The optimization is formulated so the second derivatives of $q^2_{cal}$ are zero with respect to the optimizable parameters, easing the calculation of the Hessian.
 
 Consider the case where only one iteration of the optimization is performed. For a gradient descent or quasi-Newton (BFGS for example) optimizer, the unit cell parameters will be moved in the direction of the negative gradient of the negative log-likelihood multiplied by a constant (one in the BFGS case). This movement of the parameters is very similar to the mechanism in the Metropolis Adjusted Langevin Algorithm (MALA).
 

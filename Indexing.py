@@ -6,20 +6,8 @@ orthorhombic   | 90%
 Monoclinic
     {'Not found': 157, 'Found and best': 86, 'Found but not best': 28, 'Found but off by two': 0, 'Found explainers': 66}
 
-* Startover
-    * Redo Generate dataset
-        * orthorhombic
-        * monoclinic
-
-        - stricter intensity requirement
-            - I > 0.005
-            - d2I < -1
-            - breadth = 0.10
-    * Get reasonable hyperparameters for NN
-    * Retest optimization
 
 - Documentation
-    * Add figures to Methods.md
     - Update README.md
     - Reread papers on indexing and update document
     - Reread ML technique papers
@@ -27,9 +15,18 @@ Monoclinic
         Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
 
 - Optimization:
-    * profile with orthorhombic
-    * Full softmax array optimization - Actual likelihood target function
+    * Add perturbation
+        - Make combinations of the most common unit cell params
+        - Make perturbations of all the unit cell params
+            - select the best fraction of candidates
+            - randomly pick n params for perturbation
+    * refactor to xnn coordinates
+    * implement custom dogleg method that can work with multiple entries at once
+        - get dogleg working with one entry
+        - get dogleg working with multiple entries
     - What differentiates a found / not found entry
+    - correct the epsilon factor to be e^{-10}
+    - Full softmax array optimization - Actual likelihood target function
     - common assignments:
         - drop during optimization but include in loss
         - use all hkl assignments with largest N likelihoods
@@ -37,15 +34,17 @@ Monoclinic
 - Indexing.py
 
 - Augmentation
-    - Edit so the peak distributions match
+    - Get peak distributions to match.
+        - Try making the dropout probability a function of q2
+    - augmented entries have a bug in the Miller indices
 
 - Assignments
-    * smallest model that works
     - Figure out how to take a more holistic look at the pairwise difference array.
     - Penalize multiple assignments to the same hkl
 
 - Data
-    * Fix Hexagonal / Rhombohedral setting issues.
+    - Get tetragonal running
+    - Fix Hexagonal / Rhombohedral setting issues.
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
     - redo dataset generation with new parameters based on RRUFF database
@@ -59,7 +58,6 @@ Monoclinic
         - verify conversions in Utilities.py
         - Refactor Optimizer.py
         - Refactor training
-    * CombineDatabases.py bug where entries are being added more than once.
     * memory leak during cyclic training
         - Try saving and loading weights with two different models
     - MPI error: https://github.com/pmodels/mpich/issues/6547
@@ -72,6 +70,7 @@ Monoclinic
     - profile optimization
 
 - Regression:
+    - Retest with LSTM
     - prediction of PCA components
         - evaluation of fitting in the PCA / Scaled space
         - evaluation of covariance

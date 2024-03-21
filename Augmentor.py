@@ -95,22 +95,22 @@ class Augmentor:
             q2 = q2[~np.isinf(q2)]
             first_peak_index = np.argwhere(q2_sa == q2[0])
             # this catches two cases in oP that are problematic entries
-            #if len(first_peak_index) > 0:
-            first_peak[entry_index] = first_peak_index[0][0]
-            difference = q2_sa[1:] - q2_sa[:-1]
-            differences.append(difference)
-            for peak_index in range(1, q2_sa.size - 2):
-                #diff_0 = q2_1 - q2_0
-                #diff_1 = q2_2 - q2_1
-                #diff_n-1 = q2_n - q2_n-1
-                min_separation = min(difference[peak_index], difference[peak_index - 1])
-                insert_index = np.searchsorted(difference_bins, min_separation) - 1
-                if n_bins > insert_index >= 0:
-                    if q2_sa[peak_index] in q2:
-                        if q2_sa[peak_index + 1] in q2:
-                            keep_sum[insert_index] += 1
-                        else:
-                            drop_sum[insert_index] += 1
+            if len(first_peak_index) > 0:
+                first_peak[entry_index] = first_peak_index[0][0]
+                difference = q2_sa[1:] - q2_sa[:-1]
+                differences.append(difference)
+                for peak_index in range(1, q2_sa.size - 2):
+                    #diff_0 = q2_1 - q2_0
+                    #diff_1 = q2_2 - q2_1
+                    #diff_n-1 = q2_n - q2_n-1
+                    min_separation = min(difference[peak_index], difference[peak_index - 1])
+                    insert_index = np.searchsorted(difference_bins, min_separation) - 1
+                    if n_bins > insert_index >= 0:
+                        if q2_sa[peak_index] in q2:
+                            if q2_sa[peak_index + 1] in q2:
+                                keep_sum[insert_index] += 1
+                            else:
+                                drop_sum[insert_index] += 1
 
         total_sum = keep_sum + drop_sum
 
@@ -289,34 +289,37 @@ class Augmentor:
             # 1) Close to previous_kept: Reject
             # 2) Far from previous_kept and next: Use formula
             # 3) Far from previous_kept, close to next: Accept with 50% probability. If rejected, accept the next
-            overlap_threshold_q2 = get_overlap_threshold_q2(q2_sa[index], fwhm, overlap_threshold_theta2, wavelength)
-            distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
-            if index == q2_sa.size - 1:
-                separation = distance_previous
-            else:
-                distance_next = q2_sa[index + 1] - q2_sa[index]
-                separation = min(distance_previous, distance_next)
-            #print(f'{overlap_threshold_q2} {distance_previous} {distance_next}')
-            keep = False
-            if keep_next:
-                keep = True
-                keep_next = False
-            elif distance_previous > overlap_threshold_q2:
-                keep_next = False
-                if distance_next > overlap_threshold_q2:
-                    if self.rng.random() < self.keep_rate(separation, *self.keep_rate_params):
-                        keep = True
+
+            # There is a problem with really large q2 values. Like ~100 I believe they are comming from
+            # setting the hkl to [-100, -100, -100] for empty peaks in the peak list
+            if q2_sa[index] < 1:
+                overlap_threshold_q2 = get_overlap_threshold_q2(q2_sa[index], fwhm, overlap_threshold_theta2, wavelength)
+                distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
+                if index == q2_sa.size - 1:
+                    separation = distance_previous
                 else:
-                    if self.rng.random() < 1/2:
-                        keep = True
-                        keep_next = False
+                    distance_next = q2_sa[index + 1] - q2_sa[index]
+                    separation = min(distance_previous, distance_next)
+                keep = False
+                if keep_next:
+                    keep = True
+                    keep_next = False
+                elif distance_previous > overlap_threshold_q2:
+                    keep_next = False
+                    if distance_next > overlap_threshold_q2:
+                        if self.rng.random() < self.keep_rate(separation, *self.keep_rate_params):
+                            keep = True
                     else:
-                        keep_next = True
-            if keep:
-                q2.append(q2_sa[index])
-                hkl.append(augmented_entry['hkl_sa'][index])
-                reindexed_hkl.append(augmented_entry['reindexed_hkl_sa'][index])
-                previous_kept_index = index
+                        if self.rng.random() < 1/2:
+                            keep = True
+                            keep_next = False
+                        else:
+                            keep_next = True
+                if keep:
+                    q2.append(q2_sa[index])
+                    hkl.append(augmented_entry['hkl_sa'][index])
+                    reindexed_hkl.append(augmented_entry['reindexed_hkl_sa'][index])
+                    previous_kept_index = index
 
         if len(q2) >= self.n_points:
             q2 = np.array(q2)

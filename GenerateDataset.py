@@ -359,8 +359,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'cubic']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'cubic']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'monoclinic']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'monoclinic']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')

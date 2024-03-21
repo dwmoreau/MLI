@@ -157,8 +157,8 @@ class Candidates:
             self.drop_bad_optimizations()
         if len(self.candidates) > 1:
             self.pick_explainers()
-        if len(self.candidates) > 1:
-            self.drop_identical_assignments()
+        #if len(self.candidates) > 1:
+        #    self.drop_identical_assignments()
         self.candidates.sort_values(by='loss', inplace=True)
 
     def drop_identical_assignments(self):
@@ -466,6 +466,7 @@ class Optimizer:
             'Found but off by two': 0,
             'Found explainers': 0,
             }
+        #for entry_index in range(self.N):
         for entry_index in range(self.N):
             start = time.time()
             current_percentage = entry_index / self.N
@@ -484,6 +485,11 @@ class Optimizer:
             print(report_counts)
             end = time.time()
             print(end - start)
+            #unit_cell = np.stack(candidates.candidates['unit_cell'])
+            #loss = np.stack(candidates.candidates['loss'])
+            #np.save('entry5_unit_cell.npy', unit_cell)
+            #np.save('entry5_loss.npy', loss)
+            #assert False
         self.indexer.data[f'{self.indexer.hkl_prefactor}unit_cell_best_opt'] = list(uc_best_opt)
 
     def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry):
@@ -570,34 +576,34 @@ class Optimizer:
             2: Optimize given the assigned Miller indices
             3: Accept or reject new params.
         """
-        candidates = self.assign_hkls(
+        candidates = self.update_candidates(
             candidates,
             self.opt_params['iteration_info'][0]['assigner_tag'],
-            assignment_method='best',
+            acceptance_method='always',
             )
-        candidates = self.get_loss(candidates)
         candidates.diagnostics()
         for iteration_info in self.opt_params['iteration_info']:
+            interval = iteration_info['big_jump_interval']
             for iter_index in range(iteration_info['n_iterations']):
-                next_candidates = copy.deepcopy(candidates)
+                if not interval is None and ((iter_index + 1) % interval) == 0:
+                    candidates = self.big_jump(candidates, iteration_info)
                 if iteration_info['worker'] in ['softmax_subsampling', 'random_subsampling']:
-                    next_candidates = self.assign_hkls(
-                        next_candidates, iteration_info['assigner_tag'], 'best'
-                        )
-                    next_candidates = self.random_subsampling(next_candidates, iteration_info)
+                    optimized_unit_cell = self.random_subsampling(candidates, iteration_info)
                 elif iteration_info['worker'] == 'resampling':
-                    next_candidates = self.assign_hkls(
-                        next_candidates, iteration_info['assigner_tag'], 'random'
-                        )
-                    next_candidates = self.no_subsampling(next_candidates, iteration_info)
-                candidates = self.montecarlo_acceptance(
+                    new_candidates = copy.copy(candidates)
+                    new_candidates = self.assign_hkls(new_candidates, iteration_info['assigner_tag'], 'random')
+                    optimized_unit_cell = self.no_subsampling(new_candidates, iteration_info)
+                elif iteration_info['worker'] == 'no_subsampling':
+                    optimized_unit_cell = self.no_subsampling(candidates, iteration_info)
+                candidates = self.update_candidates(
                     candidates,
-                    next_candidates,
-                    iteration_info['acceptance_method']
+                    iteration_info['assigner_tag'],
+                    iteration_info['acceptance_method'],
+                    optimized_unit_cell
                     )
-                candidates.update()
                 if candidates.n <= 1:
                     return candidates
+                #candidates.diagnostics()
                 print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
         return candidates
 
@@ -648,6 +654,9 @@ class Optimizer:
         return softmaxes
 
     def assign_hkls(self, candidates, assigner_key, assignment_method):
+        if assigner_key.startswith('random:'):
+            choices = assigner_key.split('random:')[1].split(',')
+            assigner_key = choices[self.rng.choice(len(choices), size=1)[0]]
         softmaxes = self.get_softmaxes(candidates, assigner_key)
         if assignment_method == 'best':
             hkl_assign = softmaxes.argmax(axis=2)
@@ -693,37 +702,48 @@ class Optimizer:
         softmax_all = scipy.special.softmax(pds_inv, axis=2)
         candidates.candidates['softmax'] = list(softmax_all.max(axis=2))
         candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmax_all))
-        return candidates        
+        return candidates
 
-    def montecarlo_acceptance(self, candidates, next_candidates, acceptance_method):
-        next_candidates = self.get_loss(next_candidates)
+    def montecarlo_acceptance(self, candidates, new_candidates, acceptance_method):
         if acceptance_method == 'montecarlo':
-            ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']))
+            ratio = np.exp(-(new_candidates.candidates['loss'] - candidates.candidates['loss']))
             probability = self.rng.random(candidates.n)
             accepted = probability < ratio
-            candidates.candidates.loc[accepted] = next_candidates.candidates.loc[accepted]
+            candidates.candidates.loc[accepted] = new_candidates.candidates.loc[accepted]
         elif acceptance_method == 'always':
             candidates = new_candidates
         else:
             assert False, 'Unrecognized acceptance method'
         return candidates
 
-    def get_loss(self, candidates):
+    def update_candidates(self, candidates, assigner_key, acceptance_method, optimized_unit_cell=None):
+        # This is the function that was meant to work with multiple subsampled entries at each point.
+        if optimized_unit_cell is None:
+            optimized_unit_cell = np.stack(candidates.candidates['unit_cell'])
         target_function = CandidateOptLoss(
             q2_obs=candidates.q2_obs,
             lattice_system=self.indexer.data_params['lattice_system']
             )
-        loss = np.zeros(candidates.n)
-        hkl = np.stack(candidates.candidates['hkl'])
-        unit_cell = np.stack(candidates.candidates['unit_cell'])
-        for candidate_index in range(candidates.n):
+        new_candidates = copy.deepcopy(candidates)
+        new_candidates.candidates['unit_cell'] = list(optimized_unit_cell)
+        new_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(optimized_unit_cell))
+        if assigner_key == 'closest':
+            new_candidates = self.assign_hkls_closest(new_candidates)
+        else:
+            new_candidates = self.assign_hkls(new_candidates, assigner_key, 'best')
+        new_loss = np.zeros(new_candidates.n)
+        new_hkl = np.stack(new_candidates.candidates['hkl'])
+        new_unit_cell = np.stack(new_candidates.candidates['unit_cell'])
+        for candidate_index in range(new_candidates.n):
             unit_cell_inv2 = target_function.update(
-                hkl[candidate_index],
+                new_hkl[candidate_index],
                 np.ones(self.indexer.data_params['n_points']),
-                unit_cell[candidate_index]
+                new_unit_cell[candidate_index]
                 )
-            loss[candidate_index] = target_function.get_loss(unit_cell_inv2)
-        candidates.candidates['loss'] = loss
+            new_loss[candidate_index] = target_function.get_loss(unit_cell_inv2)
+        new_candidates.candidates['loss'] = new_loss
+        candidates = self.montecarlo_acceptance(candidates, new_candidates, acceptance_method)
+        candidates.update()
         return candidates
 
     def optimize_unit_cell(self, q2_obs, hkl, softmax, unit_cell, optimizer):
@@ -753,31 +773,42 @@ class Optimizer:
                 method=optimizer,
                 jac=True,
                 hess=target_function.loss_likelihood_hessian,
-                options={'maxiter': 10},
+                options={'maxiter': 1},
                 )
         optimized_unit_cell = target_function.get_optimized_uc(results.x)
         return optimized_unit_cell
 
     def no_subsampling(self, candidates, iteration_info):
+        optimized_unit_cell = np.zeros((
+            candidates.n,
+            self.indexer.data_params['n_outputs']
+            ))
         hkl = np.stack(candidates.candidates['hkl'])
         softmax = np.stack(candidates.candidates['softmax'])
         unit_cell = np.stack(candidates.candidates['unit_cell'])
         for candidate_index in range(candidates.n):
-            unit_cell[candidate_index] = self.optimize_unit_cell(
+            optimized_unit_cell[candidate_index] = self.optimize_unit_cell(
                 q2_obs=candidates.q2_obs,
                 hkl=hkl[candidate_index],
                 softmax=softmax[candidate_index],
                 unit_cell=unit_cell[candidate_index],
                 optimizer=iteration_info['optimizer'],
                 )
-        candidates.candidates['unit_cell'] = list(unit_cell)
-        return candidates
+        return optimized_unit_cell
 
     def random_subsampling(self, candidates, iteration_info):
+        optimized_unit_cell = np.zeros((
+            candidates.n,
+            self.indexer.data_params['n_outputs']
+            ))
         hkl = np.stack(candidates.candidates['hkl'])
         softmax = np.stack(candidates.candidates['softmax'])
         unit_cell = np.stack(candidates.candidates['unit_cell'])
         for candidate_index in range(candidates.n):
+            subsampled_indices = np.zeros(
+                self.indexer.data_params['n_points'] - iteration_info['n_drop'],
+                dtype=int
+                )
             if iteration_info['worker'] == 'random_subsampling':
                 p = None
             elif iteration_info['worker'] == 'softmax_subsampling':
@@ -788,14 +819,63 @@ class Optimizer:
                 replace=False,
                 p=p,
                 ))
-            unit_cell[candidate_index] = self.optimize_unit_cell(
+
+            optimized_unit_cell[candidate_index] = self.optimize_unit_cell(
                 q2_obs=candidates.q2_obs[subsampled_indices],
                 hkl=hkl[candidate_index][subsampled_indices],
                 softmax=softmax[candidate_index][subsampled_indices],
                 unit_cell=unit_cell[candidate_index],
                 optimizer=iteration_info['optimizer'],
                 )
-        candidates.candidates['unit_cell'] = list(unit_cell)
+        return optimized_unit_cell
+
+    def big_jump(self, candidates, iteration_info):
+        # The candidates are sorted by increasing loss. So to take the top 10% of candidates by loss,
+        # Just select the first 10%.
+        rf = iteration_info['big_jump_reduction_factor']
+        n_top_candidates = candidates.n // rf
+        n_extra = candidates.n % rf
+        jumped_unit_cell = np.zeros((
+            candidates.n,
+            self.indexer.data_params['n_outputs']
+            ))
+        hkl = np.stack(candidates.candidates['hkl'])
+        softmax = np.stack(candidates.candidates['softmax'])
+        unit_cell = np.stack(candidates.candidates['unit_cell'])
+        for candidate_index in range(n_top_candidates):
+            optimized_unit_cell = self.optimize_unit_cell(
+                q2_obs=candidates.q2_obs,
+                hkl=hkl[candidate_index],
+                softmax=softmax[candidate_index],
+                unit_cell=unit_cell[candidate_index],
+                optimizer=iteration_info['optimizer'],
+                )
+            difference = np.abs(unit_cell[candidate_index] - optimized_unit_cell)
+            perturbation = np.zeros((rf, self.indexer.data_params['n_outputs']))
+            perturbation[1:] = self.rng.uniform(
+                low=-iteration_info['big_jump_perturbation'],
+                high=iteration_info['big_jump_perturbation'],
+                size=(rf - 1, self.indexer.data_params['n_outputs']),
+                )
+            for jump_index in range(rf):
+                jumped_unit_cell[candidate_index*rf + jump_index] = \
+                    unit_cell[candidate_index] + perturbation[jump_index] * difference
+            if candidate_index == 0:
+                perturbation_extra = self.rng.uniform(
+                    low=-iteration_info['big_jump_perturbation'],
+                    high=iteration_info['big_jump_perturbation'],
+                    size=(n_extra, self.indexer.data_params['n_outputs']),
+                    )
+                for extra_index in range(n_extra):
+                    jumped_unit_cell[candidates.n - (extra_index + 1)] = \
+                        unit_cell[candidate_index] + perturbation[extra_index] * difference
+
+        candidates = self.update_candidates(
+            candidates,
+            iteration_info['assigner_tag'],
+            'always',
+            jumped_unit_cell
+            )
         return candidates
 
     def gather_optimized_unit_cells(self):
