@@ -12,7 +12,11 @@ import time
 from Indexing import Indexing
 from Reindexing import unpermute_monoclinic_partial_unit_cell
 from TargetFunctions import CandidateOptLoss
+from TargetFunctions import CandidateOptLoss_xnn
 from Utilities import get_mpi_logger
+from Utilities import get_reciprocal_unit_cell_from_xnn
+from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import reciprocal_uc_conversion
 
 
 def get_out_of_range_candidates(unit_cells, lattice_system, minimum_length, maximum_length, minimum_angle, maximum_angle):
@@ -50,12 +54,21 @@ class Candidates:
         unit_cell, unit_cell_scaled, unit_cell_pred,
         lattice_system,
         minimum_unit_cell, maximum_unit_cell,
-        tolerance, unit_cell_key
+        tolerance, unit_cell_key, n_iterations
         ):
         self.q2_obs = np.array(entry['q2'])
         self.q2_obs_scaled = np.array(entry['q2_scaled'])
+        self.n_points = self.q2_obs.size
 
         self.unit_cell_pred = unit_cell_pred
+        self.n = unit_cell.shape[0]
+        self.n_uc = unit_cell.shape[1]
+
+        self.lattice_system = lattice_system
+        self.minimum_unit_cell = minimum_unit_cell
+        self.maximum_unit_cell = maximum_unit_cell
+        self.tolerance = tolerance
+
         unit_cell_true = np.array(entry[f'{unit_cell_key}unit_cell'])
         if lattice_system == 'cubic':
             self.unit_cell_true = unit_cell_true[0]
@@ -72,13 +85,11 @@ class Candidates:
         self.sg_true = int(entry['spacegroup_number'])
         self.spacegroup_symbol_hm_true = entry[f'{unit_cell_key}spacegroup_symbol_hm']
 
-        self.lattice_system = lattice_system
-        self.minimum_unit_cell = minimum_unit_cell
-        self.maximum_unit_cell = maximum_unit_cell
-        self.tolerance = tolerance
         df_columns = [
             'unit_cell',
             'unit_cell_scaled',
+            'reciprocal_unit_cell',
+            'xnn',
             'hkl',
             'softmax',
             'loss',
@@ -86,16 +97,89 @@ class Candidates:
         self.candidates = pd.DataFrame(columns=df_columns)
         self.explainers = pd.DataFrame(columns=df_columns)
 
-        #best_index = np.argmin(np.linalg.norm(unit_cell - unit_cell_true, axis=1))
-        #self.candidates['unit_cell'] = np.row_stack((unit_cell[best_index], unit_cell[best_index])).tolist()
-        #self.candidates['unit_cell_scaled'] = np.row_stack((unit_cell_scaled[best_index], unit_cell_scaled[best_index])).tolist()
         self.candidates['unit_cell'] = list(unit_cell)
         self.candidates['unit_cell_scaled'] = list(unit_cell_scaled)
-        self.n = len(self.candidates)
-        self.n_uc = unit_cell.shape[1]
-        self.n_points = self.q2_obs.size
+        self.update_xnn_from_unit_cell()
 
         self.hkl_true_check = self.get_hkl_checks(self.hkl_true)
+
+    def update_xnn_from_unit_cell(self):
+        unit_cell = np.stack(self.candidates['unit_cell'])
+        unit_cell_full = np.zeros((self.n, 6))
+        if self.lattice_system == 'cubic':
+            unit_cell_full[:, :3] = unit_cell[:, 0]
+            unit_cell_full[:, 3:] = np.pi/2
+        elif self.lattice_system == 'tetragonal':
+            unit_cell_full[:, :2] = unit_cell[:, 0]
+            unit_cell_full[:, 2] = unit_cell[:, 1]
+            unit_cell_full[:, 3:] = np.pi/2
+        elif self.lattice_system == 'orthorhombic':
+            unit_cell_full[:, :3] = unit_cell[:, :3]
+            unit_cell_full[:, 3:] = np.pi/2
+        elif self.lattice_system == 'monoclinic':
+            unit_cell_full[:, :3] = unit_cell[:, :3]
+            unit_cell_full[:, 4] = unit_cell[:, 3]
+            unit_cell_full[:, 3] = np.pi/2
+            unit_cell_full[:, 5] = np.pi/2
+        elif self.lattice_system == 'triclinic':
+            unit_cell_full = unit_cell_pred
+        else:
+            assert False
+
+        reciprocal_unit_cell_full = reciprocal_uc_conversion(unit_cell_full)
+        xnn_full = get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell_full)
+
+        if self.lattice_system == 'cubic':
+            reciprocal_unit_cell = reciprocal_unit_cell_full[:, 0]
+            xnn = xnn_full[:, 0]
+        elif self.lattice_system == 'tetragonal':
+            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 2]]
+            xnn = xnn_full[:, [0, 2]]
+        elif self.lattice_system == 'orthorhombic':
+            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 1, 2]]
+            xnn = xnn_full[:, [0, 1, 2]]
+        elif self.lattice_system == 'monoclinic':
+            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 1, 2, 4]]
+            xnn = xnn_full[:, [0, 1, 2, 4]]
+        elif self.lattice_system == 'triclinic':
+            reciprocal_unit_cell = reciprocal_unit_cell_full
+            xnn = xnn_full
+
+        self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
+        self.candidates['xnn'] = list(xnn)
+
+    def update_unit_cell_from_xnn(self):
+        xnn = np.stack(self.candidates['xnn'])
+        unit_cell_full = np.zeros((self.n, 6))
+        xnn_full = np.zeros((self.n, 6))
+        if self.lattice_system == 'cubic':
+            xnn_full[:, :3] = xnn
+        elif self.lattice_system == 'tetragonal':
+            xnn_full[:, :2] = xnn
+            xnn_full[:, 2] = xnn
+        elif self.lattice_system == 'orthorhombic':
+            xnn_full[:, :3] = xnn
+        elif self.lattice_system == 'monoclinic':
+            xnn_full[:, :3] = xnn
+            xnn_full[:, 4] = xnn
+        elif self.lattice_system == 'triclinic':
+            xnn_full = xnn
+
+        reciprocal_unit_cell_full = get_reciprocal_unit_cell_from_xnn(xnn_full)
+        unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
+        
+        if self.lattice_system == 'cubic':
+            unit_cell = unit_cell_full[:, 0]
+        elif self.lattice_system == 'tetragonal':
+            unit_cell = unit_cell_full[:, [0, 2]]
+        elif self.lattice_system == 'orthorhombic':
+            unit_cell = unit_cell_full[:, :3]
+        elif self.lattice_system == 'monoclinic':
+            unit_cell = unit_cell_full[:, [0, 1, 2, 4]]
+        elif self.lattice_system == 'triclinic':
+            unit_cell = unit_cell_full
+
+        self.candidates['unit_cell'] = list(unit_cell)
 
     def get_hkl_checks(self, hkl):
         if self.lattice_system == 'cubic':
@@ -297,7 +381,7 @@ class Optimizer:
             'tuning_param': 100,
             'n_pred_evals': 500,
             'found_tolerance': -200,
-            'assignment_batch_size': 64,
+            'assignment_batch_size': 'max',
             'load_predictions': False,
             }
         for key in opt_params_defaults.keys():
@@ -348,6 +432,14 @@ class Optimizer:
         elif self.indexer.data_params['lattice_system'] in ['tetragonal', 'orthorhombic']:
             self.unit_cell_key = 'reindexed_'
 
+        self.n_groups = len(self.indexer.data_params['groups'])
+        if self.opt_params['assignment_batch_size'] == 'max':
+            n_candidates = self.n_groups * (self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf'])
+            self.opt_params['assignment_batch_size'] = n_candidates
+            self.one_assignment_batch = True
+        else:
+            self.one_assignment_batch = False
+
     def distribute_data(self):
         # Make predictions
         if self.opt_params['load_predictions'] and self.rank == 0:
@@ -383,7 +475,6 @@ class Optimizer:
                 self.N = self.indexer.data.shape[0]
 
         if not self.opt_params['load_predictions']:
-            self.n_groups = len(self.indexer.data_params['groups'])
             self.N = self.indexer.data.shape[0]
             self.uc_scaled_mean = np.zeros((self.N, self.n_groups, self.indexer.data_params['n_outputs']))
             self.uc_scaled_cov = np.zeros((
@@ -450,6 +541,10 @@ class Optimizer:
                 self.comm.send(self.rank_indices, dest=0, tag=4)
 
     def run(self):
+        n_iterations = 0
+        for iteration_info in self.opt_params['iteration_info']:
+            n_iterations += iteration_info['n_iterations']
+
         uc_true = np.stack(
             self.indexer.data[f'{self.unit_cell_key}unit_cell']
             )[:, self.indexer.data_params['y_indices']]
@@ -466,7 +561,6 @@ class Optimizer:
             'Found but off by two': 0,
             'Found explainers': 0,
             }
-        #for entry_index in range(self.N):
         for entry_index in range(self.N):
             start = time.time()
             current_percentage = entry_index / self.N
@@ -478,21 +572,17 @@ class Optimizer:
                 self.uc_scaled_mean[entry_index],
                 self.uc_scaled_cov[entry_index],
                 uc_pred[entry_index],
-                self.indexer.data.iloc[entry_index]
+                self.indexer.data.iloc[entry_index],
+                n_iterations
                 )
             candidates = self.optimize_entry(candidates)
             uc_best_opt[entry_index], report_counts = candidates.get_best_candidates(report_counts)
             print(report_counts)
             end = time.time()
             print(end - start)
-            #unit_cell = np.stack(candidates.candidates['unit_cell'])
-            #loss = np.stack(candidates.candidates['loss'])
-            #np.save('entry5_unit_cell.npy', unit_cell)
-            #np.save('entry5_loss.npy', loss)
-            #assert False
-        self.indexer.data[f'{self.indexer.hkl_prefactor}unit_cell_best_opt'] = list(uc_best_opt)
+        self.indexer.data[f'{self.unit_cell_key}unit_cell_best_opt'] = list(uc_best_opt)
 
-    def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry):
+    def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry, n_iterations):
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
         candidate_uc_scaled = np.zeros((self.n_groups * n_candidates, self.indexer.data_params['n_outputs']))
         for group_index, group in enumerate(self.indexer.data_params['groups']):
@@ -566,7 +656,30 @@ class Optimizer:
             maximum_unit_cell=self.opt_params['maximum_uc'],
             tolerance=self.opt_params['found_tolerance'],
             unit_cell_key=self.unit_cell_key,
+            n_iterations=n_iterations
             )
+
+        if self.opt_params['iteration_info'][0]['assigner_tag'] == 'closest':
+            candidates = self.assign_hkls_closest(candidates)
+        else:
+            candidates = self.assign_hkls(
+                candidates,
+                self.opt_params['iteration_info'][0]['assigner_tag'],
+                'best'
+                )
+
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system']
+            )
+        xnn = np.stack(candidates.candidates['xnn'])
+        target_function.update(
+            np.stack(candidates.candidates['hkl']), 
+            np.ones((candidates.n, self.indexer.data_params['n_points'])),
+            xnn
+            )
+        candidates.candidates['loss'] = target_function.get_loss(xnn)
+        candidates.update()
         return candidates
 
     def optimize_entry(self, candidates):
@@ -576,34 +689,27 @@ class Optimizer:
             2: Optimize given the assigned Miller indices
             3: Accept or reject new params.
         """
-        candidates = self.update_candidates(
-            candidates,
-            self.opt_params['iteration_info'][0]['assigner_tag'],
-            acceptance_method='always',
-            )
         candidates.diagnostics()
         for iteration_info in self.opt_params['iteration_info']:
-            interval = iteration_info['big_jump_interval']
             for iter_index in range(iteration_info['n_iterations']):
-                if not interval is None and ((iter_index + 1) % interval) == 0:
-                    candidates = self.big_jump(candidates, iteration_info)
                 if iteration_info['worker'] in ['softmax_subsampling', 'random_subsampling']:
-                    optimized_unit_cell = self.random_subsampling(candidates, iteration_info)
+                    next_xnn = self.random_subsampling(candidates, iteration_info)
                 elif iteration_info['worker'] == 'resampling':
-                    new_candidates = copy.copy(candidates)
-                    new_candidates = self.assign_hkls(new_candidates, iteration_info['assigner_tag'], 'random')
-                    optimized_unit_cell = self.no_subsampling(new_candidates, iteration_info)
+                    next_candidates = copy.copy(candidates)
+                    next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_tag'], 'random')
+                    next_xnn = self.no_subsampling(next_candidates, iteration_info)
                 elif iteration_info['worker'] == 'no_subsampling':
-                    optimized_unit_cell = self.no_subsampling(candidates, iteration_info)
+                    next_xnn = self.no_subsampling(candidates, iteration_info)
                 candidates = self.update_candidates(
                     candidates,
                     iteration_info['assigner_tag'],
                     iteration_info['acceptance_method'],
-                    optimized_unit_cell
+                    next_xnn
                     )
                 if candidates.n <= 1:
                     return candidates
-                #candidates.diagnostics()
+                if len(candidates.explainers) > 10:
+                    return candidates
                 print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
         return candidates
 
@@ -626,31 +732,45 @@ class Optimizer:
             repeats=self.opt_params['assignment_batch_size'],
             axis=0
             )
-        softmaxes = np.zeros((
-            candidates.n,
-            self.indexer.data_params['n_points'],
-            self.indexer.data_params['hkl_ref_length']
-            ))
-        for batch_index in range(n_batchs + 1):
-            start = batch_index * self.opt_params['assignment_batch_size']
-            end = (batch_index + 1) * self.opt_params['assignment_batch_size']
-            if batch_index == n_batchs:
-                batch_unit_cell_scaled = np.zeros((
-                    self.opt_params['assignment_batch_size'], self.indexer.data_params['n_outputs']
-                    ))
-                batch_unit_cell_scaled[:left_over] = unit_cell_scaled[start: start + left_over]
-                batch_unit_cell_scaled[left_over:] = batch_unit_cell_scaled[0]
-            else:
-                batch_unit_cell_scaled = unit_cell_scaled[start: end]
+        if self.one_assignment_batch:
+            batch_unit_cell_scaled = np.zeros((
+                self.opt_params['assignment_batch_size'], self.indexer.data_params['n_outputs']
+                ))
+            batch_unit_cell_scaled[:candidates.n] = unit_cell_scaled
             inputs = {
                 'unit_cell_scaled': batch_unit_cell_scaled,
                 'q2_scaled': batch_q2_scaled
                 }
-            softmaxes_batch = self.indexer.assigner[assigner_key].model.predict_on_batch(inputs)
-            if batch_index == n_batchs:
-                softmaxes[start: start + left_over] = softmaxes_batch[:left_over]
-            else:
-                softmaxes[start: end] = softmaxes_batch
+            # This is a bottleneck
+            softmaxes = self.indexer.assigner[assigner_key].model.predict_on_batch(inputs)[:candidates.n]
+        else:
+            softmaxes = np.zeros((
+                candidates.n,
+                self.indexer.data_params['n_points'],
+                self.indexer.data_params['hkl_ref_length']
+                ))
+
+            for batch_index in range(n_batchs + 1):
+                start = batch_index * self.opt_params['assignment_batch_size']
+                end = (batch_index + 1) * self.opt_params['assignment_batch_size']
+                if batch_index == n_batchs:
+                    batch_unit_cell_scaled = np.zeros((
+                        self.opt_params['assignment_batch_size'], self.indexer.data_params['n_outputs']
+                        ))
+                    batch_unit_cell_scaled[:left_over] = unit_cell_scaled[start: start + left_over]
+                    batch_unit_cell_scaled[left_over:] = batch_unit_cell_scaled[0]
+                else:
+                    batch_unit_cell_scaled = unit_cell_scaled[start: end]
+                inputs = {
+                    'unit_cell_scaled': batch_unit_cell_scaled,
+                    'q2_scaled': batch_q2_scaled
+                    }
+                # This is a bottleneck
+                softmaxes_batch = self.indexer.assigner[assigner_key].model.predict_on_batch(inputs)
+                if batch_index == n_batchs:
+                    softmaxes[start: start + left_over] = softmaxes_batch[:left_over]
+                else:
+                    softmaxes[start: end] = softmaxes_batch
         return softmaxes
 
     def assign_hkls(self, candidates, assigner_key, assignment_method):
@@ -704,179 +824,89 @@ class Optimizer:
         candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmax_all))
         return candidates
 
-    def montecarlo_acceptance(self, candidates, new_candidates, acceptance_method):
+    def montecarlo_acceptance(self, candidates, next_candidates, acceptance_method):
         if acceptance_method == 'montecarlo':
-            ratio = np.exp(-(new_candidates.candidates['loss'] - candidates.candidates['loss']))
+            ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']))
             probability = self.rng.random(candidates.n)
             accepted = probability < ratio
-            candidates.candidates.loc[accepted] = new_candidates.candidates.loc[accepted]
+            candidates.candidates.loc[accepted] = next_candidates.candidates.loc[accepted]
         elif acceptance_method == 'always':
-            candidates = new_candidates
+            candidates = next_candidates
         else:
             assert False, 'Unrecognized acceptance method'
         return candidates
 
-    def update_candidates(self, candidates, assigner_key, acceptance_method, optimized_unit_cell=None):
-        # This is the function that was meant to work with multiple subsampled entries at each point.
-        if optimized_unit_cell is None:
-            optimized_unit_cell = np.stack(candidates.candidates['unit_cell'])
-        target_function = CandidateOptLoss(
-            q2_obs=candidates.q2_obs,
+    def update_candidates(self, candidates, assigner_key, acceptance_method, next_xnn):
+        next_candidates = copy.deepcopy(candidates)
+        next_candidates.candidates['xnn'] = list(next_xnn)
+        next_candidates.update_unit_cell_from_xnn()
+        next_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
+            np.stack(next_candidates.candidates['unit_cell'])
+            ))
+        if assigner_key == 'closest':
+            next_candidates = self.assign_hkls_closest(next_candidates)
+        else:
+            next_candidates = self.assign_hkls(next_candidates, assigner_key, 'best')
+
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
             lattice_system=self.indexer.data_params['lattice_system']
             )
-        new_candidates = copy.deepcopy(candidates)
-        new_candidates.candidates['unit_cell'] = list(optimized_unit_cell)
-        new_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(optimized_unit_cell))
-        if assigner_key == 'closest':
-            new_candidates = self.assign_hkls_closest(new_candidates)
-        else:
-            new_candidates = self.assign_hkls(new_candidates, assigner_key, 'best')
-        new_loss = np.zeros(new_candidates.n)
-        new_hkl = np.stack(new_candidates.candidates['hkl'])
-        new_unit_cell = np.stack(new_candidates.candidates['unit_cell'])
-        for candidate_index in range(new_candidates.n):
-            unit_cell_inv2 = target_function.update(
-                new_hkl[candidate_index],
-                np.ones(self.indexer.data_params['n_points']),
-                new_unit_cell[candidate_index]
-                )
-            new_loss[candidate_index] = target_function.get_loss(unit_cell_inv2)
-        new_candidates.candidates['loss'] = new_loss
-        candidates = self.montecarlo_acceptance(candidates, new_candidates, acceptance_method)
+        target_function.update(
+            np.stack(next_candidates.candidates['hkl']),
+            np.ones((candidates.n, self.indexer.data_params['n_points'])),
+            next_xnn
+            )
+        next_candidates.candidates['loss'] = target_function.get_loss(next_xnn)
+        candidates = self.montecarlo_acceptance(candidates, next_candidates, acceptance_method)
         candidates.update()
         return candidates
 
-    def optimize_unit_cell(self, q2_obs, hkl, softmax, unit_cell, optimizer):
-        target_function = CandidateOptLoss(
-            q2_obs=q2_obs,
-            lattice_system=self.indexer.data_params['lattice_system']
-            )
-        unit_cell_inv2 = target_function.update(hkl, softmax, unit_cell)
-        if optimizer in ['L-BFGS-B', 'BFGS', 'TNC', 'SLSQP']:
-            results = scipy.optimize.minimize(
-                target_function.loss_likelihood,
-                x0=unit_cell_inv2,
-                method=optimizer,
-                jac=True,
-                )
-        elif optimizer in ['trust-krylov', 'trust-exact', 'trust-ncg', 'Newton-CG', 'dogleg', 'trust-constr']:
-            """
-            Brief testing showed 'trust-exact' had good performance.
-            However it has a tendency to hang:
-                https://github.com/scipy/scipy/pull/19668
-                https://github.com/scipy/scipy/issues/12513
-            'dogleg' also has good performance
-            """
-            results = scipy.optimize.minimize(
-                target_function.loss_likelihood,
-                x0=unit_cell_inv2,
-                method=optimizer,
-                jac=True,
-                hess=target_function.loss_likelihood_hessian,
-                options={'maxiter': 1},
-                )
-        optimized_unit_cell = target_function.get_optimized_uc(results.x)
-        return optimized_unit_cell
-
     def no_subsampling(self, candidates, iteration_info):
-        optimized_unit_cell = np.zeros((
-            candidates.n,
-            self.indexer.data_params['n_outputs']
-            ))
-        hkl = np.stack(candidates.candidates['hkl'])
-        softmax = np.stack(candidates.candidates['softmax'])
-        unit_cell = np.stack(candidates.candidates['unit_cell'])
-        for candidate_index in range(candidates.n):
-            optimized_unit_cell[candidate_index] = self.optimize_unit_cell(
-                q2_obs=candidates.q2_obs,
-                hkl=hkl[candidate_index],
-                softmax=softmax[candidate_index],
-                unit_cell=unit_cell[candidate_index],
-                optimizer=iteration_info['optimizer'],
-                )
-        return optimized_unit_cell
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system'],
+            )
+        xnn = np.stack(candidates.candidates['xnn'])
+        target_function.update(
+            np.stack(candidates.candidates['hkl']), 
+            np.stack(candidates.candidates['softmax']), 
+            xnn)
+        delta_gn = target_function.gauss_newton_step(xnn)
+        next_xnn = xnn + delta_gn
+        return next_xnn
 
     def random_subsampling(self, candidates, iteration_info):
-        optimized_unit_cell = np.zeros((
-            candidates.n,
-            self.indexer.data_params['n_outputs']
-            ))
         hkl = np.stack(candidates.candidates['hkl'])
         softmax = np.stack(candidates.candidates['softmax'])
-        unit_cell = np.stack(candidates.candidates['unit_cell'])
+        xnn = np.stack(candidates.candidates['xnn'])
+        n_keep = self.indexer.data_params['n_points'] - iteration_info['n_drop']
+        hkl_subsampled = np.zeros((candidates.n, n_keep, 3))
+        softmax_subsampled = np.zeros((candidates.n, n_keep))
+        q2_subsampled = np.zeros((candidates.n, n_keep))
+        if iteration_info['worker'] == 'random_subsampling':
+            p = None
+        elif iteration_info['worker'] == 'softmax_subsampling':
+            p = softmax / softmax.sum(axis=1)[:, np.newaxis]
         for candidate_index in range(candidates.n):
-            subsampled_indices = np.zeros(
-                self.indexer.data_params['n_points'] - iteration_info['n_drop'],
-                dtype=int
-                )
-            if iteration_info['worker'] == 'random_subsampling':
-                p = None
-            elif iteration_info['worker'] == 'softmax_subsampling':
-                p = softmax[candidate_index] / softmax[candidate_index].sum()
+            # self.rng.choice is a bottleneck step
             subsampled_indices = np.sort(self.rng.choice(
                 self.indexer.data_params['n_points'],
-                size=self.indexer.data_params['n_points'] - iteration_info['n_drop'],
+                size=n_keep,
                 replace=False,
-                p=p,
+                p=p[candidate_index],
                 ))
-
-            optimized_unit_cell[candidate_index] = self.optimize_unit_cell(
-                q2_obs=candidates.q2_obs[subsampled_indices],
-                hkl=hkl[candidate_index][subsampled_indices],
-                softmax=softmax[candidate_index][subsampled_indices],
-                unit_cell=unit_cell[candidate_index],
-                optimizer=iteration_info['optimizer'],
-                )
-        return optimized_unit_cell
-
-    def big_jump(self, candidates, iteration_info):
-        # The candidates are sorted by increasing loss. So to take the top 10% of candidates by loss,
-        # Just select the first 10%.
-        rf = iteration_info['big_jump_reduction_factor']
-        n_top_candidates = candidates.n // rf
-        n_extra = candidates.n % rf
-        jumped_unit_cell = np.zeros((
-            candidates.n,
-            self.indexer.data_params['n_outputs']
-            ))
-        hkl = np.stack(candidates.candidates['hkl'])
-        softmax = np.stack(candidates.candidates['softmax'])
-        unit_cell = np.stack(candidates.candidates['unit_cell'])
-        for candidate_index in range(n_top_candidates):
-            optimized_unit_cell = self.optimize_unit_cell(
-                q2_obs=candidates.q2_obs,
-                hkl=hkl[candidate_index],
-                softmax=softmax[candidate_index],
-                unit_cell=unit_cell[candidate_index],
-                optimizer=iteration_info['optimizer'],
-                )
-            difference = np.abs(unit_cell[candidate_index] - optimized_unit_cell)
-            perturbation = np.zeros((rf, self.indexer.data_params['n_outputs']))
-            perturbation[1:] = self.rng.uniform(
-                low=-iteration_info['big_jump_perturbation'],
-                high=iteration_info['big_jump_perturbation'],
-                size=(rf - 1, self.indexer.data_params['n_outputs']),
-                )
-            for jump_index in range(rf):
-                jumped_unit_cell[candidate_index*rf + jump_index] = \
-                    unit_cell[candidate_index] + perturbation[jump_index] * difference
-            if candidate_index == 0:
-                perturbation_extra = self.rng.uniform(
-                    low=-iteration_info['big_jump_perturbation'],
-                    high=iteration_info['big_jump_perturbation'],
-                    size=(n_extra, self.indexer.data_params['n_outputs']),
-                    )
-                for extra_index in range(n_extra):
-                    jumped_unit_cell[candidates.n - (extra_index + 1)] = \
-                        unit_cell[candidate_index] + perturbation[extra_index] * difference
-
-        candidates = self.update_candidates(
-            candidates,
-            iteration_info['assigner_tag'],
-            'always',
-            jumped_unit_cell
+            hkl_subsampled[candidate_index] = hkl[candidate_index, subsampled_indices]
+            softmax_subsampled[candidate_index] = softmax[candidate_index, subsampled_indices]
+            q2_subsampled[candidate_index] = candidates.q2_obs[subsampled_indices]
+        target_function = CandidateOptLoss_xnn(
+            q2_subsampled, 
+            lattice_system=self.indexer.data_params['lattice_system'],
             )
-        return candidates
+        target_function.update(hkl_subsampled, softmax_subsampled, xnn)
+        delta_gn = target_function.gauss_newton_step(xnn)
+        next_xnn = xnn + delta_gn
+        return next_xnn
 
     def gather_optimized_unit_cells(self):
         if self.rank == 0:

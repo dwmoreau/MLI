@@ -2,10 +2,9 @@
 lattice system | accuracy
 -------------------------
 cubic          | 99.5%
-orthorhombic   | 90%
+orthorhombic   | 93%
 Monoclinic
     {'Not found': 157, 'Found and best': 86, 'Found but not best': 28, 'Found but off by two': 0, 'Found explainers': 66}
-
 
 - Documentation
     - Update README.md
@@ -15,17 +14,16 @@ Monoclinic
         Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
 
 - Optimization:
-    * Add perturbation
-        - Make combinations of the most common unit cell params
-        - Make perturbations of all the unit cell params
-            - select the best fraction of candidates
-            - randomly pick n params for perturbation
-    * refactor to xnn coordinates
-    * implement custom dogleg method that can work with multiple entries at once
-        - get dogleg working with one entry
-        - get dogleg working with multiple entries
+    * Vectorize np.rng.choice
+        - https://stackoverflow.com/questions/57237596/how-to-improve-np-random-choice-looping-efficiency
+        - https://stackoverflow.com/questions/34187130/fast-random-weighted-selection-across-all-rows-of-a-stochastic-matrix
+        - https://stackoverflow.com/questions/47722005/vectorizing-numpy-random-choice-for-given-2d-array-of-probabilities-along-an-a
+    * clean up code
+    * correct the epsilon factor to be e^{-10}
+    * Verify that the top n candidates do not match the true unit cell
+    * Coordinate unit cell contains path of unit cell params    
+    * Detailed balance
     - What differentiates a found / not found entry
-    - correct the epsilon factor to be e^{-10}
     - Full softmax array optimization - Actual likelihood target function
     - common assignments:
         - drop during optimization but include in loss
@@ -35,10 +33,11 @@ Monoclinic
 
 - Augmentation
     - Get peak distributions to match.
-        - Try making the dropout probability a function of q2
     - augmented entries have a bug in the Miller indices
 
 - Assignments
+    - Faster inference methods
+        - different types of ML models
     - Figure out how to take a more holistic look at the pairwise difference array.
     - Penalize multiple assignments to the same hkl
 

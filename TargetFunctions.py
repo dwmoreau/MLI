@@ -111,6 +111,92 @@ class LikelihoodLoss:
         return tf.reduce_mean(absolute_difference, axis=1)
 
 
+class CandidateOptLoss_xnn:
+    def __init__(self, q2_obs, lattice_system):
+        self.q2_obs = q2_obs
+        self.lattice_system = lattice_system
+        self.delta_q_eps = 1e-10
+        #self.delta_q_eps = np.exp(-10)
+        self.n_points = self.q2_obs.shape[1]
+        self.n_entries = self.q2_obs.shape[0]
+
+        if lattice_system == 'cubic':
+            self.uc_length = 1
+        elif lattice_system in ['tetragonal', 'hexagonal', 'rhombohedral']:
+            self.uc_length = 2
+        elif lattice_system == 'orthorhombic':
+            self.uc_length = 3
+        elif lattice_system == 'monoclinic':
+            self.uc_length = 4
+        elif lattice_system == 'triclinic':
+            self.uc_length = 6
+
+    def update(self, hkl, softmax, xnn_init):
+        self.hkl = hkl
+        self.softmax = softmax
+        if self.lattice_system == 'cubic':
+            self.hkl2 = (self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2 + self.hkl[:, :, 2]**2)[:, np.newaxis]
+        elif self.lattice_system == 'tetragonal':
+            self.hkl2 = np.column_stack((
+                self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2,
+                self.hkl[:, :, 2]**2
+                ))
+        elif self.lattice_system == 'orthorhombic':
+            self.hkl2 = self.hkl**2
+        elif self.lattice_system == 'monoclinic':
+            self.hkl2 = np.column_stack((
+                self.hkl**2,
+                self.hkl[:, :, 0] * self.hkl[:, :, 2]
+                ))
+        elif self.lattice_system == 'hexagonal':
+            self.hkl2 = np.column_stack((
+                4/3 * (self.hkl[:, :, 0]**2 + self.hkl[:, :, 0]*self.hkl[:, :, 1] + self.hkl[:, :, 1]**2),
+                self.hkl[:, :, 2]**2
+                ))
+
+        q2_pred_init = self.get_q2_pred(xnn_init, jac=False)
+        delta_q2 = np.abs(q2_pred_init - self.q2_obs)
+        self.sigma = np.sqrt(self.q2_obs * (delta_q2 + self.delta_q_eps))
+
+        self.prefactor = np.log(np.sqrt(2*np.pi) * self.sigma) - np.log(self.softmax)
+        self.hessian_prefactor = (1 / self.sigma**2)[:, :, np.newaxis, np.newaxis]
+
+    def get_q2_pred(self, xnn, jac=True):
+        # self.hkl2:     n_entries, n_points, xnn_length
+        # xnn:           n_entries, xnn_length
+        # q2_pred:       n_entries, n_points
+        # dq2_pred_dxnn: n_entries, n_points, xnn_length
+        arg = self.hkl2 * xnn[:, np.newaxis, :]
+        q2_pred = np.sum(arg, axis=2)
+        if jac:
+            dq2_pred_dxnn = self.hkl2
+            return q2_pred, dq2_pred_dxnn
+        else:
+            return q2_pred
+
+    def gauss_newton_step(self, xnn):
+        # q2_pred:       n_entries, n_points
+        # dq2_pred_dxnn: n_entries, n_points, xnn_length
+        # self.q2_obs:   n_points
+        q2_pred, dq2_pred_dxnn = self.get_q2_pred(xnn, jac=True)
+        residuals = (q2_pred - self.q2_obs) / self.sigma
+        dlikelihood_dq2_pred = residuals / self.sigma
+        dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
+        term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
+        H = np.sum(self.hessian_prefactor * term0, axis=1)
+        good = np.all(np.linalg.eigvals(H) > 0, axis=1)
+        delta_gn = np.zeros((self.n_entries, self.uc_length))
+        delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
+        return delta_gn
+
+    def get_loss(self, xnn):
+        q2_pred = self.get_q2_pred(xnn, jac=False)
+        residuals = (q2_pred - self.q2_obs) / self.sigma
+        likelihood = self.prefactor + 1/2 * residuals**2
+        loss = np.sum(likelihood, axis=1)
+        return loss
+
+
 class CandidateOptLoss:
     def __init__(self, q2_obs, lattice_system):
         self.q2_obs = q2_obs
@@ -168,8 +254,8 @@ class CandidateOptLoss:
             uc_inv2_init[3] = -2 * cos_beta / (uc_init[0] * uc_init[2] * sin_beta**2)
 
         q2_pred_init, _ = self.get_q2_pred(uc_inv2_init)
-        delta_q = np.abs(np.sqrt(q2_pred_init) - np.sqrt(self.q2_obs))
-        self.sigma = np.sqrt(self.q2_obs * (delta_q + self.delta_q_eps))
+        delta_q2 = np.abs(q2_pred_init - self.q2_obs)
+        self.sigma = np.sqrt(self.q2_obs * (delta_q2 + self.delta_q_eps))
 
         self.prefactor = np.log(np.sqrt(2*np.pi) * self.sigma) - np.log(self.softmax)
         self.hessian_prefactor = (1 / self.sigma**2)[:, np.newaxis, np.newaxis]
