@@ -19,6 +19,51 @@ from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import reciprocal_uc_conversion
 
 
+def vectorized_subsampling(p, n_picks, rng):
+    n_entries = p.shape[0]
+    n_choices = p.shape[1]
+    choices = np.repeat(np.arange(n_choices)[np.newaxis], repeats=n_entries, axis=0) 
+    chosen = np.zeros((n_entries, n_picks), dtype=int)
+    for index in range(n_picks):
+        # cumsum: n_entries, n_peaks
+        # random_value: n_entries
+        # q: n_entries, n_peaks
+        n_peaks = p.shape[1]
+        cumsum = p.cumsum(axis=1)
+        random_value = rng.random(n_entries)
+        q = cumsum >= random_value[:, np.newaxis]
+        chosen_indices = q.argmax(axis=1)
+        chosen[:, index] = choices[np.arange(n_entries), chosen_indices]
+        p_flat = p.ravel()
+        choices_flat = choices.ravel()
+        delete_indices = np.arange(n_entries) * n_peaks + chosen_indices
+        p = np.delete(p_flat, delete_indices).reshape((n_entries, n_peaks - 1))
+        choices = np.delete(choices_flat, delete_indices).reshape((n_entries, n_peaks - 1))
+    chosen = np.sort(chosen, axis=1)
+    return chosen
+
+
+def vectorized_resampling(softmaxes, rng):
+    n_entries = softmaxes.shape[0]
+    n_peaks = softmaxes.shape[1]
+    hkl_ref_length = softmaxes.shape[2]
+
+    cumsum = np.cumsum(softmaxes, axis=2)
+    random_values = rng.random(size=(n_entries, n_peaks))
+    q = cumsum >= random_values[:, :, np.newaxis]
+    hkl_assign = np.argmax(q, axis=2)
+
+    softmax = np.zeros((n_entries, n_peaks))
+    for candidate_index in range(n_entries):
+        for point_index in range(n_peaks):
+            softmax[candidate_index, point_index] = softmaxes[
+                candidate_index,
+                point_index,
+                hkl_assign[candidate_index, point_index]
+                ]
+    return hkl_assign, softmax
+
+
 def get_out_of_range_candidates(unit_cells, lattice_system, minimum_length, maximum_length, minimum_angle, maximum_angle):
     if lattice_system in ['cubic', 'tetragonal', 'orthorhombic']:
         bad_indices = np.logical_or(
@@ -73,7 +118,7 @@ class Candidates:
         if lattice_system == 'cubic':
             self.unit_cell_true = unit_cell_true[0]
         elif lattice_system == 'tetragonal':
-            self.unit_cell_true = unit_cell_true[:2]
+            self.unit_cell_true = unit_cell_true[[0, 2]]
         elif lattice_system == 'orthorhombic':
             self.unit_cell_true = unit_cell_true[:3]
         elif lattice_system == 'monoclinic':
@@ -110,7 +155,7 @@ class Candidates:
             unit_cell_full[:, :3] = unit_cell[:, 0]
             unit_cell_full[:, 3:] = np.pi/2
         elif self.lattice_system == 'tetragonal':
-            unit_cell_full[:, :2] = unit_cell[:, 0]
+            unit_cell_full[:, :2] = unit_cell[:, 0][:, np.newaxis]
             unit_cell_full[:, 2] = unit_cell[:, 1]
             unit_cell_full[:, 3:] = np.pi/2
         elif self.lattice_system == 'orthorhombic':
@@ -150,18 +195,41 @@ class Candidates:
 
     def update_unit_cell_from_xnn(self):
         xnn = np.stack(self.candidates['xnn'])
+
+        # This forces the xnn components x_hh, x_kk, and x_ll to their bounds
+        if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
+            too_small = xnn < (1 / self.maximum_unit_cell)**2
+            too_large = xnn > (1 / self.minimum_unit_cell)**2
+            xnn[too_small] = (1 / self.maximum_unit_cell)**2
+            xnn[too_large] = (1 / self.minimum_unit_cell)**2
+        elif self.lattice_system in ['monoclinic', 'triclinic']:
+            too_small = xnn[:, :3] < (1 / self.maximum_unit_cell)**2
+            too_large = xnn[:, :3] > (1 / self.minimum_unit_cell)**2
+            xnn[:, :3][too_small] = (1 / self.maximum_unit_cell)**2
+            xnn[:, :3][too_large] = (1 / self.minimum_unit_cell)**2
+            if self.lattice_system == 'monoclinic':
+                cos_rbeta = xnn[:, 3] / (xnn[:, 0] * xnn[:, 2])
+                too_small = cos_rbeta < -1
+                too_large = cos_rbeta > 1
+                xnn[too_small, 3] = -0.999 * (xnn[too_small, 0] * xnn[too_small, 2])
+                xnn[too_large, 3] = 0.999 * (xnn[too_large, 0] * xnn[too_large, 2])
+            elif self.lattice_system == 'triclinic':
+                assert False
+
+        self.candidates['xnn'] = list(xnn)
+
         unit_cell_full = np.zeros((self.n, 6))
         xnn_full = np.zeros((self.n, 6))
         if self.lattice_system == 'cubic':
-            xnn_full[:, :3] = xnn
+            xnn_full[:, :3] = xnn[:, 0]
         elif self.lattice_system == 'tetragonal':
-            xnn_full[:, :2] = xnn
-            xnn_full[:, 2] = xnn
+            xnn_full[:, :2] = xnn[:, 0][:, np.newaxis]
+            xnn_full[:, 2] = xnn[:, 1]
         elif self.lattice_system == 'orthorhombic':
-            xnn_full[:, :3] = xnn
+            xnn_full[:, :3] = xnn[:, :3]
         elif self.lattice_system == 'monoclinic':
-            xnn_full[:, :3] = xnn
-            xnn_full[:, 4] = xnn
+            xnn_full[:, :3] = xnn[:, :3]
+            xnn_full[:, 4] = xnn[:, 3]
         elif self.lattice_system == 'triclinic':
             xnn_full = xnn
 
@@ -432,7 +500,7 @@ class Optimizer:
         elif self.indexer.data_params['lattice_system'] in ['tetragonal', 'orthorhombic']:
             self.unit_cell_key = 'reindexed_'
 
-        self.n_groups = len(self.indexer.data_params['groups'])
+        self.n_groups = len(self.indexer.data_params['split_groups'])
         if self.opt_params['assignment_batch_size'] == 'max':
             n_candidates = self.n_groups * (self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf'])
             self.opt_params['assignment_batch_size'] = n_candidates
@@ -464,14 +532,14 @@ class Optimizer:
                 self.uc_scaled_mean = uc_scaled_mean_all[self.rank_indices]
                 self.uc_scaled_cov = uc_scaled_cov_all[self.rank_indices]
                 self.N = self.indexer.data.shape[0]
-                self.n_groups = len(self.indexer.data_params['groups'])
+                self.n_groups = len(self.indexer.data_params['split_groups'])
         else:
             self.rank_indices = self.comm.recv(source=0, tag=0)
             self.indexer.data = self.comm.recv(source=0, tag=1)
             if self.opt_params['load_predictions']:
                 self.uc_scaled_mean = self.comm.recv(source=0, tag=2)
                 self.uc_scaled_cov = self.comm.recv(source=0, tag=3)
-                self.n_groups = len(self.indexer.data_params['groups'])
+                self.n_groups = len(self.indexer.data_params['split_groups'])
                 self.N = self.indexer.data.shape[0]
 
         if not self.opt_params['load_predictions']:
@@ -483,7 +551,7 @@ class Optimizer:
                 self.indexer.data_params['n_outputs'],
                 self.indexer.data_params['n_outputs']
                 ))
-            for group_index, group in enumerate(self.indexer.data_params['groups']):
+            for group_index, group in enumerate(self.indexer.data_params['split_groups']):
                 print(f'Performing predictions with {group}')
                 mean, cov = self.indexer.unit_cell_generator[group].do_predictions(
                     data=self.indexer.data, verbose=0, batch_size=2048
@@ -585,7 +653,7 @@ class Optimizer:
     def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry, n_iterations):
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
         candidate_uc_scaled = np.zeros((self.n_groups * n_candidates, self.indexer.data_params['n_outputs']))
-        for group_index, group in enumerate(self.indexer.data_params['groups']):
+        for group_index, group in enumerate(self.indexer.data_params['split_groups']):
             start = group_index * n_candidates
             stop = (group_index + 1) * n_candidates
             # Get candidates from the neural network model
@@ -710,7 +778,7 @@ class Optimizer:
                     return candidates
                 if len(candidates.explainers) > 10:
                     return candidates
-                print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
+                #print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
         return candidates
 
     def get_softmaxes(self, candidates, assigner_key):
@@ -782,22 +850,7 @@ class Optimizer:
             hkl_assign = softmaxes.argmax(axis=2)
             candidates.candidates['softmax'] = list(softmaxes.max(axis=2))
         elif assignment_method == 'random':
-            # softmax output from tensorflow doesn't sum close enough to one for rng.choice
-            softmaxes /= softmaxes.sum(axis=2)[:, :, np.newaxis]
-            hkl_assign = np.zeros((candidates.n, self.indexer.data_params['n_points']), dtype=int)
-            softmax = np.zeros((candidates.n, self.indexer.data_params['n_points']))
-            for candidate_index in range(candidates.n):
-                for point_index in range(self.indexer.data_params['n_points']):
-                    hkl_assign[candidate_index, point_index] = self.rng.choice(
-                        self.indexer.data_params['hkl_ref_length'],
-                        size=1,
-                        p=softmaxes[candidate_index, point_index]
-                        )
-                    softmax[candidate_index, point_index] = softmaxes[
-                        candidate_index,
-                        point_index,
-                        hkl_assign[candidate_index, point_index]
-                        ]
+            hkl_assign, softmax = vectorized_resampling(softmaxes, self.rng)
             candidates.candidates['softmax'] = list(softmax)
         else:
             assert False
@@ -881,24 +934,26 @@ class Optimizer:
         softmax = np.stack(candidates.candidates['softmax'])
         xnn = np.stack(candidates.candidates['xnn'])
         n_keep = self.indexer.data_params['n_points'] - iteration_info['n_drop']
+        if iteration_info['worker'] == 'random_subsampling':
+            subsampled_indices = np.zeros((candidates.n, n_keep), dtype=int)
+            for entry_index in range(candidates.n):
+                subsampled_indices[entry_index] = self.rng(
+                    self.indexer.data_params['n_points'],
+                    size=n_keep,
+                    replace=True
+                    )
+        elif iteration_info['worker'] == 'softmax_subsampling':
+            p = softmax / softmax.sum(axis=1)[:, np.newaxis]
+            subsampled_indices = vectorized_subsampling(p, n_keep, self.rng)
+
         hkl_subsampled = np.zeros((candidates.n, n_keep, 3))
         softmax_subsampled = np.zeros((candidates.n, n_keep))
         q2_subsampled = np.zeros((candidates.n, n_keep))
-        if iteration_info['worker'] == 'random_subsampling':
-            p = None
-        elif iteration_info['worker'] == 'softmax_subsampling':
-            p = softmax / softmax.sum(axis=1)[:, np.newaxis]
         for candidate_index in range(candidates.n):
-            # self.rng.choice is a bottleneck step
-            subsampled_indices = np.sort(self.rng.choice(
-                self.indexer.data_params['n_points'],
-                size=n_keep,
-                replace=False,
-                p=p[candidate_index],
-                ))
-            hkl_subsampled[candidate_index] = hkl[candidate_index, subsampled_indices]
-            softmax_subsampled[candidate_index] = softmax[candidate_index, subsampled_indices]
-            q2_subsampled[candidate_index] = candidates.q2_obs[subsampled_indices]
+            hkl_subsampled[candidate_index] = hkl[candidate_index, subsampled_indices[candidate_index]]
+            softmax_subsampled[candidate_index] = softmax[candidate_index, subsampled_indices[candidate_index]]
+            q2_subsampled[candidate_index] = candidates.q2_obs[subsampled_indices[candidate_index]]
+
         target_function = CandidateOptLoss_xnn(
             q2_subsampled, 
             lattice_system=self.indexer.data_params['lattice_system'],

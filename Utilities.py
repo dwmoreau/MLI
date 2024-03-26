@@ -37,6 +37,9 @@ def get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell):
         reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 4]),
         reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 1] * np.cos(reciprocal_unit_cell[:, 5]),
         ])
+    xnn[reciprocal_unit_cell[:, 3] == np.pi/2, 3] = 0
+    xnn[reciprocal_unit_cell[:, 4] == np.pi/2, 4] = 0
+    xnn[reciprocal_unit_cell[:, 5] == np.pi/2, 5] = 0
     return xnn
 
 

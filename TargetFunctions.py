@@ -137,17 +137,20 @@ class CandidateOptLoss_xnn:
         if self.lattice_system == 'cubic':
             self.hkl2 = (self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2 + self.hkl[:, :, 2]**2)[:, np.newaxis]
         elif self.lattice_system == 'tetragonal':
-            self.hkl2 = np.column_stack((
+            self.hkl2 = np.stack((
                 self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2,
                 self.hkl[:, :, 2]**2
-                ))
+                ),
+                axis=2
+                )
         elif self.lattice_system == 'orthorhombic':
             self.hkl2 = self.hkl**2
         elif self.lattice_system == 'monoclinic':
-            self.hkl2 = np.column_stack((
-                self.hkl**2,
-                self.hkl[:, :, 0] * self.hkl[:, :, 2]
-                ))
+            self.hkl2 = np.concatenate((
+                self.hkl**2, (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis]
+                ),
+                axis=2
+                )
         elif self.lattice_system == 'hexagonal':
             self.hkl2 = np.column_stack((
                 4/3 * (self.hkl[:, :, 0]**2 + self.hkl[:, :, 0]*self.hkl[:, :, 1] + self.hkl[:, :, 1]**2),
@@ -184,7 +187,7 @@ class CandidateOptLoss_xnn:
         dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
         term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
         H = np.sum(self.hessian_prefactor * term0, axis=1)
-        good = np.all(np.linalg.eigvals(H) > 0, axis=1)
+        good = np.linalg.matrix_rank(H, hermitian=True) == self.uc_length
         delta_gn = np.zeros((self.n_entries, self.uc_length))
         delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
         return delta_gn

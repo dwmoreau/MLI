@@ -174,10 +174,10 @@ class Augmentor:
         r1 = x[1]
         c = x[2] + x[3] * q2
         if q2.size == 1:
-            prob = c*((1 - np.exp(-r0 * difference))**r1)
+            prob = c*(1 - r0**(-r1 * difference))
             return prob
         else:
-            curve = c[np.newaxis]*((1 - np.exp(-r0 * difference))**r1)[:, np.newaxis]
+            curve = c[np.newaxis]*(1 - r0**(-r1 * difference))[:, np.newaxis]
             return curve
 
     def augment(self, data, subgroup_label):
