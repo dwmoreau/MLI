@@ -553,7 +553,7 @@ class Optimizer:
                 ))
             for group_index, group in enumerate(self.indexer.data_params['split_groups']):
                 print(f'Performing predictions with {group}')
-                mean, cov = self.indexer.unit_cell_generator[group].do_predictions(
+                uc_mean_scaled_group, uc_cov_scaled_group = self.indexer.unit_cell_generator[group].do_predictions(
                     data=self.indexer.data, verbose=0, batch_size=2048
                     )
                 if self.indexer.data_params['lattice_system'] == 'monoclinic':
@@ -570,15 +570,19 @@ class Optimizer:
                     elif monoclinic_angle == 'gamma':
                         permutation = 'acb'
                     if monoclinic_angle in ['alpha', 'gamma']:
+                        uc_mean_group, uc_cov_group = self.indexer.revert_predictions(
+                            uc_pred_scaled=uc_mean_scaled_group, uc_pred_scaled_cov=uc_cov_scaled_group
+                            )
+                        # The unpermute function needs unscaled unit cells
                         for entry_index in range(len(self.indexer.data)):
-                            initial = mean[entry_index]
-                            mean[entry_index], cov[entry_index] = unpermute_monoclinic_partial_unit_cell(
-                                mean[entry_index], cov[entry_index], permutation, radians=True
+                            uc_mean_group[entry_index], uc_cov_group[entry_index] = unpermute_monoclinic_partial_unit_cell(
+                                uc_mean_group[entry_index], uc_cov_group[entry_index], permutation, radians=True
                                 )
-                            #if monoclinic_angle == 'alpha':
-                            #    print(f'{monoclinic_angle} {permutation} {initial} {mean[entry_index]}')
-                self.uc_scaled_mean[:, group_index, :] = mean
-                self.uc_scaled_cov[:, group_index, :, :] = cov
+                        uc_mean_scaled_group, uc_cov_scaled_group = self.indexer.scale_predictions(
+                            uc_pred=uc_mean_group, uc_pred_cov=uc_cov_group
+                            )
+                self.uc_scaled_mean[:, group_index, :] = uc_mean_scaled_group
+                self.uc_scaled_cov[:, group_index, :, :] = uc_cov_scaled_group
 
             if self.rank == 0:
                 uc_scaled_mean_all = [None for _ in range(self.n_ranks)]
@@ -616,7 +620,13 @@ class Optimizer:
         uc_true = np.stack(
             self.indexer.data[f'{self.unit_cell_key}unit_cell']
             )[:, self.indexer.data_params['y_indices']]
-        uc_mean = self.indexer.revert_predictions(uc_pred_scaled=self.uc_scaled_mean)
+
+        # self.uc_scaled_mean: n_entries, n_groups, unit_cell_length
+        uc_mean = np.zeros(self.uc_scaled_mean.shape)
+        for group_index in range(self.n_groups):
+            uc_mean[:, group_index, :] = self.indexer.revert_predictions(
+                uc_pred_scaled=self.uc_scaled_mean[:, group_index, :]
+                )
         closest_prediction = np.linalg.norm(uc_true[:, np.newaxis, :] - uc_mean, axis=2).argmin(axis=1)
         uc_pred = uc_mean[np.arange(len(closest_prediction)), closest_prediction]
 
@@ -690,6 +700,8 @@ class Optimizer:
 
             # Get candidates from the random forest model
             q2_scaled = np.array(entry['q2_scaled'])[np.newaxis]
+            # candidates_scaled_tree: n_entries, n_outputs, n_trees
+            #   n_entries = 1 because there is only one q2_scaled input
             _, _, candidates_scaled_tree = \
                 self.indexer.unit_cell_generator[group].do_predictions_trees(q2_scaled=q2_scaled)
             tree_indices = self.rng.choice(
@@ -697,7 +709,10 @@ class Optimizer:
                 size=self.opt_params['n_candidates_rf'],
                 replace=False
                 )
+            candidates_uc_scaled_tree = candidates_scaled_tree[0, :, tree_indices]
             if self.indexer.data_params['lattice_system'] == 'monoclinic':
+                # This only needs to be performed for the tree predictions.
+                # The NN predictions were unpermuted in self.distribute_data.
                 monoclinic_angle = self.reg_params[group]['monoclinic_angle']
                 if monoclinic_angle == 'alpha':
                     permutation = 'bca'
@@ -706,13 +721,19 @@ class Optimizer:
                 elif monoclinic_angle == 'gamma':
                     permutation = 'acb'
                 if monoclinic_angle in ['alpha', 'gamma']:
-                    for tree_index in tree_indices:
-                        # candidates_scaled_tree: n_entries, n_outputs, n_trees
-                        candidates_scaled_tree[0, :, tree_index] = unpermute_monoclinic_partial_unit_cell(
-                            candidates_scaled_tree[0, :, tree_index], None, permutation, radians=True
+                    # The unpermute function needs unscaled unit cells
+                    candidates_uc_tree = self.indexer.revert_predictions(
+                        uc_pred_scaled=candidates_uc_scaled_tree
+                        )
+                    for candidate_index in range(candidates_uc_tree.shape[0]):
+                        candidates_uc_tree[candidate_index] = unpermute_monoclinic_partial_unit_cell(
+                            candidates_uc_tree[candidate_index], None, permutation, radians=True
                             )
+                    candidates_uc_scaled_tree = self.indexer.scale_predictions(
+                        uc_pred=candidates_uc_tree
+                        )
             candidate_uc_scaled[start + self.opt_params['n_candidates_nn']: stop, :] = \
-                candidates_scaled_tree[0, :, tree_indices]
+                candidates_uc_scaled_tree
 
         candidates = Candidates(
             entry=entry,
@@ -778,7 +799,7 @@ class Optimizer:
                     return candidates
                 if len(candidates.explainers) > 10:
                     return candidates
-                #print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
+                print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
         return candidates
 
     def get_softmaxes(self, candidates, assigner_key):
@@ -894,7 +915,7 @@ class Optimizer:
         next_candidates.candidates['xnn'] = list(next_xnn)
         next_candidates.update_unit_cell_from_xnn()
         next_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
-            np.stack(next_candidates.candidates['unit_cell'])
+            uc_pred=np.stack(next_candidates.candidates['unit_cell'])
             ))
         if assigner_key == 'closest':
             next_candidates = self.assign_hkls_closest(next_candidates)
@@ -921,6 +942,13 @@ class Optimizer:
             lattice_system=self.indexer.data_params['lattice_system'],
             )
         xnn = np.stack(candidates.candidates['xnn'])
+        #np.save('mono_uc_true.npy', candidates.unit_cell_true)
+        #np.save('mono_q2_obs.npy', candidates.q2_obs)
+        #np.save('mono_xnn.npy', xnn)
+        #np.save('mono_hkl.npy', np.stack(candidates.candidates['hkl']))
+        #np.save('mono_softmax.npy', np.stack(candidates.candidates['softmax']))
+        #np.save('mono_unit_cell.npy', np.stack(candidates.candidates['unit_cell']))
+        #assert False
         target_function.update(
             np.stack(candidates.candidates['hkl']), 
             np.stack(candidates.candidates['softmax']), 

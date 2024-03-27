@@ -192,6 +192,24 @@ class CandidateOptLoss_xnn:
         delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
         return delta_gn
 
+    def _get_hessian(self, xnn):
+        # Helper for getting derivative verification
+        q2_pred, dq2_pred_dxnn = self.get_q2_pred(xnn, jac=True)
+        residuals = (q2_pred - self.q2_obs) / self.sigma
+        dlikelihood_dq2_pred = residuals / self.sigma
+        dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
+        term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
+        H = np.sum(self.hessian_prefactor * term0, axis=1)
+        return H
+
+    def _get_gradient(self, xnn):
+        # Helper for getting derivative verification
+        q2_pred, dq2_pred_dxnn = self.get_q2_pred(xnn, jac=True)
+        residuals = (q2_pred - self.q2_obs) / self.sigma
+        dlikelihood_dq2_pred = residuals / self.sigma
+        dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
+        return dloss_dxnn
+
     def get_loss(self, xnn):
         q2_pred = self.get_q2_pred(xnn, jac=False)
         residuals = (q2_pred - self.q2_obs) / self.sigma
@@ -235,10 +253,12 @@ class CandidateOptLoss:
         elif self.lattice_system == 'orthorhombic':
             self.hkl2 = self.hkl**2
         elif self.lattice_system == 'monoclinic':
-            self.hkl2 = np.column_stack((
+            self.hkl2 = np.concatenate((
                 self.hkl**2,
-                self.hkl[:, 0] * self.hkl[:, 2]
-                ))
+                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis]
+                ),
+                axis=2
+                )
         elif self.lattice_system == 'hexagonal':
             self.hkl2 = np.column_stack((
                 4/3 * (self.hkl[:, 0]**2 + self.hkl[:, 0]*self.hkl[:, 1] + self.hkl[:, 1]**2),

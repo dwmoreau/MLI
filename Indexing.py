@@ -9,12 +9,9 @@ Monoclinic
 
 
 - Documentation
-    * Update methods.md
-        - new augmentation curve
-        - Update MCMC section
-        - upload the documents to github from overleaf
-        - Result figures
-    * Update README.md
+    - Update methods.md
+        - Add figures
+    - Update README.md
     - Reread ML technique papers
     - Reread ML pxrd papers
     - read about powder extinction classes
@@ -1089,7 +1086,6 @@ class Indexing:
                     permutation,
                     radians=True,
                     )
-
             self.data['unit_cell_pred'] = list(unit_cell_pred)
             self.data['unit_cell_pred_cov'] = list(unit_cell_pred_cov)
             self.data['unit_cell_pred_trees'] = list(unit_cell_pred_trees)
@@ -1137,22 +1133,48 @@ class Indexing:
         elif uc_pred_scaled is None and not uc_pred_scaled_cov is None:
             return uc_pred_cov
 
-    def scale_predictions(self, uc_pred):
-        if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            uc_pred_scaled = (uc_pred - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-        elif self.data_params['lattice_system'] == 'monoclinic':
-            uc_pred_scaled = np.zeros(uc_pred.shape)
-            uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            uc_pred_scaled[:, 3] = (uc_pred[:, 3] - np.pi/2) / self.angle_scale
-        elif self.data_params['lattice_system'] == 'triclinic':
-            uc_pred_scaled = np.zeros(uc_pred.shape)
-            uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            uc_pred_scaled[:, 3:] = (uc_pred[:, 3:] - np.pi/2) / self.angle_scale
-        elif self.data_params['lattice_system'] == 'rhombohedral':
-            uc_pred_scaled = np.zeros(uc_pred.shape)
-            uc_pred_scaled[:, 0] = (uc_pred[:, 0] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            uc_pred_scaled[:, 1] = (uc_pred[:, 1] - np.pi/2) / self.angle_scale
-        return uc_pred_scaled
+    def scale_predictions(self, uc_pred=None, uc_pred_cov=None):
+        if not uc_pred is None:
+            if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
+                uc_pred_scaled = (uc_pred - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+            elif self.data_params['lattice_system'] == 'monoclinic':
+                uc_pred_scaled = np.zeros(uc_pred.shape)
+                uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+                uc_pred_scaled[:, 3] = (uc_pred[:, 3] - np.pi/2) / self.angle_scale
+            elif self.data_params['lattice_system'] == 'triclinic':
+                uc_pred_scaled = np.zeros(uc_pred.shape)
+                uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+                uc_pred_scaled[:, 3:] = (uc_pred[:, 3:] - np.pi/2) / self.angle_scale
+            elif self.data_params['lattice_system'] == 'rhombohedral':
+                uc_pred_scaled = np.zeros(uc_pred.shape)
+                uc_pred_scaled[:, 0] = (uc_pred[:, 0] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+                uc_pred_scaled[:, 1] = (uc_pred[:, 1] - np.pi/2) / self.angle_scale
+        if not uc_pred_cov is None:
+            uc_pred_scaled_cov = np.zeros(uc_pred_cov.shape)
+            if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
+                uc_pred_scaled_cov = uc_pred_cov / self.uc_scaler.scale_[0]**2
+            elif self.data_params['lattice_system'] == 'monoclinic':
+                uc_pred_scaled_cov[:, :3, :3] = uc_pred_cov[:, :3, :3] / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_cov[:, 3, 3] = uc_pred_cov[:, 3, 3] / self.angle_scale**2
+                uc_pred_scaled_cov[:, :3, 3] = uc_pred_cov[:, :3, 3] / (self.uc_scaler.scale_[0] * self.angle_scale)
+                uc_pred_scaled_cov[:, 3, :3] = uc_pred_cov[:, 3, :3] / (self.uc_scaler.scale_[0] * self.angle_scale)
+            elif self.data_params['lattice_system'] == 'triclinic':
+                uc_pred_scaled_cov[:, :3, :3] = uc_pred_cov[:, :3, :3] / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_cov[:, 3:, 3:] = uc_pred_cov[:, 3:, 3:] / self.angle_scale**2
+                uc_pred_scaled_cov[:, :3, 3:] = uc_pred_cov[:, :3, 3:] / (self.uc_scaler.scale_[0] * self.angle_scale)
+                uc_pred_scaled_cov[:, 3:, :3] = uc_pred_cov[:, 3:, :3] / (self.uc_scaler.scale_[0] * self.angle_scale)
+            elif self.data_params['lattice_system'] == 'rhombohedral':
+                uc_pred_scaled_cov[:, 0, 0] = uc_pred_cov[:, 0, 0] / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_cov[:, 1, 1] = uc_pred_cov[:, 1, 1] / self.angle_scale**2
+                uc_pred_scaled_cov[:, 0, 1] = uc_pred_cov[:, 0, 1] / (self.uc_scaler.scale_[0] * self.angle_scale)
+                uc_pred_scaled_cov[:, 1, 0] = uc_pred_cov[:, 1, 0] / (self.uc_scaler.scale_[0] * self.angle_scale)
+
+        if not uc_pred is None and not uc_pred_cov is None:
+            return uc_pred_scaled, uc_pred_scaled_cov
+        elif not uc_pred is None and uc_pred_cov is None:
+            return uc_pred_scaled
+        elif uc_pred is None and not uc_pred_cov is None:
+            return uc_pred_scaled_cov
 
     def evaluate_regression(self):
         if self.data_params['lattice_system'] == 'monoclinic':

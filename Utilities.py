@@ -47,9 +47,9 @@ def get_reciprocal_unit_cell_from_xnn(xnn):
     ra = np.sqrt(xnn[:, 0])
     rb = np.sqrt(xnn[:, 1])
     rc = np.sqrt(xnn[:, 2])
-    ralpha = np.arccos(xnn[:, 3] / (xnn[:, 1] * xnn[:, 2]))
-    rbeta = np.arccos(xnn[:, 4] / (xnn[:, 0] * xnn[:, 2]))
-    rgamma = np.arccos(xnn[:, 5] / (xnn[:, 0] * xnn[:, 1]))
+    ralpha = np.arccos(xnn[:, 3] / (rb * rc))
+    rbeta = np.arccos(xnn[:, 4] / (ra * rc))
+    rgamma = np.arccos(xnn[:, 5] / (ra * rb))
     reciprocal_unit_cell = np.column_stack([ra, rb, rc, ralpha, rbeta, rgamma])
     return reciprocal_unit_cell
 
