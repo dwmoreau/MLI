@@ -28,10 +28,10 @@ for key in keys:
             # There could be multiple entries in the csd database with the same composition
             # Get all the volumes for that composition and verify that the cod entry
             # is not close in volume to any of the csd entries
-            volume_checks = np.array(common_composition_csd['volume'])
+            volume_checks = np.array(common_composition_csd['reindexed_volume'])
             for entry_index in range(len(common_composition_cod)):
                 good = True
-                entry_volume = common_composition_cod.iloc[entry_index]['volume']
+                entry_volume = common_composition_cod.iloc[entry_index]['reindexed_volume']
                 for volume_check in volume_checks:
                     check = np.isclose(volume_check, entry_volume, rtol=0.05)
                     if check:
@@ -48,7 +48,7 @@ for key in keys:
 
         # This is hack.
         # There is a bug in this code where the same COD entry is being added more than once.
-        _, unique_indices = np.unique(unique_entries['volume'], return_index=True)
+        _, unique_indices = np.unique(unique_entries['reindexed_volume'], return_index=True)
         unique_entries = unique_entries.loc[unique_indices]
         all_unique_entries.append(unique_entries)
         print(f'  COD has {len(unique_entries)} unique entries not in CSD')

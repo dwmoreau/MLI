@@ -39,10 +39,13 @@ for key in groups.groups.keys():
         else:
             while len(common_composition) > 0:
                 # Get the first entries volume
-                volume = common_composition.iloc[0]['volume']
+                # reindexed volume is the same as volume for all entries except rhombohedral
+                # In this case, reindexed_volume is different for the entries in the
+                # hexagonal setting.
+                volume = common_composition.iloc[0]['reindexed_volume']
                 # Get all entries with the volume within 5%
                 close_volume = common_composition.loc[
-                    np.isclose(common_composition['volume'], volume, rtol=0.05)
+                    np.isclose(common_composition['reindexed_volume'], volume, rtol=0.05)
                     ]
                 if len(close_volume) == 1:
                     # If there is only one entry with this volume, add it to unit_entries_compostion
@@ -62,7 +65,7 @@ for key in groups.groups.keys():
     if len(unique_entries_composition) > 0:
         group_entries = pd.concat(unique_entries_composition)
         unique_entries_unit_cell = []
-        unit_cell_group = group_entries.groupby('volume')
+        unit_cell_group = group_entries.groupby('reindexed_volume')
         for unit_cell in unit_cell_group.groups.keys():
             common_unit_cell = unit_cell_group.get_group(unit_cell)
             if len(common_unit_cell) == 1:

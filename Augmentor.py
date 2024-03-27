@@ -268,24 +268,59 @@ class Augmentor:
         elif self.lattice_system == 'triclinic':
             assert False
         elif self.lattice_system in ['cubic', 'tetragonal']:
+            ##!! THIS IS WRONG. CHECK TO MAKE SURE THE ENTIRE UNIT CELL IS CORRECT
+            ##!! NOT JUST THE Y_INDICES FOR THE LATTICE SYSTEM
+            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
+            augmented_entry['unit_cell'] = perturbed_reindexed_unit_cell
+        elif self.lattice_system == 'hexagonal':
+            perturbed_reindexed_unit_cell_scaled[1] = perturbed_reindexed_unit_cell_scaled[0]
+            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
+            augmented_entry['unit_cell'] = perturbed_reindexed_unit_cell
+        elif self.lattice_system == 'rhombohedral':
+            perturbed_reindexed_unit_cell_scaled[1] = perturbed_reindexed_unit_cell_scaled[0]
+            perturbed_reindexed_unit_cell_scaled[2] = perturbed_reindexed_unit_cell_scaled[0]
+            perturbed_reindexed_unit_cell_scaled[4] = perturbed_reindexed_unit_cell_scaled[3]
+            perturbed_reindexed_unit_cell_scaled[5] = perturbed_reindexed_unit_cell_scaled[3]
+            perturbed_reindexed_unit_cell[1] = perturbed_reindexed_unit_cell[0]
+            perturbed_reindexed_unit_cell[2] = perturbed_reindexed_unit_cell[0]
+            perturbed_reindexed_unit_cell[4] = perturbed_reindexed_unit_cell[3]
+            perturbed_reindexed_unit_cell[5] = perturbed_reindexed_unit_cell[3]
             augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
             augmented_entry['unit_cell'] = perturbed_reindexed_unit_cell
         else:
             assert False
-        # calculate new d-spacings
-        if self.lattice_system == 'monoclinic':
-            q2_calculator = Q2Calculator(self.lattice_system, augmented_entry['hkl_sa'], tensorflow=False)
-            q2_sa = q2_calculator.get_q2(np.array(augmented_entry['unit_cell'])[np.newaxis, :])[0]
-            existing_peaks = np.any(augmented_entry['hkl_sa'] != 0, axis=1)
-        else:
-            q2_calculator = Q2Calculator(self.lattice_system, augmented_entry['reindexed_hkl_sa'], tensorflow=False)
-            q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[np.newaxis, :])[0]
-            existing_peaks = np.any(augmented_entry['reindexed_hkl_sa'] != 0, axis=1)
 
-        q2_sa = np.sort(q2_sa[existing_peaks])
+        # calculate new d-spacings
+        hkl_sa = np.stack(augmented_entry['hkl_sa'])
+        reindexed_hkl_sa = np.stack(augmented_entry['reindexed_hkl_sa'])
+        if self.lattice_system == 'monoclinic':
+            q2_calculator = Q2Calculator(self.lattice_system, hkl_sa, tensorflow=False)
+            q2_sa = q2_calculator.get_q2(np.array(augmented_entry['unit_cell'])[self.y_indices][np.newaxis, :])[0]
+            existing_peaks = np.any(hkl_sa != 0, axis=1)
+        else:
+            q2_calculator = Q2Calculator(self.lattice_system, reindexed_hkl_sa, tensorflow=False)
+            q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[self.y_indices][np.newaxis, :])[0]
+            existing_peaks = np.any(reindexed_hkl_sa != 0, axis=1)
+
+        q2_sa = q2_sa[existing_peaks]
+        hkl_sa = hkl_sa[existing_peaks]
+        reindexed_hkl_sa = reindexed_hkl_sa[existing_peaks]
+        order = np.argsort(q2_sa)
+        q2_sa = q2_sa[order]
+        hkl_sa = hkl_sa[order]
+        reindexed_hkl_sa = reindexed_hkl_sa[order]
+
         augmented_entry['d_spacing_sa'] = 1 / np.sqrt(q2_sa)
         augmented_entry['q2_sa'] = q2_sa
 
+        if np.sum(q2_sa <= 0) > 0:
+            print(perturbed_reindexed_unit_cell)
+            print(reindexed_hkl_sa)
+            print(q2_sa)
+            print()
+            print()
+            print()
+            print()
         # choose new peaks
         first_peak_index = self.first_probability['x'][
             np.searchsorted(self.first_probability['cdf'], self.rng.random())
@@ -293,8 +328,8 @@ class Augmentor:
         if first_peak_index >= q2_sa.size:
             return None
         q2 = [q2_sa[first_peak_index]]
-        hkl = [augmented_entry['hkl_sa'][first_peak_index]]
-        reindexed_hkl = [augmented_entry['reindexed_hkl_sa'][first_peak_index]]
+        hkl = [hkl_sa[first_peak_index]]
+        reindexed_hkl = [reindexed_hkl_sa[first_peak_index]]
 
         previous_kept_index = first_peak_index
         # overlap_threshold is the minimum separation from allowed during GenerateDataset.py
@@ -343,11 +378,12 @@ class Augmentor:
                             keep_next = True
                 if keep:
                     q2.append(q2_sa[index])
-                    hkl.append(augmented_entry['hkl_sa'][index])
-                    reindexed_hkl.append(augmented_entry['reindexed_hkl_sa'][index])
+                    hkl.append(hkl_sa[index])
+                    reindexed_hkl.append(reindexed_hkl_sa[index])
                     previous_kept_index = index
 
         if len(q2) >= self.n_points:
+            # This sort might be unneccessary, but not harmful.
             q2 = np.array(q2)
             sort_indices = np.argsort(q2)
             q2 = q2[sort_indices][:self.n_points]
@@ -371,6 +407,11 @@ class Augmentor:
                         return True
                 elif self.lattice_system == 'triclinic':
                     assert False
+        elif self.lattice_system == 'rhombohedral':
+            limit = np.pi/2 / self.angle_scale
+            if perturbed_unit_cell_scaled[0] > self.min_unit_cell_scaled:
+                if -limit < perturbed_unit_cell_scaled[1] < limit:
+                    return True
         else:
             if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
                 return True

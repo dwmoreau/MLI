@@ -9,6 +9,7 @@ import pandas as pd
 
 from EntryHelpers import save_identifiers
 from Reindexing import get_permutation
+from Reindexing import hexagonal_to_rhombohedral_hkl
 from Utilities import Q2Calculator
 from Utilities import get_fwhm_and_overlap_threshold
 
@@ -40,6 +41,7 @@ class EntryGenerator:
             'unit_cell': 'float64',
             'reindexed_spacegroup_symbol_hm': 'string',
             'reindexed_unit_cell': 'float64',
+            'reindexed_volume': 'float64',
             'permutation': 'string',
             'split': 'int8',
             'reduced_unit_cell': 'float64',
@@ -61,6 +63,7 @@ class EntryGenerator:
             'unit_cell',
             'reindexed_spacegroup_symbol_hm',
             'reindexed_unit_cell',
+            'reindexed_volume',
             'permutation',
             'split',
             'reduced_unit_cell',
@@ -201,6 +204,11 @@ class EntryGenerator:
                     print(unit_cell_)
                     print(reindexed_unit_cell_)
                     print()
+            elif lattice_system == 'rhombohedral':
+                if np.all(unit_cell_[3:] == [90., 90., 120]):
+                    reindexed_hkl = hexagonal_to_rhombohedral_hkl(hkl)
+                else:
+                    reindexed_hkl = hkl
             else:
                 reindexed_hkl = hkl
             if tag == 'all':
@@ -341,7 +349,7 @@ if __name__ == '__main__':
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    entries_per_group = 5000
+    entries_per_group = 10000
     bad_identifiers_csd = []
     bad_identifiers_cod = []
     csd_entry_reader = EntryReader('CSD')
@@ -359,8 +367,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'tetragonal']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'tetragonal']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'hexagonal']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'hexagonal']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')

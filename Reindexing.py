@@ -6,6 +6,35 @@ def reindex_entry(lattice_system, unit_cell, spacegroup_symbol, spacegroup_numbe
         return reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number)
     elif lattice_system == 'monoclinic':
         return reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number)
+    elif lattice_system == 'rhombohedral':
+        return reindex_entry_rhombohedral(unit_cell, spacegroup_symbol, spacegroup_number)
+
+
+def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell):
+    a_hexagonal = hexagonal_unit_cell[0]
+    c_hexagonal = hexagonal_unit_cell[2]
+    a_rhombohedral = a_hexagonal * np.sqrt(3 + (c_hexagonal / a_hexagonal)**2) / 3
+    num = (2*c_hexagonal**2 - 3*a_hexagonal**2)
+    denom = (2*(c_hexagonal**2 + 3*a_hexagonal**2))
+    alpha_rhombohedral = 180/ np.pi *np.arccos(num/denom)
+    rhombohedral_unit_cell = np.array([
+        a_rhombohedral,
+        a_rhombohedral,
+        a_rhombohedral,
+        alpha_rhombohedral,
+        alpha_rhombohedral,
+        alpha_rhombohedral,
+        ])
+    return rhombohedral_unit_cell
+
+
+def hexagonal_to_rhombohedral_hkl(hkl_hexagonal):
+    RM = 1/3 * np.array([
+        [-1, 1, 1],
+        [2, 1, 1],
+        [-1, -2, 1],
+        ])
+    return np.matmul(RM, hkl_hexagonal.T).T
 
 
 def get_permutation(unit_cell):

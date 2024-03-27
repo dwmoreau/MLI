@@ -407,17 +407,19 @@ def verify_unit_cell_consistency_by_bravais_lattice(bravais_lattice, unit_cell):
     elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
         if square(alpha, beta, gamma):
             check = True
-    elif bravais_lattice in ['hR', 'hP']:
-        # It seems like there are lots of mislabeled hR as hP and visa-versa.
+    elif bravais_lattice == 'hR':
+        # The rhombohedral unit cell can be set in a hexagonal setting.
+        # So check both cases.
+        # rhombohedral
         if a == b and b == c:
             if alpha == beta and beta == gamma:
                 check = True
-        if a == b or b == c or a == c:
+        elif a == b and b != c:
             if alpha == 90 and beta == 90 and gamma == 120:
                 check = True
-            elif alpha == 90 and beta == 120 and gamma == 90:
-                check = True
-            elif alpha == 120 and beta == 90 and gamma == 90:
+    elif bravais_lattice == 'hP':
+        if a == b and b != c:
+            if alpha == 90 and beta == 90 and gamma == 120:
                 check = True
     elif bravais_lattice in ['mC', 'mP']:
         # it is valid for the monoclinic to be set with beta == 90.

@@ -10,6 +10,7 @@ from EntryHelpers import verify_unit_cell_consistency_by_bravais_lattice
 from EntryHelpers import verify_volume
 from Reindexing import get_permuter
 from Reindexing import reindex_entry
+from Reindexing import hexagonal_to_rhombohedral_unit_cell
 from Utilities import Q2Calculator
 
 
@@ -29,16 +30,17 @@ class ProcessEntry:
         self.lattice_system = None
         self.crystal_system = None
         self.crystal_family = None
-        self.volume = None
 
         self.spacegroup_symbol_hall = None
         self.spacegroup_symbol_hm = None
         self.unit_cell = np.zeros(6)
+        self.volume = None
 
         self.split = None
         self.reindexed_spacegroup_symbol_hall = None
         self.reindexed_spacegroup_symbol_hm = None
         self.reindexed_unit_cell = np.zeros(6)
+        self.reindexed_volume = None
         self.permutation = None
 
         self.reduced_unit_cell = np.zeros(6)
@@ -72,6 +74,7 @@ class ProcessEntry:
             'reindexed_spacegroup_symbol_hall': self.reindexed_spacegroup_symbol_hall,
             'reindexed_spacegroup_symbol_hm': self.reindexed_spacegroup_symbol_hm,
             'reindexed_unit_cell': self.reindexed_unit_cell,
+            'reindexed_volume': self.reindexed_volume,
             'split': self.split,
             'permutation': self.permutation,
             'reduced_unit_cell': self.reindexed_unit_cell,
@@ -150,7 +153,7 @@ class ProcessEntry:
         if not verify_unit_cell_consistency_by_bravais_lattice(self.bravais_lattice, self.unit_cell):
             self.reason = 'Inconsistent unit cell'
             self.status = False
-            #print(f'{self.reason}')
+            #print(f'{self.reason}: {self.bravais_lattice} {self.unit_cell}')
             return None
 
         chemical_formula_handler = ChemicalFormulaHandler(self.chemical_formula)
@@ -192,6 +195,7 @@ class ProcessEntry:
             try:
                 self.reindexed_spacegroup_symbol_hm, self.permutation, self.reindexed_unit_cell = \
                     reindex_entry(self.lattice_system, self.unit_cell, self.spacegroup_symbol_hm, self.spacegroup_number)
+                self.reindexed_volume = self.volume
             except:
                 self.reason = 'Could not permute axes'
                 self.status = False
@@ -209,8 +213,19 @@ class ProcessEntry:
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
+        elif self.lattice_system == 'rhombohedral':
+            if np.all(self.unit_cell[3:] == [90, 90, 120]):
+                self.reindexed_unit_cell = hexagonal_to_rhombohedral_unit_cell(self.unit_cell)
+                self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
+            else:
+                self.reindexed_volume = self.volume
+                self.reindexed_unit_cell = self.unit_cell
+            self.permutation = 'abc'
+            self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
+            self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
         else:
             self.reindexed_unit_cell = self.unit_cell
+            self.reindexed_volume = self.volume
             self.permutation = 'abc'
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall

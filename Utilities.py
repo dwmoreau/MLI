@@ -163,9 +163,9 @@ class Q2Calculator:
 
     def get_q2_rhombohedral(self, unit_cell):
         a = unit_cell[:, 0][:, self.newaxis]
-        cos_alpha = self.cos(unit_cell[:, 1][:, self.newaxis])
-        sin_alpha = self.sin(unit_cell[:, 1][:, self.newaxis])
-
+        alpha = unit_cell[:, 1][:, self.newaxis]
+        cos_alpha = self.cos(alpha)
+        sin_alpha = self.sin(alpha)
         h = self.hkl[:, 0]
         k = self.hkl[:, 1]
         l = self.hkl[:, 2]

@@ -7,8 +7,8 @@ orthorhombic   | 93%
 Monoclinic
     {'Not found': 157, 'Found and best': 86, 'Found but not best': 28, 'Found but off by two': 0, 'Found explainers': 66}
 
-
 - Documentation
+    * fix rhombohedral diffraction formula
     - Update methods.md
         - Add figures
     - Update README.md
@@ -19,6 +19,9 @@ Monoclinic
 
 - Optimization:
     * Get monoclinic working
+        * solutions seem to get close to the answer in the unit cell lengths, but predict the angles close to 90
+        - update epsilon factor. Some predictions just need a little bit more optimization
+        - Test different permuations of the candidate cells
     - correct the epsilon factor to be e^{-10}
     - Verify that the top n candidates do not match the true unit cell
     - Coordinate unit cell contains path of unit cell params    
@@ -42,7 +45,7 @@ Monoclinic
     - Penalize multiple assignments to the same hkl
 
 - Data
-    - Fix Hexagonal / Rhombohedral setting issues.
+    * Get rhombohedral running
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
     - redo dataset generation with new parameters based on RRUFF database
@@ -164,6 +167,7 @@ class Indexing:
             self.data_params['bravais_lattices'] = ['aP']
         elif self.data_params['lattice_system'] == 'rhombohedral':
             self.data_params['y_indices'] = [0, 3]
+            self.data_params['bravais_lattices'] = ['hR']
         elif self.data_params['lattice_system'] == 'hexagonal':
             self.data_params['y_indices'] = [0, 2]
             self.data_params['bravais_lattices'] = ['hP']
@@ -230,7 +234,7 @@ class Indexing:
         group_spec['hm symbol'] = group_spec['hm symbol'].str.strip()
 
         self.data_params['groups'] = group_spec['group'].unique()
-        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic', 'monoclinic']:
+        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic', 'monoclinic', 'hexagonal', 'rhombohedral']:
             self.data_params['split_groups'] = self.data_params['groups']
         elif self.data_params['lattice_system'] == 'tetragonal':
             self.data_params['split_groups'] = []
@@ -249,7 +253,7 @@ class Indexing:
             'lattice_system',
             'bravais_lattice',
             'spacegroup_number',
-            'volume',
+            'reindexed_volume',
             'spacegroup_symbol_hm',
             'reindexed_spacegroup_symbol_hm',
             'unit_cell',
@@ -296,7 +300,7 @@ class Indexing:
         self.data['group'] = self.data['reindexed_spacegroup_symbol_hm'].map(
             lambda x: self.group_mappings[x]
             )
-        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic']:
+        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic', 'hexagonal', 'rhombohedral']:
             self.data['split_group'] = self.data['group']
         elif self.data_params['lattice_system'] == 'tetragonal':
             # split_0: a < c
@@ -660,9 +664,10 @@ class Indexing:
         elif self.data_params['lattice_system'] == 'orthorhombic':
             volume = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
         elif self.data_params['lattice_system'] == 'hexagonal':
-            pass
+            volume = unit_cell[:, 0]**2 * unit_cell[:, 1] * np.sin(np.pi/3)
         elif self.data_params['lattice_system'] == 'rhombohedral':
-            pass
+            calpha = np.cos(unit_cell[:, 1])
+            volume = unit_cell[:, 0]**3 * np.sqrt(1 - 3*calpha**2 + 2*calpha**3)
         elif self.data_params['lattice_system'] == 'monoclinic':
             volume = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2] * np.sin(unit_cell[:, 3])
         elif self.data_params['lattice_system'] == 'triclinic':
@@ -721,13 +726,15 @@ class Indexing:
         self.uc_scaler = StandardScaler()
         self.uc_scaler.fit(uc_train[:, :3].ravel()[:, np.newaxis])
         # angles
-        if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic']:
+        if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
             self.angle_scale = 1
         else:
             if self.data_params['lattice_system'] == 'monoclinic':
                 angles = uc_train[:, 4]
             elif self.data_params['lattice_system'] == 'triclinic':
                 angles = uc_train[:, 3:].ravel()
+            elif self.data_params['lattice_system'] == 'rhombohedral':
+                angles = uc_train[:, 3]
             self.angle_scale = angles[angles != np.pi/2].std()
 
         self.data['reindexed_unit_cell_scaled'] = self.data['reindexed_unit_cell'].apply(self.y_scale)
@@ -738,9 +745,9 @@ class Indexing:
 
         # Volume scaling
         self.volume_scaler = StandardScaler()
-        volume_train = np.array(training_data['volume'])
+        volume_train = np.array(training_data['reindexed_volume'])
         self.volume_scaler.fit(volume_train[:, np.newaxis])
-        self.data['volume_scaled'] = list(self.volume_scale(np.array(self.data['volume'])))
+        self.data['reindexed_volume_scaled'] = list(self.volume_scale(np.array(self.data['reindexed_volume'])))
 
     def plot_input(self):
         def make_hkl_plot(data, n_points, hkl_ref_length, save_to):
@@ -867,8 +874,8 @@ class Indexing:
         axes[0, 0].legend()
 
         # volume
-        volume_scaled = np.array(data['volume_scaled'])
-        volume_sorted = np.sort(np.array(data['volume'])) / plot_volume_scale
+        volume_scaled = np.array(data['reindexed_volume_scaled'])
+        volume_sorted = np.sort(np.array(data['reindexed_volume'])) / plot_volume_scale
         lower = volume_sorted[int(0.005*volume_sorted.size)]
         upper = volume_sorted[int(0.995*volume_sorted.size)]
         bins = np.linspace(lower, upper, 101)
@@ -877,7 +884,7 @@ class Indexing:
         hist, _ = np.histogram(volume_sorted, bins=bins, density=True)
         axes[0, 1].bar(centers, hist, width=dbin)
         if self.data_params['augment']:
-            volume_augmented = np.array(data_augmented['volume']) / plot_volume_scale
+            volume_augmented = np.array(data_augmented['reindexed_volume']) / plot_volume_scale
             hist_augmented, _ = np.histogram(volume_augmented, bins=bins, density=True)
             axes[0, 1].bar(centers, hist_augmented, width=dbin, alpha=0.5)
         hist_scaled, _ = np.histogram(volume_scaled, bins=bins_scaled, density=True)
@@ -909,45 +916,48 @@ class Indexing:
                 axes[1, index + 2].bar(centers_scaled, hist_augmented_scaled, width=dbin_scaled, alpha=0.5)
             axes[0, index + 2].set_title(y_labels[index])
 
-        if self.data_params['lattice_system'] == 'monoclinic':
-            sorted_angles = np.sort(unit_cell[:, 4])
-        else:
-            sorted_angles = np.sort(unit_cell[:, 3:].ravel())
-        lower = sorted_angles[int(0.005*sorted_angles.size)]
-        upper = sorted_angles[int(0.995*sorted_angles.size)]
-        bins = np.linspace(lower, upper, 101)
-        centers = (bins[1:] + bins[:-1]) / 2
-        dbin = bins[1] - bins[0]
-        for index in range(3, 6):
-            indices = np.logical_and(
-                unit_cell[:, index] != np.pi/2,
-                ~np.isnan(unit_cell[:, index])
-                )
-            hist, _ = np.histogram(unit_cell[indices, index], bins=bins, density=True)
-            axes[0, index + 2].bar(centers, hist, width=dbin)
-
-            indices = np.logical_and(
-                unit_cell_scaled[:, index] != 0,
-                ~np.isnan(unit_cell_scaled[:, index])
-                )
-            hist_scaled, _ = np.histogram(unit_cell_scaled[indices, index], bins=bins_scaled, density=True)
-            axes[1, index + 2].bar(centers_scaled, hist_scaled, width=dbin_scaled)
-            axes[0, index + 2].set_title(y_labels[index])
-
-            if self.data_params['augment']:
+        if self.data_params['lattice_system'] in ['monoclinic', 'rhombohedral', 'triclinic']:
+            if self.data_params['lattice_system'] == 'monoclinic':
+                sorted_angles = np.sort(unit_cell[:, 4])
+            elif self.data_params['lattice_system'] == 'rhombohedral':
+                sorted_angles = np.sort(unit_cell[:, 3])
+            elif self.data_params['lattice_system'] == 'triclinic':
+                sorted_angles = np.sort(unit_cell[:, 3:].ravel())
+            lower = sorted_angles[int(0.005*sorted_angles.size)]
+            upper = sorted_angles[int(0.995*sorted_angles.size)]
+            bins = np.linspace(lower, upper, 101)
+            centers = (bins[1:] + bins[:-1]) / 2
+            dbin = bins[1] - bins[0]
+            for index in range(3, 6):
                 indices = np.logical_and(
-                    unit_cell_augmented[:, index] != np.pi/2,
-                    ~np.isnan(unit_cell_augmented[:, index])
+                    unit_cell[:, index] != np.pi/2,
+                    ~np.isnan(unit_cell[:, index])
                     )
-                hist_augmented, _ = np.histogram(unit_cell_augmented[indices, index], bins=bins, density=True)
-                axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+                hist, _ = np.histogram(unit_cell[indices, index], bins=bins, density=True)
+                axes[0, index + 2].bar(centers, hist, width=dbin)
 
                 indices = np.logical_and(
-                    unit_cell_augmented_scaled[:, index] != 0,
-                    ~np.isnan(unit_cell_augmented_scaled[:, index])
+                    unit_cell_scaled[:, index] != 0,
+                    ~np.isnan(unit_cell_scaled[:, index])
                     )
-                hist_augmented_scaled, _ = np.histogram(unit_cell_augmented_scaled[indices, index], bins=bins_scaled, density=True)
-                axes[1, index + 2].bar(centers_scaled, hist_augmented_scaled, width=dbin_scaled, alpha=0.5)
+                hist_scaled, _ = np.histogram(unit_cell_scaled[indices, index], bins=bins_scaled, density=True)
+                axes[1, index + 2].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+                axes[0, index + 2].set_title(y_labels[index])
+
+                if self.data_params['augment']:
+                    indices = np.logical_and(
+                        unit_cell_augmented[:, index] != np.pi/2,
+                        ~np.isnan(unit_cell_augmented[:, index])
+                        )
+                    hist_augmented, _ = np.histogram(unit_cell_augmented[indices, index], bins=bins, density=True)
+                    axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+
+                    indices = np.logical_and(
+                        unit_cell_augmented_scaled[:, index] != 0,
+                        ~np.isnan(unit_cell_augmented_scaled[:, index])
+                        )
+                    hist_augmented_scaled, _ = np.histogram(unit_cell_augmented_scaled[indices, index], bins=bins_scaled, density=True)
+                    axes[1, index + 2].bar(centers_scaled, hist_augmented_scaled, width=dbin_scaled, alpha=0.5)
 
         axes[0, 0].set_ylabel('Raw data')
         axes[1, 0].set_ylabel('Standard Scaling')
@@ -1049,7 +1059,7 @@ class Indexing:
         reindexed_uc_pred, reindexed_uc_pred_cov = self.revert_predictions(
             reindexed_uc_pred_scaled, reindexed_uc_pred_scaled_cov
             )
-        self.data['volume_pred'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred))
+        self.data['reindexed_volume_pred'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred))
         self.data['reindexed_unit_cell_pred'] = list(reindexed_uc_pred)
         self.data['reindexed_unit_cell_pred_cov'] = list(reindexed_uc_pred_cov)
         self.data['reindexed_unit_cell_pred_scaled'] = list(reindexed_uc_pred_scaled)
@@ -1058,7 +1068,7 @@ class Indexing:
         reindexed_uc_pred_trees, reindexed_uc_pred_cov_trees = self.revert_predictions(
             reindexed_uc_pred_scaled_trees, reindexed_uc_pred_scaled_cov_trees
             )
-        self.data['volume_pred_trees'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred_trees))
+        self.data['reindexed_volume_pred_trees'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred_trees))
         self.data['reindexed_unit_cell_pred_trees'] = list(reindexed_uc_pred_trees)
         self.data['reindexed_unit_cell_pred_cov_trees'] = list(reindexed_uc_pred_cov_trees)
         self.data['reindexed_unit_cell_pred_scaled_trees'] = list(reindexed_uc_pred_scaled_trees)
