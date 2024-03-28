@@ -207,6 +207,17 @@ class EntryGenerator:
             elif lattice_system == 'rhombohedral':
                 if np.all(unit_cell_[3:] == [90., 90., 120]):
                     reindexed_hkl = hexagonal_to_rhombohedral_hkl(hkl)
+
+                    q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl, tensorflow=False)
+                    q2 = q2_calculator.get_q2(unit_cell_[np.newaxis])
+                    reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
+                    reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[np.newaxis])
+                    check = np.isclose(q2, reindexed_q2).all()
+                    if not check:
+                        print('Reindexing Failure')
+                        print(unit_cell_)
+                        print(reindexed_unit_cell_)
+                        print()
                 else:
                     reindexed_hkl = hkl
             else:
@@ -367,8 +378,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'hexagonal']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'hexagonal']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'rhombohedral']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'rhombohedral']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')

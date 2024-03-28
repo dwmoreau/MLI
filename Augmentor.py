@@ -408,9 +408,13 @@ class Augmentor:
                 elif self.lattice_system == 'triclinic':
                     assert False
         elif self.lattice_system == 'rhombohedral':
-            limit = np.pi/2 / self.angle_scale
+            # Rhombohedral has a maximum angle of 120 degrees (4pi/6 radians)
+            # Because the scaled angles are centered at zero, 90 degrees is 0 
+            # in scaled units. Then 120 degrees is pi/6 / scale
+            minimum = -np.pi/2 / self.angle_scale
+            maximum = np.pi/6 / self.angle_scale 
             if perturbed_unit_cell_scaled[0] > self.min_unit_cell_scaled:
-                if -limit < perturbed_unit_cell_scaled[1] < limit:
+                if minimum < perturbed_unit_cell_scaled[1] < maximum:
                     return True
         else:
             if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):

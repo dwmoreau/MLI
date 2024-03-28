@@ -11,6 +11,7 @@ from EntryHelpers import verify_volume
 from Reindexing import get_permuter
 from Reindexing import reindex_entry
 from Reindexing import hexagonal_to_rhombohedral_unit_cell
+from Reindexing import hexagonal_to_rhombohedral_hkl
 from Utilities import Q2Calculator
 
 
@@ -52,6 +53,7 @@ class ProcessEntry:
         self.reason = None
 
         self.hkl_ref_monoclinic = np.load('data/hkl_ref_monoclinic.npy')[:60]
+        self.hkl_ref_hexagonal = np.load('data/hkl_ref_hexagonal.npy')[:60]
 
     def make_output_dict(self):
         self.output_dict = {
@@ -93,6 +95,20 @@ class ProcessEntry:
         reindexed_unit_cell = self.reindexed_unit_cell.copy()
         reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = np.matmul(self.hkl_ref_monoclinic, get_permuter(self.permutation))
+        reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
+        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
+        check = np.isclose(q2, reindexed_q2).all()
+        return check
+
+    def verify_reindexing_rhombohedral(self):
+        unit_cell = self.unit_cell.copy()
+        unit_cell[3:] *= np.pi/180
+        q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=self.hkl_ref_hexagonal, tensorflow=False)
+        q2 = q2_calculator.get_q2(unit_cell[np.newaxis])
+
+        reindexed_unit_cell = self.reindexed_unit_cell.copy()
+        reindexed_unit_cell[3:] *= np.pi/180
+        reindexed_hkl = hexagonal_to_rhombohedral_hkl(self.hkl_ref_hexagonal)
         reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
         reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
         check = np.isclose(q2, reindexed_q2).all()
@@ -202,7 +218,7 @@ class ProcessEntry:
                 print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
                 return None
             if not self.verify_reindexing():
-                self.reason = 'Reindexing Error'
+                self.reason = 'Monoclinic / Orthorhombic Reindexing Error'
                 self.status = False
                 print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.permutation}')
                 return None
@@ -217,6 +233,11 @@ class ProcessEntry:
             if np.all(self.unit_cell[3:] == [90, 90, 120]):
                 self.reindexed_unit_cell = hexagonal_to_rhombohedral_unit_cell(self.unit_cell)
                 self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
+                if not self.verify_reindexing_rhombohedral():
+                    self.reason = 'Rhombohedral Reindexing Error'
+                    self.status = False
+                    print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.permutation}')
+                    return None
             else:
                 self.reindexed_volume = self.volume
                 self.reindexed_unit_cell = self.unit_cell

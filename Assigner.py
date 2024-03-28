@@ -188,8 +188,8 @@ class Assigner:
             )
         pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=True)
         #hkl_softmaxes = hkl_model_builder_linear(pds_inv, 'softmaxes', self.model_params)
-        hkl_softmaxes = hkl_model_builder_mlp(pds_inv, 'softmaxes', self.model_params)
-        #hkl_softmaxes = hkl_model_builder_mlp_flat(pds_inv, 'softmaxes', self.model_params)
+        #hkl_softmaxes = hkl_model_builder_mlp(pds_inv, 'softmaxes', self.model_params)
+        hkl_softmaxes = hkl_model_builder_mlp_flat(pds_inv, 'softmaxes', self.model_params)
         #hkl_softmaxes = hkl_model_builder_conv2D_flat(pds_inv, 'softmaxes', self.model_params)
         #hkl_softmaxes = hkl_model_builder_conv2D(pds_inv, 'softmaxes', self.model_params)
         return hkl_softmaxes

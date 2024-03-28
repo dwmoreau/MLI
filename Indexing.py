@@ -8,7 +8,6 @@ Monoclinic
     {'Not found': 157, 'Found and best': 86, 'Found but not best': 28, 'Found but off by two': 0, 'Found explainers': 66}
 
 - Documentation
-    * fix rhombohedral diffraction formula
     - Update methods.md
         - Add figures
     - Update README.md
