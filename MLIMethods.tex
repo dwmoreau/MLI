@@ -105,8 +105,8 @@ These equations can be rewritten in the reciprocal space unit cell parameters, $
 \begin{equation}
 S = \begin{pmatrix}
 a^2 & ab\cos(\gamma) & ac\cos(\beta)\\ 
-ab\cos(\gamma) & b^2 &bc\cos(\gamma)\\
-ac\cos(\beta) & bc\cos(\gamma) & c^2\\
+ab\cos(\gamma) & b^2 &bc\cos(\alpha)\\
+ac\cos(\beta) & bc\cos(\alpha) & c^2\\
 \end{pmatrix}
 =
 \begin{pmatrix}
@@ -136,7 +136,7 @@ $\mathrm{tetragonal}: a^*=b^*\neq c^*, \ \alpha^*=\beta^*=\gamma^*=90^o$
 q_{hkl}^2 = \left(h^2 + k^2\right)a^{*2} + l^2c^{*2}
 \end{equation}
 
-$\mathrm{hexagonal}: a^*=b^*\neq c^*, \ \alpha^*=\beta^*=90^o\ \gamma^*=120^o$
+$\mathrm{hexagonal}: a^*=b^*\neq c^*, \ \alpha^*=\beta^*=90^o\ \gamma^*= 60^o$
 
 \begin{equation}
 q_{hkl}^2 = \left(h^2 + hk + k^2\right)a^{*2} + l^2c^{*2}
@@ -145,7 +145,7 @@ q_{hkl}^2 = \left(h^2 + hk + k^2\right)a^{*2} + l^2c^{*2}
 $\mathrm{rhombohedral}: a^*=b^*=c^*, \ \alpha^*=\beta^*=\gamma^*\neq90^o$
 
 \begin{equation}
-q_{hkl}^2 = (h^2 + k^2 + l^2)a^{*2} + 2(hk + kl + hl)a^{*2}\cos^2(\alpha^*)
+q_{hkl}^2 = (h^2 + k^2 + l^2)a^{*2} + 2(hk + kl + hl)a^{*2}\cos(\alpha^*)
 \end{equation}
 
 $\mathrm{orthorhombic}: a^*\neq b^*\neq c^*, \ \alpha^*=\beta^*=\gamma^*=90^o$
@@ -165,6 +165,13 @@ An advantage of working in reciprocal space is that the Eq. 8-15 can be rewritte
 \begin{equation}
 q_{hkl}^2 = x_{hh}h^2 + x_{kk}k^2 + x_{ll}l^2 + x_{hk}hk + x_{hl}hl + x_{kl}kl
 \end{equation}
+
+$x_{hh} = a^{*2},\\$
+$x_{kk} = b^{*2},\\$
+$x_{ll} =  c^{*2},\\$
+$x_{hk} = 2 a^* b^* \cos(\gamma^*),\\$
+$x_{hl} = 2a^*c^*\cos(\beta^*),\\$
+$x_{kl} = 2b^*c^*\cos(\alpha^*).\\$
 
 \begin{equation}
 \vec{q}_{hkl}^2 = H\cdot\vec{x}.

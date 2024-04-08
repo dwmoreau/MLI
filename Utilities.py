@@ -33,9 +33,9 @@ def get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell):
         reciprocal_unit_cell[:, 0]**2,
         reciprocal_unit_cell[:, 1]**2,
         reciprocal_unit_cell[:, 2]**2,
-        reciprocal_unit_cell[:, 1] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 3]),
-        reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 4]),
-        reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 1] * np.cos(reciprocal_unit_cell[:, 5]),
+        2*reciprocal_unit_cell[:, 1] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 3]),
+        2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 4]),
+        2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 1] * np.cos(reciprocal_unit_cell[:, 5]),
         ])
     xnn[reciprocal_unit_cell[:, 3] == np.pi/2, 3] = 0
     xnn[reciprocal_unit_cell[:, 4] == np.pi/2, 4] = 0
@@ -47,9 +47,9 @@ def get_reciprocal_unit_cell_from_xnn(xnn):
     ra = np.sqrt(xnn[:, 0])
     rb = np.sqrt(xnn[:, 1])
     rc = np.sqrt(xnn[:, 2])
-    ralpha = np.arccos(xnn[:, 3] / (rb * rc))
-    rbeta = np.arccos(xnn[:, 4] / (ra * rc))
-    rgamma = np.arccos(xnn[:, 5] / (ra * rb))
+    ralpha = np.arccos(xnn[:, 3] / (2 * rb * rc))
+    rbeta = np.arccos(xnn[:, 4] / (2 * ra * rc))    
+    rgamma = np.arccos(xnn[:, 5] / (2 * ra * rb))
     reciprocal_unit_cell = np.column_stack([ra, rb, rc, ralpha, rbeta, rgamma])
     return reciprocal_unit_cell
 
@@ -129,7 +129,7 @@ class Q2Calculator:
         term0 = self.hkl[:, 0]**2 / a**2
         term1 = self.hkl[:, 1]**2 * sin_beta**2 / b**2
         term2 = self.hkl[:, 2]**2 / c**2
-        term3 = 2 * self.hkl[:, 0] * self.hkl[:, 2] * cos_beta / (a * c)
+        term3 = -2 * self.hkl[:, 0] * self.hkl[:, 2] * cos_beta / (a * c)
         term4 = 1 / sin_beta**2
         q2_ref = term4 * (term0 + term1 + term2 + term3)
         return q2_ref

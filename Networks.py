@@ -90,68 +90,6 @@ def mlp_model_builder(x, tag, model_params, output_name):
     return output
 
 
-def hkl_model_builder_conv2D(x_in, tag, model_params):
-    # doing 10 classifications effectively
-    # before softmax: batch_size x 10 x 100
-    # after softmax: batch_size x 10 x 100
-    # y_true: batch_size x 10
-    
-    # x_class = batch_size x n_points x hkl_ref_length
-    x = tf.keras.layers.Conv2D(
-        filters=model_params['n_filters'],
-        kernel_size=model_params['kernel_size'],
-        strides=(1, 1),
-        padding='same',
-        activation='linear',
-        name=f'conv2d_{tag}',
-        )(x_in[:, :, :, tf.newaxis])
-    x = tf.keras.layers.LayerNormalization(
-        epsilon=model_params['epsilon'], 
-        name=f'layer_norm_{tag}_conv2d',
-        )(x)
-    x = tf.keras.activations.gelu(x)
-    x = tf.keras.layers.Dropout(
-        rate=model_params['dropout_rate'],
-        name=f'dropout_{tag}_conv2d'
-        )(x)
-    # x = batch_size x n_points x hkl_ref_length x filters
-    x = tf.keras.layers.Reshape((
-       model_params['n_points'],
-       model_params['n_filters'] * model_params['hkl_ref_length']
-       ))(x)
-
-    for index in range(len(model_params['layers'])):
-        x = tf.keras.layers.Dense(
-            model_params['layers'][index],
-            activation='linear',
-            name=f'dense_{tag}_{index}',
-            )(x)
-        x = tf.keras.layers.LayerNormalization(
-            epsilon=model_params['epsilon'], 
-            name=f'layer_norm_{tag}_{index}',
-            )(x)
-        x = tf.keras.activations.gelu(x)
-        x = tf.keras.layers.Dropout(
-            rate=model_params['dropout_rate'],
-            name=f'dropout_{tag}_{index}'
-            )(x)
-    
-    hkl_outs = [None for _ in range(model_params['n_points'])]
-    for index in range(model_params['n_points']):
-        hkl_outs[index] = tf.keras.layers.Dense(
-            units=model_params['hkl_ref_length'],
-            activation=model_params['output_activation'],
-            name=f'hkl_{tag}_{index}',
-            )(x[:, index, :])[:, tf.newaxis, :]
-
-    # hkl_out: n_batch, n_points, hkl_ref_length
-    hkl_out = tf.keras.layers.Concatenate(
-        axis=1,
-        name=f'hkl_{tag}'
-        )(hkl_outs)
-    return hkl_out
-
-
 def hkl_model_builder_mlp(x, tag, model_params):
     # doing 10 classifications effectively
     # before softmax: batch_size x 10 x 100
@@ -189,7 +127,6 @@ def hkl_model_builder_mlp(x, tag, model_params):
     return hkl_out
 
 
-
 def hkl_model_builder_mlp_flat(x, tag, model_params):
     # doing 10 classifications effectively
     # before softmax: batch_size x 10 x 100
@@ -216,6 +153,8 @@ def hkl_model_builder_mlp_flat(x, tag, model_params):
         units=model_params['hkl_ref_length'] * model_params['n_points'],
         activation='linear',
         name=f'hkl_{tag}_flat',
+        kernel_regularizer=tf.keras.regularizers.L2(l2=model_params['L2_kernel_reg']),
+        bias_regularizer=tf.keras.regularizers.L2(l2=model_params['L2_bias_reg']),
         )(x)
     x = tf.keras.layers.Reshape(
         target_shape=(model_params['n_points'], model_params['hkl_ref_length']),
@@ -230,76 +169,40 @@ def hkl_model_builder_mlp_flat(x, tag, model_params):
     return hkl_out
 
 
-def hkl_model_builder_linear(x, tag, model_params):
-    """
-    x = tf.keras.layers.Flatten()(x)
-    x = tf.keras.layers.Dense(
-        units=model_params['hkl_ref_length'] * model_params['n_points'],
-        activation='linear',
-        name=f'hkl_{tag}_flat',
-        )(x)
-    x = tf.keras.layers.Reshape(
-        target_shape=(model_params['n_points'], model_params['hkl_ref_length']),
-        name=f'hkl_{tag}_logits',
-        )(x)
-    # hkl_out: n_batch, n_points, hkl_ref_length
-    hkl_out = tf.keras.layers.Softmax(
-        axis=2,
-        name=f'hkl_{tag}'
-        )(x)
-    """
-    hkl_outs = [None for _ in range(model_params['n_points'])]
-    for index in range(model_params['n_points']):
-        hkl_outs[index] = tf.keras.layers.Dense(
-            units=model_params['hkl_ref_length'],
-            activation=model_params['output_activation'],
-            name=f'hkl_{tag}_{index}',
-            )(x[:, index, :])[:, tf.newaxis, :]
-    # hkl_out: n_batch, n_points, hkl_ref_length
-    hkl_out = tf.keras.layers.Concatenate(
-        axis=1,
-        name=f'hkl_{tag}'
-        )(hkl_outs)
-    return hkl_out
-
-
-def hkl_model_builder_conv2D_flat(x_in, tag, model_params):
+def hkl_model_builder_mlp_ortho(x, tag, model_params):
     # doing 10 classifications effectively
     # before softmax: batch_size x 10 x 100
     # after softmax: batch_size x 10 x 100
     # y_true: batch_size x 10
-    
-    # x_class = batch_size x n_points x hkl_ref_length
-    x = tf.keras.layers.Conv2D(
-        filters=model_params['n_filters'],
-        kernel_size=model_params['kernel_size'],
-        strides=(1, 1),
-        padding='same',
-        activation='linear',
-        name=f'conv2d_{tag}',
-        )(x_in[:, :, :, tf.newaxis])
-    x = tf.keras.layers.LayerNormalization(
-        epsilon=model_params['epsilon'], 
-        name=f'layer_norm_{tag}_conv2d',
-        )(x)
-    x = tf.keras.activations.gelu(x)
-    x = tf.keras.layers.Dropout(
-        rate=model_params['dropout_rate'],
-        name=f'dropout_{tag}_conv2d'
-        )(x)
+    for index in range(len(model_params['layers'])):
+        x = tf.keras.layers.Dense(
+            model_params['layers'][index],
+            activation='linear',
+            name=f'dense_{tag}_{index}',
+            kernel_regularizer=tf.keras.regularizers.OrthogonalRegularizer(
+                factor=model_params['Ortho_kernel_reg'],
+                mode='rows'
+                ),
+            )(x)
+        x = tf.keras.layers.LayerNormalization(
+            epsilon=model_params['epsilon'], 
+            name=f'layer_norm_{tag}_{index}',
+            )(x)
+        x = tf.keras.activations.gelu(x)
+        x = tf.keras.layers.Dropout(
+            rate=model_params['dropout_rate'],
+            name=f'dropout_{tag}_{index}'
+            )(x)
 
-    x = tf.keras.layers.Flatten()(x)
     x = tf.keras.layers.Dense(
-        units=model_params['hkl_ref_length'] * model_params['n_points'],
+        model_params['hkl_ref_length'],
         activation='linear',
-        name=f'hkl_{tag}_flat',
+        name=f'hkl_output_{tag}',
+        kernel_regularizer=tf.keras.regularizers.OrthogonalRegularizer(
+            factor=model_params['Ortho_kernel_reg'],
+            mode='rows'
+            ),
         )(x)
-    x = tf.keras.layers.Reshape(
-        target_shape=(model_params['n_points'], model_params['hkl_ref_length']),
-        name=f'hkl_{tag}_logits',
-        )(x)
-
-    # hkl_out: n_batch, n_points, hkl_ref_length
     hkl_out = tf.keras.layers.Softmax(
         axis=2,
         name=f'hkl_{tag}'

@@ -135,7 +135,7 @@ class CandidateOptLoss_xnn:
         self.hkl = hkl
         self.softmax = softmax
         if self.lattice_system == 'cubic':
-            self.hkl2 = (self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2 + self.hkl[:, :, 2]**2)[:, np.newaxis]
+            self.hkl2 = (self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2 + self.hkl[:, :, 2]**2)[:, :, np.newaxis]
         elif self.lattice_system == 'tetragonal':
             self.hkl2 = np.stack((
                 self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2,
@@ -147,15 +147,27 @@ class CandidateOptLoss_xnn:
             self.hkl2 = self.hkl**2
         elif self.lattice_system == 'monoclinic':
             self.hkl2 = np.concatenate((
-                self.hkl**2, (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis]
+                self.hkl**2, 
+                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis]
                 ),
                 axis=2
                 )
         elif self.lattice_system == 'hexagonal':
-            self.hkl2 = np.column_stack((
-                4/3 * (self.hkl[:, :, 0]**2 + self.hkl[:, :, 0]*self.hkl[:, :, 1] + self.hkl[:, :, 1]**2),
+            self.hkl2 = np.stack((
+                (self.hkl[:, :, 0]**2 + self.hkl[:, :, 0]*self.hkl[:, :, 1] + self.hkl[:, :, 1]**2),
                 self.hkl[:, :, 2]**2
-                ))
+                ),
+                axis=2
+                )
+        elif self.lattice_system == 'rhombohedral':
+            self.hkl2 = np.stack((
+                (self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2 + self.hkl[:, :, 2]**2),
+                (self.hkl[:, :, 0]*self.hkl[:, :, 1] + self.hkl[:, :, 0]*self.hkl[:, :, 2] + self.hkl[:, :, 1]*self.hkl[:, :, 2]),
+                ),
+                axis=2
+                )
+        else:
+            assert False
 
         q2_pred_init = self.get_q2_pred(xnn_init, jac=False)
         delta_q2 = np.abs(q2_pred_init - self.q2_obs)
@@ -191,6 +203,22 @@ class CandidateOptLoss_xnn:
         delta_gn = np.zeros((self.n_entries, self.uc_length))
         delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
         return delta_gn
+
+    def _get_hessian_inverse(self, xnn):
+        # q2_pred:       n_entries, n_points
+        # dq2_pred_dxnn: n_entries, n_points, xnn_length
+        # self.q2_obs:   n_points
+        q2_pred, dq2_pred_dxnn = self.get_q2_pred(xnn, jac=True)
+        residuals = (q2_pred - self.q2_obs) / self.sigma
+        dlikelihood_dq2_pred = residuals / self.sigma
+        dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
+        term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
+        H = np.sum(self.hessian_prefactor * term0, axis=1)
+        good = np.linalg.matrix_rank(H, hermitian=True) == self.uc_length
+        delta_gn = np.zeros((self.n_entries, self.uc_length))
+        H_inv = np.zeros(H.shape)
+        H_inv[good] = np.linalg.inv(H[good])
+        return H_inv
 
     def _get_hessian(self, xnn):
         # Helper for getting derivative verification

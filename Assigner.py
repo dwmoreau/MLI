@@ -3,11 +3,9 @@ import numpy as np
 import scipy.optimize
 import tensorflow as tf
 
-from Networks import hkl_model_builder_linear
 from Networks import hkl_model_builder_mlp
 from Networks import hkl_model_builder_mlp_flat
-from Networks import hkl_model_builder_conv2D_flat
-from Networks import hkl_model_builder_conv2D
+from Networks import hkl_model_builder_mlp_ortho
 from Utilities import PairwiseDifferenceCalculator
 from Utilities import read_params
 from Utilities import write_params
@@ -22,15 +20,18 @@ class Assigner:
         model_params_defaults = {
             'n_filters': 4,
             'kernel_size': [5, 20],
-            'layers': [200, 200, 200, 100],
+            'layers': [100],
             'epsilon': 0.001,
-            'dropout_rate': 0.25,
+            'dropout_rate': 0.1,
             'output_activation': 'softmax',
             'epochs': 10,
             'learning_rate': 0.002,
             'batch_size': 256,
             'epsilon_pds': 0.01,
             'perturb_std': None,
+            'L2_kernel_reg': 0.005,
+            'L2_bias_reg': 0.005,
+            'Ortho_kernel_reg': 200,
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
@@ -66,6 +67,9 @@ class Assigner:
             'hkl_ref_length',
             'n_points',
             'n_uc_params',
+            'L2_kernel_reg',
+            'L2_bias_reg',
+            'Ortho_kernel_reg',
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
@@ -92,6 +96,9 @@ class Assigner:
         self.model_params['learning_rate'] = float(params['learning_rate'])
         self.model_params['epsilon'] = float(params['epsilon'])
         self.model_params['dropout_rate'] = float(params['dropout_rate'])
+        self.model_params['L2_kernel_reg'] = float(params['L2_kernel_reg'])
+        self.model_params['L2_bias_reg'] = float(params['L2_bias_reg'])
+        self.model_params['Ortho_kernel_reg'] = float(params['Ortho_kernel_reg'])
         self.model_params['output_activation'] = params['output_activation']
 
         self.build_model(mode=mode)
@@ -187,11 +194,9 @@ class Assigner:
             unit_cell_scaled, inputs['q2_scaled']
             )
         pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=True)
-        #hkl_softmaxes = hkl_model_builder_linear(pds_inv, 'softmaxes', self.model_params)
         #hkl_softmaxes = hkl_model_builder_mlp(pds_inv, 'softmaxes', self.model_params)
-        hkl_softmaxes = hkl_model_builder_mlp_flat(pds_inv, 'softmaxes', self.model_params)
-        #hkl_softmaxes = hkl_model_builder_conv2D_flat(pds_inv, 'softmaxes', self.model_params)
-        #hkl_softmaxes = hkl_model_builder_conv2D(pds_inv, 'softmaxes', self.model_params)
+        #hkl_softmaxes = hkl_model_builder_mlp_flat(pds_inv, 'softmaxes', self.model_params)
+        hkl_softmaxes = hkl_model_builder_mlp_ortho(pds_inv, 'softmaxes', self.model_params)
         return hkl_softmaxes
 
     def compile_model(self):

@@ -1,11 +1,17 @@
 """
 lattice system | accuracy
 -------------------------
-cubic          | 99.5%
-tetragonal     | 90's%
+cubic          | 99.2%
+hexagonal      | 98.5%
+rhombohedral   | bug fix assignment - then optimization
+tetragonal     | 95%
 orthorhombic   | 93%
-Monoclinic
-    {'Not found': 157, 'Found and best': 86, 'Found but not best': 28, 'Found but off by two': 0, 'Found explainers': 66}
+monoclinic     | 0%
+triclinic      | not implemented
+
+
+- Problems with current monoclinic implementation
+
 
 - Documentation
     - Update methods.md
@@ -19,7 +25,6 @@ Monoclinic
 - Optimization:
     * Get monoclinic working
         * solutions seem to get close to the answer in the unit cell lengths, but predict the angles close to 90
-        - update epsilon factor. Some predictions just need a little bit more optimization
         - Test different permuations of the candidate cells
     - correct the epsilon factor to be e^{-10}
     - Verify that the top n candidates do not match the true unit cell
@@ -34,17 +39,16 @@ Monoclinic
 - Indexing.py
 
 - Augmentation
-    - Get peak distributions to match.
-    - augmented entries have a bug in the Miller indices
+    * augmented entries have a bug in the Miller indices
 
 - Assignments
     - Faster inference methods
         - different types of ML models
-    - Figure out how to take a more holistic look at the pairwise difference array.
-    - Penalize multiple assignments to the same hkl
+    - (000) assignments
 
 - Data
-    * Get rhombohedral running
+    * rhombohedral
+        - Closest assignment isn't working
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
     - redo dataset generation with new parameters based on RRUFF database
@@ -55,7 +59,6 @@ Monoclinic
 
 - SWE:
     - Refactor code to work with reciprocal space unit cell parameters
-        - Refactor training
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
     - MPI error: https://github.com/pmodels/mpich/issues/6547
@@ -68,11 +71,8 @@ Monoclinic
     - profile optimization
 
 - Regression:
-    - Retest with LSTM
-    - prediction of PCA components
-        - evaluation of fitting in the PCA / Scaled space
-        - evaluation of covariance
-    - Read about ensembles of weak learners - what other types of models can I utilize
+    - Mixture density network
+    - Feature extraction layer
     - Improve hyperparameters
     - read Stirn 2023 and implement
     Detlefsen 2019:

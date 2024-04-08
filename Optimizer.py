@@ -48,10 +48,17 @@ def vectorized_resampling(softmaxes, rng):
     n_peaks = softmaxes.shape[1]
     hkl_ref_length = softmaxes.shape[2]
 
-    cumsum = np.cumsum(softmaxes, axis=2)
+    hkl_assign = np.zeros((n_entries, n_peaks), dtype=int)
     random_values = rng.random(size=(n_entries, n_peaks))
-    q = cumsum >= random_values[:, :, np.newaxis]
-    hkl_assign = np.argmax(q, axis=2)
+    point_order = rng.permutation(n_peaks)
+    softmaxes_zeroed = softmaxes.copy()
+    for point_index in point_order:
+        cumsum = np.cumsum(softmaxes_zeroed[:, point_index, :], axis=1)
+        q = cumsum >= random_values[:, point_index][:, np.newaxis]
+        hkl_assign[:, point_index] = np.argmax(q, axis=1)
+        for candidate_index in range(n_entries):
+            softmaxes_zeroed[candidate_index, :, hkl_assign[candidate_index, point_index]] = 0
+        softmaxes_zeroed /= softmaxes_zeroed.sum(axis=2)[:, :, np.newaxis]
 
     softmax = np.zeros((n_entries, n_peaks))
     for candidate_index in range(n_entries):
@@ -64,12 +71,40 @@ def vectorized_resampling(softmaxes, rng):
     return hkl_assign, softmax
 
 
+def best_assign_nocommon(softmaxes):
+    n_entries = softmaxes.shape[0]
+    n_peaks = softmaxes.shape[1]
+    hkl_ref_length = softmaxes.shape[2]
+    hkl_assign = np.zeros((n_entries, n_peaks), dtype=int)
+    softmax_assign = np.zeros((n_entries, n_peaks))
+
+    peak_choice = np.argsort(np.max(softmaxes, axis=2), axis=1)
+    for candidate_index in range(n_entries):
+        softmaxes_zeroed = softmaxes[candidate_index].copy()
+        for peak_index in peak_choice[candidate_index]:
+            choice = np.argmax(softmaxes_zeroed[peak_index, :])
+            hkl_assign[candidate_index, peak_index] = choice
+            softmaxes_zeroed[:, hkl_assign[candidate_index, peak_index]] = 0
+            softmax_assign[candidate_index, peak_index] = softmaxes[candidate_index, peak_index, choice]
+    return hkl_assign, softmax_assign
+
+
 def get_out_of_range_candidates(unit_cells, lattice_system, minimum_length, maximum_length, minimum_angle, maximum_angle):
-    if lattice_system in ['cubic', 'tetragonal', 'orthorhombic']:
+    if lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
         bad_indices = np.logical_or(
             np.any(unit_cells < minimum_length, axis=1),
             np.any(unit_cells > maximum_length, axis=1)
             )
+    elif lattice_system == 'rhombohedral':
+        bad_lengths = np.logical_or(
+            unit_cells[:, 0] < minimum_length,
+            unit_cells[:, 0] > maximum_length
+            )
+        bad_angles = np.logical_or(
+            unit_cells[:, 1] < minimum_angle,
+            unit_cells[:, 1] > maximum_angle
+            )
+        bad_indices = np.logical_or(bad_lengths, bad_angles)
     elif lattice_system == 'monoclinic':
         bad_lengths = np.logical_or(
             np.any(unit_cells[:, :3] < minimum_length, axis=1),
@@ -115,16 +150,25 @@ class Candidates:
         self.tolerance = tolerance
 
         unit_cell_true = np.array(entry[f'{unit_cell_key}unit_cell'])
+        reciprocal_unit_cell_true = reciprocal_uc_conversion(unit_cell_true[np.newaxis])[0]
         if lattice_system == 'cubic':
-            self.unit_cell_true = unit_cell_true[0]
-        elif lattice_system == 'tetragonal':
+            self.unit_cell_true = unit_cell_true[0][np.newaxis]
+            self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[0][np.newaxis]
+        elif lattice_system in ['tetragonal', 'hexagonal']:
             self.unit_cell_true = unit_cell_true[[0, 2]]
+            self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[[0, 2]]
+        elif lattice_system == 'rhombohedral':
+            self.unit_cell_true = unit_cell_true[[0, 3]]
+            self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[[0, 3]]
         elif lattice_system == 'orthorhombic':
             self.unit_cell_true = unit_cell_true[:3]
+            self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[:3]
         elif lattice_system == 'monoclinic':
             self.unit_cell_true = unit_cell_true[[0, 1, 2, 4]]
+            self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[[0, 1, 2, 4]]
         elif lattice_system == 'triclinic':
             self.unit_cell_true = unit_cell_true
+            self.reciprocal_unit_cell_true = reciprocal_unit_cell_true
         self.hkl_true = np.array(entry[f'{unit_cell_key}hkl'])[:, :, 0]
         self.bl_true = entry['bravais_lattice']
         self.sg_true = int(entry['spacegroup_number'])
@@ -152,12 +196,21 @@ class Candidates:
         unit_cell = np.stack(self.candidates['unit_cell'])
         unit_cell_full = np.zeros((self.n, 6))
         if self.lattice_system == 'cubic':
-            unit_cell_full[:, :3] = unit_cell[:, 0]
+            unit_cell_full[:, :3] = unit_cell[:, 0][:, np.newaxis]
             unit_cell_full[:, 3:] = np.pi/2
         elif self.lattice_system == 'tetragonal':
             unit_cell_full[:, :2] = unit_cell[:, 0][:, np.newaxis]
             unit_cell_full[:, 2] = unit_cell[:, 1]
             unit_cell_full[:, 3:] = np.pi/2
+        elif self.lattice_system == 'hexagonal':
+            unit_cell_full[:, :2] = unit_cell[:, 0][:, np.newaxis]
+            unit_cell_full[:, 2] = unit_cell[:, 1]
+            unit_cell_full[:, 3] = np.pi/2
+            unit_cell_full[:, 4] = np.pi/2
+            unit_cell_full[:, 5] = 2/3 * np.pi
+        elif self.lattice_system == 'rhombohedral':
+            unit_cell_full[:, :3] = unit_cell[:, 0]
+            unit_cell_full[:, 3:] = unit_cell[:, 1]
         elif self.lattice_system == 'orthorhombic':
             unit_cell_full[:, :3] = unit_cell[:, :3]
             unit_cell_full[:, 3:] = np.pi/2
@@ -175,11 +228,14 @@ class Candidates:
         xnn_full = get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell_full)
 
         if self.lattice_system == 'cubic':
-            reciprocal_unit_cell = reciprocal_unit_cell_full[:, 0]
-            xnn = xnn_full[:, 0]
-        elif self.lattice_system == 'tetragonal':
+            reciprocal_unit_cell = reciprocal_unit_cell_full[:, 0][:, np.newaxis]
+            xnn = xnn_full[:, 0][:, np.newaxis]
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
             reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 2]]
             xnn = xnn_full[:, [0, 2]]
+        elif self.lattice_system == 'rhombohedral':
+            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 3]]
+            xnn = xnn_full[:, [0, 3]]
         elif self.lattice_system == 'orthorhombic':
             reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 1, 2]]
             xnn = xnn_full[:, [0, 1, 2]]
@@ -202,6 +258,16 @@ class Candidates:
             too_large = xnn > (1 / self.minimum_unit_cell)**2
             xnn[too_small] = (1 / self.maximum_unit_cell)**2
             xnn[too_large] = (1 / self.minimum_unit_cell)**2
+        elif self.lattice_system == 'rhombohedral':
+            too_small = xnn[:, 0] < (1 / self.maximum_unit_cell)**2
+            too_large = xnn[:, 0] > (1 / self.minimum_unit_cell)**2
+            xnn[:, 0][too_small] = (1 / self.maximum_unit_cell)**2
+            xnn[:, 0][too_large] = (1 / self.minimum_unit_cell)**2
+            cos_ralpha = xnn[:, 1] / xnn[:, 0]**2
+            too_small = cos_ralpha < -1
+            too_large = cos_ralpha > 1
+            xnn[too_small, 3] = -0.999 * xnn[too_small, 0]**2
+            xnn[too_large, 3] = 0.999 * xnn[too_large, 0]**2
         elif self.lattice_system in ['monoclinic', 'triclinic']:
             too_small = xnn[:, :3] < (1 / self.maximum_unit_cell)**2
             too_large = xnn[:, :3] > (1 / self.minimum_unit_cell)**2
@@ -221,10 +287,17 @@ class Candidates:
         unit_cell_full = np.zeros((self.n, 6))
         xnn_full = np.zeros((self.n, 6))
         if self.lattice_system == 'cubic':
-            xnn_full[:, :3] = xnn[:, 0]
+            xnn_full[:, :3] = xnn[:, 0][:, np.newaxis]
         elif self.lattice_system == 'tetragonal':
             xnn_full[:, :2] = xnn[:, 0][:, np.newaxis]
             xnn_full[:, 2] = xnn[:, 1]
+        elif self.lattice_system == 'hexagonal':
+            xnn_full[:, :2] = xnn[:, 0][:, np.newaxis]
+            xnn_full[:, 2] = xnn[:, 1]
+            xnn_full[:, 5] = 2*xnn[:, 0]*np.cos(np.pi/3)
+        elif self.lattice_system == 'rhombohedral':
+            xnn_full[:, :3] = xnn[:, 0][:, np.newaxis]
+            xnn_full[:, 3:] = xnn[:, 1][:, np.newaxis]
         elif self.lattice_system == 'orthorhombic':
             xnn_full[:, :3] = xnn[:, :3]
         elif self.lattice_system == 'monoclinic':
@@ -237,9 +310,11 @@ class Candidates:
         unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
         
         if self.lattice_system == 'cubic':
-            unit_cell = unit_cell_full[:, 0]
-        elif self.lattice_system == 'tetragonal':
+            unit_cell = unit_cell_full[:, 0][:, np.newaxis]
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
             unit_cell = unit_cell_full[:, [0, 2]]
+        elif self.lattice_system == 'rhombohedral':
+            unit_cell = unit_cell_full[:, [0, 3]]
         elif self.lattice_system == 'orthorhombic':
             unit_cell = unit_cell_full[:, :3]
         elif self.lattice_system == 'monoclinic':
@@ -281,9 +356,43 @@ class Candidates:
                 ),
                 axis=-1
                 )
+        elif self.lattice_system == 'hexagonal':
+            hkl_check = np.stack((
+                hkl[..., 0]**2 + hkl[..., 0]*hkl[..., 1] + hkl[..., 1]**2,
+                hkl[..., 2]**2,
+                ),
+                axis=-1
+                )
+        elif self.lattice_system == 'rhombohedral':
+            hkl_check = np.stack((
+                np.sum(hkl[..., :2]**2, axis=-1),
+                hkl[..., 0]*hkl[..., 1] + hkl[..., 0]*hkl[..., 2] + hkl[..., 1]*hkl[..., 2],
+                ),
+                axis=-1
+                )
         return hkl_check
 
     def diagnostics(self):
+        reciprocal_unit_cell = np.stack(self.candidates['reciprocal_unit_cell'])
+        reciprocal_unit_cell_rms = 1/np.sqrt(self.n_uc) * np.linalg.norm(reciprocal_unit_cell - self.reciprocal_unit_cell_true, axis=1)
+        reciprocal_unit_cell_max_diff = np.max(np.abs(reciprocal_unit_cell - self.reciprocal_unit_cell_true), axis=1)
+
+        hkl = np.stack(self.candidates['hkl'])
+        hkl_pred_check = self.get_hkl_checks(hkl)
+        hkl_correct = self.hkl_true_check[np.newaxis] == hkl_pred_check
+        hkl_accuracy = np.count_nonzero(hkl_correct, axis=1) / self.n_points
+
+        print(f'True unit cell:              {np.round(self.reciprocal_unit_cell_true, decimals=4)}')
+        print(f'Closest unit cell:           {np.round(reciprocal_unit_cell[np.argmin(reciprocal_unit_cell_rms)], decimals=4)}')
+        print(f'Closest unit cell rms:       {reciprocal_unit_cell_rms.min():2.2f}')
+        print(f'Smallest unit cell max diff: {reciprocal_unit_cell_max_diff.min():2.2f}')
+        print(f'Mean unit cell rms:          {reciprocal_unit_cell_rms.mean():2.2f}')
+        print(f'Best HKL accuracy:           {hkl_accuracy.max():1.2f}')
+        print(f'Mean HKL accuracy:           {hkl_accuracy.mean():1.2f}')
+        print(f'Bravais Lattice:             {self.bl_true}')
+        print(f'Spacegroup:                  {self.sg_true} {self.spacegroup_symbol_hm_true}')
+
+    def diagnostics_current(self):
         unit_cell = np.stack(self.candidates['unit_cell'])
         unit_cell_rms = 1/np.sqrt(self.n_uc) * np.linalg.norm(unit_cell - self.unit_cell_true, axis=1)
         unit_cell_max_diff = np.max(np.abs(unit_cell - self.unit_cell_true), axis=1)
@@ -331,13 +440,18 @@ class Candidates:
         z = (loss - np.median(loss)) / loss.std()
         self.candidates = self.candidates.loc[z < 4]
         # Remove candidates with too small or too large unit cells
+        ### !!! These should be in radians???
+        if self.lattice_system == 'rhombohedral':
+            maximum_angle = 120
+        else:
+            maximum_angle = 180
         in_range = np.invert(get_out_of_range_candidates(
                 np.stack(self.candidates['unit_cell']),
                 self.lattice_system,
                 minimum_length=self.minimum_unit_cell,
                 maximum_length=self.maximum_unit_cell,
                 minimum_angle=0,
-                maximum_angle=180,
+                maximum_angle=maximum_angle,
                 ))
         self.candidates = self.candidates.loc[in_range]
         # order candidates based on loss
@@ -388,7 +502,8 @@ class Candidates:
     def get_best_candidates(self, report_counts):
         if len(self.explainers) == 0:
             uc_best_opt = self.candidates.iloc[0]['unit_cell']
-            print(np.stack(self.candidates['unit_cell'])[:5])
+            #print(np.stack(self.candidates['unit_cell'])[:5])
+            print(np.stack(self.candidates['reciprocal_unit_cell'])[:10])
             #print(uc_best_opt)
             if np.all(np.isclose(self.unit_cell_true, uc_best_opt, atol=1e-3)):
                 report_counts['Found and best'] += 1
@@ -429,6 +544,17 @@ class Candidates:
 
         return uc_best_opt, report_counts
 
+    def save_candidates(self):
+        # This is a diagnostic function.
+        # Save the current state and gtfo
+        np.save('mono_uc_true.npy', self.unit_cell_true)
+        np.save('mono_q2_obs.npy', self.q2_obs)
+        np.save('mono_xnn.npy', np.stack(self.candidates['xnn']))
+        np.save('mono_hkl.npy', np.stack(self.candidates['hkl']))
+        np.save('mono_softmax.npy', np.stack(self.candidates['softmax']))
+        np.save('mono_unit_cell.npy', np.stack(self.candidates['unit_cell']))
+        assert False
+
 
 class Optimizer:
     def __init__(self, assign_params, data_params, opt_params, reg_params):
@@ -446,8 +572,6 @@ class Optimizer:
             'n_candidates_rf': 30,
             'minimum_uc': 2,
             'maximum_uc': 500,
-            'tuning_param': 100,
-            'n_pred_evals': 500,
             'found_tolerance': -200,
             'assignment_batch_size': 'max',
             'load_predictions': False,
@@ -497,7 +621,7 @@ class Optimizer:
 
         if self.indexer.data_params['lattice_system'] in ['monoclinic', 'cubic']:
             self.unit_cell_key = ''
-        elif self.indexer.data_params['lattice_system'] in ['tetragonal', 'orthorhombic']:
+        elif self.indexer.data_params['lattice_system'] in ['tetragonal', 'orthorhombic', 'hexagonal', 'rhombohedral']:
             self.unit_cell_key = 'reindexed_'
 
         self.n_groups = len(self.indexer.data_params['split_groups'])
@@ -787,8 +911,14 @@ class Optimizer:
                     next_candidates = copy.copy(candidates)
                     next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_tag'], 'random')
                     next_xnn = self.no_subsampling(next_candidates, iteration_info)
-                elif iteration_info['worker'] == 'no_subsampling':
+                elif iteration_info['worker'] == 'no_sampling':
                     next_xnn = self.no_subsampling(candidates, iteration_info)
+                elif iteration_info['worker'] == 'perturb_xnn':
+                    next_xnn = self.perturb_xnn(candidates, iteration_info)
+                elif iteration_info['worker'] == 'perturb_monoclinic_angle':
+                    next_xnn = self.perturb_monoclinic_angle(candidates, iteration_info)
+                else:
+                    assert False
                 candidates = self.update_candidates(
                     candidates,
                     iteration_info['assigner_tag'],
@@ -799,7 +929,16 @@ class Optimizer:
                     return candidates
                 if len(candidates.explainers) > 10:
                     return candidates
-                print(f'{candidates.n}, {len(candidates.explainers)} {candidates.candidates["loss"].mean()}, {candidates.candidates["loss"].min()}, {iteration_info["assigner_tag"]}')
+                print_list = [
+                    f'{candidates.n},',
+                    f'{len(candidates.explainers)},',
+                    f'{candidates.candidates["loss"].mean():0.2f},',
+                    f'{candidates.candidates["loss"].min():0.2f},',
+                    f'{iteration_info["worker"]},',
+                    f'{iteration_info["assigner_tag"]}',
+                    ]
+                print(' '.join(print_list))
+        #candidates.save_candidates()
         return candidates
 
     def get_softmaxes(self, candidates, assigner_key):
@@ -868,6 +1007,9 @@ class Optimizer:
             assigner_key = choices[self.rng.choice(len(choices), size=1)[0]]
         softmaxes = self.get_softmaxes(candidates, assigner_key)
         if assignment_method == 'best':
+            hkl_assign, softmax_assign = best_assign_nocommon(softmaxes)
+            candidates.candidates['softmax'] = list(softmax_assign)
+        elif assignment_method == 'best_with_redundancies':
             hkl_assign = softmaxes.argmax(axis=2)
             candidates.candidates['softmax'] = list(softmaxes.max(axis=2))
         elif assignment_method == 'random':
@@ -903,6 +1045,7 @@ class Optimizer:
             ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']))
             probability = self.rng.random(candidates.n)
             accepted = probability < ratio
+            print(accepted.sum() / accepted.size)
             candidates.candidates.loc[accepted] = next_candidates.candidates.loc[accepted]
         elif acceptance_method == 'always':
             candidates = next_candidates
@@ -942,17 +1085,12 @@ class Optimizer:
             lattice_system=self.indexer.data_params['lattice_system'],
             )
         xnn = np.stack(candidates.candidates['xnn'])
-        #np.save('mono_uc_true.npy', candidates.unit_cell_true)
-        #np.save('mono_q2_obs.npy', candidates.q2_obs)
-        #np.save('mono_xnn.npy', xnn)
-        #np.save('mono_hkl.npy', np.stack(candidates.candidates['hkl']))
-        #np.save('mono_softmax.npy', np.stack(candidates.candidates['softmax']))
-        #np.save('mono_unit_cell.npy', np.stack(candidates.candidates['unit_cell']))
-        #assert False
+
         target_function.update(
             np.stack(candidates.candidates['hkl']), 
             np.stack(candidates.candidates['softmax']), 
-            xnn)
+            xnn
+            )
         delta_gn = target_function.gauss_newton_step(xnn)
         next_xnn = xnn + delta_gn
         return next_xnn
@@ -963,13 +1101,12 @@ class Optimizer:
         xnn = np.stack(candidates.candidates['xnn'])
         n_keep = self.indexer.data_params['n_points'] - iteration_info['n_drop']
         if iteration_info['worker'] == 'random_subsampling':
-            subsampled_indices = np.zeros((candidates.n, n_keep), dtype=int)
-            for entry_index in range(candidates.n):
-                subsampled_indices[entry_index] = self.rng(
-                    self.indexer.data_params['n_points'],
-                    size=n_keep,
-                    replace=True
-                    )
+            # The vectorized_subsampling function can be simplified and sped up considerably
+            # in the case that each assignment has the same probability.
+            # This implementation works, but would be faster for a function specific to this case.
+            softmaxes_ = np.ones(softmax.shape)
+            p = softmaxes_ / softmaxes_.sum(axis=1)[:, np.newaxis]
+            subsampled_indices = vectorized_subsampling(p, n_keep, self.rng)
         elif iteration_info['worker'] == 'softmax_subsampling':
             p = softmax / softmax.sum(axis=1)[:, np.newaxis]
             subsampled_indices = vectorized_subsampling(p, n_keep, self.rng)
@@ -989,6 +1126,82 @@ class Optimizer:
         target_function.update(hkl_subsampled, softmax_subsampled, xnn)
         delta_gn = target_function.gauss_newton_step(xnn)
         next_xnn = xnn + delta_gn
+        return next_xnn
+
+    def perturb_xnn(self, candidates, iteration_info):
+        next_candidates = copy.copy(candidates)
+
+        # Perturb the xnn parameters
+        xnn = np.stack(candidates.candidates['xnn'])
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system'],
+            )
+        target_function.update(
+            np.stack(candidates.candidates['hkl']), 
+            np.stack(candidates.candidates['softmax']), 
+            xnn
+            )
+        H_inv = target_function._get_hessian_inverse(xnn)
+        prefactor = np.sqrt(2 * np.abs(H_inv) * 0.01) * np.sign(H_inv)
+        random_values = self.rng.normal(size=(candidates.n, self.indexer.data_params['n_outputs']))
+        perturbation = np.matmul(prefactor, random_values[:, :, np.newaxis])[:, :, 0]
+        xnn_perturbed = xnn + perturbation
+        next_candidates.candidates['xnn'] = list(xnn_perturbed)
+        next_candidates.update_unit_cell_from_xnn()
+        next_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
+            uc_pred=np.stack(next_candidates.candidates['unit_cell'])
+            ))
+
+        # Reassign Miller indices
+        next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_tag'], 'random')
+
+        # Get next xnn after optimization step
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(next_candidates.q2_obs[np.newaxis, :], repeats=next_candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system'],
+            )
+        target_function.update(
+            np.stack(next_candidates.candidates['hkl']), 
+            np.stack(next_candidates.candidates['softmax']), 
+            xnn_perturbed
+            )
+        delta_gn = target_function.gauss_newton_step(xnn_perturbed)
+        next_xnn = xnn_perturbed + delta_gn
+        return next_xnn
+
+    def perturb_monoclinic_angle(self, candidates, iteration_info):
+        if self.indexer.data_params['lattice_system'] != 'monoclinic':
+            assert False
+        next_candidates = copy.copy(candidates)
+
+        # Perturb the xnn parameters
+        xnn = np.stack(candidates.candidates['xnn'])
+        reciprocal_beta = self.rng.uniform(low=np.pi/4, high=3*np.pi/4, size=candidates.n)
+        xnn_perturbed = xnn.copy()
+        xnn_perturbed[:, 3] = 2 * np.sqrt(xnn[:, 0] * xnn[:, 2]) * np.cos(reciprocal_beta)
+
+        next_candidates.candidates['xnn'] = list(xnn_perturbed)
+        next_candidates.update_unit_cell_from_xnn()
+        next_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
+            uc_pred=np.stack(next_candidates.candidates['unit_cell'])
+            ))
+
+        # Reassign Miller indices
+        next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_tag'], 'best')
+
+        # Get next xnn after optimization step
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(next_candidates.q2_obs[np.newaxis, :], repeats=next_candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system'],
+            )
+        target_function.update(
+            np.stack(next_candidates.candidates['hkl']), 
+            np.stack(next_candidates.candidates['softmax']), 
+            xnn_perturbed
+            )
+        delta_gn = target_function.gauss_newton_step(xnn_perturbed)
+        next_xnn = xnn_perturbed + delta_gn
         return next_xnn
 
     def gather_optimized_unit_cells(self):
