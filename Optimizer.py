@@ -209,8 +209,8 @@ class Candidates:
             unit_cell_full[:, 4] = np.pi/2
             unit_cell_full[:, 5] = 2/3 * np.pi
         elif self.lattice_system == 'rhombohedral':
-            unit_cell_full[:, :3] = unit_cell[:, 0]
-            unit_cell_full[:, 3:] = unit_cell[:, 1]
+            unit_cell_full[:, :3] = unit_cell[:, 0][:, np.newaxis]
+            unit_cell_full[:, 3:] = unit_cell[:, 1][:, np.newaxis]
         elif self.lattice_system == 'orthorhombic':
             unit_cell_full[:, :3] = unit_cell[:, :3]
             unit_cell_full[:, 3:] = np.pi/2
@@ -245,7 +245,7 @@ class Candidates:
         elif self.lattice_system == 'triclinic':
             reciprocal_unit_cell = reciprocal_unit_cell_full
             xnn = xnn_full
-
+ 
         self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
         self.candidates['xnn'] = list(xnn)
 
@@ -266,8 +266,8 @@ class Candidates:
             cos_ralpha = xnn[:, 1] / xnn[:, 0]**2
             too_small = cos_ralpha < -1
             too_large = cos_ralpha > 1
-            xnn[too_small, 3] = -0.999 * xnn[too_small, 0]**2
-            xnn[too_large, 3] = 0.999 * xnn[too_large, 0]**2
+            xnn[too_small, 1] = -0.999 * xnn[too_small, 0]**2
+            xnn[too_large, 1] = 0.999 * xnn[too_large, 0]**2
         elif self.lattice_system in ['monoclinic', 'triclinic']:
             too_small = xnn[:, :3] < (1 / self.maximum_unit_cell)**2
             too_large = xnn[:, :3] > (1 / self.minimum_unit_cell)**2
@@ -440,17 +440,18 @@ class Candidates:
         z = (loss - np.median(loss)) / loss.std()
         self.candidates = self.candidates.loc[z < 4]
         # Remove candidates with too small or too large unit cells
-        ### !!! These should be in radians???
         if self.lattice_system == 'rhombohedral':
-            maximum_angle = 120
+            minimum_angle = np.pi/3
+            maximum_angle = 2*np.pi/3
         else:
+            minimum_angle = 0
             maximum_angle = 180
         in_range = np.invert(get_out_of_range_candidates(
                 np.stack(self.candidates['unit_cell']),
                 self.lattice_system,
                 minimum_length=self.minimum_unit_cell,
                 maximum_length=self.maximum_unit_cell,
-                minimum_angle=0,
+                minimum_angle=minimum_angle,
                 maximum_angle=maximum_angle,
                 ))
         self.candidates = self.candidates.loc[in_range]
@@ -613,9 +614,15 @@ class Optimizer:
             (self.opt_params['minimum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
         self.opt_params['maximum_uc_scaled'] = \
             (self.opt_params['maximum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
-        # Minimum / Maximum angle = 0 / 180 degrees
-        self.opt_params['minimum_angle_scaled'] = (0 - np.pi/2) / self.indexer.angle_scale
-        self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
+
+        if self.indexer.data_params['lattice_system'] == 'rhombohedral':
+            # Minimum / Maximum angle = 60 / 120 degrees
+            self.opt_params['minimum_angle_scaled'] = (1*np.pi/3 - np.pi/2) / self.indexer.angle_scale
+            self.opt_params['maximum_angle_scaled'] = (2*np.pi/3 - np.pi/2) / self.indexer.angle_scale
+        else:
+            # Minimum / Maximum angle = 0 / 180 degrees
+            self.opt_params['minimum_angle_scaled'] = (0 - np.pi/2) / self.indexer.angle_scale
+            self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
 
         self.logger = get_mpi_logger(self.rank, self.save_to, self.opt_params['tag'])
 

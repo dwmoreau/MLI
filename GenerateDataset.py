@@ -192,7 +192,7 @@ class EntryGenerator:
         for index, tag in enumerate(self.peak_removal_tags):
             hkl = hkl_order[:, :3, index]
             if lattice_system in ['monoclinic', 'orthorhombic']:
-                reindexed_hkl = np.matmul(hkl, permuter)
+                reindexed_hkl = np.matmul(hkl, permuter).round(decimals=0).astype(int)
 
                 q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl, tensorflow=False)
                 q2 = q2_calculator.get_q2(unit_cell_[np.newaxis])
@@ -205,18 +205,20 @@ class EntryGenerator:
                     print(reindexed_unit_cell_)
                     print()
             elif lattice_system == 'rhombohedral':
-                if np.all(unit_cell_[3:] == [90., 90., 120]):
+                if np.all(unit_cell_[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
                     reindexed_hkl = hexagonal_to_rhombohedral_hkl(hkl)
 
-                    q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl, tensorflow=False)
-                    q2 = q2_calculator.get_q2(unit_cell_[np.newaxis])
-                    reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
-                    reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[np.newaxis])
-                    check = np.isclose(q2, reindexed_q2).all()
+                    check_indices = np.invert(np.all(hkl == -100, axis=1))
+                    q2_calculator = Q2Calculator(lattice_system='hexagonal', hkl=hkl[check_indices], tensorflow=False)
+                    q2 = q2_calculator.get_q2(unit_cell_[[0, 2]][np.newaxis])
+                    reindexed_q2_calculator = Q2Calculator(lattice_system='rhombohedral', hkl=reindexed_hkl[check_indices], tensorflow=False)
+                    reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[[0, 3]][np.newaxis])
+                    check = np.isclose(q2[0], reindexed_q2[0]).all()
                     if not check:
                         print('Reindexing Failure')
                         print(unit_cell_)
                         print(reindexed_unit_cell_)
+                        print(np.column_stack((q2[0], reindexed_q2[0])).round(decimals=4))
                         print()
                 else:
                     reindexed_hkl = hkl

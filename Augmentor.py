@@ -291,8 +291,8 @@ class Augmentor:
             assert False
 
         # calculate new d-spacings
-        hkl_sa = np.stack(augmented_entry['hkl_sa'])
-        reindexed_hkl_sa = np.stack(augmented_entry['reindexed_hkl_sa'])
+        hkl_sa = np.stack(augmented_entry['hkl_sa']).round(decimals=0).astype(int)
+        reindexed_hkl_sa = np.stack(augmented_entry['reindexed_hkl_sa']).round(decimals=0).astype(int)
         if self.lattice_system == 'monoclinic':
             q2_calculator = Q2Calculator(self.lattice_system, hkl_sa, tensorflow=False)
             q2_sa = q2_calculator.get_q2(np.array(augmented_entry['unit_cell'])[self.y_indices][np.newaxis, :])[0]
@@ -388,8 +388,8 @@ class Augmentor:
             sort_indices = np.argsort(q2)
             q2 = q2[sort_indices][:self.n_points]
 
-            hkl = np.array(hkl)[sort_indices][:self.n_points]
-            reindexed_hkl = np.array(reindexed_hkl)[sort_indices][:self.n_points]
+            hkl = np.array(hkl, dtype=int)[sort_indices][:self.n_points]
+            reindexed_hkl = np.array(reindexed_hkl, dtype=int)[sort_indices][:self.n_points]
             augmented_entry[f'q2_{self.points_tag}'] = q2
             augmented_entry[f'd_spacing_{self.points_tag}'] = 1 / np.sqrt(q2)
             augmented_entry['hkl'] = hkl

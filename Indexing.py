@@ -3,14 +3,11 @@ lattice system | accuracy
 -------------------------
 cubic          | 99.2%
 hexagonal      | 98.5%
-rhombohedral   | bug fix assignment - then optimization
+rhombohedral   | 0%
 tetragonal     | 95%
 orthorhombic   | 93%
 monoclinic     | 0%
 triclinic      | not implemented
-
-
-- Problems with current monoclinic implementation
 
 
 - Documentation
@@ -23,6 +20,7 @@ triclinic      | not implemented
         Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
 
 - Optimization:
+    * rhombohedral
     * Get monoclinic working
         * solutions seem to get close to the answer in the unit cell lengths, but predict the angles close to 90
         - Test different permuations of the candidate cells
@@ -39,7 +37,7 @@ triclinic      | not implemented
 - Indexing.py
 
 - Augmentation
-    * augmented entries have a bug in the Miller indices
+    - augmented entries have a bug in the Miller indices
 
 - Assignments
     - Faster inference methods
@@ -47,8 +45,6 @@ triclinic      | not implemented
     - (000) assignments
 
 - Data
-    * rhombohedral
-        - Closest assignment isn't working
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
     - redo dataset generation with new parameters based on RRUFF database
@@ -233,13 +229,14 @@ class Indexing:
         group_spec['hm symbol'] = group_spec['hm symbol'].str.strip()
 
         self.data_params['groups'] = group_spec['group'].unique()
-        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic', 'monoclinic', 'hexagonal', 'rhombohedral']:
-            self.data_params['split_groups'] = self.data_params['groups']
-        elif self.data_params['lattice_system'] == 'tetragonal':
+        
+        if self.data_params['lattice_system'] == 'tetragonal':
             self.data_params['split_groups'] = []
             for group in self.data_params['groups']:
                 self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_0_'))
                 self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_1_'))
+        else:
+            self.data_params['split_groups'] = self.data_params['groups']
 
         self.group_mappings = dict.fromkeys(group_spec['hm symbol'].unique())
         for index in range(len(group_spec)):
@@ -326,6 +323,8 @@ class Indexing:
                 new_reindexed_unit_cell[entry_index, 4] = reindexed_unit_cell[entry_index, reindexed_angle_index[entry_index]]
             self.data['reindexed_unit_cell'] = list(new_reindexed_unit_cell)
             self.data['reindexed_angle_index'] = list(reindexed_angle_index)
+        elif self.data_params['lattice_system'] == 'triclinic':
+            assert False
 
         data_grouped = self.data.groupby('split_group')
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]
@@ -415,6 +414,28 @@ class Indexing:
         reindexed_unit_cell[:, 3:] = np.pi/180 * reindexed_unit_cell[:, 3:]
         self.data['reindexed_unit_cell'] = list(reindexed_unit_cell)
         self.setup_scalers()
+
+        """
+        # Check for rhombohedral data
+        for index in range(hkl.shape[0]):
+            q2_obs = np.array(self.data.iloc[index]['q2'])
+            q2_reindexed = Q2Calculator('rhombohedral', reindexed_hkl[index], False).get_q2(reindexed_unit_cell[index, [0, 3]][np.newaxis])[0]
+
+            if np.all(unit_cell[index, 3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
+                q2 = Q2Calculator('hexagonal', hkl[index], False).get_q2(unit_cell[index, [0, 2]][np.newaxis])[0]
+            else:
+                q2 = Q2Calculator('rhombohedral', hkl[index], False).get_q2(unit_cell[index, [0, 3]][np.newaxis])[0]
+            check0 = np.all(np.isclose(q2_obs, q2))
+            check1 = np.all(np.isclose(q2_obs, q2_reindexed))
+            check = check0 & check1
+            if not check:
+                print(np.column_stack((q2_obs, q2, q2_reindexed)).round(decimals=5))
+                print(unit_cell[index])
+                print(reindexed_unit_cell[index])
+                #print(reindexed_hkl[index])
+                #print(hkl[index])
+                print()
+        """
 
         if self.data_params['augment']:
             self.augment_data()

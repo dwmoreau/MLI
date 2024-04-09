@@ -170,9 +170,9 @@ class Q2Calculator:
         k = self.hkl[:, 1]
         l = self.hkl[:, 2]
         term0 = (h**2 + k**2 + l**2) * sin_alpha**2
-        term1 = 2 * (h*k + k*l + h*l)
-        term2 = cos_alpha**2 - cos_alpha
-        term3 = a**2 * (1 + 2*cos_alpha**3 - 3*cos_alpha**2)
+        term1 = h*k + k*l + h*l
+        term2 = 2 * (cos_alpha**2 - cos_alpha)
+        term3 = a**2 * (1 - 3*cos_alpha**2 + 2*cos_alpha**3)
         q2_ref = (term0 + term1 * term2) / term3
         return q2_ref
 
