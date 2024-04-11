@@ -9,30 +9,26 @@ orthorhombic   | 93%
 monoclinic     | 0%
 triclinic      | not implemented
 
-
 - Documentation
     - Update methods.md
         - Add figures
     - Update README.md
-    - Reread ML technique papers
     - Reread ML pxrd papers
     - read about powder extinction classes
         Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
+            Buerger 1935, 1942, 1969
+            Buerger 2002
+            Nespolo 2014
 
 - Optimization:
     * rhombohedral
-    * Get monoclinic working
-        * solutions seem to get close to the answer in the unit cell lengths, but predict the angles close to 90
-        - Test different permuations of the candidate cells
+    * monoclinic
     - correct the epsilon factor to be e^{-10}
     - Verify that the top n candidates do not match the true unit cell
     - Coordinate unit cell contains path of unit cell params    
     - Detailed balance
     - What differentiates a found / not found entry
     - Full softmax array optimization - Actual likelihood target function
-    - common assignments:
-        - drop during optimization but include in loss
-        - use all hkl assignments with largest N likelihoods
 
 - Indexing.py
 
@@ -45,8 +41,10 @@ triclinic      | not implemented
     - (000) assignments
 
 - Data
+    - reindex rhombohedral so angle is 60 <-> 90???
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
+        - Create new peak list
     - redo dataset generation with new parameters based on RRUFF database
     - Rewrite GenerateDataset.py
     - Get data from other databases:
@@ -70,11 +68,6 @@ triclinic      | not implemented
     - Mixture density network
     - Feature extraction layer
     - Improve hyperparameters
-    - read Stirn 2023 and implement
-    Detlefsen 2019:
-        - cluster input d-spacings
-          - map d-spacings onto a single scalar correlated with volume
-        - ??? extrapolation architecture
 """
 import joblib
 import matplotlib.pyplot as plt

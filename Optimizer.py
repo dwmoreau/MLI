@@ -11,7 +11,6 @@ import time
 
 from Indexing import Indexing
 from Reindexing import unpermute_monoclinic_partial_unit_cell
-from TargetFunctions import CandidateOptLoss
 from TargetFunctions import CandidateOptLoss_xnn
 from Utilities import get_mpi_logger
 from Utilities import get_reciprocal_unit_cell_from_xnn
@@ -134,7 +133,7 @@ class Candidates:
         unit_cell, unit_cell_scaled, unit_cell_pred,
         lattice_system,
         minimum_unit_cell, maximum_unit_cell,
-        tolerance, unit_cell_key, n_iterations
+        tolerance, unit_cell_key
         ):
         self.q2_obs = np.array(entry['q2'])
         self.q2_obs_scaled = np.array(entry['q2_scaled'])
@@ -170,6 +169,7 @@ class Candidates:
             self.unit_cell_true = unit_cell_true
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true
         self.hkl_true = np.array(entry[f'{unit_cell_key}hkl'])[:, :, 0]
+        print(entry['hkl_labels'])
         self.bl_true = entry['bravais_lattice']
         self.sg_true = int(entry['spacegroup_number'])
         self.spacegroup_symbol_hm_true = entry[f'{unit_cell_key}spacegroup_symbol_hm']
@@ -245,7 +245,7 @@ class Candidates:
         elif self.lattice_system == 'triclinic':
             reciprocal_unit_cell = reciprocal_unit_cell_full
             xnn = xnn_full
- 
+
         self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
         self.candidates['xnn'] = list(xnn)
 
@@ -263,22 +263,22 @@ class Candidates:
             too_large = xnn[:, 0] > (1 / self.minimum_unit_cell)**2
             xnn[:, 0][too_small] = (1 / self.maximum_unit_cell)**2
             xnn[:, 0][too_large] = (1 / self.minimum_unit_cell)**2
-            cos_ralpha = xnn[:, 1] / xnn[:, 0]**2
+            cos_ralpha = xnn[:, 1] / (2*xnn[:, 0])
             too_small = cos_ralpha < -1
             too_large = cos_ralpha > 1
-            xnn[too_small, 1] = -0.999 * xnn[too_small, 0]**2
-            xnn[too_large, 1] = 0.999 * xnn[too_large, 0]**2
+            xnn[too_small, 1] = -2*0.999 * xnn[too_small, 0]
+            xnn[too_large, 1] = 2*0.999 * xnn[too_large, 0]
         elif self.lattice_system in ['monoclinic', 'triclinic']:
             too_small = xnn[:, :3] < (1 / self.maximum_unit_cell)**2
             too_large = xnn[:, :3] > (1 / self.minimum_unit_cell)**2
             xnn[:, :3][too_small] = (1 / self.maximum_unit_cell)**2
             xnn[:, :3][too_large] = (1 / self.minimum_unit_cell)**2
             if self.lattice_system == 'monoclinic':
-                cos_rbeta = xnn[:, 3] / (xnn[:, 0] * xnn[:, 2])
+                cos_rbeta = xnn[:, 3] / (2 * np.sqrt(xnn[:, 0] * xnn[:, 2]))
                 too_small = cos_rbeta < -1
                 too_large = cos_rbeta > 1
-                xnn[too_small, 3] = -0.999 * (xnn[too_small, 0] * xnn[too_small, 2])
-                xnn[too_large, 3] = 0.999 * (xnn[too_large, 0] * xnn[too_large, 2])
+                xnn[too_small, 3] = -2*0.999 * np.sqrt(xnn[too_small, 0] * xnn[too_small, 2])
+                xnn[too_large, 3] = 2*0.999 * np.sqrt(xnn[too_large, 0] * xnn[too_large, 2])
             elif self.lattice_system == 'triclinic':
                 assert False
 
@@ -576,6 +576,7 @@ class Optimizer:
             'found_tolerance': -200,
             'assignment_batch_size': 'max',
             'load_predictions': False,
+            'max_explainers': 20,
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
@@ -782,7 +783,6 @@ class Optimizer:
                 self.uc_scaled_cov[entry_index],
                 uc_pred[entry_index],
                 self.indexer.data.iloc[entry_index],
-                n_iterations
                 )
             candidates = self.optimize_entry(candidates)
             uc_best_opt[entry_index], report_counts = candidates.get_best_candidates(report_counts)
@@ -791,7 +791,7 @@ class Optimizer:
             print(end - start)
         self.indexer.data[f'{self.unit_cell_key}unit_cell_best_opt'] = list(uc_best_opt)
 
-    def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry, n_iterations):
+    def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry):
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
         candidate_uc_scaled = np.zeros((self.n_groups * n_candidates, self.indexer.data_params['n_outputs']))
         for group_index, group in enumerate(self.indexer.data_params['split_groups']):
@@ -876,7 +876,6 @@ class Optimizer:
             maximum_unit_cell=self.opt_params['maximum_uc'],
             tolerance=self.opt_params['found_tolerance'],
             unit_cell_key=self.unit_cell_key,
-            n_iterations=n_iterations
             )
 
         if self.opt_params['iteration_info'][0]['assigner_tag'] == 'closest':
@@ -934,7 +933,7 @@ class Optimizer:
                     )
                 if candidates.n <= 1:
                     return candidates
-                if len(candidates.explainers) > 10:
+                if len(candidates.explainers) > self.opt_params['max_explainers']:
                     return candidates
                 print_list = [
                     f'{candidates.n},',
@@ -1052,7 +1051,7 @@ class Optimizer:
             ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']))
             probability = self.rng.random(candidates.n)
             accepted = probability < ratio
-            print(accepted.sum() / accepted.size)
+            #print(accepted.sum() / accepted.size)
             candidates.candidates.loc[accepted] = next_candidates.candidates.loc[accepted]
         elif acceptance_method == 'always':
             candidates = next_candidates
