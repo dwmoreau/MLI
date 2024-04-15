@@ -358,6 +358,7 @@ class Augmentor:
                 distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
                 if index == q2_sa.size - 1:
                     separation = distance_previous
+                    distance_next = distance_previous
                 else:
                     distance_next = q2_sa[index + 1] - q2_sa[index]
                     separation = min(distance_previous, distance_next)

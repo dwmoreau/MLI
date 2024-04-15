@@ -667,6 +667,38 @@ class Regression_AlphaBeta(RegressionBase):
                 ))
         return uc_pred_scaled
 
+    def model_builder_mlp_noise(self, inputs):
+        q2_scaled = tf.keras.layers.GaussianNoise(0.005)(inputs['q2_scaled'])
+        uc_pred_mean_scaled = mlp_model_builder(
+            q2_scaled,
+            tag=f'uc_pred_mean_scaled_{self.group}',
+            model_params=self.model_params['mean_params'],
+            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}'
+            )
+        uc_pred_alpha_scaled = 1 + mlp_model_builder(
+            q2_scaled,
+            tag=f'uc_pred_alpha_scaled_{self.group}',
+            model_params=self.model_params['alpha_params'],
+            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}'
+            )
+        uc_pred_beta_scaled = mlp_model_builder(
+            q2_scaled,
+            tag=f'uc_pred_beta_scaled_{self.group}',
+            model_params=self.model_params['beta_params'],
+            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}'
+            )
+
+        # uc_pred_mean_scaled: n_batch x n_outputs
+        uc_pred_scaled = tf.keras.layers.Concatenate(
+            axis=2,
+            name=f'uc_pred_scaled_{self.group}'
+            )((
+                uc_pred_mean_scaled[:, :, tf.newaxis],
+                uc_pred_alpha_scaled[:, :, tf.newaxis],
+                uc_pred_beta_scaled[:, :, tf.newaxis],
+                ))
+        return uc_pred_scaled
+
     def model_builder_mlp(self, inputs):
         uc_pred_mean_scaled = mlp_model_builder(
             inputs['q2_scaled'],

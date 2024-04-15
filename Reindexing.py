@@ -446,6 +446,31 @@ def unpermute_monoclinic_partial_unit_cell(permuted_unit_cell, permuted_unit_cel
         return unit_cell, unit_cell_cov
 
 
+def make_monoclinic_obtuse(unit_cell, hkl=None, radians=True):
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    reindexed_unit_cell = np.zeros(6)
+    reindexed_unit_cell[:3] = unit_cell[:3]
+    for index in range(3, 6):
+        if unit_cell[index] != check:
+            reindexed_unit_cell[index] = 2*check - unit_cell[index]
+            if not hkl is None:
+                if index == 3:
+                    reindexed_hkl = hkl * np.array([-1, 1, -1])[np.newaxis]
+                elif index == 4:
+                    reindexed_hkl = hkl * np.array([-1, -1, 1])[np.newaxis]
+                elif index == 5:
+                    reindexed_hkl = hkl * np.array([-1, 1, -1])[np.newaxis]
+        else:
+            reindexed_unit_cell[index] = check
+    if hkl is None:
+        return reindexed_unit_cell
+    else:
+        return reindexed_unit_cell, reindexed_hkl
+    
+
 def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutation):
     if isinstance(spacegroup_map_table[key], str):
         permuted_spacegroup_symbol = spacegroup_symbol

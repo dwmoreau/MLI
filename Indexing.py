@@ -3,10 +3,10 @@ lattice system | accuracy
 -------------------------
 cubic          | 99.2%
 hexagonal      | 98.5%
-rhombohedral   | 0%
+rhombohedral   | 94%
 tetragonal     | 95%
 orthorhombic   | 93%
-monoclinic     | 0%
+monoclinic     | 50% (only 6 entries)
 triclinic      | not implemented
 
 - Documentation
@@ -14,19 +14,15 @@ triclinic      | not implemented
         - Add figures
     - Update README.md
     - Reread ML pxrd papers
-    - read about powder extinction classes
+    - powder extinction classes
         Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
             Buerger 1935, 1942, 1969
             Buerger 2002
             Nespolo 2014
 
 - Optimization:
-    * rhombohedral
     * monoclinic
     - correct the epsilon factor to be e^{-10}
-    - Verify that the top n candidates do not match the true unit cell
-    - Coordinate unit cell contains path of unit cell params    
-    - Detailed balance
     - What differentiates a found / not found entry
     - Full softmax array optimization - Actual likelihood target function
 
@@ -36,15 +32,14 @@ triclinic      | not implemented
     - augmented entries have a bug in the Miller indices
 
 - Assignments
-    - Faster inference methods
-        - different types of ML models
     - (000) assignments
 
 - Data
-    - reindex rhombohedral so angle is 60 <-> 90???
+    * reindex monoclinic so all angles are > 90
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
+        - determine appropriate data generation parameters
     - redo dataset generation with new parameters based on RRUFF database
     - Rewrite GenerateDataset.py
     - Get data from other databases:
@@ -55,7 +50,6 @@ triclinic      | not implemented
     - Refactor code to work with reciprocal space unit cell parameters
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
-    - MPI error: https://github.com/pmodels/mpich/issues/6547
     - get working on dials
         - generate data
         - get materials project cif files
@@ -63,6 +57,7 @@ triclinic      | not implemented
         - get MLI working
         - Train ML models
     - profile optimization
+    - MPI error: https://github.com/pmodels/mpich/issues/6547
 
 - Regression:
     - Mixture density network
