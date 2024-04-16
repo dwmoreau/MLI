@@ -22,9 +22,10 @@ triclinic      | not implemented
 
 - Optimization:
     * monoclinic
-    - correct the epsilon factor to be e^{-10}
+        - get working
+        - evaluate
     - What differentiates a found / not found entry
-    - Full softmax array optimization - Actual likelihood target function
+    - correct the epsilon factor to be e^{-10}
 
 - Indexing.py
 
@@ -34,10 +35,8 @@ triclinic      | not implemented
 - Assignments
     - (000) assignments
 
-- Data
-    * reindex monoclinic so all angles are > 90
-        - finish training
     - reindex rhombohedral unit cells so they are included with hexagonal
+- Data
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -50,6 +49,7 @@ triclinic      | not implemented
 
 - SWE:
     - Refactor code to work with reciprocal space unit cell parameters
+    - profile optimization
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
     - get working on dials
@@ -58,18 +58,9 @@ triclinic      | not implemented
         - redo counts & groups
         - get MLI working
         - Train ML models
-    - profile optimization
     - MPI error: https://github.com/pmodels/mpich/issues/6547
 
 - Regression:
-    - Problems with regression:
-        - MLP's do not efficiently extract information from peak lists.
-        - Treat as continuous when there is a discrete aspect
-        - Predict unit cell parameters individually, not jointly
-        - Trying to predict a probability distribution. Doesn't really work well.
-        - No covariance, just variance.
-        - Results are really garbage.
-
     - Feature extraction layer
         - Pick out sets of three Miller indices ordered by prevalence in the data
             1. Pick one Miller index based on histogram
@@ -78,11 +69,9 @@ triclinic      | not implemented
         - create a unit cell parameter grid according to lattice system constraints
         - Calculate pairwise difference array
         - Use argmax & max as nn input
-
-        - dialated convolutional neural network
+        - NN does classification over the unit cell parameter grid
 
     - Mixture density network
-    - Improve hyperparameters
 """
 import joblib
 import matplotlib.pyplot as plt

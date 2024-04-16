@@ -431,7 +431,7 @@ class Candidates:
                     high=self.maximum_angle,
                     size=np.sum(too_large_angles)
                     )
-        elif lattice_system in ['monoclinic', 'triclinic']:
+        elif self.lattice_system in ['monoclinic', 'triclinic']:
             too_small_lengths = unit_cells[:, :3] < self.minimum_unit_cell
             too_large_lengths = unit_cells[:, :3] > self.maximum_unit_cell
             if np.sum(too_small_lengths) > 0:
@@ -737,11 +737,11 @@ class Optimizer:
                     # 'permutation' is the permutation of the axes needed to go from the standard monoclinic angle
                     # at beta to the given monoclinic angle. This is the expectation of the unpermute function.
                     if monoclinic_angle == 'alpha':
-                        permutation = 'bca'
+                        permutation = 'bca>'
                     elif monoclinic_angle == 'beta':
-                        permutation = 'abc'
+                        permutation = 'abc>'
                     elif monoclinic_angle == 'gamma':
-                        permutation = 'acb'
+                        permutation = 'acb>'
                     if monoclinic_angle in ['alpha', 'gamma']:
                         uc_mean_group, uc_cov_group = self.indexer.revert_predictions(
                             uc_pred_scaled=uc_mean_scaled_group, uc_pred_scaled_cov=uc_cov_scaled_group
@@ -1014,11 +1014,11 @@ class Optimizer:
                 # The NN predictions were unpermuted in self.distribute_data.
                 monoclinic_angle = self.reg_params[group]['monoclinic_angle']
                 if monoclinic_angle == 'alpha':
-                    permutation = 'bca'
+                    permutation = 'bca>'
                 elif monoclinic_angle == 'beta':
-                    permutation = 'abc'
+                    permutation = 'abc>'
                 elif monoclinic_angle == 'gamma':
-                    permutation = 'acb'
+                    permutation = 'acb>'
                 if monoclinic_angle in ['alpha', 'gamma']:
                     # The unpermute function needs unscaled unit cells
                     candidates_uc_tree = self.indexer.revert_predictions(
@@ -1070,12 +1070,6 @@ class Optimizer:
         return candidates
 
     def optimize_entry(self, candidates):
-        """
-        MCMC order:
-            1: Assign Miller indices according to protocol
-            2: Optimize given the assigned Miller indices
-            3: Accept or reject new params.
-        """
         diagnostic_df_entry = candidates.diagnostics()
         acceptance_fraction = []
         for iteration_info in self.opt_params['iteration_info']:
@@ -1251,6 +1245,13 @@ class Optimizer:
             q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
             lattice_system=self.indexer.data_params['lattice_system']
             )
+        """
+        target_function.update(
+            np.stack(next_candidates.candidates['hkl']),
+            np.stack(next_candidates.candidates['softmax']),
+            next_xnn
+            )
+        """
         target_function.update(
             np.stack(next_candidates.candidates['hkl']),
             np.ones((candidates.n, self.indexer.data_params['n_points'])),
@@ -1358,13 +1359,14 @@ class Optimizer:
         return next_xnn
 
     def perturb_monoclinic_angle(self, candidates, iteration_info):
+        # This runs, but is not useful.
         if self.indexer.data_params['lattice_system'] != 'monoclinic':
             assert False
         next_candidates = copy.copy(candidates)
 
         # Perturb the xnn parameters
         xnn = np.stack(candidates.candidates['xnn'])
-        reciprocal_beta = self.rng.uniform(low=np.pi/4, high=3*np.pi/4, size=candidates.n)
+        reciprocal_beta = self.rng.uniform(low=0.05, high=np.pi/2, size=candidates.n)
         xnn_perturbed = xnn.copy()
         xnn_perturbed[:, 3] = 2 * np.sqrt(xnn[:, 0] * xnn[:, 2]) * np.cos(reciprocal_beta)
 
