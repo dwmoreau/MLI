@@ -53,7 +53,10 @@ class ProcessEntry:
         self.reason = None
 
         self.hkl_ref_monoclinic = np.load('data/hkl_ref_monoclinic.npy')[:60]
-        self.hkl_ref_hexagonal = np.load('data/hkl_ref_hexagonal.npy')[:60]
+        hkl_ref_hexagonal = np.load('data/hkl_ref_hexagonal.npy')
+        check = -hkl_ref_hexagonal[:, 0] + hkl_ref_hexagonal[:, 1] + hkl_ref_hexagonal[:, 2]
+        rhombohedral_condition = (check % 3) == 0
+        self.hkl_ref_hexagonal = hkl_ref_hexagonal[rhombohedral_condition][:60]
 
     def make_output_dict(self):
         self.output_dict = {
@@ -103,14 +106,14 @@ class ProcessEntry:
     def verify_reindexing_rhombohedral(self):
         unit_cell = self.unit_cell.copy()
         unit_cell[3:] *= np.pi/180
-        q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=self.hkl_ref_hexagonal, tensorflow=False)
-        q2 = q2_calculator.get_q2(unit_cell[np.newaxis])
+        q2_calculator = Q2Calculator(lattice_system='hexagonal', hkl=self.hkl_ref_hexagonal, tensorflow=False)
+        q2 = q2_calculator.get_q2(unit_cell[np.newaxis][:, [0, 2]])[0]
 
         reindexed_unit_cell = self.reindexed_unit_cell.copy()
         reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = hexagonal_to_rhombohedral_hkl(self.hkl_ref_hexagonal)
-        reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
-        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
+        reindexed_q2_calculator = Q2Calculator(lattice_system='rhombohedral', hkl=reindexed_hkl, tensorflow=False)
+        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis][:, [0, 3]])[0]
         check = np.isclose(q2, reindexed_q2).all()
         return check
 
@@ -231,7 +234,7 @@ class ProcessEntry:
                 return None
         elif self.lattice_system == 'rhombohedral':
             if np.all(self.unit_cell[3:] == [90, 90, 120]):
-                self.reindexed_unit_cell = hexagonal_to_rhombohedral_unit_cell(self.unit_cell)
+                self.reindexed_unit_cell = hexagonal_to_rhombohedral_unit_cell(self.unit_cell, radians=False)
                 self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
                 if not self.verify_reindexing_rhombohedral():
                     self.reason = 'Rhombohedral Reindexing Error'

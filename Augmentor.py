@@ -7,7 +7,6 @@ import scipy.optimize
 from sklearn.decomposition import PCA
 from sklearn.metrics import ConfusionMatrixDisplay
 
-from Reindexing import get_permutation
 from Reindexing import unpermute_monoclinic_full_unit_cell
 from Utilities import Q2Calculator
 from Utilities import get_fwhm_and_overlap_threshold
@@ -242,9 +241,8 @@ class Augmentor:
             perturbed_reindexed_unit_cell_[augmented_entry['reindexed_angle_index']] = perturbed_reindexed_unit_cell[4]
             # This unreindexes the perturbed_reindexed_unit_cell
             # Conversion to radians happens before augmentation
-            permutation, _ = get_permutation(augmented_entry['unit_cell'])
             perturbed_unit_cell = unpermute_monoclinic_full_unit_cell(
-                perturbed_reindexed_unit_cell_, permutation, radians=True
+                perturbed_reindexed_unit_cell_, augmented_entry['permutation'], radians=True
                 )
             perturbed_unit_cell_scaled = np.zeros(6)
             perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
@@ -400,14 +398,14 @@ class Augmentor:
             return None
 
     def _check_in_range(self, perturbed_unit_cell_scaled):
-        if self.lattice_system in ['monoclinic', 'triclinic']:
-            limit = np.pi/2 / self.angle_scale
+        if self.lattice_system == 'monoclinic':
+            minimum_angle_scaled = (np.pi/2 - np.pi/2) / self.angle_scale
+            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
             if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
-                if self.lattice_system == 'monoclinic':
-                    if -limit < perturbed_unit_cell_scaled[3] < limit:
-                        return True
-                elif self.lattice_system == 'triclinic':
-                    assert False
+                if minimum_angle_scaled < perturbed_unit_cell_scaled[3] < maximum_angle_scaled:
+                    return True
+        elif self.lattice_system == 'triclinic':
+            assert False
         elif self.lattice_system == 'rhombohedral':
             # Rhombohedral has a maximum angle of 120 degrees (4pi/6 radians)
             # Because the scaled angles are centered at zero, 90 degrees is 0 

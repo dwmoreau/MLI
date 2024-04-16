@@ -36,6 +36,8 @@ triclinic      | not implemented
 
 - Data
     * reindex monoclinic so all angles are > 90
+        - finish training
+    - reindex rhombohedral unit cells so they are included with hexagonal
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -60,8 +62,26 @@ triclinic      | not implemented
     - MPI error: https://github.com/pmodels/mpich/issues/6547
 
 - Regression:
-    - Mixture density network
+    - Problems with regression:
+        - MLP's do not efficiently extract information from peak lists.
+        - Treat as continuous when there is a discrete aspect
+        - Predict unit cell parameters individually, not jointly
+        - Trying to predict a probability distribution. Doesn't really work well.
+        - No covariance, just variance.
+        - Results are really garbage.
+
     - Feature extraction layer
+        - Pick out sets of three Miller indices ordered by prevalence in the data
+            1. Pick one Miller index based on histogram
+            2. Pick next Miller index based on histogram of entries with Miller index 1
+            3. Repeat 2.
+        - create a unit cell parameter grid according to lattice system constraints
+        - Calculate pairwise difference array
+        - Use argmax & max as nn input
+
+        - dialated convolutional neural network
+
+    - Mixture density network
     - Improve hyperparameters
 """
 import joblib
@@ -77,7 +97,6 @@ from Assigner import Assigner
 from Augmentor import Augmentor
 from Evaluations import evaluate_regression
 from Evaluations import calibrate_regression
-from Reindexing import get_permutation
 from Reindexing import unpermute_monoclinic_partial_unit_cell
 from Regression import Regression_AlphaBeta
 from Utilities import Q2Calculator
@@ -249,6 +268,7 @@ class Indexing:
             f'reindexed_h_{self.data_params["points_tag"]}',
             f'reindexed_k_{self.data_params["points_tag"]}',
             f'reindexed_l_{self.data_params["points_tag"]}',
+            'permutation',
             ]
 
         if self.data_params['augment']:
@@ -1084,6 +1104,7 @@ class Indexing:
 
         if self.data_params['lattice_system'] == 'monoclinic':
             unit_cell = np.stack(self.data['unit_cell'])
+            permutation = list(self.data['permutation'])
             N = unit_cell.shape[0]
             unit_cell_pred = np.zeros((N, 4))
             unit_cell_pred_cov = np.zeros((N, 4, 4))
@@ -1091,17 +1112,16 @@ class Indexing:
             unit_cell_pred_cov_trees = np.zeros((N, 4, 4))
 
             for entry_index in range(unit_cell.shape[0]):
-                permutation, _ = get_permutation(unit_cell[entry_index])
                 unit_cell_pred[entry_index], unit_cell_pred_cov[entry_index] = unpermute_monoclinic_partial_unit_cell(
                     reindexed_uc_pred[entry_index],
                     reindexed_uc_pred_cov[entry_index],
-                    permutation,
+                    permutation[entry_index],
                     radians=True,
                     )
                 unit_cell_pred_trees[entry_index], unit_cell_pred_cov_trees[entry_index] = unpermute_monoclinic_partial_unit_cell(
                     reindexed_uc_pred_trees[entry_index],
                     reindexed_uc_pred_cov_trees[entry_index],
-                    permutation,
+                    permutation[entry_index],
                     radians=True,
                     )
             self.data['unit_cell_pred'] = list(unit_cell_pred)

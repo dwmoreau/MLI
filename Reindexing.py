@@ -6,16 +6,16 @@ def reindex_entry(lattice_system, unit_cell, spacegroup_symbol, spacegroup_numbe
         return reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number)
     elif lattice_system == 'monoclinic':
         return reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number)
-    elif lattice_system == 'rhombohedral':
-        return reindex_entry_rhombohedral(unit_cell, spacegroup_symbol, spacegroup_number)
 
 
-def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell):
+def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell, radians):
     a_hexagonal = hexagonal_unit_cell[0]
     c_hexagonal = hexagonal_unit_cell[2]
     a_rhombohedral = 1/3 * np.sqrt(3*a_hexagonal**2 + c_hexagonal**2)
     denom = 2 * np.sqrt(3 + (c_hexagonal/a_hexagonal)**2)
-    alpha = 180/np.pi * 2 * np.arcsin(3 / denom)
+    alpha = 2 * np.arcsin(3 / denom)
+    if radians == False:
+        alpha *= 180/np.pi
     rhombohedral_unit_cell = np.array([
         a_rhombohedral,
         a_rhombohedral,
@@ -65,37 +65,37 @@ def get_permutation(unit_cell):
 
 
 def get_permuter(permutation):
-    if permutation == 'abc':
+    if permutation in ['abc', 'abc<', 'abc>']:
         permuter = np.eye(3)
-    elif permutation == 'acb':
+    elif permutation in ['acb', 'acb<', 'acb>']:
         # Rx
         permuter = np.array([
             [1, 0, 0],
             [0, 0, -1],
             [0, 1, 0],
             ])
-    elif permutation == 'bac':
+    elif permutation in ['bac', 'bac<', 'bac>']:
         # Rz
         permuter = np.array([
             [0, -1, 0],
             [1, 0, 0],
             [0, 0, 1],
             ])
-    elif permutation == 'bca':
+    elif permutation in ['bca', 'bca<', 'bca>']:
         # Rz Rx
         permuter = np.array([
             [0, 0, 1],
             [1, 0, 0],
             [0, 1, 0],
             ])
-    elif permutation == 'cab':
+    elif permutation in ['cab', 'cab<', 'cab>']:
         # Rx Rz
         permuter = np.array([
             [0, -1, 0],
             [0, 0, -1],
             [1, 0, 0],
             ])
-    elif permutation == 'cba':
+    elif permutation in ['cba', 'cba<', 'cba>']:
         # Ry
         permuter = np.array([
             [0, 0, 1],
@@ -105,6 +105,27 @@ def get_permuter(permutation):
     else:
         print(f'Permuter could not be determined from {permutation}')
         assert False
+
+    if permutation in ['acb<', 'bac<', 'bca<', 'cab<']:
+        # case where angle is acute and at alpha or gamma after reindexing
+        permuter = np.matmul(
+            permuter,
+            np.array([
+                [-1, 0, 0],
+                [0, 1, 0],
+                [0, 0, -1],
+                ])
+            )
+    elif permutation in ['abc<', 'cba<']:
+        # case where angle is acute and at beta after reindexing
+        permuter = np.matmul(
+            permuter,
+            np.array([
+                [-1, 0, 0],
+                [0, -1, 0],
+                [0, 0, 1],
+                ])
+            )
     return permuter
 
 
@@ -182,7 +203,7 @@ def reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number):
 
 def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number):
     permutation, permuter = get_permutation(unit_cell)
-    permuted_unit_cell = permute_monoclinic(unit_cell, permutation, radians=False)
+    permuted_unit_cell, permutation = permute_monoclinic(unit_cell, permutation, radians=False)
     #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
     spacegroup_map_table = {
         '3i': ['P 1 2 1', 'P 1 1 2', 'P 2 1 1', 'P 2 1 1', 'P 1 1 2', 'P 1 2 1'],
@@ -231,12 +252,12 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number):
         '15iii': ['I 1 2/a 1', 'I 1 1 2/a', 'I 2/b 1 1', 'I 2/b 1 1', 'I 1 1 2/a', 'I 1 2/a 1'],
         '15iv': ['F 1 2/d 1', 'F 1 1 2/d', 'F 2/d 1 1', 'F 2/d 1 1', 'F 1 1 2/d', 'F 1 2/d 1'],
         }
+    #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
     for key in spacegroup_map_table.keys():
         if key.startswith(str(spacegroup_number)):
             if spacegroup_symbol in spacegroup_map_table[key]:
                 map_table_key = key
 
-    #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
     permuted_spacegroup_symbol = map_spacegroup_symbol(
         spacegroup_map_table, map_table_key, spacegroup_symbol, permutation
         )
@@ -250,7 +271,10 @@ def permute_monoclinic(unit_cell, permutation, radians):
         check = 90
     permuted_unit_cell = np.zeros(6)
     if permutation == 'abc':
-        permuted_unit_cell = unit_cell
+        # without a copy here, if the angle is acute, permuted unit cell angle changes,
+        # and so does unit cell angle
+        permuted_unit_cell = unit_cell.copy()
+        angle_index = 4
     elif permutation == 'acb':
         permuted_unit_cell = np.array([
             unit_cell[0],
@@ -260,6 +284,7 @@ def permute_monoclinic(unit_cell, permutation, radians):
             check,
             unit_cell[4],
             ])
+        angle_index = 5
     elif permutation == 'bac':
         permuted_unit_cell = np.array([
             unit_cell[1],
@@ -269,6 +294,7 @@ def permute_monoclinic(unit_cell, permutation, radians):
             check,
             check,
             ])
+        angle_index = 3
     elif permutation == 'bca':
         permuted_unit_cell = np.array([
             unit_cell[1],
@@ -278,6 +304,7 @@ def permute_monoclinic(unit_cell, permutation, radians):
             check,
             check,
             ])
+        angle_index = 3
     elif permutation == 'cab':
         permuted_unit_cell = np.array([
             unit_cell[2],
@@ -287,6 +314,7 @@ def permute_monoclinic(unit_cell, permutation, radians):
             check,
             2*check - unit_cell[4],
             ])
+        angle_index = 5
     elif permutation == 'cba':
         permuted_unit_cell = np.array([
             unit_cell[2],
@@ -296,10 +324,192 @@ def permute_monoclinic(unit_cell, permutation, radians):
             2*check - unit_cell[4],
             check,
             ])
-    return permuted_unit_cell
+        angle_index = 4
+    # Any monoclinic unit cell can be represented with a obtuse or acute angle.
+    # I am choosing to use the obtuse representation, this is consistent with most of the
+    # entries in the ccdc.
+    if permuted_unit_cell[angle_index] < check:
+        # If acute, add a '<' (less than) sign to the permutation and make the angle obtuse.
+        permutation += '<'
+        permuted_unit_cell[angle_index] = 2*check - permuted_unit_cell[angle_index]
+    else:
+        permutation += '>'
+    return permuted_unit_cell, permutation
 
 
 def unpermute_monoclinic_full_unit_cell(permuted_unit_cell, permutation, radians):
+    """
+    the 'permutation' variable is the permutation that resulted in this unit cell
+    The correct unpermurtation should give a unit cell angle of pi - angle in half of these
+    cases. When the initial reindexing is performed, the angles are made obtuse and
+    an additional operation is performed on the Miller indices.
+
+    In otherwords, this should only be used to convert predicted unit cells in the reindexed
+    representation to the original representation.
+    """
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    unit_cell = np.zeros(6)
+    if permutation in ['abc<', 'abc>']:
+        unit_cell = permuted_unit_cell.copy()
+    elif permutation in ['acb<', 'acb>']:
+        unit_cell = np.array([
+            permuted_unit_cell[0],
+            permuted_unit_cell[2],
+            permuted_unit_cell[1],
+            check,
+            permuted_unit_cell[5],
+            check,
+            ])
+    elif permutation in ['bac<', 'bac>']:
+        unit_cell = np.array([
+            permuted_unit_cell[1],
+            permuted_unit_cell[0],
+            permuted_unit_cell[2],
+            check,
+            permuted_unit_cell[3],
+            check,
+            ])
+    elif permutation in ['bca<', 'bca>']:
+        unit_cell = np.array([
+            permuted_unit_cell[2],
+            permuted_unit_cell[0],
+            permuted_unit_cell[1],
+            check,
+            permuted_unit_cell[3],
+            check,
+            ])
+    elif permutation in ['cab<', 'cab>']:
+        unit_cell = np.array([
+            permuted_unit_cell[1],
+            permuted_unit_cell[2],
+            permuted_unit_cell[0],
+            check,
+            permuted_unit_cell[5],
+            check,
+            ])
+    elif permutation in ['cba<', 'cba>']:
+        unit_cell = np.array([
+            permuted_unit_cell[2],
+            permuted_unit_cell[1],
+            permuted_unit_cell[0],
+            check,
+            permuted_unit_cell[4],
+            check,
+            ])
+    else:
+        print('Failed unpermute')
+        print(permutation)
+        print(permuted_unit_cell)
+        assert False
+    return unit_cell
+
+
+def unpermute_monoclinic_partial_unit_cell(permuted_unit_cell, permuted_unit_cell_cov, permutation, radians):
+    """
+    the 'permutation' variable is the permutation that resulted in this unit cell
+
+    this should only be used to convert predicted unit cells in the reindexed
+    representation to the original representation.
+    """
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    if not permuted_unit_cell is None:
+        if permutation in ['abc<', 'abc>']:
+            unit_cell = permuted_unit_cell.copy()
+        elif permutation in ['acb<', 'acb>']:
+            unit_cell = np.array([
+                permuted_unit_cell[0],
+                permuted_unit_cell[2],
+                permuted_unit_cell[1],
+                permuted_unit_cell[3],
+                ])
+        elif permutation in ['bac<', 'bac>']:
+            unit_cell = np.array([
+                permuted_unit_cell[1],
+                permuted_unit_cell[0],
+                permuted_unit_cell[2],
+                permuted_unit_cell[3],
+                ])
+        elif permutation in ['bca<', 'bca>']:
+            unit_cell = np.array([
+                permuted_unit_cell[2],
+                permuted_unit_cell[0],
+                permuted_unit_cell[1],
+                permuted_unit_cell[3],
+                ])
+        elif permutation in ['cab<', 'cab>']:
+            unit_cell = np.array([
+                permuted_unit_cell[1],
+                permuted_unit_cell[2],
+                permuted_unit_cell[0],
+                permuted_unit_cell[3],
+                ])
+        elif permutation in ['cba<', 'cba>']:
+            unit_cell = np.array([
+                permuted_unit_cell[2],
+                permuted_unit_cell[1],
+                permuted_unit_cell[0],
+                permuted_unit_cell[3],
+                ])
+        else:
+            print('Failed unpermute')
+            print(permutation)
+            print(permuted_unit_cell)
+            print()
+
+    if not permuted_unit_cell_cov is None:
+        if permutation in ['abc<', 'abc>']:
+            unit_cell_cov = permuted_unit_cell_cov.copy()
+        elif permutation in ['acb<', 'acb>']:
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation in ['bac<', 'bac>']:
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation in ['bca<', 'bca>']:
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation in ['cab<', 'cab>']:
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        elif permutation in ['cba<', 'cba>']:
+            unit_cell_cov = np.zeros((4, 4))
+            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
+            unit_cell_cov[1, 1] = permuted_unit_cell_cov[1, 1]
+            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
+            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
+        else:
+            print('Failed unpermute')
+            print(permutation)
+            print(permuted_unit_cell)
+            print()
+
+    if permuted_unit_cell is None and not permuted_unit_cell_cov is None:
+        return unit_cell_cov
+    elif not permuted_unit_cell is None and permuted_unit_cell_cov is None:
+        return unit_cell
+    elif not permuted_unit_cell is None and not permuted_unit_cell_cov is None:
+        return unit_cell, unit_cell_cov
+
+
+def unpermute_monoclinic_full_unit_cell_old(permuted_unit_cell, permutation, radians):
     """
     the 'permutation' variable is the permutation that resulted in this unit cell
     """
@@ -309,7 +519,7 @@ def unpermute_monoclinic_full_unit_cell(permuted_unit_cell, permutation, radians
         check = 90
     unit_cell = np.zeros(6)
     if permutation == 'abc':
-        unit_cell = permuted_unit_cell
+        unit_cell = permuted_unit_cell.copy()
     elif permutation == 'acb':
         unit_cell = np.array([
             permuted_unit_cell[0],
@@ -358,7 +568,7 @@ def unpermute_monoclinic_full_unit_cell(permuted_unit_cell, permutation, radians
     return unit_cell
 
 
-def unpermute_monoclinic_partial_unit_cell(permuted_unit_cell, permuted_unit_cell_cov, permutation, radians):
+def unpermute_monoclinic_partial_unit_cell_old(permuted_unit_cell, permuted_unit_cell_cov, permutation, radians):
     """
     the 'permutation' variable is the permutation that resulted in this unit cell
     """
@@ -457,12 +667,10 @@ def make_monoclinic_obtuse(unit_cell, hkl=None, radians=True):
         if unit_cell[index] != check:
             reindexed_unit_cell[index] = 2*check - unit_cell[index]
             if not hkl is None:
-                if index == 3:
+                if index in [3, 5]:
                     reindexed_hkl = hkl * np.array([-1, 1, -1])[np.newaxis]
                 elif index == 4:
                     reindexed_hkl = hkl * np.array([-1, -1, 1])[np.newaxis]
-                elif index == 5:
-                    reindexed_hkl = hkl * np.array([-1, 1, -1])[np.newaxis]
         else:
             reindexed_unit_cell[index] = check
     if hkl is None:
@@ -478,87 +686,87 @@ def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutat
         current_index = spacegroup_map_table[key].index(spacegroup_symbol)
         if current_index == 0:
             # abc
-            if permutation == 'abc':
+            if permutation in ['abc', 'abc<', 'abc>']:
                 new_index = 0
-            elif permutation == 'acb':
+            elif permutation in ['acb', 'acb<', 'acb>']:
                 new_index = 1
-            elif permutation == 'bac':
+            elif permutation in ['bac', 'bac<', 'bac>']:
                 new_index = 2
-            elif permutation == 'bca':
+            elif permutation in ['bca', 'bca<', 'bca>']:
                 new_index = 3
-            elif permutation == 'cab':
+            elif permutation in ['cab', 'cab<', 'cab>']:
                 new_index = 4
-            elif permutation == 'cba':
+            elif permutation in ['cba', 'cba<', 'cba>']:
                 new_index = 5
         elif current_index == 1:
             # acb
-            if permutation == 'abc':
+            if permutation in ['abc', 'abc<', 'abc>']:
                 new_index = 1
-            elif permutation == 'acb':
+            elif permutation in ['acb', 'acb<', 'acb>']:
                 new_index = 0
-            elif permutation == 'bac':
+            elif permutation in ['bac', 'bac<', 'bac>']:
                 new_index = 4
-            elif permutation == 'bca':
+            elif permutation in ['bca', 'bca<', 'bca>']:
                 new_index = 5
-            elif permutation == 'cab':
+            elif permutation in ['cab', 'cab<', 'cab>']:
                 new_index = 2
-            elif permutation == 'cba':
+            elif permutation in ['cba', 'cba<', 'cba>']:
                 new_index = 3
         elif current_index == 2:
             # bac
-            if permutation == 'abc':
+            if permutation in ['abc', 'abc<', 'abc>']:
                 new_index = 2
-            elif permutation == 'acb':
+            elif permutation in ['acb', 'acb<', 'acb>']:
                 new_index = 3
-            elif permutation == 'bac':
+            elif permutation in ['bac', 'bac<', 'bac>']:
                 new_index = 0
-            elif permutation == 'bca':
+            elif permutation in ['bca', 'bca<', 'bca>']:
                 new_index = 1
-            elif permutation == 'cab':
+            elif permutation in ['cab', 'cab<', 'cab>']:
                 new_index = 5
-            elif permutation == 'cba':
+            elif permutation in ['cba', 'cba<', 'cba>']:
                 new_index = 4
         elif current_index == 3:
             # bca
-            if permutation == 'abc':
+            if permutation in ['abc', 'abc<', 'abc>']:
                 new_index = 3
-            elif permutation == 'acb':
+            elif permutation in ['acb', 'acb<', 'acb>']:
                 new_index = 2
-            elif permutation == 'bac':
+            elif permutation in ['bac', 'bac<', 'bac>']:
                 new_index = 5
-            elif permutation == 'bca':
+            elif permutation in ['bca', 'bca<', 'bca>']:
                 new_index = 4
-            elif permutation == 'cab':
+            elif permutation in ['cab', 'cab<', 'cab>']:
                 new_index = 0
-            elif permutation == 'cba':
+            elif permutation in ['cba', 'cba<', 'cba>']:
                 new_index = 1
         elif current_index == 4:
             # cab
-            if permutation == 'abc':
+            if permutation in ['abc', 'abc<', 'abc>']:
                 new_index = 4
-            elif permutation == 'acb':
+            elif permutation in ['acb', 'acb<', 'acb>']:
                 new_index = 5
-            elif permutation == 'bac':
+            elif permutation in ['bac', 'bac<', 'bac>']:
                 new_index = 1
-            elif permutation == 'bca':
+            elif permutation in ['bca', 'bca<', 'bca>']:
                 new_index = 0
-            elif permutation == 'cab':
+            elif permutation in ['cab', 'cab<', 'cab>']:
                 new_index = 3
-            elif permutation == 'cba':
+            elif permutation in ['cba', 'cba<', 'cba>']:
                 new_index = 2
         elif current_index == 5:
             # cba
-            if permutation == 'abc':
+            if permutation in ['abc', 'abc<', 'abc>']:
                 new_index = 5
-            elif permutation == 'acb':
+            elif permutation in ['acb', 'acb<', 'acb>']:
                 new_index = 4
-            elif permutation == 'bac':
+            elif permutation in ['bac', 'bac<', 'bac>']:
                 new_index = 3
-            elif permutation == 'bca':
+            elif permutation in ['bca', 'bca<', 'bca>']:
                 new_index = 2
-            elif permutation == 'cab':
+            elif permutation in ['cab', 'cab<', 'cab>']:
                 new_index = 1
-            elif permutation == 'cba':
+            elif permutation in ['cba', 'cba<', 'cba>']:
                 new_index = 0
         permuted_spacegroup_symbol = spacegroup_map_table[key][new_index]
     return permuted_spacegroup_symbol

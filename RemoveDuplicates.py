@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 
-source = 'cod'
+source = 'csd'
 n_ranks = 8
 
 if source == 'csd':

@@ -9,6 +9,8 @@ import pandas as pd
 
 from EntryHelpers import save_identifiers
 from Reindexing import get_permutation
+from Reindexing import get_permuter
+from Reindexing import permute_monoclinic
 from Reindexing import hexagonal_to_rhombohedral_hkl
 from Utilities import Q2Calculator
 from Utilities import get_fwhm_and_overlap_threshold
@@ -178,8 +180,13 @@ class EntryGenerator:
         hkl_order[:indices.size, :, 5] = hkl_order[indices, :, 0]
         hkl_order[indices.size:, :, 5] = 0
 
-        if lattice_system in ['monoclinic', 'orthorhombic']:
+        if lattice_system == 'orthorhombic':
             _, permuter = get_permutation(unit_cell)
+        elif lattice_system == 'monoclinic':
+            # monoclinic needs to additionally make the unit cell angle obtuse
+            permutation, _ = get_permutation(unit_cell)
+            _, permutation = permute_monoclinic(unit_cell, permutation, radians=False)
+            permuter = get_permuter(permutation)
         peaks_df = {}
 
         # I get a "destination is read-only" error without creating new arrays for the unit cell
@@ -380,8 +387,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'rhombohedral']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'rhombohedral']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'monoclinic']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'monoclinic']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')
