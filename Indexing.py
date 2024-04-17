@@ -6,7 +6,7 @@ hexagonal      | 98.5%
 rhombohedral   | 94%
 tetragonal     | 95%
 orthorhombic   | 93%
-monoclinic     | 50% (only 6 entries)
+monoclinic     | 37% - 71%
 triclinic      | not implemented
 
 - Documentation
@@ -22,9 +22,10 @@ triclinic      | not implemented
 
 - Optimization:
     * monoclinic
-        - get working
-        - evaluate
-    - What differentiates a found / not found entry
+        * How to find new unit cell parameters once a deadend has been reached
+            * reset unit cells 
+        - How to improve initial HKL estimates
+            - Really powerful NN at the beginning
     - correct the epsilon factor to be e^{-10}
 
 - Indexing.py

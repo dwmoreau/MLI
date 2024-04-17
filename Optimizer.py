@@ -146,7 +146,7 @@ class Candidates:
         self.sg_true = int(entry['spacegroup_number'])
         self.spacegroup_symbol_hm_true = entry[f'{unit_cell_key}spacegroup_symbol_hm']
 
-        df_columns = [
+        self.df_columns = [
             'unit_cell',
             'unit_cell_scaled',
             'reciprocal_unit_cell',
@@ -155,8 +155,8 @@ class Candidates:
             'softmax',
             'loss',
             ]
-        self.candidates = pd.DataFrame(columns=df_columns)
-        self.explainers = pd.DataFrame(columns=df_columns)
+        self.candidates = pd.DataFrame(columns=self.df_columns)
+        self.explainers = pd.DataFrame(columns=self.df_columns)
 
         self.candidates['unit_cell'] = list(unit_cell)
         self.candidates['unit_cell_scaled'] = list(unit_cell_scaled)
@@ -344,7 +344,7 @@ class Candidates:
                 )
         return hkl_check
 
-    def diagnostics(self):
+    def diagnostics(self, hkl_ref_length):
         reciprocal_unit_cell = np.stack(self.candidates['reciprocal_unit_cell'])
         reciprocal_unit_cell_rms = 1/np.sqrt(self.n_uc) * np.linalg.norm(reciprocal_unit_cell - self.reciprocal_unit_cell_true, axis=1)
         reciprocal_unit_cell_max_diff = np.max(np.abs(reciprocal_unit_cell - self.reciprocal_unit_cell_true), axis=1)
@@ -354,12 +354,12 @@ class Candidates:
         hkl_correct = self.hkl_true_check[np.newaxis] == hkl_pred_check
         hkl_accuracy = np.count_nonzero(hkl_correct, axis=1) / self.n_points
 
-        ###!!! This is hard coded for hkl_ref_length == 300
-        impossible = np.any(self.hkl_labels_true == 299)
+        impossible = np.any(self.hkl_labels_true == hkl_ref_length - 1)
 
         print(f'Starting # candidates:       {self.n}')
         print(f'Impossible:                  {impossible}')
-        print(f'True unit cell:              {np.round(self.reciprocal_unit_cell_true, decimals=4)}')
+        print(f'True unit cell:              {np.round(self.unit_cell_true, decimals=4)}')
+        print(f'True reciprocal unit cell:   {np.round(self.reciprocal_unit_cell_true, decimals=4)}')
         print(f'Closest unit cell:           {np.round(reciprocal_unit_cell[np.argmin(reciprocal_unit_cell_rms)], decimals=4)}')
         print(f'Closest unit cell rms:       {reciprocal_unit_cell_rms.min():2.2f}')
         print(f'Smallest unit cell max diff: {reciprocal_unit_cell_max_diff.min():2.2f}')
@@ -529,7 +529,7 @@ class Candidates:
         if len(self.explainers) == 0:
             uc_best_opt = self.candidates.iloc[0]['unit_cell']
             #print(np.stack(self.candidates['unit_cell'])[:5])
-            print(np.stack(self.candidates['reciprocal_unit_cell'])[:10])
+            print(np.stack(self.candidates['reciprocal_unit_cell'])[:10].round(decimals=4))
             #print(uc_best_opt)
             if np.all(np.isclose(self.unit_cell_true, uc_best_opt, atol=1e-3)):
                 report_counts['Found and best'] += 1
@@ -537,7 +537,7 @@ class Candidates:
             else:
                 report_counts['Not found'] += 1
         elif len(self.explainers) == 1:
-            print(self.explainers[['unit_cell', 'loss']])
+            print(self.explainers[['unit_cell', 'loss']].round(decimals={'unit_cell': 3, 'loss': 1}))
             uc_best_opt = self.explainers.iloc[0]['unit_cell']
             if np.all(np.isclose(self.unit_cell_true, uc_best_opt, atol=1e-3)):
                 report_counts['Found and best'] += 1
@@ -546,9 +546,13 @@ class Candidates:
                 report_counts['Found but off by two'] += 1
                 found = True
             else:
-                report_counts['Not found'] += 1
+                report_counts['Found explainers'] += 1
+                found = True
         else:
-            print(self.explainers[['unit_cell', 'loss']])
+            self.explainers.to_json('explainers.json')
+            uc_print = np.stack(self.explainers['unit_cell']).round(decimals=3)
+            loss_print = np.array(self.explainers['loss']).round(decimals=1)
+            print(np.concatenate((uc_print, loss_print[:, np.newaxis]), axis=1))
             uc_best_opt = np.array(self.explainers.iloc[0]['unit_cell'])
             found_best = False
             found_not_best = False
@@ -573,8 +577,54 @@ class Candidates:
                 found = True
             else:
                 report_counts['Found explainers'] += 1
+                found = True
 
         return uc_best_opt, report_counts, found
+
+    def monoclinic_reset(self, n_best, n_angles):
+        reciprocal_unit_cell = np.stack(self.candidates['reciprocal_unit_cell'])
+        lengths = np.round(reciprocal_unit_cell[:, :3].ravel(), decimals=4)
+        unique, counts = np.unique(lengths, return_counts=True)
+        sort_indices = np.argsort(counts)[::-1]
+        unique = unique[sort_indices]
+        counts = counts[sort_indices]
+
+        n_configurations = n_best * (n_best-1) * (n_best-2)
+        new_reciprocal_unit_cell = np.zeros((n_configurations, 4))
+        index = 0
+        for ai in range(n_best):
+            bi_indices = np.delete(np.arange(n_best), ai)
+            for bi in bi_indices:
+                if bi > ai:
+                    ci_indices = np.delete(bi_indices, bi - 1)
+                else:
+                    ci_indices = np.delete(bi_indices, bi)
+                for ci in ci_indices:
+                    new_reciprocal_unit_cell[index, :3] = [unique[ai], unique[bi], unique[ci]]
+                    index += 1
+
+        new_reciprocal_unit_cell = np.repeat(new_reciprocal_unit_cell, repeats=n_angles, axis=0)
+        for index, new_angle in enumerate(np.arccos(np.linspace(0, 0.99, n_angles))):
+            start = index * n_configurations
+            stop = (index + 1) * n_configurations
+            new_reciprocal_unit_cell[start: stop, 3] = new_angle
+
+        self.candidates = pd.DataFrame(columns=self.df_columns)
+        self.candidates['reciprocal_unit_cell'] = list(new_reciprocal_unit_cell)
+        self.n = n_configurations * n_angles
+        reciprocal_unit_cell_full = np.zeros((self.n, 6))
+        reciprocal_unit_cell_full[:, :3] = new_reciprocal_unit_cell[:, :3]
+        reciprocal_unit_cell_full[:, 4] = new_reciprocal_unit_cell[:, 3]
+        reciprocal_unit_cell_full[:, 3] = np.pi/2
+        reciprocal_unit_cell_full[:, 5] = np.pi/2
+
+        xnn_full = get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell_full)
+        xnn = xnn_full[:, [0, 1, 2, 4]]
+        self.candidates['xnn'] = list(xnn)
+
+        unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
+        unit_cell = unit_cell_full[:, [0, 1, 2, 4]]
+        self.candidates['unit_cell'] = list(unit_cell)
 
     def save_candidates(self):
         # This is a diagnostic function.
@@ -786,10 +836,6 @@ class Optimizer:
                 self.comm.send(self.rank_indices, dest=0, tag=4)
 
     def run(self):
-        n_iterations = 0
-        for iteration_info in self.opt_params['iteration_info']:
-            n_iterations += iteration_info['n_iterations']
-
         uc_true = np.stack(
             self.indexer.data[f'{self.unit_cell_key}unit_cell']
             )[:, self.indexer.data_params['y_indices']]
@@ -1046,12 +1092,12 @@ class Optimizer:
             unit_cell_key=self.unit_cell_key,
             )
 
-        if self.opt_params['iteration_info'][0]['assigner_tag'] == 'closest':
+        if self.opt_params['iteration_info'][0]['assigner_key'] == 'closest':
             candidates = self.assign_hkls_closest(candidates)
         else:
             candidates = self.assign_hkls(
                 candidates,
-                self.opt_params['iteration_info'][0]['assigner_tag'],
+                self.opt_params['iteration_info'][0]['assigner_key'],
                 'best'
                 )
 
@@ -1070,48 +1116,68 @@ class Optimizer:
         return candidates
 
     def optimize_entry(self, candidates):
-        diagnostic_df_entry = candidates.diagnostics()
+        diagnostic_df_entry = candidates.diagnostics(self.indexer.data_params['hkl_ref_length'])
         acceptance_fraction = []
         for iteration_info in self.opt_params['iteration_info']:
-            for iter_index in range(iteration_info['n_iterations']):
-                if iteration_info['worker'] in ['softmax_subsampling', 'random_subsampling']:
-                    next_xnn = self.random_subsampling(candidates, iteration_info)
-                elif iteration_info['worker'] == 'resampling':
-                    next_candidates = copy.copy(candidates)
-                    next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_tag'], 'random')
-                    next_xnn = self.no_subsampling(next_candidates, iteration_info)
-                elif iteration_info['worker'] == 'resampling_softmax_subsampling':
-                    next_candidates = copy.copy(candidates)
-                    next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_tag'], 'random')
-                    next_xnn = self.random_subsampling(next_candidates, iteration_info)
-                elif iteration_info['worker'] == 'no_sampling':
-                    next_xnn = self.no_subsampling(candidates, iteration_info)
-                elif iteration_info['worker'] == 'perturb_xnn':
-                    next_xnn = self.perturb_xnn(candidates, iteration_info)
-                elif iteration_info['worker'] == 'perturb_monoclinic_angle':
-                    next_xnn = self.perturb_monoclinic_angle(candidates, iteration_info)
-                else:
-                    assert False
-                candidates, acceptance_fraction = self.update_candidates(
-                    candidates,
-                    iteration_info['assigner_tag'],
-                    iteration_info['acceptance_method'],
-                    next_xnn,
-                    acceptance_fraction 
-                    )
-                if candidates.n <= 1:
-                    return candidates, diagnostic_df_entry
-                if len(candidates.explainers) > self.opt_params['max_explainers']:
-                    return candidates, diagnostic_df_entry
+            if iteration_info['worker'] == 'monoclinic_reset':
+                candidates = self.monoclinic_reset(candidates, iteration_info)
                 print_list = [
                     f'{candidates.n},',
                     f'{len(candidates.explainers)},',
                     f'{candidates.candidates["loss"].mean():0.2f},',
                     f'{candidates.candidates["loss"].min():0.2f},',
                     f'{iteration_info["worker"]},',
-                    f'{iteration_info["assigner_tag"]}',
+                    f'{iteration_info["assigner_key"]}',
                     ]
                 print(' '.join(print_list))
+            else:
+                for iter_index in range(iteration_info['n_iterations']):
+                    if iteration_info['worker'] in ['softmax_subsampling', 'random_subsampling']:
+                        next_xnn = self.random_subsampling(candidates, iteration_info)
+                    elif iteration_info['worker'] == 'resampling':
+                        next_candidates = copy.copy(candidates)
+                        next_candidates = self.assign_hkls(
+                            next_candidates,
+                            iteration_info['assigner_key'],
+                            'random'
+                            )
+                        next_xnn = self.no_subsampling(next_candidates, iteration_info)
+                    elif iteration_info['worker'] == 'resampling_softmax_subsampling':
+                        next_candidates = copy.copy(candidates)
+                        next_candidates = self.assign_hkls(
+                            next_candidates,
+                            iteration_info['assigner_key'],
+                            'random'
+                            )
+                        next_xnn = self.random_subsampling(next_candidates, iteration_info)
+                    elif iteration_info['worker'] == 'no_sampling':
+                        next_xnn = self.no_subsampling(candidates, iteration_info)
+                    elif iteration_info['worker'] == 'perturb_xnn':
+                        next_xnn = self.perturb_xnn(candidates, iteration_info)
+                    elif iteration_info['worker'] == 'perturb_monoclinic_angle':
+                        next_xnn = self.perturb_monoclinic_angle(candidates, iteration_info)
+                    else:
+                        assert False
+                    candidates, acceptance_fraction = self.update_candidates(
+                        candidates,
+                        iteration_info['assigner_key'],
+                        iteration_info['acceptance_method'],
+                        next_xnn,
+                        acceptance_fraction 
+                        )
+                    if candidates.n <= 1:
+                        return candidates, diagnostic_df_entry
+                    if len(candidates.explainers) > self.opt_params['max_explainers']:
+                        return candidates, diagnostic_df_entry
+                    print_list = [
+                        f'{candidates.n},',
+                        f'{len(candidates.explainers)},',
+                        f'{candidates.candidates["loss"].mean():0.2f},',
+                        f'{candidates.candidates["loss"].min():0.2f},',
+                        f'{iteration_info["worker"]},',
+                        f'{iteration_info["assigner_key"]}',
+                        ]
+                    print(' '.join(print_list))
         #candidates.save_candidates()
         print(np.mean(acceptance_fraction))
         return candidates, diagnostic_df_entry
@@ -1245,13 +1311,7 @@ class Optimizer:
             q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
             lattice_system=self.indexer.data_params['lattice_system']
             )
-        """
-        target_function.update(
-            np.stack(next_candidates.candidates['hkl']),
-            np.stack(next_candidates.candidates['softmax']),
-            next_xnn
-            )
-        """
+
         target_function.update(
             np.stack(next_candidates.candidates['hkl']),
             np.ones((candidates.n, self.indexer.data_params['n_points'])),
@@ -1377,7 +1437,7 @@ class Optimizer:
             ))
 
         # Reassign Miller indices
-        next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_tag'], 'best')
+        next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_key'], 'best')
 
         # Get next xnn after optimization step
         target_function = CandidateOptLoss_xnn(
@@ -1392,6 +1452,34 @@ class Optimizer:
         delta_gn = target_function.gauss_newton_step(xnn_perturbed)
         next_xnn = xnn_perturbed + delta_gn
         return next_xnn
+
+    def monoclinic_reset(self, candidates, iteration_info):
+        assert self.indexer.data_params['lattice_system'] == 'monoclinic'
+
+        # This is set to true so only one batch is run during Miller index assignmnent
+        # Now we have a different amount of candidates, so we must use batched assignments
+        self.one_assignment_batch = False
+        candidates.monoclinic_reset(iteration_info['n_best'], iteration_info['n_angles'])
+        candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
+            uc_pred=np.stack(candidates.candidates['unit_cell'])
+            ))
+        if iteration_info['assigner_key'] == 'closest':
+            candidates = self.assign_hkls_closest(candidates)
+        else:
+            candidates = self.assign_hkls(candidates, iteration_info['assigner_key'], 'best')
+
+        xnn = np.stack(candidates.candidates['xnn'])
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system']
+            )
+        target_function.update(
+            np.stack(candidates.candidates['hkl']),
+            np.ones((candidates.n, self.indexer.data_params['n_points'])),
+            xnn
+            )
+        candidates.candidates['loss'] = target_function.get_loss(xnn)
+        return candidates
 
     def gather_optimized_unit_cells(self):
         if self.rank == 0:
