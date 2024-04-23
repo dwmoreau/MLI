@@ -44,6 +44,7 @@ def bnn_model_builder(x, tag, model_params, output_name, N_train):
             kl_weight=1/N_train,
             activation='linear',
             name=f'dense_{tag}_{index}',
+            use_bias=False,
             )(x)
         x = tf.keras.layers.LayerNormalization(
             epsilon=model_params['epsilon'], 
@@ -70,6 +71,7 @@ def mlp_model_builder(x, tag, model_params, output_name):
             model_params['layers'][index],
             activation='linear',
             name=f'dense_{tag}_{index}',
+            use_bias=False,
             )(x)
         x = tf.keras.layers.LayerNormalization(
             epsilon=model_params['epsilon'], 
@@ -100,6 +102,7 @@ def hkl_model_builder_mlp(x, tag, model_params):
             model_params['layers'][index],
             activation='linear',
             name=f'dense_{tag}_{index}',
+            use_bias=False,
             )(x)
         x = tf.keras.layers.LayerNormalization(
             epsilon=model_params['epsilon'], 
@@ -137,6 +140,7 @@ def hkl_model_builder_mlp_flat(x, tag, model_params):
             model_params['layers'][index],
             activation='linear',
             name=f'dense_{tag}_{index}',
+            use_bias=False,
             )(x)
         x = tf.keras.layers.LayerNormalization(
             epsilon=model_params['epsilon'], 
@@ -183,6 +187,7 @@ def hkl_model_builder_mlp_ortho(x, tag, model_params):
                 factor=model_params['Ortho_kernel_reg'],
                 mode='rows'
                 ),
+            use_bias=False,
             )(x)
         x = tf.keras.layers.LayerNormalization(
             epsilon=model_params['epsilon'], 

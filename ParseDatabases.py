@@ -9,7 +9,8 @@ from EntryHelpers import verify_crystal_system_bravais_lattice_consistency
 from EntryHelpers import verify_unit_cell_consistency_by_bravais_lattice
 from EntryHelpers import verify_volume
 from Reindexing import get_permuter
-from Reindexing import reindex_entry
+from Reindexing import reindex_entry_monoclinic
+from Reindexing import reindex_entry_orthorhombic
 from Reindexing import hexagonal_to_rhombohedral_unit_cell
 from Reindexing import hexagonal_to_rhombohedral_hkl
 from Utilities import Q2Calculator
@@ -43,6 +44,7 @@ class ProcessEntry:
         self.reindexed_unit_cell = np.zeros(6)
         self.reindexed_volume = None
         self.permutation = None
+        self.hkl_reindexer = np.eye(3)
 
         self.reduced_unit_cell = np.zeros(6)
         self.reduced_volume = None
@@ -82,6 +84,7 @@ class ProcessEntry:
             'reindexed_volume': self.reindexed_volume,
             'split': self.split,
             'permutation': self.permutation,
+            'hkl_reindexer': self.hkl_reindexer.ravel(),
             'reduced_unit_cell': self.reindexed_unit_cell,
             'reduced_volume': self.reduced_volume,
             'r_factor': self.r_factor,
@@ -97,7 +100,7 @@ class ProcessEntry:
 
         reindexed_unit_cell = self.reindexed_unit_cell.copy()
         reindexed_unit_cell[3:] *= np.pi/180
-        reindexed_hkl = np.matmul(self.hkl_ref_monoclinic, get_permuter(self.permutation))
+        reindexed_hkl = self.hkl_ref_monoclinic @ self.hkl_reindexer
         reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
         reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
         check = np.isclose(q2, reindexed_q2).all()
@@ -111,7 +114,7 @@ class ProcessEntry:
 
         reindexed_unit_cell = self.reindexed_unit_cell.copy()
         reindexed_unit_cell[3:] *= np.pi/180
-        reindexed_hkl = hexagonal_to_rhombohedral_hkl(self.hkl_ref_hexagonal)
+        reindexed_hkl = self.hkl_ref_hexagonal @ self.hkl_reindexer
         reindexed_q2_calculator = Q2Calculator(lattice_system='rhombohedral', hkl=reindexed_hkl, tensorflow=False)
         reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis][:, [0, 3]])[0]
         check = np.isclose(q2, reindexed_q2).all()
@@ -130,7 +133,7 @@ class ProcessEntry:
 
         if not verify_crystal_system_bravais_lattice_consistency(
                 self.crystal_system, self.bravais_lattice
-        ):
+            ):
             self.reason = 'Crystal system bravais lattice mismatch'
             self.status = False
             #print(f'{self.reason}')
@@ -210,10 +213,14 @@ class ProcessEntry:
             #print(f'{self.reason} {self.volume} {expected_volume}')
             return None
 
-        if self.lattice_system in ['orthorhombic', 'monoclinic']:
+        if self.lattice_system in 'orthorhombic':
             try:
-                self.reindexed_spacegroup_symbol_hm, self.permutation, self.reindexed_unit_cell = \
-                    reindex_entry(self.lattice_system, self.unit_cell, self.spacegroup_symbol_hm, self.spacegroup_number)
+                self.reindexed_spacegroup_symbol_hm, self.permutation, self.reindexed_unit_cell, self.hkl_reindexer = \
+                    reindex_entry_orthorhombic(
+                        self.unit_cell,
+                        self.spacegroup_symbol_hm,
+                        self.spacegroup_number
+                        )
                 self.reindexed_volume = self.volume
             except:
                 self.reason = 'Could not permute axes'
@@ -221,7 +228,7 @@ class ProcessEntry:
                 print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
                 return None
             if not self.verify_reindexing():
-                self.reason = 'Monoclinic / Orthorhombic Reindexing Error'
+                self.reason = 'Orthorhombic Reindexing Error'
                 self.status = False
                 print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.permutation}')
                 return None
@@ -232,9 +239,42 @@ class ProcessEntry:
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
+        elif self.lattice_system == 'monoclinic':
+            #try:
+            self.reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, self.hkl_reindexer = \
+                reindex_entry_monoclinic(
+                    self.unit_cell,
+                    self.spacegroup_symbol_hm,
+                    radians=False
+                    )
+            #except:
+            #    self.reason = 'Could not reindex monoclinic'
+            #    self.status = False
+            #    print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
+            #    return None
+            if self.reindexed_unit_cell is None:
+                self.reason = 'Infrequent monoclinic setting that has not been setup for reindexing'
+                self.status = False
+                print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
+                return None
+            self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
+            if not self.verify_reindexing():
+                self.reason = 'Monoclinic Reindexing Error'
+                self.status = False
+                print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.spacegroup_symbol_hm}')
+                return None
+            try:
+                self.reindexed_spacegroup_symbol_hall = gemmi.SpaceGroup(self.reindexed_spacegroup_symbol_hm).hall
+            except:
+                self.reason = 'Could not read reindexed spacegroup symbol'
+                self.status = False
+                print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
+                return None
         elif self.lattice_system == 'rhombohedral':
             if np.all(self.unit_cell[3:] == [90, 90, 120]):
-                self.reindexed_unit_cell = hexagonal_to_rhombohedral_unit_cell(self.unit_cell, radians=False)
+                self.reindexed_unit_cell, self.hkl_reindexer = hexagonal_to_rhombohedral_unit_cell(
+                    self.unit_cell, radians=False
+                    )
                 self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
                 if not self.verify_reindexing_rhombohedral():
                     self.reason = 'Rhombohedral Reindexing Error'
@@ -242,6 +282,7 @@ class ProcessEntry:
                     print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.permutation}')
                     return None
             else:
+                self.hkl_reindexer = np.eye(3)
                 self.reindexed_volume = self.volume
                 self.reindexed_unit_cell = self.unit_cell
             self.permutation = 'abc'
@@ -262,12 +303,27 @@ class ProcessEntry:
             else:
                 self.split = 1
         elif self.lattice_system == 'monoclinic':
-            if self.reindexed_unit_cell[3] != 90:
-                self.split = 0
-            elif self.reindexed_unit_cell[4] != 90:
-                self.split = 1
-            elif self.reindexed_unit_cell[5] != 90:
-                self.split = 2
+            if self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[1]:
+                if self.reindexed_unit_cell[1] <= self.reindexed_unit_cell[2]:
+                    self.split = 0 # abc
+                elif self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[2]:
+                    self.split = 1 # acb
+                else:
+                    self.split = 2 # cab
+            else:
+                if self.reindexed_unit_cell[1] > self.reindexed_unit_cell[2]:
+                    self.split = 3 # cba
+                elif self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[2]:
+                    self.split = 4 # bac
+                else:
+                    self.split = 5 # bca
+            if self.reindexed_spacegroup_symbol_hm in ['P 1 2 1', 'P 1 m 1', 'P 1 2/m 1', 'P 1 21 1', 'P 1 21/m 1']:
+                # These cases should all be reindexed so a < c
+                if self.split in [2, 3, 5]:
+                    self.reason = 'Monoclinic Reindexing Error - unit cell did not get reordered'
+                    self.status = False
+                    print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.spacegroup_symbol_hm}')
+                    return None
         else:
             self.split = 0
 

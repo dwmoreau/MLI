@@ -204,6 +204,20 @@ class CandidateOptLoss_xnn:
         delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
         return delta_gn
 
+    def linear_least_squares(self):
+        # Weighted linear least squares
+        # Results are identical to the gauss newton step - not extensively tested though
+        # q2 = H @ xnn <- crystallography equation
+        # b  = a @ x   <- np.linalg.lstsq equation
+        xnn = np.zeros((self.n_entries, self.uc_length))
+        for index in range(self.n_entries):
+            xnn[index], residuals, rank, s = np.linalg.lstsq(
+                self.hkl2[index] / self.sigma[index, :, np.newaxis],
+                self.q2_obs[index] / self.sigma[index],
+                rcond=None
+                )
+        return xnn
+
     def _get_hessian_inverse(self, xnn):
         # q2_pred:       n_entries, n_points
         # dq2_pred_dxnn: n_entries, n_points, xnn_length

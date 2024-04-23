@@ -8,10 +8,6 @@ import os
 import pandas as pd
 
 from EntryHelpers import save_identifiers
-from Reindexing import get_permutation
-from Reindexing import get_permuter
-from Reindexing import permute_monoclinic
-from Reindexing import hexagonal_to_rhombohedral_hkl
 from Utilities import Q2Calculator
 from Utilities import get_fwhm_and_overlap_threshold
 
@@ -44,6 +40,7 @@ class EntryGenerator:
             'reindexed_spacegroup_symbol_hm': 'string',
             'reindexed_unit_cell': 'float64',
             'reindexed_volume': 'float64',
+            'hkl_reindexer': 'float64',
             'permutation': 'string',
             'split': 'int8',
             'reduced_unit_cell': 'float64',
@@ -67,6 +64,7 @@ class EntryGenerator:
             'reindexed_unit_cell',
             'reindexed_volume',
             'permutation',
+            'hkl_reindexer',
             'split',
             'reduced_unit_cell',
             'reduced_volume',
@@ -116,7 +114,7 @@ class EntryGenerator:
         else:
             return np.ones(peaks.size, dtype=bool)
 
-    def get_pattern(self, crystal, unit_cell, reindexed_unit_cell, lattice_system):
+    def get_pattern(self, crystal, unit_cell, reindexed_unit_cell, hkl_reindexer, lattice_system):
         def reset_peaks(peaks, hkl_order, indices, axes):
             n = np.count_nonzero(indices)
             peaks[:n, :, axes] = peaks[indices, :, axes]
@@ -180,13 +178,6 @@ class EntryGenerator:
         hkl_order[:indices.size, :, 5] = hkl_order[indices, :, 0]
         hkl_order[indices.size:, :, 5] = 0
 
-        if lattice_system == 'orthorhombic':
-            _, permuter = get_permutation(unit_cell)
-        elif lattice_system == 'monoclinic':
-            # monoclinic needs to additionally make the unit cell angle obtuse
-            permutation, _ = get_permutation(unit_cell)
-            _, permutation = permute_monoclinic(unit_cell, permutation, radians=False)
-            permuter = get_permuter(permutation)
         peaks_df = {}
 
         # I get a "destination is read-only" error without creating new arrays for the unit cell
@@ -198,9 +189,8 @@ class EntryGenerator:
         reindexed_unit_cell_[3:] = np.pi/180 * reindexed_unit_cell[3:]
         for index, tag in enumerate(self.peak_removal_tags):
             hkl = hkl_order[:, :3, index]
+            reindexed_hkl = np.matmul(hkl, hkl_reindexer).round(decimals=0).astype(int)
             if lattice_system in ['monoclinic', 'orthorhombic']:
-                reindexed_hkl = np.matmul(hkl, permuter).round(decimals=0).astype(int)
-
                 q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl, tensorflow=False)
                 q2 = q2_calculator.get_q2(unit_cell_[np.newaxis])
                 reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
@@ -213,8 +203,6 @@ class EntryGenerator:
                     print()
             elif lattice_system == 'rhombohedral':
                 if np.all(unit_cell_[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
-                    reindexed_hkl = hexagonal_to_rhombohedral_hkl(hkl)
-
                     check_indices = np.invert(np.all(hkl == -100, axis=1))
                     q2_calculator = Q2Calculator(lattice_system='hexagonal', hkl=hkl[check_indices], tensorflow=False)
                     q2 = q2_calculator.get_q2(unit_cell_[[0, 2]][np.newaxis])
@@ -315,6 +303,7 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
                 crystal,
                 data_iteration[0]['unit_cell'],
                 data_iteration[0]['reindexed_unit_cell'],
+                np.array(data_iteration[0]['hkl_reindexer']).reshape([3, 3]),
                 data_iteration[0]['lattice_system'],
                 )
             data_iteration[0] = fill_data_iteration(
@@ -351,6 +340,7 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
                 crystal,
                 data_extra['unit_cell'],
                 data_extra['reindexed_unit_cell'],
+                np.array(data_extra['hkl_reindexer']).reshape([3, 3]),
                 data_extra['lattice_system'],
                 )
             data_extra = fill_data_iteration(
@@ -369,7 +359,7 @@ if __name__ == '__main__':
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    entries_per_group = 10000
+    entries_per_group = 30000
     bad_identifiers_csd = []
     bad_identifiers_cod = []
     csd_entry_reader = EntryReader('CSD')
@@ -471,6 +461,7 @@ if __name__ == '__main__':
                         crystal,
                         data_iteration_rank['unit_cell'],
                         data_iteration_rank['reindexed_unit_cell'],
+                        np.array(data_iteration_rank['hkl_reindexer']).reshape([3, 3]),
                         data_iteration_rank['lattice_system']
                         )
                     data_iteration_rank = fill_data_iteration(

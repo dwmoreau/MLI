@@ -7,7 +7,6 @@ import scipy.optimize
 from sklearn.decomposition import PCA
 from sklearn.metrics import ConfusionMatrixDisplay
 
-from Reindexing import unpermute_monoclinic_full_unit_cell
 from Utilities import Q2Calculator
 from Utilities import get_fwhm_and_overlap_threshold
 
@@ -227,85 +226,18 @@ class Augmentor:
         perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
         augmented_entry['reindexed_unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
         augmented_entry['reindexed_unit_cell'] = perturbed_reindexed_unit_cell
-        if self.lattice_system == 'monoclinic':
-            # The perturbed unit cell is based on 'reindexed_unit_cell'
-            # The 'reindexed_unit_cell' has alpha = gamma = np.nan as a convenience, even though the true reindexed
-            # monoclinic angle might be alpha or gamma.
-            # Perturbation does not change the monoclinic angle.
-            # 'unit_cell' requires no nan's and always has the monoclinic angle at beta
-
-            # This sets up a perturbed_reindexed_unit_cell with the monoclinic angle at the correct location
-            perturbed_reindexed_unit_cell_ = np.zeros(6)
-            perturbed_reindexed_unit_cell_[:3] = perturbed_reindexed_unit_cell[:3]
-            perturbed_reindexed_unit_cell_[3:] = np.pi/2
-            perturbed_reindexed_unit_cell_[augmented_entry['reindexed_angle_index']] = perturbed_reindexed_unit_cell[4]
-            # This unreindexes the perturbed_reindexed_unit_cell
-            # Conversion to radians happens before augmentation
-            perturbed_unit_cell = unpermute_monoclinic_full_unit_cell(
-                perturbed_reindexed_unit_cell_, augmented_entry['permutation'], radians=True
-                )
-            perturbed_unit_cell_scaled = np.zeros(6)
-            perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
-
-            augmented_entry['unit_cell_scaled'] = perturbed_unit_cell_scaled
-            augmented_entry['unit_cell'] = perturbed_unit_cell
-            if np.all(perturbed_unit_cell[3:] == np.pi/2):
-                print('FAILED')
-                print(permutation)
-                print(perturbed_reindexed_unit_cell)
-                print(perturbed_reindexed_unit_cell_)
-                print(perturbed_unit_cell)
-                print()
-        elif self.lattice_system == 'orthorhombic':
-            order = np.concatenate((
-                np.argsort(np.array(augmented_entry['unit_cell_scaled'])[:3]), [3, 4, 5]
-                ))
-            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled[order]
-            augmented_entry['unit_cell'] =  perturbed_reindexed_unit_cell[order]
-        elif self.lattice_system == 'triclinic':
-            assert False
-        elif self.lattice_system in ['cubic', 'tetragonal']:
-            ##!! THIS IS WRONG. CHECK TO MAKE SURE THE ENTIRE UNIT CELL IS CORRECT
-            ##!! NOT JUST THE Y_INDICES FOR THE LATTICE SYSTEM
-            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
-            augmented_entry['unit_cell'] = perturbed_reindexed_unit_cell
-        elif self.lattice_system == 'hexagonal':
-            perturbed_reindexed_unit_cell_scaled[1] = perturbed_reindexed_unit_cell_scaled[0]
-            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
-            augmented_entry['unit_cell'] = perturbed_reindexed_unit_cell
-        elif self.lattice_system == 'rhombohedral':
-            perturbed_reindexed_unit_cell_scaled[1] = perturbed_reindexed_unit_cell_scaled[0]
-            perturbed_reindexed_unit_cell_scaled[2] = perturbed_reindexed_unit_cell_scaled[0]
-            perturbed_reindexed_unit_cell_scaled[4] = perturbed_reindexed_unit_cell_scaled[3]
-            perturbed_reindexed_unit_cell_scaled[5] = perturbed_reindexed_unit_cell_scaled[3]
-            perturbed_reindexed_unit_cell[1] = perturbed_reindexed_unit_cell[0]
-            perturbed_reindexed_unit_cell[2] = perturbed_reindexed_unit_cell[0]
-            perturbed_reindexed_unit_cell[4] = perturbed_reindexed_unit_cell[3]
-            perturbed_reindexed_unit_cell[5] = perturbed_reindexed_unit_cell[3]
-            augmented_entry['unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
-            augmented_entry['unit_cell'] = perturbed_reindexed_unit_cell
-        else:
-            assert False
 
         # calculate new d-spacings
-        hkl_sa = np.stack(augmented_entry['hkl_sa']).round(decimals=0).astype(int)
         reindexed_hkl_sa = np.stack(augmented_entry['reindexed_hkl_sa']).round(decimals=0).astype(int)
-        if self.lattice_system == 'monoclinic':
-            q2_calculator = Q2Calculator(self.lattice_system, hkl_sa, tensorflow=False)
-            q2_sa = q2_calculator.get_q2(np.array(augmented_entry['unit_cell'])[self.y_indices][np.newaxis, :])[0]
-            existing_peaks = np.any(hkl_sa != 0, axis=1)
-        else:
-            q2_calculator = Q2Calculator(self.lattice_system, reindexed_hkl_sa, tensorflow=False)
-            q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[self.y_indices][np.newaxis, :])[0]
-            existing_peaks = np.any(reindexed_hkl_sa != 0, axis=1)
+
+        q2_calculator = Q2Calculator(self.lattice_system, reindexed_hkl_sa, tensorflow=False)
+        q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[self.y_indices][np.newaxis, :])[0]
+        existing_peaks = np.any(reindexed_hkl_sa != 0, axis=1)
 
         q2_sa = q2_sa[existing_peaks]
-        hkl_sa = hkl_sa[existing_peaks]
         reindexed_hkl_sa = reindexed_hkl_sa[existing_peaks]
         order = np.argsort(q2_sa)
         q2_sa = q2_sa[order]
-        hkl_sa = hkl_sa[order]
         reindexed_hkl_sa = reindexed_hkl_sa[order]
 
         augmented_entry['d_spacing_sa'] = 1 / np.sqrt(q2_sa)
@@ -326,7 +258,6 @@ class Augmentor:
         if first_peak_index >= q2_sa.size:
             return None
         q2 = [q2_sa[first_peak_index]]
-        hkl = [hkl_sa[first_peak_index]]
         reindexed_hkl = [reindexed_hkl_sa[first_peak_index]]
 
         previous_kept_index = first_peak_index
@@ -377,7 +308,6 @@ class Augmentor:
                             keep_next = True
                 if keep:
                     q2.append(q2_sa[index])
-                    hkl.append(hkl_sa[index])
                     reindexed_hkl.append(reindexed_hkl_sa[index])
                     previous_kept_index = index
 
@@ -387,11 +317,9 @@ class Augmentor:
             sort_indices = np.argsort(q2)
             q2 = q2[sort_indices][:self.n_points]
 
-            hkl = np.array(hkl, dtype=int)[sort_indices][:self.n_points]
             reindexed_hkl = np.array(reindexed_hkl, dtype=int)[sort_indices][:self.n_points]
             augmented_entry[f'q2_{self.points_tag}'] = q2
             augmented_entry[f'd_spacing_{self.points_tag}'] = 1 / np.sqrt(q2)
-            augmented_entry['hkl'] = hkl
             augmented_entry['reindexed_hkl'] = reindexed_hkl
             return augmented_entry
         else:
@@ -419,11 +347,21 @@ class Augmentor:
             if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
                 return True
 
-    def _permute_perturbed_unit_cell(self, perturbed_unit_cell_scaled):
-        if self.lattice_system in ['monoclinic', 'triclinic']:
-            perturbed_unit_cell_scaled[:3] = np.sort(perturbed_unit_cell_scaled[:3])
+    def _permute_perturbed_unit_cell(self, perturbed_unit_cell_scaled, unit_cell_scaled):
+        if self.lattice_system == 'monoclinic':
+            initial_order = np.argsort(unit_cell_scaled[:3])
+            initial_inverse_sort = np.argsort(initial_order)
+            current_sort = np.argsort(perturbed_unit_cell_scaled[:3])
+            perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[:3][current_sort][initial_inverse_sort]
+            current_order = np.argsort(perturbed_unit_cell_scaled[:3])
+            if np.any(initial_order != current_order):
+                print(unit_cell_scaled)
+                print(perturbed_unit_cell_scaled)
+                print()
         elif self.lattice_system == 'orthorhombic':
             perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
+        elif self.lattice_system == 'triclinic':
+            assert False
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_std(self, unit_cell_scaled):
@@ -438,7 +376,9 @@ class Augmentor:
             i += 1
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
-        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
+        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
+            perturbed_unit_cell_scaled, unit_cell_scaled
+            )
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_cov(self, unit_cell_scaled):
@@ -452,7 +392,9 @@ class Augmentor:
                 )[0]
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
-        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
+        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
+            perturbed_unit_cell_scaled, unit_cell_scaled
+            )
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_pca(self, unit_cell_scaled):
@@ -469,5 +411,7 @@ class Augmentor:
                 )[0, :]
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
-        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(perturbed_unit_cell_scaled)
+        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
+            perturbed_unit_cell_scaled, unit_cell_scaled
+            )
         return perturbed_unit_cell_scaled

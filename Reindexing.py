@@ -1,11 +1,5 @@
+import copy
 import numpy as np
-
-
-def reindex_entry(lattice_system, unit_cell, spacegroup_symbol, spacegroup_number):
-    if lattice_system == 'orthorhombic':
-        return reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number)
-    elif lattice_system == 'monoclinic':
-        return reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number)
 
 
 def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell, radians):
@@ -24,7 +18,13 @@ def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell, radians):
         alpha,
         alpha,
         ])
-    return rhombohedral_unit_cell
+
+    hkl_reindexer = 1/3 * np.array([
+        [-1, 2, -1],
+        [1, 1, -2],
+        [1, 1, 1],
+        ])
+    return rhombohedral_unit_cell, hkl_reindexer
 
 
 def hexagonal_to_rhombohedral_hkl(hkl_hexagonal):
@@ -198,486 +198,8 @@ def reindex_entry_orthorhombic(unit_cell, spacegroup_symbol, spacegroup_number):
     permuted_spacegroup_symbol = map_spacegroup_symbol(
         spacegroup_map_table, spacegroup_number, spacegroup_symbol, permutation
         )
-    return permuted_spacegroup_symbol, permutation, permuted_unit_cell
+    return permuted_spacegroup_symbol, permutation, permuted_unit_cell, permuter
 
-
-def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, spacegroup_number):
-    permutation, permuter = get_permutation(unit_cell)
-    permuted_unit_cell, permutation = permute_monoclinic(unit_cell, permutation, radians=False)
-    #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
-    spacegroup_map_table = {
-        '3i': ['P 1 2 1', 'P 1 1 2', 'P 2 1 1', 'P 2 1 1', 'P 1 1 2', 'P 1 2 1'],
-        '3ii': ['B 1 2 1', 'C 1 1 2', 'A 2 1 1', 'A 2 1 1', 'C 1 1 2', 'B 1 2 1'],
-        '4i': ['P 1 21 1', 'P 1 1 21', 'P 21 1 1', 'P 21 1 1', 'P 1 1 21', 'P 1 21 1'],
-        '4ii': ['B 1 21 1', 'C 1 1 21', 'A 21 1 1', 'A 21 1 1', 'C 1 1 21', 'B 1 21 1'],
-        '5i': ['C 1 2 1', 'A 1 1 2', 'B 2 1 1', 'B 2 1 1', 'A 1 1 2', 'C 1 2 1'],
-        '5ii': ['A 1 2 1', 'B 1 1 2', 'C 2 1 1', 'C 2 1 1', 'B 1 1 2', 'A 1 2 1'],
-        '5iii': ['I 1 2 1', 'I 1 1 2', 'I 2 1 1', 'I 2 1 1', 'I 1 1 2', 'I 1 2 1'],
-        '5iv': ['F 1 2 1', 'F 1 1 2', 'F 2 1 1', 'F 2 1 1', 'F 1 1 2', 'F 1 2 1'],
-        '6i': ['P 1 m 1', 'P 1 1 m', 'P m 1 1', 'P m 1 1', 'P 1 1 m', 'P 1 m 1'],
-        '6ii': ['B 1 m 1', 'C 1 1 m', 'A m 1 1', 'A m 1 1', 'C 1 1 m', 'B 1 m 1'],
-        '7i': ['P 1 c 1', 'P 1 1 a', 'P b 1 1', 'P b 1 1', 'P 1 1 a', 'P 1 c 1'],
-        '7ii': ['P 1 a 1', 'P 1 1 b', 'P c 1 1', 'P c 1 1', 'P 1 1 b', 'P 1 a 1'],
-        '7iii': ['P 1 n 1', 'P 1 1 n', 'P n 1 1', 'P n 1 1', 'P 1 1 n', 'P 1 n 1'],
-        '7iv': ['B 1 a 1', 'C 1 1 a', 'A b 1 1', 'A b 1 1', 'C 1 1 a', 'B 1 a 1'],
-        '7v': ['B 1 d 1', 'C 1 1 d', 'A d 1 1', 'A d 1 1', 'C 1 1 d', 'B 1 d 1'],
-        '8i': ['C 1 m 1', 'A 1 1 m', 'B m 1 1', 'B m 1 1', 'A 1 1 m', 'C 1 m 1'],
-        '8ii': ['A 1 m 1', 'B 1 1 m', 'C m 1 1', 'C m 1 1', 'B 1 1 m', 'A 1 m 1'],
-        '8iii': ['I 1 m 1', 'I 1 1 m', 'I m 1 1', 'I m 1 1', 'I 1 1 m', 'I 1 m 1'],
-        '8iv': ['F 1 m 1', 'F 1 1 m', 'F m 1 1', 'F m 1 1', 'F 1 1 m', 'F 1 m 1'],
-        '9i': ['C 1 c 1', 'A 1 1 a', 'B b 1 1', 'B b 1 1', 'A 1 1 a', 'C 1 c 1'],
-        '9ii': ['A 1 a 1', 'B 1 1 b', 'C c 1 1', 'C c 1 1', 'B 1 1 b', 'A 1 a 1'],
-        '9iii': ['I 1 a 1', 'I 1 1 a', 'I b 1 1', 'I b 1 1', 'I 1 1 a', 'I 1 a 1'],
-        '9iv': ['F 1 d 1', 'F 1 1 d', 'F d 1 1', 'F d 1 1', 'F 1 1 d', 'F 1 d 1'],
-        '10i': ['P 1 2/m 1', 'P 1 1 2/m', 'P 2/m 1 1', 'P 2/m 1 1', 'P 1 1 2/m', 'P 1 2/m 1'],
-        '10ii': ['B 1 2/m 1', 'C 1 1 2/m', 'A 2/m 1 1', 'A 2/m 1 1', 'C 1 1 2/m', 'B 1 2/m 1'],
-        '11i': ['P 1 21/m 1', 'P 1 1 21/m', 'P 21/m 1 1', 'P 21/m 1 1', 'P 1 1 21/m', 'P 1 21/m 1'],
-        '11ii': ['B 1 21/m 1', 'C 1 1 21/m', 'A 21/m 1 1', 'A 21/m 1 1', 'C 1 1 21/m', 'B 1 21/m 1'],
-        '12i': ['C 1 2/m 1', 'A 1 1 2/m', 'B 2/m 1 1', 'B 2/m 1 1', 'A 1 1 2/m', 'C 1 2/m 1'],
-        '12ii': ['A 1 2/m 1', 'B 1 1 2/m', 'C 2/m 1 1', 'C 2/m 1 1', 'B 1 1 2/m', 'A 1 2/m 1'],
-        '12iii': ['I 1 2/m 1', 'I 1 1 2/m', 'I 2/m 1 1', 'I 2/m 1 1', 'I 1 1 2/m', 'I 1 2/m 1'],
-        '12iv': ['F 1 2/m 1', 'F 1 1 2/m', 'F 2/m 1 1', 'F 2/m 1 1', 'F 1 1 2/m', 'F 1 2/m 1'],
-        '13i': ['P 1 2/c 1', 'P 1 1 2/a', 'P 2/b 1 1', 'P 2/b 1 1', 'P 1 1 2/a', 'P 1 2/c 1'],
-        '13ii': ['P 1 2/a 1', 'P 1 1 2/b', 'P 2/c 1 1', 'P 2/c 1 1', 'P 1 1 2/b', 'P 1 2/a 1'],
-        '13iii': ['P 1 2/n 1', 'P 1 1 2/n', 'P 2/n 1 1', 'P 2/n 1 1', 'P 1 1 2/n', 'P 1 2/n 1'],
-        '13iv': ['B 1 2/a 1', 'C 1 1 2/a', 'A 2/b 1 1', 'A 2/b 1 1', 'C 1 1 2/a', 'B 1 2/a 1'],
-        '13v': ['B 1 2/d 1', 'C 1 1 2/d', 'A 2/d 1 1', 'A 2/d 1 1', 'C 1 1 2/d', 'B 1 2/d 1'],
-        '14i': ['P 1 21/c 1', 'P 1 1 21/a', 'P 21/b 1 1', 'P 21/b 1 1', 'P 1 1 21/a', 'P 1 21/c 1'],
-        '14ii': ['P 1 21/a 1', 'P 1 1 21/b', 'P 21/c 1 1', 'P 21/c 1 1', 'P 1 1 21/b', 'P 1 21/a 1'],
-        '14iii': ['P 1 21/n 1', 'P 1 1 21/n', 'P 21/n 1 1', 'P 21/n 1 1', 'P 1 1 21/n', 'P 1 21/n 1'],
-        '14iv': ['B 1 21/a 1', 'C 1 1 21/a', 'A 21/b 1 1', 'A 21/b 1 1', 'C 1 1 21/a', 'B 1 21/a 1'],
-        '14v': ['B 1 21/d 1', 'C 1 1 21/d', 'A 21/d 1 1', 'A 21/d 1 1', 'C 1 1 21/d', 'B 1 21/d 1'],
-        '15i': ['C 1 2/c 1', 'A 1 1 2/a', 'B 2/b 1 1', 'B 2/b 1 1', 'A 1 1 2/a', 'C 1 2/c 1'],
-        '15ii': ['A 1 2/a 1', 'B 1 1 2/b', 'C 2/c 1 1', 'C 2/c 1 1', 'B 1 1 2/b', 'A 1 2/a 1'],
-        '15iii': ['I 1 2/a 1', 'I 1 1 2/a', 'I 2/b 1 1', 'I 2/b 1 1', 'I 1 1 2/a', 'I 1 2/a 1'],
-        '15iv': ['F 1 2/d 1', 'F 1 1 2/d', 'F 2/d 1 1', 'F 2/d 1 1', 'F 1 1 2/d', 'F 1 2/d 1'],
-        }
-    #           'abc'       'acb',     'bac'       'bca'    'cab',       'cba'
-    for key in spacegroup_map_table.keys():
-        if key.startswith(str(spacegroup_number)):
-            if spacegroup_symbol in spacegroup_map_table[key]:
-                map_table_key = key
-
-    permuted_spacegroup_symbol = map_spacegroup_symbol(
-        spacegroup_map_table, map_table_key, spacegroup_symbol, permutation
-        )
-    return permuted_spacegroup_symbol, permutation, permuted_unit_cell
-
-
-def permute_monoclinic(unit_cell, permutation, radians):
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    permuted_unit_cell = np.zeros(6)
-    if permutation == 'abc':
-        # without a copy here, if the angle is acute, permuted unit cell angle changes,
-        # and so does unit cell angle
-        permuted_unit_cell = unit_cell.copy()
-        angle_index = 4
-    elif permutation == 'acb':
-        permuted_unit_cell = np.array([
-            unit_cell[0],
-            unit_cell[2],
-            unit_cell[1],
-            check,
-            check,
-            unit_cell[4],
-            ])
-        angle_index = 5
-    elif permutation == 'bac':
-        permuted_unit_cell = np.array([
-            unit_cell[1],
-            unit_cell[0],
-            unit_cell[2],
-            2*check - unit_cell[4],
-            check,
-            check,
-            ])
-        angle_index = 3
-    elif permutation == 'bca':
-        permuted_unit_cell = np.array([
-            unit_cell[1],
-            unit_cell[2],
-            unit_cell[0],
-            unit_cell[4],
-            check,
-            check,
-            ])
-        angle_index = 3
-    elif permutation == 'cab':
-        permuted_unit_cell = np.array([
-            unit_cell[2],
-            unit_cell[0],
-            unit_cell[1],
-            check,
-            check,
-            2*check - unit_cell[4],
-            ])
-        angle_index = 5
-    elif permutation == 'cba':
-        permuted_unit_cell = np.array([
-            unit_cell[2],
-            unit_cell[1],
-            unit_cell[0],
-            check,
-            2*check - unit_cell[4],
-            check,
-            ])
-        angle_index = 4
-    # Any monoclinic unit cell can be represented with a obtuse or acute angle.
-    # I am choosing to use the obtuse representation, this is consistent with most of the
-    # entries in the ccdc.
-    if permuted_unit_cell[angle_index] < check:
-        # If acute, add a '<' (less than) sign to the permutation and make the angle obtuse.
-        permutation += '<'
-        permuted_unit_cell[angle_index] = 2*check - permuted_unit_cell[angle_index]
-    else:
-        permutation += '>'
-    return permuted_unit_cell, permutation
-
-
-def unpermute_monoclinic_full_unit_cell(permuted_unit_cell, permutation, radians):
-    """
-    the 'permutation' variable is the permutation that resulted in this unit cell
-    The correct unpermurtation should give a unit cell angle of pi - angle in half of these
-    cases. When the initial reindexing is performed, the angles are made obtuse and
-    an additional operation is performed on the Miller indices.
-
-    In otherwords, this should only be used to convert predicted unit cells in the reindexed
-    representation to the original representation.
-    """
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    unit_cell = np.zeros(6)
-    if permutation in ['abc<', 'abc>']:
-        unit_cell = permuted_unit_cell.copy()
-    elif permutation in ['acb<', 'acb>']:
-        unit_cell = np.array([
-            permuted_unit_cell[0],
-            permuted_unit_cell[2],
-            permuted_unit_cell[1],
-            check,
-            permuted_unit_cell[5],
-            check,
-            ])
-    elif permutation in ['bac<', 'bac>']:
-        unit_cell = np.array([
-            permuted_unit_cell[1],
-            permuted_unit_cell[0],
-            permuted_unit_cell[2],
-            check,
-            permuted_unit_cell[3],
-            check,
-            ])
-    elif permutation in ['bca<', 'bca>']:
-        unit_cell = np.array([
-            permuted_unit_cell[2],
-            permuted_unit_cell[0],
-            permuted_unit_cell[1],
-            check,
-            permuted_unit_cell[3],
-            check,
-            ])
-    elif permutation in ['cab<', 'cab>']:
-        unit_cell = np.array([
-            permuted_unit_cell[1],
-            permuted_unit_cell[2],
-            permuted_unit_cell[0],
-            check,
-            permuted_unit_cell[5],
-            check,
-            ])
-    elif permutation in ['cba<', 'cba>']:
-        unit_cell = np.array([
-            permuted_unit_cell[2],
-            permuted_unit_cell[1],
-            permuted_unit_cell[0],
-            check,
-            permuted_unit_cell[4],
-            check,
-            ])
-    else:
-        print('Failed unpermute')
-        print(permutation)
-        print(permuted_unit_cell)
-        assert False
-    return unit_cell
-
-
-def unpermute_monoclinic_partial_unit_cell(permuted_unit_cell, permuted_unit_cell_cov, permutation, radians):
-    """
-    the 'permutation' variable is the permutation that resulted in this unit cell
-
-    this should only be used to convert predicted unit cells in the reindexed
-    representation to the original representation.
-    """
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    if not permuted_unit_cell is None:
-        if permutation in ['abc<', 'abc>']:
-            unit_cell = permuted_unit_cell.copy()
-        elif permutation in ['acb<', 'acb>']:
-            unit_cell = np.array([
-                permuted_unit_cell[0],
-                permuted_unit_cell[2],
-                permuted_unit_cell[1],
-                permuted_unit_cell[3],
-                ])
-        elif permutation in ['bac<', 'bac>']:
-            unit_cell = np.array([
-                permuted_unit_cell[1],
-                permuted_unit_cell[0],
-                permuted_unit_cell[2],
-                permuted_unit_cell[3],
-                ])
-        elif permutation in ['bca<', 'bca>']:
-            unit_cell = np.array([
-                permuted_unit_cell[2],
-                permuted_unit_cell[0],
-                permuted_unit_cell[1],
-                permuted_unit_cell[3],
-                ])
-        elif permutation in ['cab<', 'cab>']:
-            unit_cell = np.array([
-                permuted_unit_cell[1],
-                permuted_unit_cell[2],
-                permuted_unit_cell[0],
-                permuted_unit_cell[3],
-                ])
-        elif permutation in ['cba<', 'cba>']:
-            unit_cell = np.array([
-                permuted_unit_cell[2],
-                permuted_unit_cell[1],
-                permuted_unit_cell[0],
-                permuted_unit_cell[3],
-                ])
-        else:
-            print('Failed unpermute')
-            print(permutation)
-            print(permuted_unit_cell)
-            print()
-
-    if not permuted_unit_cell_cov is None:
-        if permutation in ['abc<', 'abc>']:
-            unit_cell_cov = permuted_unit_cell_cov.copy()
-        elif permutation in ['acb<', 'acb>']:
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation in ['bac<', 'bac>']:
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation in ['bca<', 'bca>']:
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation in ['cab<', 'cab>']:
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation in ['cba<', 'cba>']:
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        else:
-            print('Failed unpermute')
-            print(permutation)
-            print(permuted_unit_cell)
-            print()
-
-    if permuted_unit_cell is None and not permuted_unit_cell_cov is None:
-        return unit_cell_cov
-    elif not permuted_unit_cell is None and permuted_unit_cell_cov is None:
-        return unit_cell
-    elif not permuted_unit_cell is None and not permuted_unit_cell_cov is None:
-        return unit_cell, unit_cell_cov
-
-
-def unpermute_monoclinic_full_unit_cell_old(permuted_unit_cell, permutation, radians):
-    """
-    the 'permutation' variable is the permutation that resulted in this unit cell
-    """
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    unit_cell = np.zeros(6)
-    if permutation == 'abc':
-        unit_cell = permuted_unit_cell.copy()
-    elif permutation == 'acb':
-        unit_cell = np.array([
-            permuted_unit_cell[0],
-            permuted_unit_cell[2],
-            permuted_unit_cell[1],
-            check,
-            permuted_unit_cell[5],
-            check,
-            ])
-    elif permutation == 'bac':
-        unit_cell = np.array([
-            permuted_unit_cell[1],
-            permuted_unit_cell[0],
-            permuted_unit_cell[2],
-            check,
-            2*check - permuted_unit_cell[3],
-            check,
-            ])
-    elif permutation == 'bca':
-        unit_cell = np.array([
-            permuted_unit_cell[2],
-            permuted_unit_cell[0],
-            permuted_unit_cell[1],
-            check,
-            permuted_unit_cell[3],
-            check,
-            ])
-    elif permutation == 'cab':
-        unit_cell = np.array([
-            permuted_unit_cell[1],
-            permuted_unit_cell[2],
-            permuted_unit_cell[0],
-            check,
-            2*check - permuted_unit_cell[5],
-            check,
-            ])
-    elif permutation == 'cba':
-        unit_cell = np.array([
-            permuted_unit_cell[2],
-            permuted_unit_cell[1],
-            permuted_unit_cell[0],
-            check,
-            2*check - permuted_unit_cell[4],
-            check,
-            ])
-    return unit_cell
-
-
-def unpermute_monoclinic_partial_unit_cell_old(permuted_unit_cell, permuted_unit_cell_cov, permutation, radians):
-    """
-    the 'permutation' variable is the permutation that resulted in this unit cell
-    """
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    if not permuted_unit_cell is None:
-        if permutation == 'abc':
-            unit_cell = permuted_unit_cell
-        elif permutation == 'acb':
-            unit_cell = np.array([
-                permuted_unit_cell[0],
-                permuted_unit_cell[2],
-                permuted_unit_cell[1],
-                permuted_unit_cell[3],
-                ])
-        elif permutation == 'bac':
-            unit_cell = np.array([
-                permuted_unit_cell[1],
-                permuted_unit_cell[0],
-                permuted_unit_cell[2],
-                2 * check - permuted_unit_cell[3],
-                ])
-        elif permutation == 'bca':
-            unit_cell = np.array([
-                permuted_unit_cell[2],
-                permuted_unit_cell[0],
-                permuted_unit_cell[1],
-                permuted_unit_cell[3],
-                ])
-        elif permutation == 'cab':
-            unit_cell = np.array([
-                permuted_unit_cell[1],
-                permuted_unit_cell[2],
-                permuted_unit_cell[0],
-                2 * check - permuted_unit_cell[3],
-                ])
-        elif permutation == 'cba':
-            unit_cell = np.array([
-                permuted_unit_cell[2],
-                permuted_unit_cell[1],
-                permuted_unit_cell[0],
-                2 * check - permuted_unit_cell[3],
-                ])
-    if not permuted_unit_cell_cov is None:
-        if permutation == 'abc':
-            unit_cell_cov = permuted_unit_cell_cov
-        elif permutation == 'acb':
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation == 'bac':
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation == 'bca':
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation == 'cab':
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-        elif permutation == 'cba':
-            unit_cell_cov = np.zeros((4, 4))
-            unit_cell_cov[0, 0] = permuted_unit_cell_cov[2, 2]
-            unit_cell_cov[1, 1] = permuted_unit_cell_cov[1, 1]
-            unit_cell_cov[2, 2] = permuted_unit_cell_cov[0, 0]
-            unit_cell_cov[3, 3] = permuted_unit_cell_cov[3, 3]
-
-    if permuted_unit_cell is None and not permuted_unit_cell_cov is None:
-        return unit_cell_cov
-    elif not permuted_unit_cell is None and permuted_unit_cell_cov is None:
-        return unit_cell
-    elif not permuted_unit_cell is None and not permuted_unit_cell_cov is None:
-        return unit_cell, unit_cell_cov
-
-
-def make_monoclinic_obtuse(unit_cell, hkl=None, radians=True):
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    reindexed_unit_cell = np.zeros(6)
-    reindexed_unit_cell[:3] = unit_cell[:3]
-    for index in range(3, 6):
-        if unit_cell[index] != check:
-            reindexed_unit_cell[index] = 2*check - unit_cell[index]
-            if not hkl is None:
-                if index in [3, 5]:
-                    reindexed_hkl = hkl * np.array([-1, 1, -1])[np.newaxis]
-                elif index == 4:
-                    reindexed_hkl = hkl * np.array([-1, -1, 1])[np.newaxis]
-        else:
-            reindexed_unit_cell[index] = check
-    if hkl is None:
-        return reindexed_unit_cell
-    else:
-        return reindexed_unit_cell, reindexed_hkl
-    
 
 def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutation):
     if isinstance(spacegroup_map_table[key], str):
@@ -770,3 +292,136 @@ def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutat
                 new_index = 0
         permuted_spacegroup_symbol = spacegroup_map_table[key][new_index]
     return permuted_spacegroup_symbol
+
+
+def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
+    # Useful resources:
+    #    http://pd.chem.ucl.ac.uk/pdnn/symm4/practice.htm
+    #    https://onlinelibrary.wiley.com/iucr/itc/Ab/ch5o1v0001/sec5o1o3.pdf
+    if radians:
+        check = np.pi/2
+        angle_multiplier = 1
+    else:
+        check = 90
+        angle_multiplier = np.pi/180
+
+    A_centered = ['A 1 2 1', 'A 1 m 1', 'A 1 a 1', 'A 1 2/m 1', 'A 1 2/a 1']
+    B_centered = [
+        'B 1 2 1', 'B 1 21 1', 'B 1 m 1', 'B 1 a 1', 'B 1 d 1', 'B 1 2/m 1',
+        'B 1 21/m 1', 'B 1 2/a 1', 'B 1 2/d 1', 'B 1 21/a 1'
+        ]
+    I_centered = ['I 1 2 1', 'I 1 m 1', 'I 1 a 1', 'I 1 2/m 1', 'I 1 2/a 1']
+    standard_settings = [
+        'P 1 2 1', 'P 1 21 1', 'C 1 2 1', 'P 1 m 1', 'P 1 c 1',
+        'C 1 m 1', 'C 1 c 1', ' P 1 2/m 1', 'P 1 21/m 1', 'C 1 2/m 1',
+        'P 1 2/c 1', 'P 1 21/c 1', 'C 1 2/c 1'
+        ]
+    ac_equivalent = ['P 1 2 1', 'P 1 m 1', 'P 1 2/m 1', 'P 1 21 1', 'P 1 21/m 1']
+    Pa_symbols = ['P 1 a 1', 'P 1 2/a 1', 'P 1 21/a 1']
+    Pn_symbols = ['P 1 n 1', 'P 1 2/n 1', 'P 1 21/n 1']
+
+    reindexed_spacegroup_symbol = copy.copy(spacegroup_symbol)
+
+    a = unit_cell[0]
+    b = unit_cell[1]
+    c = unit_cell[2]
+    beta = angle_multiplier * unit_cell[4]
+    ucm = np.array([
+        [a, 0, c*np.cos(beta)],
+        [0, b, 0],
+        [0, 0, c*np.sin(beta)],
+        ])
+    if spacegroup_symbol in standard_settings:
+        centered_reindexer = np.eye(3)
+    elif spacegroup_symbol in A_centered + Pa_symbols:
+        # A centered settings are converted to C centered
+        # primitive settings with a glide plane along the a axis are convereted to the setting
+        #   with the glide plane along the c axis
+        centered_reindexer = np.array([
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+        if spacegroup_symbol in A_centered:
+            reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('A', 'C')
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('a', 'c')
+    elif spacegroup_symbol in I_centered:
+        # I centered settings are converted to C centered
+        centered_reindexer = np.array([
+            [-1, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('I', 'C')
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('a', 'c')
+    elif spacegroup_symbol in Pn_symbols:
+        # primitive settings with a glide plane along the n axis are convereted to the setting
+        #   with the glide plane along the c axis
+        centered_reindexer = np.array([
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 1],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('n', 'c')
+    elif spacegroup_symbol in ['I 1 2/c 1', 'I 1 c 1']:
+        centered_reindexer = np.array([
+            [1, 0, 0],
+            [0, 1, 0],
+            [-1, 0, 1],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('I', 'C')
+    elif spacegroup_symbol == ['A 1 n 1', 'A 1 2/n 1']:
+        centered_reindexer = np.array([
+            [0, 0, -1],
+            [0, 1, 0],
+            [1, 0, -1],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('A', 'C')
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('n', 'c')
+    elif spacegroup_symbol in ['C 1 n 1', 'C 1 2/n 1']:
+        centered_reindexer = np.array([
+            [-1, 0, 1],
+            [0, -1, 0],
+            [0, 0, 1],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('n', 'c')
+    else:
+        # These cases entries that are reported in
+        # unexpected, nonstandard settings:
+        # And in settings so the b/y axis is not unique:
+        #   'P 1 1 21/n', 'P 1 1 21' 'I 2/b 1 1', 'P 21/c 1 1', 'C 2/m 1 1', 'P 21/m 1 1'
+        return None, None, np.eye(3)
+
+    if spacegroup_symbol in ac_equivalent and a > c:
+        # primitive settings with no symmetry elements along the a or c axis are reindexed so
+        #   a < c
+        ac_reindexer = np.array([
+                [0, 0, 1],
+                [0, 1, 0],
+                [-1, 0, 0],
+                ])
+        centered_reindexer = ac_reindexer @ centered_reindexer
+    
+    rucm = ucm @ centered_reindexer
+    reindexed_unit_cell = np.zeros(6)
+    reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
+    reindexed_unit_cell[1] = np.linalg.norm(rucm[:, 1])
+    reindexed_unit_cell[2] = np.linalg.norm(rucm[:, 2])
+    dot_product = np.dot(rucm[:, 0], rucm[:, 2])
+    mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
+    reindexed_unit_cell[4] = np.arccos(dot_product / mag) / angle_multiplier
+    reindexed_unit_cell[3] = check
+    reindexed_unit_cell[5] = check
+    
+    if reindexed_unit_cell[4] < check:
+        obtuse_reindexer = np.array([
+            [-1, 0, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            ])
+        reindexed_unit_cell[4] = 2*check - reindexed_unit_cell[4]
+        hkl_reindexer = obtuse_reindexer @ centered_reindexer
+    else:
+        hkl_reindexer = centered_reindexer
+        
+    return reindexed_unit_cell, reindexed_spacegroup_symbol, hkl_reindexer

@@ -10,7 +10,6 @@ import scipy.special
 import time
 
 from Indexing import Indexing
-from Reindexing import unpermute_monoclinic_partial_unit_cell
 from TargetFunctions import CandidateOptLoss_xnn
 from Utilities import get_mpi_logger
 from Utilities import get_reciprocal_unit_cell_from_xnn
@@ -94,7 +93,7 @@ class Candidates:
         unit_cell, unit_cell_scaled, unit_cell_pred,
         lattice_system,
         minimum_unit_cell, maximum_unit_cell,
-        tolerance, unit_cell_key
+        tolerance
         ):
         self.q2_obs = np.array(entry['q2'])
         self.q2_obs_scaled = np.array(entry['q2_scaled'])
@@ -120,7 +119,7 @@ class Candidates:
         self.rng = np.random.default_rng()
         self.tolerance = tolerance
 
-        unit_cell_true = np.array(entry[f'{unit_cell_key}unit_cell'])
+        unit_cell_true = np.array(entry['reindexed_unit_cell'])
         reciprocal_unit_cell_true = reciprocal_uc_conversion(unit_cell_true[np.newaxis])[0]
         if lattice_system == 'cubic':
             self.unit_cell_true = unit_cell_true[0][np.newaxis]
@@ -140,11 +139,11 @@ class Candidates:
         elif lattice_system == 'triclinic':
             self.unit_cell_true = unit_cell_true
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true
-        self.hkl_true = np.array(entry[f'{unit_cell_key}hkl'])[:, :, 0]
+        self.hkl_true = np.array(entry['reindexed_hkl'])[:, :, 0]
         self.hkl_labels_true = np.array(entry['hkl_labels'])
         self.bl_true = entry['bravais_lattice']
         self.sg_true = int(entry['spacegroup_number'])
-        self.spacegroup_symbol_hm_true = entry[f'{unit_cell_key}spacegroup_symbol_hm']
+        self.spacegroup_symbol_hm_true = entry['reindexed_spacegroup_symbol_hm']
 
         self.df_columns = [
             'unit_cell',
@@ -626,16 +625,15 @@ class Candidates:
         unit_cell = unit_cell_full[:, [0, 1, 2, 4]]
         self.candidates['unit_cell'] = list(unit_cell)
 
-    def save_candidates(self):
+    def save_candidates(self, save_to, index):
         # This is a diagnostic function.
         # Save the current state and gtfo
-        np.save('mono_uc_true.npy', self.unit_cell_true)
-        np.save('mono_q2_obs.npy', self.q2_obs)
-        np.save('mono_xnn.npy', np.stack(self.candidates['xnn']))
-        np.save('mono_hkl.npy', np.stack(self.candidates['hkl']))
-        np.save('mono_softmax.npy', np.stack(self.candidates['softmax']))
-        np.save('mono_unit_cell.npy', np.stack(self.candidates['unit_cell']))
-        assert False
+        np.save(f'{save_to}/uc_true_{index:03d}.npy', self.unit_cell_true)
+        np.save(f'{save_to}/q2_obs_{index:03d}.npy', self.q2_obs)
+        np.save(f'{save_to}/xnn_{index:03d}.npy', np.stack(self.candidates['xnn']))
+        np.save(f'{save_to}/hkl_{index:03d}.npy', np.stack(self.candidates['hkl']))
+        np.save(f'{save_to}/softmax_{index:03d}.npy', np.stack(self.candidates['softmax']))
+        np.save(f'{save_to}/unit_cell_{index:03d}.npy', np.stack(self.candidates['unit_cell']))
 
 
 class Optimizer:
@@ -718,11 +716,6 @@ class Optimizer:
 
         self.logger = get_mpi_logger(self.rank, self.save_to, self.opt_params['tag'])
 
-        if self.indexer.data_params['lattice_system'] in ['monoclinic', 'cubic']:
-            self.unit_cell_key = ''
-        elif self.indexer.data_params['lattice_system'] in ['tetragonal', 'orthorhombic', 'hexagonal', 'rhombohedral']:
-            self.unit_cell_key = 'reindexed_'
-
         self.n_groups = len(self.indexer.data_params['split_groups'])
         if self.opt_params['assignment_batch_size'] == 'max':
             n_candidates = self.n_groups * (self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf'])
@@ -779,31 +772,6 @@ class Optimizer:
                 uc_mean_scaled_group, uc_cov_scaled_group = self.indexer.unit_cell_generator[group].do_predictions(
                     data=self.indexer.data, verbose=0, batch_size=2048
                     )
-                if self.indexer.data_params['lattice_system'] == 'monoclinic':
-                    monoclinic_angle = self.reg_params[group]['monoclinic_angle']
-                    # Monoclinic predictions are performed in a 'reindexed' setting where axes lengths are a < b < c,
-                    # and the monoclinic angle is not necessarily beta. Optimization is performed in the standard
-                    # setting where beta is the monoclinic angle.
-                    # 'permutation' is the permutation of the axes needed to go from the standard monoclinic angle
-                    # at beta to the given monoclinic angle. This is the expectation of the unpermute function.
-                    if monoclinic_angle == 'alpha':
-                        permutation = 'bca>'
-                    elif monoclinic_angle == 'beta':
-                        permutation = 'abc>'
-                    elif monoclinic_angle == 'gamma':
-                        permutation = 'acb>'
-                    if monoclinic_angle in ['alpha', 'gamma']:
-                        uc_mean_group, uc_cov_group = self.indexer.revert_predictions(
-                            uc_pred_scaled=uc_mean_scaled_group, uc_pred_scaled_cov=uc_cov_scaled_group
-                            )
-                        # The unpermute function needs unscaled unit cells
-                        for entry_index in range(len(self.indexer.data)):
-                            uc_mean_group[entry_index], uc_cov_group[entry_index] = unpermute_monoclinic_partial_unit_cell(
-                                uc_mean_group[entry_index], uc_cov_group[entry_index], permutation, radians=True
-                                )
-                        uc_mean_scaled_group, uc_cov_scaled_group = self.indexer.scale_predictions(
-                            uc_pred=uc_mean_group, uc_pred_cov=uc_cov_group
-                            )
                 self.uc_scaled_mean[:, group_index, :] = uc_mean_scaled_group
                 self.uc_scaled_cov[:, group_index, :, :] = uc_cov_scaled_group
 
@@ -837,7 +805,7 @@ class Optimizer:
 
     def run(self):
         uc_true = np.stack(
-            self.indexer.data[f'{self.unit_cell_key}unit_cell']
+            self.indexer.data['reindexed_unit_cell']
             )[:, self.indexer.data_params['y_indices']]
 
         # self.uc_scaled_mean: n_entries, n_groups, unit_cell_length
@@ -869,7 +837,7 @@ class Optimizer:
             'impossible',
             'found',
             ])
-        for entry_index in range(1, self.N):
+        for entry_index in range(self.N):
             start = time.time()
             current_percentage = entry_index / self.N
             if current_percentage > percentage + 0.01:
@@ -882,7 +850,8 @@ class Optimizer:
                 uc_pred[entry_index],
                 self.indexer.data.iloc[entry_index],
                 )
-            candidates, diagnostic_df_entry = self.optimize_entry(candidates)
+            candidates, diagnostic_df_entry = self.optimize_entry(candidates, entry_index)
+            #candidates.save_candidates(self.save_to, entry_index)
             uc_best_opt[entry_index], report_counts, found = candidates.get_best_candidates(report_counts)
             diagnostic_df_entry['found'] = found
             diagnostic_df_entry['entry_index'] = entry_index
@@ -891,7 +860,7 @@ class Optimizer:
             print(report_counts)
             end = time.time()
             print(end - start)
-        self.indexer.data[f'{self.unit_cell_key}unit_cell_best_opt'] = list(uc_best_opt)
+        self.indexer.data['reindexed_unit_cell_best_opt'] = list(uc_best_opt)
 
     def generate_unit_cells(self, uc_scaled_mean, uc_scaled_cov):
         if self.indexer.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
@@ -1055,28 +1024,6 @@ class Optimizer:
                 replace=False
                 )
             candidates_uc_scaled_tree = candidates_scaled_tree[0, :, tree_indices]
-            if self.indexer.data_params['lattice_system'] == 'monoclinic':
-                # This only needs to be performed for the tree predictions.
-                # The NN predictions were unpermuted in self.distribute_data.
-                monoclinic_angle = self.reg_params[group]['monoclinic_angle']
-                if monoclinic_angle == 'alpha':
-                    permutation = 'bca>'
-                elif monoclinic_angle == 'beta':
-                    permutation = 'abc>'
-                elif monoclinic_angle == 'gamma':
-                    permutation = 'acb>'
-                if monoclinic_angle in ['alpha', 'gamma']:
-                    # The unpermute function needs unscaled unit cells
-                    candidates_uc_tree = self.indexer.revert_predictions(
-                        uc_pred_scaled=candidates_uc_scaled_tree
-                        )
-                    for candidate_index in range(candidates_uc_tree.shape[0]):
-                        candidates_uc_tree[candidate_index] = unpermute_monoclinic_partial_unit_cell(
-                            candidates_uc_tree[candidate_index], None, permutation, radians=True
-                            )
-                    candidates_uc_scaled_tree = self.indexer.scale_predictions(
-                        uc_pred=candidates_uc_tree
-                        )
             candidate_uc_scaled[start + self.opt_params['n_candidates_nn']: stop, :] = \
                 candidates_uc_scaled_tree
 
@@ -1089,7 +1036,6 @@ class Optimizer:
             minimum_unit_cell=self.opt_params['minimum_uc'],
             maximum_unit_cell=self.opt_params['maximum_uc'],
             tolerance=self.opt_params['found_tolerance'],
-            unit_cell_key=self.unit_cell_key,
             )
 
         if self.opt_params['iteration_info'][0]['assigner_key'] == 'closest':
@@ -1097,7 +1043,7 @@ class Optimizer:
         else:
             candidates = self.assign_hkls(
                 candidates,
-                self.opt_params['iteration_info'][0]['assigner_key'],
+                'initial',
                 'best'
                 )
 
@@ -1115,11 +1061,12 @@ class Optimizer:
         candidates.update()
         return candidates
 
-    def optimize_entry(self, candidates):
+    def optimize_entry(self, candidates, entry_index):
         diagnostic_df_entry = candidates.diagnostics(self.indexer.data_params['hkl_ref_length'])
         acceptance_fraction = []
         for iteration_info in self.opt_params['iteration_info']:
             if iteration_info['worker'] == 'monoclinic_reset':
+                candidates.save_candidates(self.save_to, entry_index)
                 candidates = self.monoclinic_reset(candidates, iteration_info)
                 print_list = [
                     f'{candidates.n},',
@@ -1154,8 +1101,6 @@ class Optimizer:
                         next_xnn = self.no_subsampling(candidates, iteration_info)
                     elif iteration_info['worker'] == 'perturb_xnn':
                         next_xnn = self.perturb_xnn(candidates, iteration_info)
-                    elif iteration_info['worker'] == 'perturb_monoclinic_angle':
-                        next_xnn = self.perturb_monoclinic_angle(candidates, iteration_info)
                     else:
                         assert False
                     candidates, acceptance_fraction = self.update_candidates(
@@ -1178,7 +1123,7 @@ class Optimizer:
                         f'{iteration_info["assigner_key"]}',
                         ]
                     print(' '.join(print_list))
-        #candidates.save_candidates()
+        
         print(np.mean(acceptance_fraction))
         return candidates, diagnostic_df_entry
 
@@ -1403,41 +1348,6 @@ class Optimizer:
 
         # Reassign Miller indices
         next_candidates = self.assign_hkls_closest(next_candidates)
-
-        # Get next xnn after optimization step
-        target_function = CandidateOptLoss_xnn(
-            q2_obs=np.repeat(next_candidates.q2_obs[np.newaxis, :], repeats=next_candidates.n, axis=0), 
-            lattice_system=self.indexer.data_params['lattice_system'],
-            )
-        target_function.update(
-            np.stack(next_candidates.candidates['hkl']), 
-            np.stack(next_candidates.candidates['softmax']), 
-            xnn_perturbed
-            )
-        delta_gn = target_function.gauss_newton_step(xnn_perturbed)
-        next_xnn = xnn_perturbed + delta_gn
-        return next_xnn
-
-    def perturb_monoclinic_angle(self, candidates, iteration_info):
-        # This runs, but is not useful.
-        if self.indexer.data_params['lattice_system'] != 'monoclinic':
-            assert False
-        next_candidates = copy.copy(candidates)
-
-        # Perturb the xnn parameters
-        xnn = np.stack(candidates.candidates['xnn'])
-        reciprocal_beta = self.rng.uniform(low=0.05, high=np.pi/2, size=candidates.n)
-        xnn_perturbed = xnn.copy()
-        xnn_perturbed[:, 3] = 2 * np.sqrt(xnn[:, 0] * xnn[:, 2]) * np.cos(reciprocal_beta)
-
-        next_candidates.candidates['xnn'] = list(xnn_perturbed)
-        next_candidates.update_unit_cell_from_xnn()
-        next_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
-            uc_pred=np.stack(next_candidates.candidates['unit_cell'])
-            ))
-
-        # Reassign Miller indices
-        next_candidates = self.assign_hkls(next_candidates, iteration_info['assigner_key'], 'best')
 
         # Get next xnn after optimization step
         target_function = CandidateOptLoss_xnn(
