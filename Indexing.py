@@ -6,9 +6,9 @@ hexagonal      | 98.5%
 rhombohedral   | 94%
 tetragonal     | 95%
 orthorhombic   | 93%
-monoclinic     | 40% - 75%
+monoclinic     | 30% - 55%
+  - with reindex 30% - 65%
 triclinic      | not implemented
-{'Not found': 89, 'Found and best': 80, 'Found but not best': 48, 'Found but off by two': 0, 'Found explainers': 122}
 
 - Documentation
     - Update methods.md
@@ -23,20 +23,20 @@ triclinic      | not implemented
 
 - Optimization:
     * monoclinic
-        * Reindexing
-        * reread SVD-Index
         * monoclinic reset
-            - catch cases where beta is predicting the body / face centered equivalent
-        * why do entries fail???
-        * split monoclinic into different cases:
-            - P2:    No systematic absences
-            - P21:   0k0: k=2n
-            - Pc:    h0l: l=2n; 00l: l=2n
-            - P21/c: h00: h=2n; 0k0: k=2n; 00l: l=2n; 0kl: k+l=2n
-            - C2
-            - Cc
+            - transform to a common setting before making the histogram
+        * mirror acute monoclinic angles
         * Simulated annealing
-        * Reactive Search Optimization
+        * split monoclinic into different cases:
+            * P2:    No systematic absences
+            - P21:   0k0: k=2n
+            * Pc:    h0l: l=2n; 00l: l=2n
+            - P21/c: h0l: l=2n; 00l: l=2n; 0k0: 2n
+            * C2
+            - Cc
+        * why do entries fail???
+        - reread SVD-Index
+        - Reactive Search Optimization
         - Particle swarm???
     - correct the epsilon factor to be e^{-10}
 

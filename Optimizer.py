@@ -1,4 +1,5 @@
 import copy
+import gemmi
 import itertools
 import matplotlib.pyplot as plt
 from mpi4py import MPI
@@ -112,6 +113,12 @@ class Candidates:
         elif self.lattice_system == 'monoclinic':
             self.maximum_angle = np.pi
             self.minimum_angle = 4*np.pi/9
+            self.P = np.array([
+                [-1, 0, 1],
+                [0, 1, 0],
+                [-1, 0, 0],
+                ])
+            self.Pinv = np.linalg.inv(self.P)
         elif self.lattice_system == 'triclinic':
             assert False
             self.maximum_angle = np.pi
@@ -120,6 +127,7 @@ class Candidates:
         self.tolerance = tolerance
 
         unit_cell_true = np.array(entry['reindexed_unit_cell'])
+
         reciprocal_unit_cell_true = reciprocal_uc_conversion(unit_cell_true[np.newaxis])[0]
         if lattice_system == 'cubic':
             self.unit_cell_true = unit_cell_true[0][np.newaxis]
@@ -145,6 +153,8 @@ class Candidates:
         self.sg_true = int(entry['spacegroup_number'])
         self.spacegroup_symbol_hm_true = entry['reindexed_spacegroup_symbol_hm']
 
+        self.niggli_true = self.niggli_reduction(self.unit_cell_true)
+
         self.df_columns = [
             'unit_cell',
             'unit_cell_scaled',
@@ -162,6 +172,48 @@ class Candidates:
         self.update_xnn_from_unit_cell()
 
         self.hkl_true_check = self.get_hkl_checks(self.hkl_true)
+
+    def niggli_reduction(self, unit_cell):
+        unit_cell_full = np.zeros(6)
+        if self.lattice_system == 'cubic':
+            gemmi_sg = gemmi.SpaceGroup('P 2 3')
+            unit_cell_full[:3] = unit_cell[0]
+            unit_cell_full[3:] = 90
+        elif self.lattice_system == 'tetragonal':
+            gemmi_sg = gemmi.SpaceGroup('P 4')
+            unit_cell_full[:2] = unit_cell[0]
+            unit_cell_full[2] = unit_cell[1]
+            unit_cell_full[3:] = 90
+        elif self.lattice_system == 'hexagonal':
+            gemmi_sg = gemmi.SpaceGroup('P 6')
+            unit_cell_full[:2] = unit_cell[0]
+            unit_cell_full[2] = unit_cell[1]
+            unit_cell_full[3] = 90
+            unit_cell_full[4] = 90
+            unit_cell_full[5] = 120
+        elif self.lattice_system == 'rhombohedral':
+            gemmi_sg = gemmi.SpaceGroup('P 3')
+            unit_cell_full[:3] = unit_cell[0]
+            unit_cell_full[3:] = unit_cell[1]
+        elif self.lattice_system == 'orthorhombic':
+            gemmi_sg = gemmi.SpaceGroup('P 2 2 2')
+            unit_cell_full[:3] = unit_cell[:3]
+            unit_cell_full[3:] = 90
+        elif self.lattice_system == 'monoclinic':
+            gemmi_sg = gemmi.SpaceGroup('P 1 2 1')
+            unit_cell_full[:3] = unit_cell[:3]
+            unit_cell_full[4] = unit_cell[3]
+            unit_cell_full[3] = 90
+            unit_cell_full[5] = 90
+        elif self.lattice_system == 'triclinic':
+            gemmi_sg = gemmi.SpaceGroup('P 1')
+            unit_cell_full = unit_cell.copy()
+            unit_cell_full[3:] *= 180/np.pi
+        gruber_vector = gemmi.GruberVector(gemmi.UnitCell(*unit_cell_full), gemmi_sg)
+        gruber_vector.niggli_reduce(epsilon=0, iteration_limit=100)
+        niggli = np.round(gruber_vector.cell_parameters(), decimals=4)
+        niggli[3:] *= np.pi/180
+        return niggli
 
     def update_xnn_from_unit_cell(self):
         unit_cell = np.stack(self.candidates['unit_cell'])
@@ -367,6 +419,7 @@ class Candidates:
         print(f'Mean HKL accuracy:           {hkl_accuracy.mean():1.2f}')
         print(f'Bravais Lattice:             {self.bl_true}')
         print(f'Spacegroup:                  {self.sg_true} {self.spacegroup_symbol_hm_true}')
+        print(f'True Niggli unit cell:       {np.round(self.niggli_true, decimals=4)}')
 
         output_dict = {
             'entry_index': None,
@@ -430,7 +483,7 @@ class Candidates:
                     high=self.maximum_angle,
                     size=np.sum(too_large_angles)
                     )
-        elif self.lattice_system in ['monoclinic', 'triclinic']:
+        elif self.lattice_system == ['monoclinic', 'triclinic']:
             too_small_lengths = unit_cells[:, :3] < self.minimum_unit_cell
             too_large_lengths = unit_cells[:, :3] > self.maximum_unit_cell
             if np.sum(too_small_lengths) > 0:
@@ -523,7 +576,7 @@ class Candidates:
         else:
             return False
 
-    def get_best_candidates(self, report_counts):
+    def get_best_candidates_old(self, report_counts):
         found = False
         if len(self.explainers) == 0:
             uc_best_opt = self.candidates.iloc[0]['unit_cell']
@@ -579,6 +632,198 @@ class Candidates:
                 found = True
 
         return uc_best_opt, report_counts, found
+
+    def validate_candidate(self, unit_cell):
+        atol = 1e-2
+        if self.lattice_system == 'cubic':
+            if np.isclose(self.unit_cell_true, unit_cell, atol=atol):
+                return True, False
+            mult_factors = np.array([1/2, 2])
+            for mf in mult_factors:
+                if np.isclose(self.unit_cell_true, mf * unit_cell, atol=atol):
+                    return False, True
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
+            if np.all(np.isclose(self.unit_cell_true, unit_cell, atol=atol)):
+                return True, False
+            mult_factors = np.array([1/2, 1, 2])
+            for mf0 in mult_factors:
+                for mf1 in mult_factors:
+                    mf = np.array([mf0, mf1])
+                    if np.all(np.isclose(self.unit_cell_true, mf * unit_cell, atol=atol)):
+                        return False, True
+        elif self.lattice_system == 'rhombohedral':
+            if np.all(np.isclose(self.unit_cell_true, unit_cell, atol=atol)):
+                return True, False
+            mult_factors = np.array([1/2, 2])
+            for mf in mult_factors:
+                if np.isclose(self.unit_cell_true, np.array([mf0, 1]) * unit_cell, atol=atol):
+                    return False, True
+        elif self.lattice_system == 'orthorhombic':
+            unit_cell_true_sorted = np.sort(self.unit_cell_true)
+            unit_cell_sorted = np.sort(unit_cell)
+            if np.all(np.isclose(unit_cell_true_sorted, unit_cell_sorted, atol=atol)):
+                return True, False
+            mult_factors = np.array([1/2, 1, 2])
+            for mf0 in mult_factors:
+                for mf1 in mult_factors:
+                    for mf2 in mult_factors:
+                        mf = np.array([mf0, mf1, mf2])
+                        if np.all(np.isclose(unit_cell_true_sorted, np.sort(mf * unit_cell), atol=atol)):
+                            return False, True
+        elif self.lattice_system == 'monoclinic':
+            mult_factors = np.array([1/2, 1, 2])
+            obtuse_reindexer = [
+                np.eye(3),
+                np.array([
+                    [-1, 0, 0],
+                    [0, -1, 0],
+                    [0, 0, 1],
+                    ])
+                ]
+            ac_reindexer = [
+                np.eye(3),
+                np.array([
+                    [0, 0, 1],
+                    [0, 1, 0],
+                    [-1, 0, 0],
+                    ])
+                ]
+            transformations = [
+                np.eye(3),
+                np.array([
+                    [-1, 0, 1],
+                    [0, 1, 0],
+                    [-1, 0, 0],
+                    ]),
+                np.array([
+                    [0, 0, -1],
+                    [0, 1, 0],
+                    [1, 0, -1],
+                    ]),
+                np.array([
+                    [1, 0, 0],
+                    [0, 1, 0],
+                    [-1, 0, 1],
+                    ]),
+                np.array([
+                    [1, 0, 0],
+                    [0, 1, 0],
+                    [1, 0, 1],
+                    ]),
+                ]
+
+            ucm = np.array([
+                [unit_cell[0], 0,            unit_cell[2] * np.cos(unit_cell[3])],
+                [0,            unit_cell[1], 0],
+                [0,            0,            unit_cell[2] * np.sin(unit_cell[3])],
+                ])
+            found = False
+            off_by_two = False
+            for trans in transformations:
+                for perm in ac_reindexer:
+                    for obt in obtuse_reindexer:
+                        rucm = ucm @ obt @ perm @ trans
+                        reindexed_unit_cell = np.zeros(4)
+                        reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
+                        reindexed_unit_cell[1] = np.linalg.norm(rucm[:, 1])
+                        reindexed_unit_cell[2] = np.linalg.norm(rucm[:, 2])
+                        dot_product = np.dot(rucm[:, 0], rucm[:, 2])
+                        mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
+                        reindexed_unit_cell[3] = np.arccos(dot_product / mag)
+                        if np.all(np.isclose(self.unit_cell_true, reindexed_unit_cell, atol=atol)):
+                            found = True
+                        mult_factors = np.array([1/2, 1, 2])
+                        for mf0 in mult_factors:
+                            for mf1 in mult_factors:
+                                for mf2 in mult_factors:
+                                    mf = np.array([mf0, mf1, mf2, 1])
+                                    if np.all(np.isclose(self.unit_cell_true, mf * reindexed_unit_cell, atol=atol)):
+                                        off_by_two = True
+            return found, off_by_two
+        elif self.lattice_system == 'triclinic':
+            if np.all(np.isclose(self.unit_cell_true, unit_cell, atol=atol)):
+                return True, False
+        return False, False
+
+    def get_best_candidates(self, report_counts):
+        found = False
+        if len(self.explainers) == 0:
+            uc_best_opt = self.candidates.iloc[0]['unit_cell']
+            print(np.stack(self.candidates['reciprocal_unit_cell'])[:10].round(decimals=4))
+            report_counts['Not found'] += 1
+        else:
+            uc_best_opt = np.array(self.explainers.iloc[0]['unit_cell'])
+            if len(self.explainers) == 1:
+                print(self.explainers[['unit_cell', 'loss']].round(decimals={'unit_cell': 3, 'loss': 1}))
+            else:
+                uc_print = np.stack(self.explainers['unit_cell']).round(decimals=3)
+                loss_print = np.array(self.explainers['loss']).round(decimals=1)
+                print(np.concatenate((uc_print, loss_print[:, np.newaxis]), axis=1))
+            found_best = False
+            found_not_best = False
+            found_off_by_two = False
+            for explainer_index in range(len(self.explainers)):
+                unit_cell = np.array(self.explainers.iloc[explainer_index]['unit_cell'])
+                correct, off_by_two = self.validate_candidate(unit_cell)
+                if correct and explainer_index == 0:
+                    found_best = True
+                elif correct:
+                    found_not_best = True
+                elif off_by_two:
+                    found_off_by_two = True
+            if found_best:
+                report_counts['Found and best'] += 1
+                found = True
+            elif found_not_best:
+                report_counts['Found but not best'] += 1
+                found = True
+            elif found_off_by_two:
+                report_counts['Found but off by two'] += 1
+                found = True
+            else:
+                report_counts['Found explainers'] += 1
+                found = True
+        return uc_best_opt, report_counts, found
+
+    def monoclinic_reindex(self, reindex_operation):
+        if reindex_operation == 'P':
+            operation = self.P
+        elif reindex_operation == 'P-1P-1':
+            operation = self.Pinv @ self.Pinv
+        reciprocal_unit_cell = np.stack(self.candidates['reciprocal_unit_cell'])
+        new_reciprocal_unit_cell = np.zeros((self.n, 4))
+        for candidate_index in range(self.n):
+            a = reciprocal_unit_cell[candidate_index, 0]
+            b = reciprocal_unit_cell[candidate_index, 1]
+            c = reciprocal_unit_cell[candidate_index, 2]
+            beta = reciprocal_unit_cell[candidate_index, 3]
+            ucm = np.array([
+                [a, 0, c*np.cos(beta)],
+                [0, b, 0],
+                [0, 0, c*np.sin(beta)],
+                ])
+            rucm = ucm @ operation
+            new_reciprocal_unit_cell[candidate_index, 0] = np.linalg.norm(rucm[:, 0])
+            new_reciprocal_unit_cell[candidate_index, 1] = np.linalg.norm(rucm[:, 1])
+            new_reciprocal_unit_cell[candidate_index, 2] = np.linalg.norm(rucm[:, 2])
+            dot_product = np.dot(rucm[:, 0], rucm[:, 2])
+            mag = new_reciprocal_unit_cell[candidate_index, 0] * new_reciprocal_unit_cell[candidate_index, 2]
+            new_reciprocal_unit_cell[candidate_index, 3] = np.arccos(dot_product / mag)
+        self.candidates['reciprocal_unit_cell'] = list(new_reciprocal_unit_cell)
+        reciprocal_unit_cell_full = np.zeros((self.n, 6))
+        reciprocal_unit_cell_full[:, :3] = new_reciprocal_unit_cell[:, :3]
+        reciprocal_unit_cell_full[:, 4] = new_reciprocal_unit_cell[:, 3]
+        reciprocal_unit_cell_full[:, 3] = np.pi/2
+        reciprocal_unit_cell_full[:, 5] = np.pi/2
+
+        xnn_full = get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell_full)
+        xnn = xnn_full[:, [0, 1, 2, 4]]
+        self.candidates['xnn'] = list(xnn)
+
+        unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
+        unit_cell = unit_cell_full[:, [0, 1, 2, 4]]
+        self.candidates['unit_cell'] = list(unit_cell)
+        print(f'{reindex_operation} {np.sum(reciprocal_unit_cell)} {np.sum(new_reciprocal_unit_cell)}')
 
     def monoclinic_reset(self, n_best, n_angles):
         reciprocal_unit_cell = np.stack(self.candidates['reciprocal_unit_cell'])
@@ -1078,7 +1323,21 @@ class Optimizer:
                     ]
                 print(' '.join(print_list))
             else:
+                reindex_count = 0
                 for iter_index in range(iteration_info['n_iterations']):
+                    if iteration_info['monoclinic_reindex'] & (iter_index > 0):
+                        if iter_index % iteration_info['monoclinic_reindex_period'] == 0:
+                            if reindex_count == 0:
+                                reindex_operation = 'P'
+                                reindex_count += 1
+                            elif reindex_count == 1:
+                                reindex_operation = 'P-1P-1'
+                                reindex_count += 1
+                            elif reindex_count == 2:
+                                reindex_operation = 'P'
+                                reindex_count = 0
+                            self.monoclinic_reindex(candidates, reindex_operation, iteration_info)
+
                     if iteration_info['worker'] in ['softmax_subsampling', 'random_subsampling']:
                         next_xnn = self.random_subsampling(candidates, iteration_info)
                     elif iteration_info['worker'] == 'resampling':
@@ -1123,7 +1382,6 @@ class Optimizer:
                         f'{iteration_info["assigner_key"]}',
                         ]
                     print(' '.join(print_list))
-        
         print(np.mean(acceptance_fraction))
         return candidates, diagnostic_df_entry
 
@@ -1362,6 +1620,34 @@ class Optimizer:
         delta_gn = target_function.gauss_newton_step(xnn_perturbed)
         next_xnn = xnn_perturbed + delta_gn
         return next_xnn
+
+    def monoclinic_reindex(self, candidates, reindex_operation, iteration_info):
+        assert self.indexer.data_params['lattice_system'] == 'monoclinic'
+
+        # This is set to true so only one batch is run during Miller index assignmnent
+        # Now we have a different amount of candidates, so we must use batched assignments
+        self.one_assignment_batch = False
+        candidates.monoclinic_reindex(reindex_operation)
+        candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
+            uc_pred=np.stack(candidates.candidates['unit_cell'])
+            ))
+        if iteration_info['assigner_key'] == 'closest':
+            candidates = self.assign_hkls_closest(candidates)
+        else:
+            candidates = self.assign_hkls(candidates, iteration_info['assigner_key'], 'best')
+
+        xnn = np.stack(candidates.candidates['xnn'])
+        target_function = CandidateOptLoss_xnn(
+            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system']
+            )
+        target_function.update(
+            np.stack(candidates.candidates['hkl']),
+            np.ones((candidates.n, self.indexer.data_params['n_points'])),
+            xnn
+            )
+        candidates.candidates['loss'] = target_function.get_loss(xnn)
+        return candidates
 
     def monoclinic_reset(self, candidates, iteration_info):
         assert self.indexer.data_params['lattice_system'] == 'monoclinic'
