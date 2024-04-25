@@ -6,8 +6,7 @@ hexagonal      | 98.5%
 rhombohedral   | 94%
 tetragonal     | 95%
 orthorhombic   | 93%
-monoclinic     | 30% - 55%
-  - with reindex 30% - 65%
+monoclinic     | 60% - 68%
 triclinic      | not implemented
 
 - Documentation
@@ -23,10 +22,13 @@ triclinic      | not implemented
 
 - Optimization:
     * monoclinic
+        * predictions from hkl templates
+        * mirror acute monoclinic angles
         * monoclinic reset
             - transform to a common setting before making the histogram
-        * mirror acute monoclinic angles
         * Simulated annealing
+        * hot & cold chains
+            - http://bamm-project.org/mc3.html
         * split monoclinic into different cases:
             * P2:    No systematic absences
             - P21:   0k0: k=2n
@@ -38,6 +40,7 @@ triclinic      | not implemented
         - reread SVD-Index
         - Reactive Search Optimization
         - Particle swarm???
+    * Refactor to remove duplications
     - correct the epsilon factor to be e^{-10}
 
 - Indexing.py
@@ -87,7 +90,6 @@ triclinic      | not implemented
         - Calculate pairwise difference array
         - Use argmax & max as nn input
         - NN does classification over the unit cell parameter grid
-
     - Mixture density network
 """
 import joblib
@@ -150,6 +152,7 @@ class Indexing:
             'n_points': 20,
             'points_tag': 'intersect',
             'hkl_ref_length': 500,
+            'n_miller_index_sets': 1000,
             }
 
         for key in data_params_defaults.keys():
@@ -201,6 +204,7 @@ class Indexing:
             'hkl_ref_length',
             'groupspec_file_name',
             'groupspec_sheet',
+            'n_miller_index_sets',
             ]
 
         self.data_params = dict.fromkeys(data_params_keys)
@@ -215,6 +219,8 @@ class Indexing:
         self.data_params['data_dir'] = params['data_dir']
         self.data_params['y_indices'] = np.array(params['y_indices'].split('[')[1].split(']')[0].split(','), dtype=int)
         self.data_params['train_fraction'] = float(params['train_fraction'])
+        #self.data_params['n_miller_index_sets'] = int(params['n_miller_index_sets'])
+        self.data_params['n_miller_index_sets'] = 4000
         self.data_params['n_max'] = int(params['n_max'])
         self.data_params['n_points'] = int(params['n_points'])
         self.data_params['points_tag'] = params['points_tag']
@@ -455,6 +461,8 @@ class Indexing:
 
     def load_data_from_tag(self, load_augmented, load_train):
         self.hkl_ref = np.load(f'{self.save_to["data"]}/hkl_ref.npy')
+        if os.path.exists(f'{self.save_to["data"]}/miller_index_templates.npy'):
+            self.miller_index_templates = np.load(f'{self.save_to["data"]}/miller_index_templates.npy')
         self.data = pd.read_parquet(f'{self.save_to["data"]}/data.parquet')
         if 'h' in self.data.keys():
             hkl = np.stack([
@@ -504,6 +512,47 @@ class Indexing:
         joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
         joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
         write_params(self.data_params, f'{self.save_to["data"]}/data_params.csv')
+
+    def setup_miller_index_templates(self):
+        def get_counts(hkl_labels_func, hkl_ref_length):
+            hkl_labels_func = hkl_labels_func[hkl_labels_func != hkl_ref_length - 1]
+            if hkl_labels_func.size > 0:
+                counts_ = np.bincount(hkl_labels_func, minlength=hkl_ref_length)
+                hist_ = np.zeros(hkl_ref_length)
+                hist_ = counts_ / hkl_labels_func.size
+                return hist_
+            else:
+                return None
+            
+        def make_sets(N_sets, N_peaks, hkl_labels, hkl_ref_length, rng):
+            MI_sets = np.zeros((N_sets, N_peaks), dtype=int)
+            hist_initial = np.zeros((N_peaks, hkl_ref_length))
+            for peak_index in range(N_peaks):
+                hist_initial[peak_index] = get_counts(hkl_labels[:, peak_index], hkl_ref_length)
+            for set_index in tqdm(range(N_sets)):
+                MI_sets[set_index, 0] = rng.choice(hkl_ref_length, p=hist_initial[0])
+                hkl_labels_ = hkl_labels
+                for peak_index in range(1, N_peaks):
+                    indices = hkl_labels_[:, peak_index - 1] == MI_sets[set_index, peak_index - 1]
+                    hkl_labels_ = hkl_labels_[indices]
+                    hist_loop = get_counts(hkl_labels_[:, peak_index], hkl_ref_length)
+                    if not hist_loop is None:
+                        MI_sets[set_index, peak_index] = rng.choice(hkl_ref_length, p=hist_loop)
+                    else:
+                        MI_sets[set_index, peak_index] = rng.choice(hkl_ref_length, p=hist_initial[peak_index])
+            return MI_sets
+
+        unaugmented_data = self.data[~self.data['augmented']]
+        training_data = unaugmented_data[unaugmented_data['train']]
+        hkl_labels_all = np.stack(training_data['hkl_labels'])
+        self.miller_index_templates = make_sets(
+            self.data_params['n_miller_index_sets'],
+            self.data_params['n_points'],
+            hkl_labels_all,
+            self.data_params['hkl_ref_length'],
+            self.rng
+            )
+        np.save(f'{self.save_to["data"]}/miller_index_templates.npy', self.miller_index_templates)
 
     def setup_hkl(self):
         print('Setting up the hkl labels')

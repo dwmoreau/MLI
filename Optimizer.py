@@ -838,6 +838,7 @@ class Optimizer:
         opt_params_defaults = {
             'n_candidates_nn': 30,
             'n_candidates_rf': 30,
+            'n_candidates_template': 30,
             'minimum_uc': 2,
             'maximum_uc': 500,
             'found_tolerance': -200,
@@ -907,7 +908,7 @@ class Optimizer:
         self.n_groups = len(self.indexer.data_params['split_groups'])
         if self.opt_params['assignment_batch_size'] == 'max':
             n_candidates = self.n_groups * (self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf'])
-            self.opt_params['assignment_batch_size'] = n_candidates
+            self.opt_params['assignment_batch_size'] = n_candidates + self.opt_params['n_candidates_template']
             self.one_assignment_batch = True
         else:
             self.one_assignment_batch = False
@@ -1187,9 +1188,54 @@ class Optimizer:
 
         return candidates_scaled
 
+    def generate_unit_cells_miller_index_templates(self, q2_obs):
+        xnn = np.zeros((self.opt_params['n_candidates_template'], self.indexer.data_params['n_outputs']))
+        order = np.zeros((self.opt_params['n_candidates_template'], self.indexer.data_params['n_points']))
+        for template_index in range(self.opt_params['n_candidates_template']):
+            hkl = self.indexer.hkl_ref[self.indexer.miller_index_templates[template_index]]
+            if self.indexer.data_params['lattice_system'] == 'monoclinic':
+                hkl2 = np.concatenate((
+                    hkl**2,
+                    (hkl[:, 0] * hkl[:, 2])[:, np.newaxis]
+                    ),
+                    axis=1
+                    )
+            else:
+                assert False
+            xnn[template_index], r, rank, s = np.linalg.lstsq(hkl2, q2_obs, rcond=None)
+
+        if self.indexer.data_params['lattice_system'] == 'monoclinic':
+            too_small = xnn[:, :3] < (1 / self.opt_params['maximum_uc'])**2
+            too_large = xnn[:, :3] > (1 / self.opt_params['minimum_uc'])**2
+            xnn[:, :3][too_small] = (1 / self.opt_params['maximum_uc'])**2
+            xnn[:, :3][too_large] = (1 / self.opt_params['minimum_uc'])**2
+
+            cos_rbeta = xnn[:, 3] / (2 * np.sqrt(xnn[:, 0] * xnn[:, 2]))
+
+            too_small = cos_rbeta < -1
+            too_large = cos_rbeta > 1
+            xnn[too_small, 3] = -2*0.999 * np.sqrt(xnn[too_small, 0] * xnn[too_small, 2])
+            xnn[too_large, 3] = 2*0.999 * np.sqrt(xnn[too_large, 0] * xnn[too_large, 2])
+
+            xnn_full = np.zeros((self.opt_params['n_candidates_template'], 6))
+            xnn_full[:, :3] = xnn[:, :3]
+            xnn_full[:, 4] = xnn[:, 3]
+            reciprocal_unit_cell_full = get_reciprocal_unit_cell_from_xnn(xnn_full)
+            unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
+
+            acute = unit_cell_full[:, 4] < np.pi/2
+            unit_cell_full[acute, 4] = np.pi - unit_cell_full[acute, 4]
+            candidates_scaled = self.indexer.scale_predictions(uc_pred=unit_cell_full[:, [0, 1, 2, 4]])
+        else:
+            assert False
+        return candidates_scaled
+
     def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry):
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
-        candidate_uc_scaled = np.zeros((self.n_groups * n_candidates, self.indexer.data_params['n_outputs']))
+        candidate_uc_scaled = np.zeros((
+            self.n_groups * n_candidates + self.opt_params['n_candidates_template'],
+            self.indexer.data_params['n_outputs']
+            ))
         for group_index, group in enumerate(self.indexer.data_params['split_groups']):
             start = group_index * n_candidates
             stop = (group_index + 1) * n_candidates
@@ -1214,6 +1260,9 @@ class Optimizer:
             candidates_uc_scaled_tree = candidates_scaled_tree[0, :, tree_indices]
             candidate_uc_scaled[start + self.opt_params['n_candidates_nn']: stop, :] = \
                 candidates_uc_scaled_tree
+
+        candidate_uc_scaled[self.n_groups * n_candidates:] = \
+            self.generate_unit_cells_miller_index_templates(np.array(entry['q2']))
 
         candidates = Candidates(
             entry=entry,
