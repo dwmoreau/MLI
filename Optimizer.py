@@ -576,63 +576,6 @@ class Candidates:
         else:
             return False
 
-    def get_best_candidates_old(self, report_counts):
-        found = False
-        if len(self.explainers) == 0:
-            uc_best_opt = self.candidates.iloc[0]['unit_cell']
-            #print(np.stack(self.candidates['unit_cell'])[:5])
-            print(np.stack(self.candidates['reciprocal_unit_cell'])[:10].round(decimals=4))
-            #print(uc_best_opt)
-            if np.all(np.isclose(self.unit_cell_true, uc_best_opt, atol=1e-3)):
-                report_counts['Found and best'] += 1
-                found = True
-            else:
-                report_counts['Not found'] += 1
-        elif len(self.explainers) == 1:
-            print(self.explainers[['unit_cell', 'loss']].round(decimals={'unit_cell': 3, 'loss': 1}))
-            uc_best_opt = self.explainers.iloc[0]['unit_cell']
-            if np.all(np.isclose(self.unit_cell_true, uc_best_opt, atol=1e-3)):
-                report_counts['Found and best'] += 1
-                found = True
-            elif self.catch_off_by_two(uc_best_opt):
-                report_counts['Found but off by two'] += 1
-                found = True
-            else:
-                report_counts['Found explainers'] += 1
-                found = True
-        else:
-            self.explainers.to_json('explainers.json')
-            uc_print = np.stack(self.explainers['unit_cell']).round(decimals=3)
-            loss_print = np.array(self.explainers['loss']).round(decimals=1)
-            print(np.concatenate((uc_print, loss_print[:, np.newaxis]), axis=1))
-            uc_best_opt = np.array(self.explainers.iloc[0]['unit_cell'])
-            found_best = False
-            found_not_best = False
-            found_off_by_two = False
-            for explainer_index in range(len(self.explainers)):
-                uc = np.array(self.explainers.iloc[explainer_index]['unit_cell'])
-                if np.all(np.isclose(self.unit_cell_true, uc, atol=1e-3)):
-                    if explainer_index == 0:
-                        found_best = True
-                    else:
-                        found_not_best = True
-                elif self.catch_off_by_two(uc):
-                    found_off_by_two = True
-            if found_best:
-                report_counts['Found and best'] += 1
-                found = True
-            elif found_not_best:
-                report_counts['Found but not best'] += 1
-                found = True
-            elif found_off_by_two:
-                report_counts['Found but off by two'] += 1
-                found = True
-            else:
-                report_counts['Found explainers'] += 1
-                found = True
-
-        return uc_best_opt, report_counts, found
-
     def validate_candidate(self, unit_cell):
         atol = 1e-2
         if self.lattice_system == 'cubic':
