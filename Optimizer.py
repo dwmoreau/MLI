@@ -483,7 +483,7 @@ class Candidates:
                     high=self.maximum_angle,
                     size=np.sum(too_large_angles)
                     )
-        elif self.lattice_system == ['monoclinic', 'triclinic']:
+        elif self.lattice_system in ['monoclinic', 'triclinic']:
             too_small_lengths = unit_cells[:, :3] < self.minimum_unit_cell
             too_large_lengths = unit_cells[:, :3] > self.maximum_unit_cell
             if np.sum(too_small_lengths) > 0:
@@ -500,24 +500,36 @@ class Candidates:
                     high=self.maximum_unit_cell,
                     size=np.sum(too_large_lengths)
                     )
-
-            too_small_angles = unit_cells[:, 3:] < self.minimum_angle
-            too_large_angles = unit_cells[:, 3:] > self.maximum_angle
-            if np.sum(too_small_angles) > 0:
-                indices = np.argwhere(too_small_angles)
-                unit_cells[indices[:, 0], 3 + indices[:, 1]] = self.rng.uniform(
-                    low=self.minimum_angle,
-                    high=1.05*self.minimum_angle,
-                    size=np.sum(too_small_angles)
-                    )
-            if np.sum(too_large_angles) > 0:
-                indices = np.argwhere(too_large_angles)
-                unit_cells[indices[:, 0], 3 + indices[:, 1]] = self.rng.uniform(
-                    low=0.95*self.maximum_angle,
-                    high=self.maximum_angle,
-                    size=np.sum(too_large_angles)
-                    )
-
+            
+            if self.lattice_system == 'triclinic':
+                too_small_angles = unit_cells[:, 3:] < self.minimum_angle
+                too_large_angles = unit_cells[:, 3:] > self.maximum_angle
+                if np.sum(too_small_angles) > 0:
+                    indices = np.argwhere(too_small_angles)
+                    unit_cells[indices[:, 0], 3 + indices[:, 1]] = self.rng.uniform(
+                        low=self.minimum_angle,
+                        high=1.05*self.minimum_angle,
+                        size=np.sum(too_small_angles)
+                        )
+                if np.sum(too_large_angles) > 0:
+                    indices = np.argwhere(too_large_angles)
+                    unit_cells[indices[:, 0], 3 + indices[:, 1]] = self.rng.uniform(
+                        low=0.95*self.maximum_angle,
+                        high=self.maximum_angle,
+                        size=np.sum(too_large_angles)
+                        )
+            elif self.lattice_system == 'monoclinic':
+                too_small_angles = unit_cells[:, 3] < self.minimum_angle
+                too_large_angles = unit_cells[:, 3] > self.maximum_angle
+                if np.sum(too_small_angles) > 0:
+                    unit_cells[too_small_angles, 3] = np.pi - unit_cells[too_small_angles, 3]
+                if np.sum(too_large_angles) > 0:
+                    unit_cells[too_large_angles, 3] = self.rng.uniform(
+                        low=0.95*self.maximum_angle,
+                        high=self.maximum_angle,
+                        size=np.sum(too_large_angles)
+                        )
+            
         self.candidates['unit_cell'] = list(unit_cells)
         self.update_xnn_from_unit_cell()
 
@@ -896,9 +908,8 @@ class Optimizer:
             # Monoclinic angles are restricted to be above 90 degrees because
             # the same monoclinic unit cell can be represented with either an
             # obtuse or acute angle.
-            # They are allowed to go down to 80 degrees to prevent edge effects at
-            # the 90 degree boundary.
-            self.opt_params['minimum_angle_scaled'] = (4*np.pi/9 - np.pi/2) / self.indexer.angle_scale
+            # Scaling is (angle - pi/2) / angle_scale
+            self.opt_params['minimum_angle_scaled'] = (np.pi/2 - np.pi/2) / self.indexer.angle_scale
             self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
         elif self.indexer.data_params['lattice_system'] == 'triclinic':
             assert False
@@ -1038,6 +1049,7 @@ class Optimizer:
                 self.uc_scaled_cov[entry_index],
                 uc_pred[entry_index],
                 self.indexer.data.iloc[entry_index],
+                entry_index,
                 )
             candidates, diagnostic_df_entry = self.optimize_entry(candidates, entry_index)
             #candidates.save_candidates(self.save_to, entry_index)
@@ -1161,8 +1173,8 @@ class Optimizer:
                     high=self.opt_params['minimum_angle_scaled'] + 0.1*np.abs(self.opt_params['minimum_angle_scaled']),
                     size=np.sum(too_small_angles)
                     )
-                # If the candidate angle is larger than maximum_angle_scaled (120 degrees)
-                # Then uniformly sample between 100 and 120 degrees
+                # If the candidate angle is larger than maximum_angle_scaled (180 degrees)
+                # Then uniformly sample between 100 and 180 degrees
                 candidates_scaled[too_large_angles, 3] = self.rng.uniform(
                     low=self.opt_params['maximum_angle_scaled'] - 0.1*np.abs(self.opt_params['maximum_angle_scaled']),
                     high=self.opt_params['maximum_angle_scaled'],
@@ -1230,7 +1242,92 @@ class Optimizer:
             assert False
         return candidates_scaled
 
-    def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry):
+    def plot_candidate_unit_cells(self, candidate_uc, entry, entry_index):
+        if self.indexer.data_params['lattice_system'] == 'monoclinic':
+            candidates_nn = np.zeros((self.n_groups * self.opt_params['n_candidates_nn'], 4))
+            candidates_rf = np.zeros((self.n_groups * self.opt_params['n_candidates_rf'], 4))
+
+            n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
+            for group_index, group in enumerate(self.indexer.data_params['split_groups']):
+                start_candidates = group_index * n_candidates
+                stop_candidates = (group_index + 1) * n_candidates
+
+                start_nn = group_index * self.opt_params['n_candidates_nn']
+                stop_nn = (group_index + 1) * self.opt_params['n_candidates_nn']
+                candidates_nn[start_nn: stop_nn] = candidate_uc[
+                    start_candidates: start_candidates + self.opt_params['n_candidates_nn']
+                    ]
+
+                start_rf = group_index * self.opt_params['n_candidates_rf']
+                stop_rf = (group_index + 1) * self.opt_params['n_candidates_rf']
+                candidates_rf[start_nn: stop_nn] = candidate_uc[
+                    start_candidates + self.opt_params['n_candidates_nn']: stop_candidates
+                    ]
+            candidates_template = candidate_uc[self.n_groups * n_candidates:]
+
+            ms = 1
+            alpha = 0.25
+            angle_bins = np.linspace(np.pi/2, np.pi, 101)
+            angle_centers = (angle_bins[1:] + angle_bins[:-1]) / 2
+            w = angle_bins[1] - angle_bins[0]
+            fig, axes = plt.subplots(3, 4, figsize=(8, 6))
+            axes[0, 0].plot(candidates_nn[:, 0], candidates_nn[:, 1], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            axes[0, 1].plot(candidates_nn[:, 0], candidates_nn[:, 2], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            axes[0, 2].plot(candidates_nn[:, 1], candidates_nn[:, 2], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            hist_nn, _ = np.histogram(candidates_nn[:, 3], bins=angle_bins, density=True)
+            axes[0, 3].bar(angle_centers, hist_nn, width=w)
+
+            axes[1, 0].plot(candidates_rf[:, 0], candidates_rf[:, 1], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            axes[1, 1].plot(candidates_rf[:, 0], candidates_rf[:, 2], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            axes[1, 2].plot(candidates_rf[:, 1], candidates_rf[:, 2], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            hist_rf, _ = np.histogram(candidates_rf[:, 3], bins=angle_bins, density=True)
+            axes[1, 3].bar(angle_centers, hist_rf, width=w)
+
+            axes[2, 0].plot(candidates_template[:, 0], candidates_template[:, 1], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            axes[2, 1].plot(candidates_template[:, 0], candidates_template[:, 2], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            axes[2, 2].plot(candidates_template[:, 1], candidates_template[:, 2], linestyle='none', marker='.', markersize=ms, alpha=alpha)
+            hist_template, _ = np.histogram(candidates_template[:, 3], bins=angle_bins, density=True)
+            axes[2, 3].bar(angle_centers, hist_template, width=w)
+
+            unit_cell_true = np.array(entry['reindexed_unit_cell'])
+            for row in range(3):
+                axes[row, 0].plot(unit_cell_true[0], unit_cell_true[1], linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0])
+                axes[row, 1].plot(unit_cell_true[0], unit_cell_true[2], linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0])
+                axes[row, 2].plot(unit_cell_true[1], unit_cell_true[2], linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0])
+
+                ylim = axes[row, 3].get_ylim()
+                axes[row, 3].plot([unit_cell_true[3], unit_cell_true[3]], 0.5*np.array(ylim), color=[0.8, 0, 0], linewidth=1)
+                axes[row, 3].set_ylim(ylim)
+
+            for col in range(3):
+                ylim0 = axes[0, col].get_ylim()
+                ylim1 = axes[1, col].get_ylim()
+                ylim = [min(ylim0[0], ylim1[0]), max(ylim0[1], ylim1[1])]
+                for row in range(3):
+                    axes[row, col].set_ylim(ylim)
+
+                xlim0 = axes[0, col].get_xlim()
+                xlim1 = axes[1, col].get_xlim()
+                xlim = [min(xlim0[0], xlim1[0]), max(xlim0[1], xlim1[1])]
+                for row in range(3):
+                    axes[row, col].set_xlim(xlim)
+
+            axes[0, 0].set_ylabel('NN predictions\nb')
+            axes[1, 0].set_ylabel('RF predictions\nb')
+            axes[2, 0].set_ylabel('Template predictions\nb')
+            for row in range(3):
+                axes[row, 0].set_xlabel('a')
+                axes[row, 1].set_xlabel('a')
+                axes[row, 2].set_xlabel('b')
+                axes[row, 3].set_xlabel('beta')
+            fig.tight_layout()
+            fig.savefig(os.path.join(self.save_to, f'initial_candidates_{entry_index:03d}.png'))
+            # This is a bit scorched earth, but it helps with memory leaks.
+            plt.cla()
+            plt.clf()
+            plt.close('all')
+
+    def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry, entry_index):
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
         candidate_uc_scaled = np.zeros((
             self.n_groups * n_candidates + self.opt_params['n_candidates_template'],
@@ -1264,9 +1361,11 @@ class Optimizer:
         candidate_uc_scaled[self.n_groups * n_candidates:] = \
             self.generate_unit_cells_miller_index_templates(np.array(entry['q2']))
 
+        candidate_uc = self.indexer.revert_predictions(uc_pred_scaled=candidate_uc_scaled)
+        self.plot_candidate_unit_cells(candidate_uc, entry, entry_index)
         candidates = Candidates(
             entry=entry,
-            unit_cell=self.indexer.revert_predictions(uc_pred_scaled=candidate_uc_scaled),
+            unit_cell=candidate_uc,
             unit_cell_scaled=candidate_uc_scaled,
             unit_cell_pred=uc_pred,
             lattice_system=self.indexer.data_params['lattice_system'],
@@ -1298,6 +1397,22 @@ class Optimizer:
         candidates.update()
         return candidates
 
+    def update_annealing(self, iteration_info, iter_index):
+        if iteration_info['simulated_annealing'] == False:
+            self.temperature = 1
+        else:
+            if iter_index == 0:
+                N = iteration_info['simulated_annealing_stop_iteration']
+                temp_start = iteration_info['simulated_annealing_starting_temp']
+                temp_end = iteration_info['simulated_annealing_ending_temp']
+                a = -1/N * np.log(temp_end / temp_start)
+                self._annealing_temperature_schedule = np.zeros(iteration_info['n_iterations'])
+                self._annealing_temperature_schedule[:N] = temp_start * np.exp(-a*np.arange(N))
+                self._annealing_temperature_schedule[N:] = temp_end
+                self.temperature = self._annealing_temperature_schedule[0]
+            else:
+                self.temperature = self._annealing_temperature_schedule[iter_index]
+
     def optimize_entry(self, candidates, entry_index):
         diagnostic_df_entry = candidates.diagnostics(self.indexer.data_params['hkl_ref_length'])
         acceptance_fraction = []
@@ -1317,6 +1432,7 @@ class Optimizer:
             else:
                 reindex_count = 0
                 for iter_index in range(iteration_info['n_iterations']):
+                    self.update_annealing(iteration_info, iter_index)
                     if iteration_info['monoclinic_reindex'] & (iter_index > 0):
                         if iter_index % iteration_info['monoclinic_reindex_period'] == 0:
                             if reindex_count == 0:
@@ -1350,8 +1466,6 @@ class Optimizer:
                         next_xnn = self.random_subsampling(next_candidates, iteration_info)
                     elif iteration_info['worker'] == 'no_sampling':
                         next_xnn = self.no_subsampling(candidates, iteration_info)
-                    elif iteration_info['worker'] == 'perturb_xnn':
-                        next_xnn = self.perturb_xnn(candidates, iteration_info)
                     else:
                         assert False
                     candidates, acceptance_fraction = self.update_candidates(
@@ -1478,7 +1592,7 @@ class Optimizer:
 
     def montecarlo_acceptance(self, candidates, next_candidates, acceptance_method, acceptance_fraction):
         if acceptance_method == 'montecarlo':
-            ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']))
+            ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']) /self.temperature)
             probability = self.rng.random(candidates.n)
             accepted = probability < ratio
             acceptance_fraction.append(accepted.sum() / accepted.size)
@@ -1569,48 +1683,6 @@ class Optimizer:
         target_function.update(hkl_subsampled, softmax_subsampled, xnn)
         delta_gn = target_function.gauss_newton_step(xnn)
         next_xnn = xnn + delta_gn
-        return next_xnn
-
-    def perturb_xnn(self, candidates, iteration_info):
-        next_candidates = copy.copy(candidates)
-
-        # Perturb the xnn parameters
-        xnn = np.stack(candidates.candidates['xnn'])
-        target_function = CandidateOptLoss_xnn(
-            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
-            lattice_system=self.indexer.data_params['lattice_system'],
-            )
-        target_function.update(
-            np.stack(candidates.candidates['hkl']), 
-            np.stack(candidates.candidates['softmax']), 
-            xnn
-            )
-        H_inv = target_function._get_hessian_inverse(xnn)
-        prefactor = np.sqrt(2 * np.abs(H_inv) * iteration_info['mala_tau']) * np.sign(H_inv)
-        random_values = self.rng.normal(size=(candidates.n, self.indexer.data_params['n_outputs']))
-        perturbation = np.matmul(prefactor, random_values[:, :, np.newaxis])[:, :, 0]
-        xnn_perturbed = xnn + perturbation
-        next_candidates.candidates['xnn'] = list(xnn_perturbed)
-        next_candidates.update_unit_cell_from_xnn()
-        next_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
-            uc_pred=np.stack(next_candidates.candidates['unit_cell'])
-            ))
-
-        # Reassign Miller indices
-        next_candidates = self.assign_hkls_closest(next_candidates)
-
-        # Get next xnn after optimization step
-        target_function = CandidateOptLoss_xnn(
-            q2_obs=np.repeat(next_candidates.q2_obs[np.newaxis, :], repeats=next_candidates.n, axis=0), 
-            lattice_system=self.indexer.data_params['lattice_system'],
-            )
-        target_function.update(
-            np.stack(next_candidates.candidates['hkl']), 
-            np.stack(next_candidates.candidates['softmax']), 
-            xnn_perturbed
-            )
-        delta_gn = target_function.gauss_newton_step(xnn_perturbed)
-        next_xnn = xnn_perturbed + delta_gn
         return next_xnn
 
     def monoclinic_reindex(self, candidates, reindex_operation, iteration_info):

@@ -6,7 +6,7 @@ hexagonal      | 98.5%
 rhombohedral   | 94%
 tetragonal     | 95%
 orthorhombic   | 93%
-monoclinic     | 60% - 68%
+monoclinic     | 70% - 75%
 triclinic      | not implemented
 
 - Documentation
@@ -22,25 +22,19 @@ triclinic      | not implemented
 
 - Optimization:
     * monoclinic
-        * predictions from hkl templates
-        * mirror acute monoclinic angles
-        * monoclinic reset
-            - transform to a common setting before making the histogram
-        * Simulated annealing
         * hot & cold chains
             - http://bamm-project.org/mc3.html
         * split monoclinic into different cases:
-            * P2:    No systematic absences
-            - P21:   0k0: k=2n
-            * Pc:    h0l: l=2n; 00l: l=2n
-            - P21/c: h0l: l=2n; 00l: l=2n; 0k0: 2n
-            * C2
-            - Cc
+            * P2: No systematic absences <- only case where transformations are allowed
+            - Pn: h0l: h+l=2n
+            * I2: hkl: h+k+l=2n
+            - Ia: hkl: h+k+l=2n; h0l: h=2n & l=2n
         * why do entries fail???
         - reread SVD-Index
         - Reactive Search Optimization
         - Particle swarm???
-    * Refactor to remove duplications
+    * Refactor code to remove duplicated code
+    * remove the distribute data function.
     - correct the epsilon factor to be e^{-10}
 
 - Indexing.py
@@ -63,9 +57,12 @@ triclinic      | not implemented
         - ICSD
 
 - SWE:
-    - Refactor code to work with reciprocal space unit cell parameters
-    - remove angle scaler and use cos(angle)
-    - profile optimization
+    * Refactor code:
+        stage 1: reciprocal space unit cell parameters
+        stage 1: remove angle scaler and use cos(angle)
+        stage 2: separate monoclinic by bravais lattice
+        stage 2: Remove duplication in Optimizer.py
+        stage 3: profile optimization
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
     - get working on dials
@@ -82,14 +79,7 @@ triclinic      | not implemented
         - n glide plane angle issue
         - mixing of P21/c & P2/c symmetry group
     - Feature extraction layer
-        - Pick out sets of three Miller indices ordered by prevalence in the data
-            1. Pick one Miller index based on histogram
-            2. Pick next Miller index based on histogram of entries with Miller index 1
-            3. Repeat 2.
-        - create a unit cell parameter grid according to lattice system constraints
-        - Calculate pairwise difference array
-        - Use argmax & max as nn input
-        - NN does classification over the unit cell parameter grid
+        - How to use Miller index templates?
     - Mixture density network
 """
 import joblib
