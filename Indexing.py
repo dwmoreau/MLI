@@ -11,6 +11,7 @@ triclinic      | not implemented
 
 - Documentation
     - Update methods.md
+        - Update text
         - Add figures
     - Update README.md
     - Reread ML pxrd papers
@@ -21,21 +22,21 @@ triclinic      | not implemented
             Nespolo 2014
 
 - Optimization:
-    * monoclinic
-        * hot & cold chains
+    - monoclinic
+        - hkl template 
+            - Update to incorporate balancing for dominant zone
+        - correct the epsilon factor to be e^{-10}
+            - how does this parameter affect the optimization?
+        - hot & cold chains
+            - simulated annealing seems to help
             - http://bamm-project.org/mc3.html
-        * split monoclinic into different cases:
+        - split monoclinic into different cases:
             * P2: No systematic absences <- only case where transformations are allowed
             - Pn: h0l: h+l=2n
             * I2: hkl: h+k+l=2n
             - Ia: hkl: h+k+l=2n; h0l: h=2n & l=2n
-        * why do entries fail???
+        - poor performance with dominant zones and low initial HKL assignment accuracy
         - reread SVD-Index
-        - Reactive Search Optimization
-        - Particle swarm???
-    * Refactor code to remove duplicated code
-    * remove the distribute data function.
-    - correct the epsilon factor to be e^{-10}
 
 - Indexing.py
 
@@ -58,29 +59,22 @@ triclinic      | not implemented
 
 - SWE:
     * Refactor code:
-        stage 1: reciprocal space unit cell parameters
-        stage 1: remove angle scaler and use cos(angle)
+        stage 1: 
+            - reciprocal space unit cell parameters for predictions
+            - xnn input for assigner
+            - remove angle scaler and use cos(angle)
         stage 2: separate monoclinic by bravais lattice
-        stage 2: Remove duplication in Optimizer.py
         stage 3: profile optimization
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
     - get working on dials
-        - generate data
-        - get materials project cif files
-        - redo counts & groups
-        - get MLI working
-        - Train ML models
+        - Get a working environment
+        - Train ML models (monoclinic)
     - MPI error: https://github.com/pmodels/mpich/issues/6547
 
 - Regression:
-    ? why does monoclinic_*_01 train poorly
-        - dominant zones?
-        - n glide plane angle issue
-        - mixing of P21/c & P2/c symmetry group
-    - Feature extraction layer
-        - How to use Miller index templates?
-    - Mixture density network
+    - move Miller index templates into regression object
+    - How to turn templates into a feature extraction layer
 """
 import joblib
 import matplotlib.pyplot as plt
@@ -194,7 +188,9 @@ class Indexing:
             'hkl_ref_length',
             'groupspec_file_name',
             'groupspec_sheet',
-            'n_miller_index_sets',
+            'miller_index_sets_dz_max',
+            'miller_index_sets_n_dz_bins',
+            'miller_index_sets_per_bin',
             ]
 
         self.data_params = dict.fromkeys(data_params_keys)
@@ -209,8 +205,9 @@ class Indexing:
         self.data_params['data_dir'] = params['data_dir']
         self.data_params['y_indices'] = np.array(params['y_indices'].split('[')[1].split(']')[0].split(','), dtype=int)
         self.data_params['train_fraction'] = float(params['train_fraction'])
-        #self.data_params['n_miller_index_sets'] = int(params['n_miller_index_sets'])
-        self.data_params['n_miller_index_sets'] = 4000
+        self.data_params['miller_index_sets_dz_max'] = float(params['miller_index_sets_dz_max'])
+        self.data_params['miller_index_sets_per_bin'] = int(params['miller_index_sets_per_bin'])
+        self.data_params['miller_index_sets_n_dz_bins'] = int(params['miller_index_sets_n_dz_bins'])
         self.data_params['n_max'] = int(params['n_max'])
         self.data_params['n_points'] = int(params['n_points'])
         self.data_params['points_tag'] = params['points_tag']
@@ -535,13 +532,40 @@ class Indexing:
         unaugmented_data = self.data[~self.data['augmented']]
         training_data = unaugmented_data[unaugmented_data['train']]
         hkl_labels_all = np.stack(training_data['hkl_labels'])
-        self.miller_index_templates = make_sets(
-            self.data_params['n_miller_index_sets'],
-            self.data_params['n_points'],
-            hkl_labels_all,
-            self.data_params['hkl_ref_length'],
-            self.rng
-            )
+        reindexed_unit_cell = np.stack(training_data['reindexed_unit_cell'])
+
+        n_bins = self.data_params['miller_index_sets_n_dz_bins']
+        if self.data_params['lattice_system'] in ['orthorhombic', 'monoclinic', 'triclinic']:
+            length_indices = [0, 1, 2]
+        elif self.data_params['lattice_system'] in ['tetragonal', 'hexagonal']:
+            length_indices = [0, 2]
+
+        if self.data_params['lattice_system'] in ['cubic', 'rhombohedral']:
+            self.miller_index_templates = make_sets(
+                self.data_params['miller_index_sets_per_bin'],
+                self.data_params['n_points'],
+                hkl_labels_all,
+                self.data_params['hkl_ref_length'],
+                self.rng
+                )
+        else:
+            mi_sets = []
+            ratio = reindexed_unit_cell[:, :3].max(axis=1) / reindexed_unit_cell[:, :3].min(axis=1)
+            bins = np.linspace(1, self.data_params['miller_index_sets_dz_max'], n_bins + 1)
+            indices = np.searchsorted(bins, ratio)
+            for i in range(1, n_bins + 2):
+                hkl_labels_bin = hkl_labels_all[indices == i]
+                if hkl_labels_bin.shape[0] < self.data_params['miller_index_sets_per_bin']:
+                    mi_sets.append(hkl_labels_bin)
+                else:
+                    mi_sets.append(make_sets(
+                        self.data_params['miller_index_sets_per_bin'],
+                        self.data_params['n_points'],
+                        hkl_labels_bin,
+                        self.data_params['hkl_ref_length'],
+                        self.rng
+                        ))
+            self.miller_index_templates = np.row_stack(mi_sets)
         np.save(f'{self.save_to["data"]}/miller_index_templates.npy', self.miller_index_templates)
 
     def setup_hkl(self):

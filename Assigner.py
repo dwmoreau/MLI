@@ -3,9 +3,7 @@ import numpy as np
 import scipy.optimize
 import tensorflow as tf
 
-from Networks import hkl_model_builder_mlp
-from Networks import hkl_model_builder_mlp_flat
-from Networks import hkl_model_builder_mlp_ortho
+from Networks import hkl_model_builder
 from Utilities import PairwiseDifferenceCalculator
 from Utilities import read_params
 from Utilities import write_params
@@ -194,9 +192,7 @@ class Assigner:
             unit_cell_scaled, inputs['q2_scaled']
             )
         pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=True)
-        #hkl_softmaxes = hkl_model_builder_mlp(pds_inv, 'softmaxes', self.model_params)
-        #hkl_softmaxes = hkl_model_builder_mlp_flat(pds_inv, 'softmaxes', self.model_params)
-        hkl_softmaxes = hkl_model_builder_mlp_ortho(pds_inv, 'softmaxes', self.model_params)
+        hkl_softmaxes = hkl_model_builder(pds_inv, 'softmaxes', self.model_params)
         return hkl_softmaxes
 
     def compile_model(self):
