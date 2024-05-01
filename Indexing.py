@@ -9,6 +9,10 @@ orthorhombic   | 93%
 monoclinic     | 70% - 75%
 triclinic      | not implemented
 
+* Refactor code:
+    stage 2: separate monoclinic by bravais lattice
+        - reindex monoclinic to I centered and n glide planes
+
 - Documentation
     - Update methods.md
         - Update text
@@ -23,8 +27,6 @@ triclinic      | not implemented
 
 - Optimization:
     - monoclinic
-        - hkl template 
-            - Update to incorporate balancing for dominant zone
         - correct the epsilon factor to be e^{-10}
             - how does this parameter affect the optimization?
         - hot & cold chains
@@ -59,21 +61,16 @@ triclinic      | not implemented
 
 - SWE:
     * Refactor code:
-        stage 1: 
-            - reciprocal space unit cell parameters for predictions
-            - xnn input for assigner
-            - remove angle scaler and use cos(angle)
-        stage 2: separate monoclinic by bravais lattice
-        stage 3: profile optimization
+        - separate monoclinic by bravais lattice
+    - remove angle scaler and use cos(angle)
+    - Move Miller index templates into regression object
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
     - get working on dials
         - Get a working environment
         - Train ML models (monoclinic)
-    - MPI error: https://github.com/pmodels/mpich/issues/6547
 
 - Regression:
-    - move Miller index templates into regression object
     - How to turn templates into a feature extraction layer
 """
 import joblib
@@ -93,6 +90,8 @@ from Regression import Regression_AlphaBeta
 from Utilities import Q2Calculator
 from Utilities import read_params
 from Utilities import write_params
+from Utilities import reciprocal_uc_conversion
+from Utilities import get_xnn_from_reciprocal_unit_cell
 
 
 class Indexing:
@@ -1376,45 +1375,45 @@ class Indexing:
     def setup_assignment(self):
         self.assigner = dict.fromkeys(self.assign_params.keys())
 
+        # Assignments use the xnn unit cell representation.
+        # This should be updated in the ParseDatabases.py file then these lines can be deleted
+        # once the datasets are regenerated.
+        reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
+        reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
+            reindexed_unit_cell, partial_unit_cell=False,
+            )
+        reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
+            reindexed_reciprocal_unit_cell, partial_unit_cell=False
+            )
+        self.data['reindexed_xnn'] = list(reindexed_xnn)
+
         for key in self.assign_params.keys():
             self.assigner[key] = Assigner(
                 self.data_params,
                 self.assign_params[key],
                 self.hkl_ref,
-                self.uc_scaler,
-                self.angle_scale,
                 self.q2_scaler,
                 self.save_to['assigner']
                 )
             if self.assign_params[key]['load_from_tag']:
-                self.assigner[key].load_from_tag(self.assign_params[key]['tag'], self.assign_params[key]['mode'])
+                self.assigner[key].load_from_tag(
+                    self.assign_params[key]['tag'],
+                    self.assign_params[key]['mode']
+                    )
             else:
-                if self.assign_params[key]['train_on'] == 'perturbed':
-                    unit_cell_scaled_key = 'reindexed_unit_cell_scaled'
-                    y_indices = self.data_params['y_indices']
-                elif self.assign_params[key]['train_on'] == 'predicted':
-                    unit_cell_scaled_key = 'reindexed_unit_cell_pred_scaled'
-                    y_indices = None
                 self.assigner[key].fit_model(
                     data=self.data[~self.data['augmented']],
-                    unit_cell_scaled_key=unit_cell_scaled_key,
-                    y_indices=y_indices,
+                    xnn_key='reindexed_xnn',
+                    y_indices=self.data_params['y_indices'],
                     )
 
     def inferences_assignment(self, keys):
         for key in keys:
-            if self.assign_params[key]['train_on'] == 'perturbed':
-                unit_cell_scaled_key = 'reindexed_unit_cell_scaled'
-                y_indices = self.data_params['y_indices']
-            elif self.assign_params[key]['train_on'] == 'predicted':
-                unit_cell_scaled_key = 'reindexed_unit_cell_pred_scaled'
-                y_indices = None
-
             unaugmented_data = self.data[~self.data['augmented']].copy()
             softmaxes = self.assigner[key].do_predictions(
                 unaugmented_data,
-                unit_cell_scaled_key=unit_cell_scaled_key,
-                y_indices=y_indices,
+                xnn_key='reindexed_xnn',
+                y_indices=self.data_params['y_indices'],
                 reload_model=False,
                 batch_size=1024,
                 )
@@ -1427,8 +1426,8 @@ class Indexing:
             self.assigner[key].evaluate(
                 unaugmented_data,
                 self.data_params['bravais_lattices'],
-                unit_cell_scaled_key=unit_cell_scaled_key,
-                y_indices=y_indices,
+                xnn_key='reindexed_xnn',
+                y_indices=self.data_params['y_indices'],
                 perturb_std=self.assign_params[key]['perturb_std']
                 )
 

@@ -10,14 +10,12 @@ from Utilities import write_params
 
 
 class Assigner:
-    def __init__(self, data_params, model_params, hkl_ref, uc_scaler, angle_scale, q2_scaler, save_to):
+    def __init__(self, data_params, model_params, hkl_ref, q2_scaler, save_to):
         self.model_params = model_params
         self.model_params['n_uc_params'] = len(data_params['y_indices'])
         self.model_params['n_points'] = data_params['n_points']
         self.model_params['hkl_ref_length'] = data_params['hkl_ref_length']
         model_params_defaults = {
-            'n_filters': 4,
-            'kernel_size': [5, 20],
             'layers': [100],
             'epsilon': 0.001,
             'dropout_rate': 0.1,
@@ -40,8 +38,12 @@ class Assigner:
             hkl_ref=hkl_ref,
             tensorflow=True,
             q2_scaler=q2_scaler,
-            uc_scaler=uc_scaler,
-            angle_scale=angle_scale,
+            )
+        self.pairwise_difference_calculation_numpy = PairwiseDifferenceCalculator(
+            lattice_system=data_params['lattice_system'],
+            hkl_ref=hkl_ref,
+            tensorflow=False,
+            q2_scaler=q2_scaler,
             )
 
     def save(self):
@@ -52,7 +54,6 @@ class Assigner:
         params = read_params(f'{self.save_to}/assignment_params_{self.model_params["tag"]}.csv')
         params_keys = [
             'tag',
-            'train_on',
             'batch_size',
             'epochs',
             'layers',
@@ -60,8 +61,6 @@ class Assigner:
             'epsilon',
             'dropout_rate',
             'output_activation',
-            'kernel_size',
-            'n_filters',
             'hkl_ref_length',
             'n_points',
             'n_uc_params',
@@ -71,7 +70,6 @@ class Assigner:
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
-        self.model_params['train_on'] = params['train_on']
         self.model_params['n_points'] = int(params['n_points'])
         if params['perturb_std'] == '':
             self.model_params['perturb_std'] = None
@@ -79,16 +77,11 @@ class Assigner:
             self.model_params['perturb_std'] = float(params['perturb_std'])
         self.model_params['epsilon_pds'] = float(params['epsilon_pds'])
         self.model_params['n_uc_params'] = int(params['n_uc_params'])
-        self.model_params['n_filters'] = int(params['n_filters'])
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['epochs'] = int(params['epochs'])
         self.model_params['hkl_ref_length'] = int(params['hkl_ref_length'])
         self.model_params['layers'] = np.array(
             params['layers'].split('[')[1].split(']')[0].split(','),
-            dtype=int
-            )
-        self.model_params['kernel_size'] = np.array(
-            params['kernel_size'].split('[')[1].split(']')[0].split(','),
             dtype=int
             )
         self.model_params['learning_rate'] = float(params['learning_rate'])
@@ -113,49 +106,11 @@ class Assigner:
             by_name=True
             )
 
-    def get_initial_assign_biases(self, data):
-        def bias_init_tf_jac(b, f):
-            f_est = np.exp(b) / np.sum(np.exp(b))
-
-            term0 = np.zeros((b.size, f.size))
-            term0[np.arange(b.size), np.arange(b.size)] = f_est
-            term1 = f_est[:, np.newaxis] * f_est[np.newaxis]
-            df_est_db = term0 - term1
-
-            loss = 1/2 * np.sum((f - f_est)**2)
-            dloss_db = -np.sum((f - f_est) * df_est_db, axis=1)
-            return loss, dloss_db
-
-        # bias initialization
-        # batch_size x 10 x 100
-        hkl_labels = np.stack(data['hkl_labels'])  # n_data x n_points
-        frequencies = np.zeros((self.model_params['n_points'], self.model_params['hkl_ref_length']))
-        bins = np.arange(0, self.model_params['hkl_ref_length'] + 1) - 0.5
-        for index in range(self.model_params['n_points']):
-            frequencies[index], _ = np.histogram(hkl_labels[:, index], bins=bins, density=True)
-
-        bias_init = np.zeros((self.model_params['n_points'], self.model_params['hkl_ref_length']))
-        for index in range(self.model_params['n_points']):
-            results = scipy.optimize.minimize(
-                bias_init_tf_jac,
-                x0=frequencies[index],
-                args=(frequencies[index]),
-                method='L-BFGS-B',
-                jac=True
-                )
-            bias_init[index] = results.x
-
-        #fig, axes = plt.subplots(1, 1, figsize=(10, 4))
-        #axes.plot(results.x)
-        #plt.show()
-        #print(results)
-        return bias_init
-
     def build_model(self, mode, data=None):
         inputs = {
-            'unit_cell_scaled': tf.keras.Input(
+            'xnn': tf.keras.Input(
                 shape=(self.model_params['n_uc_params']),
-                name='unit_cell_scaled',
+                name='xnn',
                 dtype=tf.float32,
                 ),
             'q2_scaled': tf.keras.Input(
@@ -166,30 +121,22 @@ class Assigner:
             }
         self.model = tf.keras.Model(inputs, self.model_builder(inputs, mode))
         #self.model.summary()
-        """
-        # This sets the biases to the initial distribution.
-        # This helps with very early training but benefits aren't worth the time spent in this loop.
-        if not data is None:
-            bias_init = self.get_initial_assign_biases(data[data['train']])
-            for index in range(self.model_params['n_points']):
-                weights, biases = self.model.get_layer(f'hkl_softmaxes_{index}').get_weights()
-                self.model.get_layer(f'hkl_softmaxes_{index}').set_weights([weights, bias_init[index]])
-        """
 
     def model_builder(self, inputs, mode):
         if self.model_params['perturb_std'] is None:
             print(f'Building assignment without perturbations {self.model_params["tag"]}')
-            unit_cell_scaled = inputs['unit_cell_scaled']
+            xnn = inputs['xnn']
         elif mode != 'training':
             print(f'Building assignment without perturbations {self.model_params["tag"]}')
-            unit_cell_scaled = inputs['unit_cell_scaled']
+            xnn = inputs['xnn']
         else:
             print(f'Building assignment with perturbations {self.model_params["tag"]}')
-            unit_cell_scaled = tf.keras.layers.GaussianNoise(self.model_params['perturb_std'])(
-                inputs['unit_cell_scaled'], training=True
+            noise = tf.keras.layers.GaussianNoise(self.model_params['perturb_std'])(
+                tf.ones_like(inputs['xnn']), training=True
                 )
-        pairwise_differences_scaled = self.pairwise_difference_calculation.get_pairwise_differences_from_uc_scaled(
-            unit_cell_scaled, inputs['q2_scaled']
+            xnn = noise * inputs['xnn']
+        pairwise_differences_scaled = self.pairwise_difference_calculation.get_pairwise_differences(
+            xnn, inputs['q2_scaled']
             )
         pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=True)
         hkl_softmaxes = hkl_model_builder(pds_inv, 'softmaxes', self.model_params)
@@ -215,24 +162,19 @@ class Assigner:
         epsilon = self.model_params['epsilon_pds']
         return epsilon / (abs_func(pairwise_differences_scaled) + epsilon)
 
-    def fit_model(self, data, unit_cell_scaled_key, y_indices):
+    def fit_model(self, data, xnn_key, y_indices):
         self.build_model(mode='training', data=data)
         self.compile_model()
 
         train_data = data[data['train']]
         val_data = data[~data['train']]
 
-        if y_indices is None:
-            unit_cell_scaled = np.stack(data[unit_cell_scaled_key])
-        else:
-            unit_cell_scaled = np.stack(data[unit_cell_scaled_key])[:, y_indices]
-
         train_inputs = {
-            'unit_cell_scaled': unit_cell_scaled[data['train']],
+            'xnn': np.stack(train_data[xnn_key])[:, y_indices],
             'q2_scaled': np.stack(train_data['q2_scaled']),
             }
         val_inputs = {
-            'unit_cell_scaled': unit_cell_scaled[~data['train']],
+            'xnn': np.stack(val_data[xnn_key])[:, y_indices],
             'q2_scaled': np.stack(val_data['q2_scaled']),
             }
         train_true = {'hkl_softmaxes': np.stack(train_data['hkl_labels'])}
@@ -281,7 +223,7 @@ class Assigner:
         fig.savefig(f'{self.save_to}/assignment_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
-    def do_predictions(self, data, unit_cell_scaled_key, y_indices, reload_model=True, batch_size=256):
+    def do_predictions(self, data, xnn_key, y_indices, reload_model=True, batch_size=256):
         if reload_model:
             self.build_model(mode='evaluate')
             self.model.load_weights(
@@ -289,36 +231,34 @@ class Assigner:
                 by_name=True
                 )
             self.compile_model()
-        if y_indices is None:
-            inputs = {
-                'unit_cell_scaled': np.stack(data[unit_cell_scaled_key]),
-                'q2_scaled': np.stack(data['q2_scaled'])
-                }
-        else:
-            inputs = {
-                'unit_cell_scaled': np.stack(data[unit_cell_scaled_key])[:, y_indices],
-                'q2_scaled': np.stack(data['q2_scaled'])
-                }
+        inputs = {
+            'xnn': np.stack(data[xnn_key])[:, y_indices],
+            'q2_scaled': np.stack(data['q2_scaled'])
+            }
         print(f'\n Inference for Miller Index Assignments')
         n_batchs = len(data) // batch_size
         left_over = len(data) % batch_size
 
-        softmaxes = np.zeros((len(data), self.model_params['n_points'], self.model_params['hkl_ref_length']))
+        softmaxes = np.zeros((
+            len(data),
+            self.model_params['n_points'],
+            self.model_params['hkl_ref_length']
+            ))
         for batch_index in range(n_batchs + 1):
             start = batch_index * batch_size
             if batch_index == n_batchs:
                 batch_unit_cell_scaled = np.zeros((batch_size, self.model_params['n_uc_params']))
                 batch_q2_scaled = np.zeros((batch_size, self.model_params['n_points']))
-                batch_unit_cell_scaled[:left_over] = inputs['unit_cell_scaled'][start: start + left_over]
-                batch_unit_cell_scaled[left_over:] = inputs['unit_cell_scaled'][0]
+                batch_unit_cell_scaled[:left_over] = inputs['xnn'][start: start + left_over]
+                batch_unit_cell_scaled[left_over:] = inputs['xnn'][0]
                 batch_q2_scaled[:left_over] = inputs['q2_scaled'][start: start + left_over]
                 batch_q2_scaled[left_over:] = inputs['q2_scaled'][0]
             else:
                 end = (batch_index + 1) * batch_size
-                batch_unit_cell_scaled = inputs['unit_cell_scaled'][start: end]
+                batch_unit_cell_scaled = inputs['xnn'][start: end]
                 batch_q2_scaled = inputs['q2_scaled'][start: end]
             batch_inputs = {
-                'unit_cell_scaled': batch_unit_cell_scaled,
+                'xnn': batch_unit_cell_scaled,
                 'q2_scaled': batch_q2_scaled
                 }
             softmaxes_batch = self.model.predict_on_batch(batch_inputs)
@@ -328,22 +268,19 @@ class Assigner:
                 softmaxes[start: end] = softmaxes_batch
         return softmaxes
 
-    def evaluate(self, data, bravais_lattices, unit_cell_scaled_key, y_indices, perturb_std):
+    def evaluate(self, data, bravais_lattices, xnn_key, y_indices, perturb_std):
         for bravais_lattice in bravais_lattices:
             if bravais_lattice == 'All':
                 bl_data = data
             else:
                 bl_data = data[data['bravais_lattice'] == bravais_lattice]
-            if y_indices is None:
-                unit_cell_scaled = np.stack(bl_data[unit_cell_scaled_key])
-            else:
-                unit_cell_scaled = np.stack(bl_data[unit_cell_scaled_key])[:, y_indices]
+            xnn = np.stack(bl_data[xnn_key])[:, y_indices]
 
             if perturb_std is not None:
-                noise = np.random.normal(loc=0, scale=perturb_std, size=unit_cell_scaled.shape)
-                unit_cell_scaled += noise
-            pairwise_differences_scaled = self.pairwise_difference_calculation.get_pairwise_differences_from_uc_scaled(
-                unit_cell_scaled, np.stack(bl_data['q2_scaled'])
+                noise = np.random.normal(loc=1, scale=perturb_std, size=xnn.shape)
+                xnn *= noise
+            pairwise_differences_scaled = self.pairwise_difference_calculation_numpy.get_pairwise_differences(
+                xnn, np.stack(bl_data['q2_scaled'])
                 )
             bl_pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=False)
             labels_closest = np.argmax(bl_pds_inv, axis=2)

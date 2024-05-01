@@ -396,10 +396,10 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
         # primitive settings with no symmetry elements along the a or c axis are reindexed so
         #   a < c
         ac_reindexer = np.array([
-                [0, 0, 1],
-                [0, 1, 0],
-                [-1, 0, 0],
-                ])
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
         centered_reindexer = ac_reindexer @ centered_reindexer
     
     rucm = ucm @ centered_reindexer

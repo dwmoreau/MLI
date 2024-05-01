@@ -112,11 +112,10 @@ class LikelihoodLoss:
 
 
 class CandidateOptLoss_xnn:
-    def __init__(self, q2_obs, lattice_system, epsilon=1e-5):
+    def __init__(self, q2_obs, lattice_system, epsilon):
         self.q2_obs = q2_obs
         self.lattice_system = lattice_system
         self.delta_q_eps = epsilon**2
-        #self.delta_q_eps = np.exp(-10)
         self.n_points = self.q2_obs.shape[1]
         self.n_entries = self.q2_obs.shape[0]
 

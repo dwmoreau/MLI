@@ -13,7 +13,9 @@ from Reindexing import reindex_entry_monoclinic
 from Reindexing import reindex_entry_orthorhombic
 from Reindexing import hexagonal_to_rhombohedral_unit_cell
 from Reindexing import hexagonal_to_rhombohedral_hkl
+from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import Q2Calculator
+from Utilities import reciprocal_uc_conversion
 
 
 class ProcessEntry:
@@ -42,6 +44,8 @@ class ProcessEntry:
         self.reindexed_spacegroup_symbol_hall = None
         self.reindexed_spacegroup_symbol_hm = None
         self.reindexed_unit_cell = np.zeros(6)
+        self.reindexed_reciprocal_unit_cell = np.zeros(6)
+        self.reindexed_xnn = np.zeros(6)
         self.reindexed_volume = None
         self.permutation = None
         self.hkl_reindexer = np.eye(3)
@@ -80,12 +84,14 @@ class ProcessEntry:
             'unit_cell': self.unit_cell,
             'reindexed_spacegroup_symbol_hall': self.reindexed_spacegroup_symbol_hall,
             'reindexed_spacegroup_symbol_hm': self.reindexed_spacegroup_symbol_hm,
+            'reindexed_reciprocal_unit_cell': self.reindexed_reciprocal_unit_cell,
+            'reindexed_xnn': self.reindexed_xnn,
             'reindexed_unit_cell': self.reindexed_unit_cell,
             'reindexed_volume': self.reindexed_volume,
             'split': self.split,
             'permutation': self.permutation,
             'hkl_reindexer': self.hkl_reindexer.ravel(),
-            'reduced_unit_cell': self.reindexed_unit_cell,
+            'reduced_unit_cell': self.reduced_unit_cell,
             'reduced_volume': self.reduced_volume,
             'r_factor': self.r_factor,
             'status': self.status,
@@ -95,13 +101,23 @@ class ProcessEntry:
     def verify_reindexing(self):
         unit_cell = self.unit_cell.copy()
         unit_cell[3:] *= np.pi/180
-        q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=self.hkl_ref_monoclinic, tensorflow=False)
+        q2_calculator = Q2Calculator(
+            lattice_system='triclinic',
+            hkl=self.hkl_ref_monoclinic,
+            tensorflow=False,
+            representation='unit_cell'
+            )
         q2 = q2_calculator.get_q2(unit_cell[np.newaxis])
 
         reindexed_unit_cell = self.reindexed_unit_cell.copy()
         reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = self.hkl_ref_monoclinic @ self.hkl_reindexer
-        reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
+        reindexed_q2_calculator = Q2Calculator(
+            lattice_system='triclinic',
+            hkl=reindexed_hkl,
+            tensorflow=False,
+            representation='unit_cell'
+            )
         reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
         check = np.isclose(q2, reindexed_q2).all()
         return check
@@ -109,13 +125,23 @@ class ProcessEntry:
     def verify_reindexing_rhombohedral(self):
         unit_cell = self.unit_cell.copy()
         unit_cell[3:] *= np.pi/180
-        q2_calculator = Q2Calculator(lattice_system='hexagonal', hkl=self.hkl_ref_hexagonal, tensorflow=False)
+        q2_calculator = Q2Calculator(
+            lattice_system='hexagonal',
+            hkl=self.hkl_ref_hexagonal,
+            tensorflow=False,
+            representation='unit_cell'
+            )
         q2 = q2_calculator.get_q2(unit_cell[np.newaxis][:, [0, 2]])[0]
 
         reindexed_unit_cell = self.reindexed_unit_cell.copy()
         reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = self.hkl_ref_hexagonal @ self.hkl_reindexer
-        reindexed_q2_calculator = Q2Calculator(lattice_system='rhombohedral', hkl=reindexed_hkl, tensorflow=False)
+        reindexed_q2_calculator = Q2Calculator(
+            lattice_system='rhombohedral',
+            hkl=reindexed_hkl,
+            tensorflow=False,
+            representation='unit_cell'
+            )
         reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis][:, [0, 3]])[0]
         check = np.isclose(q2, reindexed_q2).all()
         return check
@@ -240,24 +266,30 @@ class ProcessEntry:
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
         elif self.lattice_system == 'monoclinic':
-            #try:
-            self.reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, self.hkl_reindexer = \
-                reindex_entry_monoclinic(
-                    self.unit_cell,
-                    self.spacegroup_symbol_hm,
-                    radians=False
-                    )
-            #except:
-            #    self.reason = 'Could not reindex monoclinic'
-            #    self.status = False
-            #    print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
-            #    return None
+            try:
+                self.reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, self.hkl_reindexer = \
+                    reindex_entry_monoclinic(
+                        self.unit_cell,
+                        self.spacegroup_symbol_hm,
+                        radians=False
+                        )
+            except:
+                self.reason = 'Could not reindex monoclinic'
+                self.status = False
+                print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
+                return None
             if self.reindexed_unit_cell is None:
                 self.reason = 'Infrequent monoclinic setting that has not been setup for reindexing'
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
                 return None
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
+            self.reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
+                self.reindexed_unit_cell, partial=False, radians=False
+                )
+            self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
+                self.reindexed_reciprocal_unit_cell, partial=False, radians=False
+                )
             if not self.verify_reindexing():
                 self.reason = 'Monoclinic Reindexing Error'
                 self.status = False

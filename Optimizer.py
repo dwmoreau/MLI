@@ -1,5 +1,4 @@
 import copy
-import itertools
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -40,7 +39,8 @@ def vectorized_subsampling(p, n_picks, rng):
     return chosen
 
 
-def vectorized_resampling(softmaxes, rng):
+def vectorized_resampling_original(softmaxes, rng):
+    # This is a major performance bottleneck
     n_entries = softmaxes.shape[0]
     n_peaks = softmaxes.shape[1]
     hkl_ref_length = softmaxes.shape[2]
@@ -50,11 +50,13 @@ def vectorized_resampling(softmaxes, rng):
     point_order = rng.permutation(n_peaks)
     softmaxes_zeroed = softmaxes.copy()
     for point_index in point_order:
+        # This is slow (21% of execution time)
         cumsum = np.cumsum(softmaxes_zeroed[:, point_index, :], axis=1)
         q = cumsum >= random_values[:, point_index][:, np.newaxis]
         hkl_assign[:, point_index] = np.argmax(q, axis=1)
         for candidate_index in range(n_entries):
             softmaxes_zeroed[candidate_index, :, hkl_assign[candidate_index, point_index]] = 0
+        # This is slow (55% execution time)
         softmaxes_zeroed /= softmaxes_zeroed.sum(axis=2)[:, :, np.newaxis]
 
     softmax = np.zeros((n_entries, n_peaks))
@@ -89,7 +91,7 @@ def best_assign_nocommon(softmaxes):
 class Candidates:
     def __init__(self,
         entry,
-        unit_cell, unit_cell_scaled, unit_cell_pred,
+        unit_cell, unit_cell_pred,
         lattice_system,
         minimum_unit_cell, maximum_unit_cell,
         tolerance
@@ -147,7 +149,6 @@ class Candidates:
 
         self.df_columns = [
             'unit_cell',
-            'unit_cell_scaled',
             'reciprocal_unit_cell',
             'xnn',
             'hkl',
@@ -158,7 +159,6 @@ class Candidates:
         self.explainers = pd.DataFrame(columns=self.df_columns)
 
         self.candidates['unit_cell'] = list(unit_cell)
-        self.candidates['unit_cell_scaled'] = list(unit_cell_scaled)
         self.update_xnn_from_unit_cell()
         self.hkl_true_check = get_hkl_checks(self.hkl_true, self.lattice_system)
 
@@ -818,7 +818,8 @@ class Optimizer:
             entry_list = np.array(diagnostics[~diagnostics['found']]['entry_index'])
         else:
             entry_list = np.arange(self.N)
-        for entry_index in entry_list:
+        #for entry_index in entry_list:
+        for entry_index in [1]:
             start = time.time()
             candidates = self.generate_candidates(
                 self.uc_scaled_mean[entry_index],
@@ -1169,7 +1170,6 @@ class Optimizer:
         candidates = Candidates(
             entry=entry,
             unit_cell=candidate_uc,
-            unit_cell_scaled=candidate_uc_scaled,
             unit_cell_pred=uc_pred,
             lattice_system=self.indexer.data_params['lattice_system'],
             minimum_unit_cell=self.opt_params['minimum_uc'],
@@ -1182,7 +1182,7 @@ class Optimizer:
         else:
             candidates = self.assign_hkls(
                 candidates,
-                'initial',
+                self.opt_params['initial_assigner_key'],
                 'best'
                 )
 
@@ -1288,19 +1288,19 @@ class Optimizer:
         """
         n_batchs = candidates.n // self.opt_params['assignment_batch_size']
         left_over = candidates.n % self.opt_params['assignment_batch_size']
-        unit_cell_scaled = np.stack(candidates.candidates['unit_cell_scaled'])
+        xnn = np.stack(candidates.candidates['xnn'])
         batch_q2_scaled = np.repeat(
             candidates.q2_obs_scaled[np.newaxis, :],
             repeats=self.opt_params['assignment_batch_size'],
             axis=0
             )
         if self.one_assignment_batch:
-            batch_unit_cell_scaled = np.zeros((
+            batch_xnn = np.zeros((
                 self.opt_params['assignment_batch_size'], self.indexer.data_params['n_outputs']
                 ))
-            batch_unit_cell_scaled[:candidates.n] = unit_cell_scaled
+            batch_xnn[:candidates.n] = xnn
             inputs = {
-                'unit_cell_scaled': batch_unit_cell_scaled,
+                'xnn': batch_xnn,
                 'q2_scaled': batch_q2_scaled
                 }
             # This is a bottleneck
@@ -1316,15 +1316,15 @@ class Optimizer:
                 start = batch_index * self.opt_params['assignment_batch_size']
                 end = (batch_index + 1) * self.opt_params['assignment_batch_size']
                 if batch_index == n_batchs:
-                    batch_unit_cell_scaled = np.zeros((
+                    batch_xnn = np.zeros((
                         self.opt_params['assignment_batch_size'], self.indexer.data_params['n_outputs']
                         ))
-                    batch_unit_cell_scaled[:left_over] = unit_cell_scaled[start: start + left_over]
-                    batch_unit_cell_scaled[left_over:] = batch_unit_cell_scaled[0]
+                    batch_xnn[:left_over] = xnn[start: start + left_over]
+                    batch_xnn[left_over:] = batch_xnn[0]
                 else:
-                    batch_unit_cell_scaled = unit_cell_scaled[start: end]
+                    batch_xnn = xnn[start: end]
                 inputs = {
-                    'unit_cell_scaled': batch_unit_cell_scaled,
+                    'xnn': batch_xnn,
                     'q2_scaled': batch_q2_scaled
                     }
                 # This is a bottleneck
@@ -1359,15 +1359,17 @@ class Optimizer:
         return candidates
 
     def assign_hkls_closest(self, candidates):
-        unit_cell_scaled = np.stack(candidates.candidates['unit_cell_scaled'])
+        """
+        This function may be super broken...
+        """
+        xnn = np.stack(candidates.candidates['xnn'])
         q2_obs_scaled = np.repeat(
             candidates.q2_obs_scaled[np.newaxis, :], repeats=candidates.n, axis=0
             )
-        pairwise_differences_scaled = \
-            self.indexer.assigner['0'].pairwise_difference_calculation.get_pairwise_differences_from_uc_scaled(
-                unit_cell_scaled, q2_obs_scaled
+        pairwise_differences_scaled = self.indexer.assigner[self.opt_params['initial_assigner_key']].pairwise_difference_calculation_numpy.get_pairwise_differences(
+                xnn, q2_obs_scaled
                 )
-        pds_inv = self.indexer.assigner['0'].transform_pairwise_differences(
+        pds_inv = self.indexer.assigner[self.opt_params['initial_assigner_key']].transform_pairwise_differences(
             pairwise_differences_scaled, tensorflow=False
             )
         softmax_all = scipy.special.softmax(pds_inv, axis=2)
@@ -1393,9 +1395,6 @@ class Optimizer:
         next_candidates = copy.deepcopy(candidates)
         next_candidates.candidates['xnn'] = list(next_xnn)
         next_candidates.update_unit_cell_from_xnn()
-        next_candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
-            uc_pred=np.stack(next_candidates.candidates['unit_cell'])
-            ))
         if assigner_key == 'closest':
             next_candidates = self.assign_hkls_closest(next_candidates)
         else:
@@ -1481,9 +1480,6 @@ class Optimizer:
         # Now we have a different amount of candidates, so we must use batched assignments
         self.one_assignment_batch = False
         candidates.monoclinic_reset(iteration_info['n_best'], iteration_info['n_angles'])
-        candidates.candidates['unit_cell_scaled'] = list(self.indexer.scale_predictions(
-            uc_pred=np.stack(candidates.candidates['unit_cell'])
-            ))
         if iteration_info['assigner_key'] == 'closest':
             candidates = self.assign_hkls_closest(candidates)
         else:
