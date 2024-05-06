@@ -295,6 +295,136 @@ def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutat
 
 
 def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
+    # This version reindexes the monoclinic entries to nonconventional settings
+    #   SG # | Setting
+    #      3 | P 1 2 1
+    #      4 | P 1 21 1
+    #      5 | I 1 2 1
+    #      6 | P 1 m 1
+    #      7 | P 1 n 1
+    #      8 | I 1 m 1
+    #      9 | I 1 a 1
+    #     10 | P 1 2/m 1
+    #     11 | P 1 21/m 1
+    #     12 | I 1 2/m 1
+    #     13 | P 1 2/n 1
+    #     14 | P 1 21/n 1
+    #     15 | I 1 2/a 1
+    # Useful resources:
+    #    http://pd.chem.ucl.ac.uk/pdnn/symm4/practice.htm
+    #    https://onlinelibrary.wiley.com/iucr/itc/Ab/ch5o1v0001/sec5o1o3.pdf
+    def reindex_unit_cell(unit_cell, operator, radians):
+        if radians:
+            check = np.pi/2
+            angle_multiplier = 1
+        else:
+            check = 90
+            angle_multiplier = np.pi/180
+        a = unit_cell[0]
+        b = unit_cell[1]
+        c = unit_cell[2]
+        beta = angle_multiplier * unit_cell[4]
+        ucm = np.array([
+            [a, 0, c*np.cos(beta)],
+            [0, b, 0],
+            [0, 0, c*np.sin(beta)],
+            ])
+        rucm = ucm @ operator
+        reindexed_unit_cell = np.zeros(6)
+        reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
+        reindexed_unit_cell[1] = np.linalg.norm(rucm[:, 1])
+        reindexed_unit_cell[2] = np.linalg.norm(rucm[:, 2])
+        dot_product = np.dot(rucm[:, 0], rucm[:, 2])
+        mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
+        reindexed_unit_cell[4] = np.arccos(dot_product / mag) / angle_multiplier
+        reindexed_unit_cell[3] = check
+        reindexed_unit_cell[5] = check
+        return reindexed_unit_cell
+
+    A_centered = ['A 1 2 1', 'A 1 m 1', 'A 1 a 1', 'A 1 2/m 1', 'A 1 2/a 1']
+    C_centered = ['C 1 2 1', 'C 1 m 1', 'C 1 c 1', 'C 1 2/m 1', 'C 1 2/c 1']
+    I_centered = ['I 1 2 1', 'I 1 m 1', 'I 1 a 1', 'I 1 2/m 1', 'I 1 2/a 1']
+    P_symbols = ['P 1 2 1', 'P 1 m 1', 'P 1 2/m 1', 'P 1 21 1', 'P 1 21/m 1']
+    Pa_symbols = ['P 1 a 1', 'P 1 2/a 1', 'P 1 21/a 1']
+    Pc_symbols = ['P 1 c 1', 'P 1 2/c 1', 'P 1 21/c 1']
+    Pn_symbols = ['P 1 n 1', 'P 1 2/n 1', 'P 1 21/n 1']
+    standard_settings = P_symbols + Pn_symbols + I_centered
+    
+    reindexed_spacegroup_symbol = copy.copy(spacegroup_symbol)
+    if spacegroup_symbol in standard_settings:
+        centered_reindexer = np.eye(3)
+    elif spacegroup_symbol in A_centered:
+        centered_reindexer = np.array([
+            [-1, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('A', 'I')
+    elif spacegroup_symbol in C_centered:
+        centered_reindexer = np.array([
+            [0, 0, -1],
+            [0, 1, 0],
+            [1, 0, -1],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('C', 'I')
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('c', 'a')
+    elif spacegroup_symbol in ['I 1 2/c 1', 'I 1 c 1']:
+        centered_reindexer = np.array([
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('c', 'a')
+    elif spacegroup_symbol in Pa_symbols:
+        centered_reindexer = np.array([
+            [1, 0, 1],
+            [0, 1, 0],
+            [0, 0, 1],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('a', 'n')
+    elif spacegroup_symbol in Pc_symbols:
+        centered_reindexer = np.array([
+            [1, 0, -1],
+            [0, 1, 0],
+            [1, 0, 0],
+            ])
+        reindexed_spacegroup_symbol = reindexed_spacegroup_symbol.replace('c', 'n')
+    else:
+        # These cases include entries that are reported in settings:
+        # 'A 1 n 1', 'C 1 n 1', 'C 1 2/n 1', 'A 1 2/n 1',
+        # 'P 1 1 21/n', 'P 1 1 21' 'I 2/b 1 1', 'P 21/c 1 1', 'C 2/m 1 1', 'P 21/m 1 1'
+        # None of these would reindex to settings with limited entries.
+        return None, None, np.eye(3)
+
+    reindexed_unit_cell = reindex_unit_cell(unit_cell, centered_reindexer, radians)
+    if reindexed_unit_cell[0] > reindexed_unit_cell[2]:
+        ac_reindexer = np.array([
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+        centered_reindexer = centered_reindexer @ ac_reindexer
+        reindexed_unit_cell = reindex_unit_cell(reindexed_unit_cell, ac_reindexer, radians)
+    
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+    if reindexed_unit_cell[4] < check:
+        obtuse_reindexer = np.array([
+            [-1, 0, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            ])
+        reindexed_unit_cell[4] = 2*check - reindexed_unit_cell[4]
+        hkl_reindexer = centered_reindexer @ obtuse_reindexer
+    else:
+        hkl_reindexer = centered_reindexer
+    return reindexed_unit_cell, reindexed_spacegroup_symbol, hkl_reindexer
+
+
+def reindex_entry_monoclinic_conventional_setting(unit_cell, spacegroup_symbol, radians):
+    # This version reindexes the monoclinic entries to the conventional setting
     # Useful resources:
     #    http://pd.chem.ucl.ac.uk/pdnn/symm4/practice.htm
     #    https://onlinelibrary.wiley.com/iucr/itc/Ab/ch5o1v0001/sec5o1o3.pdf

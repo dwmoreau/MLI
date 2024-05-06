@@ -230,7 +230,12 @@ class Augmentor:
         # calculate new d-spacings
         reindexed_hkl_sa = np.stack(augmented_entry['reindexed_hkl_sa']).round(decimals=0).astype(int)
 
-        q2_calculator = Q2Calculator(self.lattice_system, reindexed_hkl_sa, tensorflow=False)
+        q2_calculator = Q2Calculator(
+            self.lattice_system,
+            reindexed_hkl_sa,
+            tensorflow=False,
+            representation='unit_cell'
+            )
         q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[self.y_indices][np.newaxis, :])[0]
         existing_peaks = np.any(reindexed_hkl_sa != 0, axis=1)
 

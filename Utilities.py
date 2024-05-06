@@ -3,7 +3,6 @@ import numpy as np
 import os
 
 
-
 def get_fwhm_and_overlap_threshold():
     # This information gets used in GenerateDataset.py and Augmentor.py
     # This function removes duplicatation
@@ -64,6 +63,12 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
         [a*b*np.cos(gamma), b**2, b*c*np.cos(alpha)],
         [a*c*np.cos(beta), b*c*np.cos(alpha), c**2]
         ])
+    #for i in range(a.size):
+    #    print(S[:, :, i])
+    #    print(np.linalg.inv(S[:, :, i]))
+    #    print()
+    #good = np.linalg.matrix_rank(S.T, hermitian=True) == 3
+    #print(np.sum(~good))
     S_inv = np.linalg.inv(S.T)
     a_inv = np.sqrt(S_inv[:, 0, 0])
     b_inv = np.sqrt(S_inv[:, 1, 1])
@@ -149,53 +154,58 @@ def get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=False, lattice_syst
     return reciprocal_unit_cell
 
 
-def get_hkl_checks(hkl, lattice_system):
-    if lattice_system == 'cubic':
-        hkl_check = np.sum(hkl**2, axis=-1)
-    elif lattice_system == 'tetragonal':
-        hkl_check = np.stack((
-            np.sum(hkl[..., :2]**2, axis=-1),
-            hkl[..., 2]**2,
+def get_unit_cell_from_xnn(xnn, partial_unit_cell=False, lattice_system=None, radians=True):
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell, lattice_system)
+    return reciprocal_uc_conversion(reciprocal_unit_cell, partial_unit_cell, lattice_system, radians)
+
+
+def get_hkl_matrix(hkl, lattice_system):
+    last_axis = len(hkl.shape) - 1
+    # hkl shape:
+    # last_axis = 1: n_peaks, 3
+    # last_axis = 2: n_entries, n_peaks, 3
+    if lattice_system == 'triclinic':
+        hkl_matrix = np.concatenate((
+            hkl[..., :3]**2,
+            (hkl[..., 0] * hkl[..., 1])[..., np.newaxis],
+            (hkl[..., 0] * hkl[..., 2])[..., np.newaxis],
+            (hkl[..., 1] * hkl[..., 2])[..., np.newaxis],
             ),
-            axis=-1
+            axis=last_axis
+            )
+    elif lattice_system == 'monoclinic':
+        hkl_matrix = np.concatenate((
+            hkl[..., :3]**2,
+            (hkl[..., 0] * hkl[..., 2])[..., np.newaxis],
+            ),
+            axis=last_axis
             )
     elif lattice_system == 'orthorhombic':
-        hkl_check = hkl**2
-    elif lattice_system == 'monoclinic':
-        hkl_check = np.stack((
-            hkl[..., 0]**2,
-            hkl[..., 1]**2,
+        hkl_matrix = hkl**2
+    elif lattice_system == 'tetragonal':
+        hkl_matrix = np.stack((
+            np.sum(hkl[..., :2]**2, axis=last_axis),
             hkl[..., 2]**2,
-            hkl[..., 0] * hkl[..., 2],
             ),
-            axis=-1
-            )
-    elif lattice_system == 'triclinic':
-        hkl_check = np.stack((
-            hkl[..., 0]**2,
-            hkl[..., 1]**2,
-            hkl[..., 2]**2,
-            hkl[..., 0] * hkl[..., 1],
-            hkl[..., 0] * hkl[..., 2],
-            hkl[..., 1] * hkl[..., 2],
-            ),
-            axis=-1
+            axis=last_axis
             )
     elif lattice_system == 'hexagonal':
-        hkl_check = np.stack((
+        hkl_matrix = np.stack((
             hkl[..., 0]**2 + hkl[..., 0]*hkl[..., 1] + hkl[..., 1]**2,
             hkl[..., 2]**2,
             ),
-            axis=-1
+            axis=last_axis
             )
     elif lattice_system == 'rhombohedral':
-        hkl_check = np.stack((
-            np.sum(hkl[..., :2]**2, axis=-1),
+        hkl_matrix = np.stack((
+            np.sum(hkl[..., :2]**2, axis=last_axis),
             hkl[..., 0]*hkl[..., 1] + hkl[..., 0]*hkl[..., 2] + hkl[..., 1]*hkl[..., 2],
             ),
-            axis=-1
+            axis=last_axis
             )
-    return hkl_check
+    elif lattice_system == 'cubic':
+        hkl_matrix = np.sum(hkl**2, axis=last_axis)[..., np.newaxis]
+    return hkl_matrix
 
 
 class Q2Calculator:

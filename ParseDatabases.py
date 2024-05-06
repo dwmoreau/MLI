@@ -285,11 +285,11 @@ class ProcessEntry:
                 return None
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
             self.reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-                self.reindexed_unit_cell, partial=False, radians=False
-                )
+                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
+                )[0]
             self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-                self.reindexed_reciprocal_unit_cell, partial=False, radians=False
-                )
+                self.reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
+                )[0]
             if not self.verify_reindexing():
                 self.reason = 'Monoclinic Reindexing Error'
                 self.status = False

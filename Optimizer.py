@@ -9,7 +9,7 @@ import time
 
 from Indexing import Indexing
 from TargetFunctions import CandidateOptLoss_xnn
-from Utilities import get_hkl_checks
+from Utilities import get_hkl_matrix
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import reciprocal_uc_conversion
@@ -39,7 +39,7 @@ def vectorized_subsampling(p, n_picks, rng):
     return chosen
 
 
-def vectorized_resampling_original(softmaxes, rng):
+def vectorized_resampling(softmaxes, rng):
     # This is a major performance bottleneck
     n_entries = softmaxes.shape[0]
     n_peaks = softmaxes.shape[1]
@@ -59,6 +59,8 @@ def vectorized_resampling_original(softmaxes, rng):
         # This is slow (55% execution time)
         softmaxes_zeroed /= softmaxes_zeroed.sum(axis=2)[:, :, np.newaxis]
 
+    # This could be sped up with np.take_along_axis
+    # This loop is about 10% of the execution time
     softmax = np.zeros((n_entries, n_peaks))
     for candidate_index in range(n_entries):
         for point_index in range(n_peaks):
@@ -92,7 +94,7 @@ class Candidates:
     def __init__(self,
         entry,
         unit_cell, unit_cell_pred,
-        lattice_system,
+        lattice_system, bravais_lattice,
         minimum_unit_cell, maximum_unit_cell,
         tolerance
         ):
@@ -105,6 +107,7 @@ class Candidates:
         self.n_uc = unit_cell.shape[1]
 
         self.lattice_system = lattice_system
+        self.bravais_lattice = bravais_lattice
         self.minimum_unit_cell = minimum_unit_cell
         self.maximum_unit_cell = maximum_unit_cell
         if self.lattice_system == 'rhombohedral':
@@ -160,7 +163,7 @@ class Candidates:
 
         self.candidates['unit_cell'] = list(unit_cell)
         self.update_xnn_from_unit_cell()
-        self.hkl_true_check = get_hkl_checks(self.hkl_true, self.lattice_system)
+        self.hkl_true_check = get_hkl_matrix(self.hkl_true, self.lattice_system)
 
     def update_xnn_from_unit_cell(self):
         unit_cell = np.stack(self.candidates['unit_cell'])
@@ -300,7 +303,7 @@ class Candidates:
         reciprocal_unit_cell_max_diff = np.max(np.abs(reciprocal_unit_cell - self.reciprocal_unit_cell_true), axis=1)
 
         hkl = np.stack(self.candidates['hkl'])
-        hkl_pred_check = get_hkl_checks(hkl, self.lattice_system)
+        hkl_pred_check = get_hkl_matrix(hkl, self.lattice_system)
         hkl_correct = self.hkl_true_check[np.newaxis] == hkl_pred_check
         hkl_accuracy = np.count_nonzero(hkl_correct, axis=1) / self.n_points
 
@@ -656,21 +659,23 @@ class Candidates:
 
     def save_candidates(self, save_to, index):
         # This is a diagnostic function that saves info to work with in isolated cases.
-        np.save(f'{save_to}/uc_true_{index:03d}.npy', self.unit_cell_true)
-        np.save(f'{save_to}/q2_obs_{index:03d}.npy', self.q2_obs)
-        np.save(f'{save_to}/xnn_{index:03d}.npy', np.stack(self.candidates['xnn']))
-        np.save(f'{save_to}/hkl_{index:03d}.npy', np.stack(self.candidates['hkl']))
-        np.save(f'{save_to}/softmax_{index:03d}.npy', np.stack(self.candidates['softmax']))
-        np.save(f'{save_to}/unit_cell_{index:03d}.npy', np.stack(self.candidates['unit_cell']))
+        np.save(f'{save_to}/{self.bravais_lattice}_uc_true_{index:03d}.npy', self.unit_cell_true)
+        np.save(f'{save_to}/{self.bravais_lattice}_q2_obs_{index:03d}.npy', self.q2_obs)
+        np.save(f'{save_to}/{self.bravais_lattice}_xnn_{index:03d}.npy', np.stack(self.candidates['xnn']))
+        np.save(f'{save_to}/{self.bravais_lattice}_hkl_{index:03d}.npy', np.stack(self.candidates['hkl']))
+        np.save(f'{save_to}/{self.bravais_lattice}_softmax_{index:03d}.npy', np.stack(self.candidates['softmax']))
+        np.save(f'{save_to}/{self.bravais_lattice}_unit_cell_{index:03d}.npy', np.stack(self.candidates['unit_cell']))
 
 
 class Optimizer:
-    def __init__(self, assign_params, data_params, opt_params, reg_params):
+    def __init__(self, assign_params, data_params, opt_params, reg_params, template_params, bravais_lattice, seed=12345):
         self.assign_params = assign_params
         self.data_params = data_params
         self.opt_params = opt_params
         self.reg_params = reg_params
-        self.rng = np.random.default_rng()
+        self.template_params = template_params
+        self.bravais_lattice = bravais_lattice
+        self.rng = np.random.default_rng(seed)
 
         opt_params_defaults = {
             'n_candidates_nn': 30,
@@ -686,9 +691,9 @@ class Optimizer:
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
                 self.opt_params[key] = opt_params_defaults[key]
-        for key in self.assign_params:
-            self.assign_params[key]['load_from_tag'] = True
-            self.assign_params[key]['mode'] = 'inference'
+        for key in self.assign_params[self.bravais_lattice]:
+            self.assign_params[self.bravais_lattice][key]['load_from_tag'] = True
+            self.assign_params[self.bravais_lattice][key]['mode'] = 'inference'
         for key in self.reg_params:
             self.reg_params[key]['load_from_tag'] = True
             self.reg_params[key]['alpha_params'] = {}
@@ -697,6 +702,7 @@ class Optimizer:
             self.reg_params[key]['var_params'] = {}
             self.reg_params[key]['head_params'] = {}
         self.data_params['load_from_tag'] = True
+        self.template_params[self.bravais_lattice]['load_from_tag'] = True
 
         self.save_to = os.path.join(
             self.data_params['base_directory'], 'models', self.data_params['tag'], 'optimizer'
@@ -708,12 +714,18 @@ class Optimizer:
             assign_params=self.assign_params, 
             data_params=self.data_params,
             reg_params=self.reg_params, 
+            template_params=self.template_params, 
             seed=12345, 
             )
         self.indexer.setup_from_tag()
-        self.indexer.load_data_from_tag(load_augmented=False, load_train=False)
+        self.indexer.load_data_from_tag(
+            load_augmented=False,
+            load_train=False,
+            load_bravais_lattice=self.bravais_lattice
+            )
         self.indexer.setup_regression()
         self.indexer.setup_assignment()
+        self.indexer.setup_miller_index_templates()
 
         self.opt_params['minimum_uc_scaled'] = \
             (self.opt_params['minimum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
@@ -771,11 +783,11 @@ class Optimizer:
                 self.uc_scaled_mean[:, group_index, :] = uc_mean_scaled_group
                 self.uc_scaled_cov[:, group_index, :, :] = uc_cov_scaled_group
             np.save(
-                f'{self.save_to}/{self.data_params["tag"]}_uc_scaled_mean.npy',
+                f'{self.save_to}/{self.bravais_lattice}_{self.data_params["tag"]}_uc_scaled_mean.npy',
                 self.uc_scaled_mean
                 )
             np.save(
-                f'{self.save_to}/{self.data_params["tag"]}_uc_scaled_cov.npy',
+                f'{self.save_to}/{self.bravais_lattice}_{self.data_params["tag"]}_uc_scaled_cov.npy',
                 self.uc_scaled_cov
                 )
 
@@ -814,12 +826,13 @@ class Optimizer:
         if self.opt_params['rerun_failures']:
             print()
             print('Loading failures')
-            diagnostics = pd.read_json(os.path.join(self.save_to, 'optimization_diagnostics.json'))
+            diagnostics = pd.read_json(
+                os.path.join(self.save_to, f'{self.bravais_lattice}_optimization_diagnostics.json')
+                )
             entry_list = np.array(diagnostics[~diagnostics['found']]['entry_index'])
         else:
             entry_list = np.arange(self.N)
-        #for entry_index in entry_list:
-        for entry_index in [1]:
+        for entry_index in entry_list:
             start = time.time()
             candidates = self.generate_candidates(
                 self.uc_scaled_mean[entry_index],
@@ -835,12 +848,16 @@ class Optimizer:
             diagnostic_df_entry['entry_index'] = entry_index
             diagnostic_df.loc[entry_index] = diagnostic_df_entry
             if self.opt_params['rerun_failures'] == False:
-                diagnostic_df.to_json(os.path.join(self.save_to, 'optimization_diagnostics.json'))
+                diagnostic_df.to_json(
+                    os.path.join(self.save_to, f'{self.bravais_lattice}_optimization_diagnostics.json')
+                    )
             print(report_counts)
             end = time.time()
             print(end - start)
 
     def generate_unit_cells(self, uc_scaled_mean, uc_scaled_cov):
+        ### !!! This is redundant to candidates.fix_out_of_range_candidates,
+        ### !!! Convert to unscaled cordinates then call candidates.fix_out_of_range_candidates()
         if self.indexer.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
             candidates_scaled = self.rng.multivariate_normal(
                 mean=uc_scaled_mean,
@@ -978,60 +995,10 @@ class Optimizer:
         return candidates_scaled
 
     def generate_unit_cells_miller_index_templates(self, q2_obs):
-        xnn = np.zeros((self.opt_params['n_candidates_template'], self.indexer.data_params['n_outputs']))
-        order = np.zeros((self.opt_params['n_candidates_template'], self.indexer.data_params['n_points']))
-        check_array = np.arange(self.indexer.data_params['n_points'])
-        for template_index in range(self.opt_params['n_candidates_template']):
-            hkl = self.indexer.hkl_ref[self.indexer.miller_index_templates[template_index]]
-            if self.indexer.data_params['lattice_system'] == 'monoclinic':
-                hkl2 = np.concatenate((
-                    hkl**2,
-                    (hkl[:, 0] * hkl[:, 2])[:, np.newaxis]
-                    ),
-                    axis=1
-                    )
-            else:
-                assert False
-            xnn[template_index], r, rank, s = np.linalg.lstsq(hkl2, q2_obs, rcond=None)
-            i = 0
-            status = True
-            while status:
-                xnn_loop, r, rank, s = np.linalg.lstsq(hkl2, q2_obs, rcond=None)
-                q2_calc = hkl2 @ xnn_loop
-                sort_indices = np.argsort(q2_calc)
-                i += 1
-                if np.all(sort_indices == check_array):
-                    status = False
-                elif i == 100:
-                    status = False
-                else:
-                    hkl2 = hkl2[sort_indices]
-            xnn[template_index] = xnn_loop
-
-        if self.indexer.data_params['lattice_system'] == 'monoclinic':
-            too_small = xnn[:, :3] < (1 / self.opt_params['maximum_uc'])**2
-            too_large = xnn[:, :3] > (1 / self.opt_params['minimum_uc'])**2
-            xnn[:, :3][too_small] = (1 / self.opt_params['maximum_uc'])**2
-            xnn[:, :3][too_large] = (1 / self.opt_params['minimum_uc'])**2
-
-            cos_rbeta = xnn[:, 3] / (2 * np.sqrt(xnn[:, 0] * xnn[:, 2]))
-
-            too_small = cos_rbeta < -1
-            too_large = cos_rbeta > 1
-            xnn[too_small, 3] = -2*0.999 * np.sqrt(xnn[too_small, 0] * xnn[too_small, 2])
-            xnn[too_large, 3] = 2*0.999 * np.sqrt(xnn[too_large, 0] * xnn[too_large, 2])
-
-            xnn_full = np.zeros((self.opt_params['n_candidates_template'], 6))
-            xnn_full[:, :3] = xnn[:, :3]
-            xnn_full[:, 4] = xnn[:, 3]
-            reciprocal_unit_cell_full = get_reciprocal_unit_cell_from_xnn(xnn_full)
-            unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
-
-            acute = unit_cell_full[:, 4] < np.pi/2
-            unit_cell_full[acute, 4] = np.pi - unit_cell_full[acute, 4]
-            candidates_scaled = self.indexer.scale_predictions(uc_pred=unit_cell_full[:, [0, 1, 2, 4]])
-        else:
-            assert False
+        unit_cell_templates = self.indexer.miller_index_templator[self.bravais_lattice].do_predictions(
+            q2_obs, n_templates=self.opt_params['n_candidates_template'],
+            )
+        candidates_scaled = self.indexer.scale_predictions(uc_pred=unit_cell_templates)
         return candidates_scaled
 
     def plot_candidate_unit_cells(self, candidate_uc, entry, entry_index):
@@ -1052,11 +1019,10 @@ class Optimizer:
 
                 start_rf = group_index * self.opt_params['n_candidates_rf']
                 stop_rf = (group_index + 1) * self.opt_params['n_candidates_rf']
-                candidates_rf[start_nn: stop_nn] = candidate_uc[
+                candidates_rf[start_rf: stop_rf] = candidate_uc[
                     start_candidates + self.opt_params['n_candidates_nn']: stop_candidates
                     ]
             candidates_template = candidate_uc[self.n_groups * n_candidates:]
-
             unit_cell_true = np.array(entry['reindexed_unit_cell'])
             ms = 1
             alpha = 0.25
@@ -1172,10 +1138,12 @@ class Optimizer:
             unit_cell=candidate_uc,
             unit_cell_pred=uc_pred,
             lattice_system=self.indexer.data_params['lattice_system'],
+            bravais_lattice=self.bravais_lattice,
             minimum_unit_cell=self.opt_params['minimum_uc'],
             maximum_unit_cell=self.opt_params['maximum_uc'],
             tolerance=self.opt_params['found_tolerance'],
             )
+        candidates.fix_out_of_range_candidates()
 
         if self.opt_params['iteration_info'][0]['assigner_key'] == 'closest':
             candidates = self.assign_hkls_closest(candidates)
@@ -1304,7 +1272,7 @@ class Optimizer:
                 'q2_scaled': batch_q2_scaled
                 }
             # This is a bottleneck
-            softmaxes = self.indexer.assigner[assigner_key].model.predict_on_batch(inputs)[:candidates.n]
+            softmaxes = self.indexer.assigner[self.bravais_lattice][assigner_key].model.predict_on_batch(inputs)[:candidates.n]
         else:
             softmaxes = np.zeros((
                 candidates.n,
@@ -1328,7 +1296,7 @@ class Optimizer:
                     'q2_scaled': batch_q2_scaled
                     }
                 # This is a bottleneck
-                softmaxes_batch = self.indexer.assigner[assigner_key].model.predict_on_batch(inputs)
+                softmaxes_batch = self.indexer.assigner[self.bravais_lattice][assigner_key].model.predict_on_batch(inputs)
                 if batch_index == n_batchs:
                     softmaxes[start: start + left_over] = softmaxes_batch[:left_over]
                 else:
@@ -1354,7 +1322,7 @@ class Optimizer:
             assert False
         hkl_pred = np.zeros((candidates.n, self.indexer.data_params['n_points'], 3))
         for entry_index in range(candidates.n):
-            hkl_pred[entry_index] = self.indexer.hkl_ref[hkl_assign[entry_index]]
+            hkl_pred[entry_index] = self.indexer.hkl_ref[self.bravais_lattice][hkl_assign[entry_index]]
         candidates.candidates['hkl'] = list(hkl_pred)
         return candidates
 
@@ -1366,10 +1334,10 @@ class Optimizer:
         q2_obs_scaled = np.repeat(
             candidates.q2_obs_scaled[np.newaxis, :], repeats=candidates.n, axis=0
             )
-        pairwise_differences_scaled = self.indexer.assigner[self.opt_params['initial_assigner_key']].pairwise_difference_calculation_numpy.get_pairwise_differences(
+        pairwise_differences_scaled = self.indexer.assigner[self.bravais_lattice][self.opt_params['initial_assigner_key']].pairwise_difference_calculation_numpy.get_pairwise_differences(
                 xnn, q2_obs_scaled
                 )
-        pds_inv = self.indexer.assigner[self.opt_params['initial_assigner_key']].transform_pairwise_differences(
+        pds_inv = self.indexer.assigner[self.bravais_lattice][self.opt_params['initial_assigner_key']].transform_pairwise_differences(
             pairwise_differences_scaled, tensorflow=False
             )
         softmax_all = scipy.special.softmax(pds_inv, axis=2)

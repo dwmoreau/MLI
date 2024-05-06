@@ -18,15 +18,15 @@ class Assigner:
         model_params_defaults = {
             'layers': [100],
             'epsilon': 0.001,
-            'dropout_rate': 0.1,
+            'dropout_rate': 0.25,
             'output_activation': 'softmax',
-            'epochs': 10,
+            'epochs': 25,
             'learning_rate': 0.002,
             'batch_size': 256,
             'epsilon_pds': 0.01,
             'perturb_std': None,
-            'L2_kernel_reg': 0.005,
-            'L2_bias_reg': 0.005,
+            'L2_kernel_reg': 0.0005,
+            'L2_bias_reg': 0.0005,
             'Ortho_kernel_reg': 200,
             }
         for key in model_params_defaults.keys():
@@ -268,78 +268,73 @@ class Assigner:
                 softmaxes[start: end] = softmaxes_batch
         return softmaxes
 
-    def evaluate(self, data, bravais_lattices, xnn_key, y_indices, perturb_std):
-        for bravais_lattice in bravais_lattices:
-            if bravais_lattice == 'All':
-                bl_data = data
-            else:
-                bl_data = data[data['bravais_lattice'] == bravais_lattice]
-            xnn = np.stack(bl_data[xnn_key])[:, y_indices]
+    def evaluate(self, data, bravais_lattice, xnn_key, y_indices, perturb_std):
+        xnn = np.stack(data[xnn_key])[:, y_indices]
 
-            if perturb_std is not None:
-                noise = np.random.normal(loc=1, scale=perturb_std, size=xnn.shape)
-                xnn *= noise
-            pairwise_differences_scaled = self.pairwise_difference_calculation_numpy.get_pairwise_differences(
-                xnn, np.stack(bl_data['q2_scaled'])
-                )
-            bl_pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=False)
-            labels_closest = np.argmax(bl_pds_inv, axis=2)
-            labels_true = np.stack(bl_data['hkl_labels'])
-            labels_true_train = np.stack(bl_data[bl_data['train']]['hkl_labels'])
-            labels_pred_train = np.stack(bl_data[bl_data['train']]['hkl_labels_pred'])
-            labels_true_val = np.stack(bl_data[~bl_data['train']]['hkl_labels'])
-            labels_pred_val = np.stack(bl_data[~bl_data['train']]['hkl_labels_pred'])
+        if perturb_std is not None:
+            noise = np.random.normal(loc=1, scale=perturb_std, size=xnn.shape)
+            xnn *= noise
+        pairwise_differences_scaled = self.pairwise_difference_calculation_numpy.get_pairwise_differences(
+            xnn, np.stack(data['q2_scaled'])
+            )
+        bl_pds_inv = self.transform_pairwise_differences(pairwise_differences_scaled, tensorflow=False)
+        labels_closest = np.argmax(bl_pds_inv, axis=2)
+        labels_true = np.stack(data['hkl_labels'])
+        labels_true_train = np.stack(data[data['train']]['hkl_labels'])
+        labels_pred_train = np.stack(data[data['train']]['hkl_labels_pred'])
+        labels_true_val = np.stack(data[~data['train']]['hkl_labels'])
+        labels_pred_val = np.stack(data[~data['train']]['hkl_labels_pred'])
 
-            # correct shape: n_entries, n_peaks
-            correct_pred_train = labels_true_train == labels_pred_train
-            correct_pred_val = labels_true_val == labels_pred_val
-            correct_closest = labels_true == labels_closest
-            accuracy_pred_train = correct_pred_train.sum() / correct_pred_train.size
-            accuracy_pred_val = correct_pred_val.sum() / correct_pred_val.size
-            accuracy_closest = correct_closest.sum() / correct_closest.size
-            # accuracy for each entry
-            accuracy_entry_train = correct_pred_train.sum(axis=1) / self.model_params['n_points']
-            accuracy_entry_val = correct_pred_val.sum(axis=1) / self.model_params['n_points']
-            accuracy_entry_closest = correct_closest.sum(axis=1) / self.model_params['n_points']
-            # accuracy per peak position
-            accuracy_peak_position_train = correct_pred_train.sum(axis=0) / correct_pred_train.shape[0]
-            accuracy_peak_position_val = correct_pred_val.sum(axis=0) / correct_pred_val.shape[0]
-            accuracy_peak_position_closest = correct_closest.sum(axis=0) / bl_data.shape[0]
+        # correct shape: n_entries, n_peaks
+        correct_pred_train = labels_true_train == labels_pred_train
+        correct_pred_val = labels_true_val == labels_pred_val
+        correct_closest = labels_true == labels_closest
+        accuracy_pred_train = correct_pred_train.sum() / correct_pred_train.size
+        accuracy_pred_val = correct_pred_val.sum() / correct_pred_val.size
+        accuracy_closest = correct_closest.sum() / correct_closest.size
+        # accuracy for each entry
+        accuracy_entry_train = correct_pred_train.sum(axis=1) / self.model_params['n_points']
+        accuracy_entry_val = correct_pred_val.sum(axis=1) / self.model_params['n_points']
+        accuracy_entry_closest = correct_closest.sum(axis=1) / self.model_params['n_points']
+        # accuracy per peak position
+        accuracy_peak_position_train = correct_pred_train.sum(axis=0) / correct_pred_train.shape[0]
+        accuracy_peak_position_val = correct_pred_val.sum(axis=0) / correct_pred_val.shape[0]
+        accuracy_peak_position_closest = correct_closest.sum(axis=0) / data.shape[0]
 
-            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-            bins = (np.arange(self.model_params['n_points'] + 2) - 0.5) / self.model_params['n_points']
-            centers = (bins[1:] + bins[:-1]) / 2
-            dbin = bins[1] - bins[0]
-            hist_train, _ = np.histogram(accuracy_entry_train, bins=bins, density=True)
-            hist_val, _ = np.histogram(accuracy_entry_val, bins=bins, density=True)
-            hist_closest, _ = np.histogram(accuracy_entry_closest, bins=bins, density=True)
-            axes[0].bar(centers, hist_train, width=dbin, label='Predicted: Training')
-            axes[0].bar(centers, hist_val, width=dbin, alpha=0.5, label='Predicted: Validation')
-            axes[0].bar(centers, hist_closest, width=dbin, alpha=0.5, label='Closest')
-            axes[1].bar(
-                np.arange(self.model_params['n_points']), accuracy_peak_position_train,
-                width=1, label='Predicted: Training'
-                )
-            axes[1].bar(
-                np.arange(self.model_params['n_points']), accuracy_peak_position_val,
-                width=1, alpha=0.5, label='Predicted: Validation'
-                )
-            axes[1].bar(
-                np.arange(self.model_params['n_points']), accuracy_peak_position_closest,
-                width=1, alpha=0.5, label='Closest'
-                )
+        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+        bins = (np.arange(self.model_params['n_points'] + 2) - 0.5) / self.model_params['n_points']
+        centers = (bins[1:] + bins[:-1]) / 2
+        dbin = bins[1] - bins[0]
+        hist_train, _ = np.histogram(accuracy_entry_train, bins=bins, density=True)
+        hist_val, _ = np.histogram(accuracy_entry_val, bins=bins, density=True)
+        hist_closest, _ = np.histogram(accuracy_entry_closest, bins=bins, density=True)
+        axes[0].bar(centers, hist_train, width=dbin, label='Predicted: Training')
+        axes[0].bar(centers, hist_val, width=dbin, alpha=0.5, label='Predicted: Validation')
+        axes[0].bar(centers, hist_closest, width=dbin, alpha=0.5, label='Closest')
+        axes[1].bar(
+            np.arange(self.model_params['n_points']), accuracy_peak_position_train,
+            width=1, label='Predicted: Training'
+            )
+        axes[1].bar(
+            np.arange(self.model_params['n_points']), accuracy_peak_position_val,
+            width=1, alpha=0.5, label='Predicted: Validation'
+            )
+        axes[1].bar(
+            np.arange(self.model_params['n_points']), accuracy_peak_position_closest,
+            width=1, alpha=0.5, label='Closest'
+            )
 
-            axes[1].legend(frameon=False)
-            axes[0].set_title(f'Predicted accuracy: {accuracy_pred_train:0.3f}/{accuracy_pred_val:0.3f}\nClosest accuracy: {accuracy_closest:0.3f}')
+        axes[1].legend(frameon=False)
+        axes[0].set_title(f'Predicted accuracy: {accuracy_pred_train:0.3f}/{accuracy_pred_val:0.3f}\nClosest accuracy: {accuracy_closest:0.3f}')
 
-            axes[0].set_xlabel('Accuracy')
-            axes[1].set_xlabel('Peak Position')
-            axes[0].set_ylabel('Entry Accuracy')
-            axes[1].set_ylabel('Peak Accuracy')
-            axes[1].set_ylim([0, 1])
-            fig.tight_layout()
-            fig.savefig(f'{self.save_to}/{bravais_lattice}_assignment_{self.model_params["tag"]}.png')
-            plt.close()    
+        axes[0].set_xlabel('Accuracy')
+        axes[1].set_xlabel('Peak Position')
+        axes[0].set_ylabel('Entry Accuracy')
+        axes[1].set_ylabel('Peak Accuracy')
+        axes[1].set_ylim([0, 1])
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to}/{bravais_lattice}_assignment_{self.model_params["tag"]}.png')
+        plt.close()    
 
     def calibrate(self, data):
         def calibration_plots(softmaxes, n_points, n_bins=25):

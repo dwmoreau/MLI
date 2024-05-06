@@ -7,11 +7,28 @@ rhombohedral   | 94%
 tetragonal     | 95%
 orthorhombic   | 93%
 monoclinic     | 70% - 75%
-triclinic      | not implemented
+
+Bravais Lattice | accuracy
+--------------------------
+cF              | 99.5%
+cI              | 100.0%
+cP              | 99.7%
 
 * Refactor code:
-    stage 2: separate monoclinic by bravais lattice
-        - reindex monoclinic to I centered and n glide planes
+    * redo Indexing.py to separate bravais lattices
+        - Get working on tetragonal
+        - Get working on hexagonal
+        - Get working on rhombohedral
+        - Get working on monoclinic
+    * setup so monoclinic & tetragonal groups work with bravais lattice names
+
+* Templating
+    * Get working on
+        - monoclinic
+        - hexagonal
+        - rhombohedral
+
+* reindex orthorhombic
 
 - Documentation
     - Update methods.md
@@ -27,16 +44,18 @@ triclinic      | not implemented
 
 - Optimization:
     - monoclinic
-        - correct the epsilon factor to be e^{-10}
-            - how does this parameter affect the optimization?
-        - hot & cold chains
-            - simulated annealing seems to help
-            - http://bamm-project.org/mc3.html
         - split monoclinic into different cases:
-            * P2: No systematic absences <- only case where transformations are allowed
+            * P2: No systematic absences
             - Pn: h0l: h+l=2n
             * I2: hkl: h+k+l=2n
             - Ia: hkl: h+k+l=2n; h0l: h=2n & l=2n
+        - correct the epsilon factor to be e^{-10}
+            - how does this parameter affect the optimization?
+        - Constant sigma
+        - U-turns
+        - hot & cold chains
+            - simulated annealing seems to help
+            - http://bamm-project.org/mc3.html
         - poor performance with dominant zones and low initial HKL assignment accuracy
         - reread SVD-Index
 
@@ -49,6 +68,8 @@ triclinic      | not implemented
     - (000) assignments
 
 - Data
+    * reindex tetragonal
+    * reindex orthorhombic
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -62,8 +83,8 @@ triclinic      | not implemented
 - SWE:
     * Refactor code:
         - separate monoclinic by bravais lattice
+    * generate unit cells in unscaled units and call fix_out_of_range_candidates
     - remove angle scaler and use cos(angle)
-    - Move Miller index templates into regression object
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
     - get working on dials
@@ -71,7 +92,6 @@ triclinic      | not implemented
         - Train ML models (monoclinic)
 
 - Regression:
-    - How to turn templates into a feature extraction layer
 """
 import joblib
 import matplotlib.pyplot as plt
@@ -86,16 +106,19 @@ from Assigner import Assigner
 from Augmentor import Augmentor
 from Evaluations import evaluate_regression
 from Evaluations import calibrate_regression
+from MITemplates import MITemplates
+from MITemplates import MITemplates_binning
 from Regression import Regression_AlphaBeta
+from Utilities import get_hkl_matrix
+from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import Q2Calculator
 from Utilities import read_params
-from Utilities import write_params
 from Utilities import reciprocal_uc_conversion
-from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import write_params
 
 
 class Indexing:
-    def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, seed=12345):
+    def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, template_params=None, seed=12345):
         self.random_seed = seed
         self.rng = np.random.default_rng(self.random_seed)
         self.n_generated_points = 60  # This is the peak length of the generated dataset.
@@ -104,6 +127,7 @@ class Indexing:
         self.aug_params = aug_params
         self.data_params = data_params
         self.reg_params = reg_params
+        self.template_params = template_params
 
         results_directory = os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'])
         self.save_to = {
@@ -112,6 +136,7 @@ class Indexing:
             'augmentor': os.path.join(results_directory, 'augmentor'),
             'data': os.path.join(results_directory, 'data'),
             'regression': os.path.join(results_directory, 'regression'),
+            'template': os.path.join(results_directory, 'template'),
             }
         if not os.path.exists(self.save_to['results']):
             os.mkdir(self.save_to['results'])
@@ -119,6 +144,7 @@ class Indexing:
             os.mkdir(self.save_to['augmentor'])
             os.mkdir(self.save_to['data'])
             os.mkdir(self.save_to['regression'])
+            os.mkdir(self.save_to['template'])
 
         if self.data_params['load_from_tag']:
             self.setup_from_tag()
@@ -135,7 +161,6 @@ class Indexing:
             'n_points': 20,
             'points_tag': 'intersect',
             'hkl_ref_length': 500,
-            'n_miller_index_sets': 1000,
             }
 
         for key in data_params_defaults.keys():
@@ -187,9 +212,6 @@ class Indexing:
             'hkl_ref_length',
             'groupspec_file_name',
             'groupspec_sheet',
-            'miller_index_sets_dz_max',
-            'miller_index_sets_n_dz_bins',
-            'miller_index_sets_per_bin',
             ]
 
         self.data_params = dict.fromkeys(data_params_keys)
@@ -204,9 +226,6 @@ class Indexing:
         self.data_params['data_dir'] = params['data_dir']
         self.data_params['y_indices'] = np.array(params['y_indices'].split('[')[1].split(']')[0].split(','), dtype=int)
         self.data_params['train_fraction'] = float(params['train_fraction'])
-        self.data_params['miller_index_sets_dz_max'] = float(params['miller_index_sets_dz_max'])
-        self.data_params['miller_index_sets_per_bin'] = int(params['miller_index_sets_per_bin'])
-        self.data_params['miller_index_sets_n_dz_bins'] = int(params['miller_index_sets_n_dz_bins'])
         self.data_params['n_max'] = int(params['n_max'])
         self.data_params['n_points'] = int(params['n_points'])
         self.data_params['points_tag'] = params['points_tag']
@@ -217,8 +236,11 @@ class Indexing:
         self._setup_joint()
 
     def _setup_joint(self):
-        for key in self.assign_params.keys():
-            self.assign_params[key]['n_outputs'] = self.data_params['hkl_ref_length']
+        # This is here because during optimization, not all bravais lattices are used for the
+        # assignment model
+        for bravais_lattice in self.assign_params.keys():
+            for key in self.assign_params[bravais_lattice].keys():
+                self.assign_params[bravais_lattice][key]['n_outputs'] = self.data_params['hkl_ref_length']
         self.data_params['n_outputs'] = len(self.data_params['y_indices'])
         self.reg_params['n_outputs'] = self.data_params['n_outputs']
 
@@ -445,8 +467,12 @@ class Indexing:
         self.plot_input()
         self.save()
 
-    def load_data_from_tag(self, load_augmented, load_train):
-        self.hkl_ref = np.load(f'{self.save_to["data"]}/hkl_ref.npy')
+    def load_data_from_tag(self, load_augmented, load_train, load_bravais_lattice='all'):
+        self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
+        for bravais_lattice in self.data_params['bravais_lattices']:
+            self.hkl_ref[bravais_lattice] = np.load(
+                f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy'
+                )
         if os.path.exists(f'{self.save_to["data"]}/miller_index_templates.npy'):
             self.miller_index_templates = np.load(f'{self.save_to["data"]}/miller_index_templates.npy')
         self.data = pd.read_parquet(f'{self.save_to["data"]}/data.parquet')
@@ -478,6 +504,12 @@ class Indexing:
             self.data = self.data[~self.data['augmented']]
         if not load_train:
             self.data = self.data[~self.data['train']]
+        if load_bravais_lattice != 'all':
+            # This should be used during optimization when only one bravais lattice is
+            # considered at a time
+            self.data = self.data[self.data['bravais_lattice'] == load_bravais_lattice]
+            self.data_params['bravais_lattices'] = [load_bravais_lattice]
+
         self.data_params['split_groups'] = sorted(list(self.data['split_group'].unique()))
 
     def save(self):
@@ -492,220 +524,71 @@ class Indexing:
         self.data.drop(columns=['hkl', 'reindexed_hkl'], inplace=True)
         self.data.to_parquet(f'{self.save_to["data"]}/data.parquet')
 
-        np.save(f'{self.save_to["data"]}/hkl_ref.npy', self.hkl_ref)
+        for bravais_lattice in self.data_params['bravais_lattices']:
+            np.save(
+                f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy',
+                self.hkl_ref[bravais_lattice]
+                )
         np.save(f'{self.save_to["data"]}/angle_scale.npy', self.angle_scale)
         joblib.dump(self.uc_scaler, f'{self.save_to["data"]}/uc_scaler.bin')
         joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
         joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
         write_params(self.data_params, f'{self.save_to["data"]}/data_params.csv')
 
-    def setup_miller_index_templates(self):
-        def get_counts(hkl_labels_func, hkl_ref_length):
-            hkl_labels_func = hkl_labels_func[hkl_labels_func != hkl_ref_length - 1]
-            if hkl_labels_func.size > 0:
-                counts_ = np.bincount(hkl_labels_func, minlength=hkl_ref_length)
-                hist_ = np.zeros(hkl_ref_length)
-                hist_ = counts_ / hkl_labels_func.size
-                return hist_
-            else:
-                return None
-            
-        def make_sets(N_sets, N_peaks, hkl_labels, hkl_ref_length, rng):
-            MI_sets = np.zeros((N_sets, N_peaks), dtype=int)
-            hist_initial = np.zeros((N_peaks, hkl_ref_length))
-            for peak_index in range(N_peaks):
-                hist_initial[peak_index] = get_counts(hkl_labels[:, peak_index], hkl_ref_length)
-            for set_index in tqdm(range(N_sets)):
-                MI_sets[set_index, 0] = rng.choice(hkl_ref_length, p=hist_initial[0])
-                hkl_labels_ = hkl_labels
-                for peak_index in range(1, N_peaks):
-                    indices = hkl_labels_[:, peak_index - 1] == MI_sets[set_index, peak_index - 1]
-                    hkl_labels_ = hkl_labels_[indices]
-                    hist_loop = get_counts(hkl_labels_[:, peak_index], hkl_ref_length)
-                    if not hist_loop is None:
-                        MI_sets[set_index, peak_index] = rng.choice(hkl_ref_length, p=hist_loop)
-                    else:
-                        MI_sets[set_index, peak_index] = rng.choice(hkl_ref_length, p=hist_initial[peak_index])
-            return MI_sets
-
-        unaugmented_data = self.data[~self.data['augmented']]
-        training_data = unaugmented_data[unaugmented_data['train']]
-        hkl_labels_all = np.stack(training_data['hkl_labels'])
-        reindexed_unit_cell = np.stack(training_data['reindexed_unit_cell'])
-
-        n_bins = self.data_params['miller_index_sets_n_dz_bins']
-        if self.data_params['lattice_system'] in ['orthorhombic', 'monoclinic', 'triclinic']:
-            length_indices = [0, 1, 2]
-        elif self.data_params['lattice_system'] in ['tetragonal', 'hexagonal']:
-            length_indices = [0, 2]
-
-        if self.data_params['lattice_system'] in ['cubic', 'rhombohedral']:
-            self.miller_index_templates = make_sets(
-                self.data_params['miller_index_sets_per_bin'],
-                self.data_params['n_points'],
-                hkl_labels_all,
-                self.data_params['hkl_ref_length'],
-                self.rng
-                )
-        else:
-            mi_sets = []
-            ratio = reindexed_unit_cell[:, :3].max(axis=1) / reindexed_unit_cell[:, :3].min(axis=1)
-            bins = np.linspace(1, self.data_params['miller_index_sets_dz_max'], n_bins + 1)
-            indices = np.searchsorted(bins, ratio)
-            for i in range(1, n_bins + 2):
-                hkl_labels_bin = hkl_labels_all[indices == i]
-                if hkl_labels_bin.shape[0] < self.data_params['miller_index_sets_per_bin']:
-                    mi_sets.append(hkl_labels_bin)
-                else:
-                    mi_sets.append(make_sets(
-                        self.data_params['miller_index_sets_per_bin'],
-                        self.data_params['n_points'],
-                        hkl_labels_bin,
-                        self.data_params['hkl_ref_length'],
-                        self.rng
-                        ))
-            self.miller_index_templates = np.row_stack(mi_sets)
-        np.save(f'{self.save_to["data"]}/miller_index_templates.npy', self.miller_index_templates)
-
     def setup_hkl(self):
         print('Setting up the hkl labels')
-        # This converts the true h, k, and l columns to a single label
-        if self.data_params['lattice_system'] == 'cubic':
-            hkl_ref_file_name = 'hkl_ref_cubic.npy'
-        elif self.data_params['lattice_system'] == 'hexagonal':
-            hkl_ref_file_name = 'hkl_ref_hexagonal.npy'
-        elif self.data_params['lattice_system'] == 'monoclinic':
-            hkl_ref_file_name = 'hkl_ref_monoclinic.npy'
-        elif self.data_params['lattice_system'] == 'orthorhombic':
-            hkl_ref_file_name = 'hkl_ref_orthorhombic.npy'
-        elif self.data_params['lattice_system'] == 'rhombohedral':
-            hkl_ref_file_name = 'hkl_ref_rhombohedral.npy'
-        elif self.data_params['lattice_system'] == 'tetragonal':
-            hkl_ref_file_name = 'hkl_ref_tetragonal.npy'
-        elif self.data_params['lattice_system'] == 'triclinic':
-            hkl_ref_file_name = 'hkl_ref_triclinic.npy'
-        self.hkl_ref = np.load(os.path.join(
-            self.data_params['data_dir'], hkl_ref_file_name
-            ))[:2*self.data_params['hkl_ref_length']]
         indices = np.logical_and(self.data['train'], ~self.data['augmented'])
         train = self.data[indices]
-        unit_cell = np.stack(train['reindexed_unit_cell'])[:, self.data_params['y_indices']]
-        q2_ref_calculator = Q2Calculator(self.data_params['lattice_system'], self.hkl_ref, tensorflow=False)
-        q2_ref = q2_ref_calculator.get_q2(unit_cell)
-        sort_indices = np.argsort(q2_ref.mean(axis=0))
-        self.hkl_ref = self.hkl_ref[sort_indices][:self.data_params['hkl_ref_length'] - 1]
-        self.hkl_ref = np.concatenate((self.hkl_ref, np.zeros((1, 3))), axis=0)
-        hkl = np.stack(self.data['reindexed_hkl'])
-
-        if self.data_params['lattice_system'] == 'cubic':
-            check_ref = self.hkl_ref[:, 0]**2 + self.hkl_ref[:, 1]**2 + self.hkl_ref[:, 2]**2
-            check_data = hkl[:, :, 0]**2 + hkl[:, :, 1]**2 + hkl[:, :, 2]**2
-            check_ref = check_ref[:, np.newaxis]
-            check_data = check_data[:, :, np.newaxis]
-        elif self.data_params['lattice_system'] == 'hexagonal':
-            check_ref = np.column_stack((
-                self.hkl_ref[:, 0]**2 + self.hkl_ref[:, 0]*self.hkl_ref[:, 1] + self.hkl_ref[:, 1]**2,
-                self.hkl_ref[:, 2]**2
-                ))
-            check_data = np.stack((
-                hkl[:, :, 0]**2 + hkl[:, :, 0] * hkl[:, :, 1] + hkl[:, :, 1]**2,
-                hkl[:, :, 2]**2
-                ),
-                axis=2
-                )
-        elif self.data_params['lattice_system'] == 'monoclinic':
-            check_ref = np.column_stack((
-                self.hkl_ref[:, 0]**2,
-                self.hkl_ref[:, 1]**2,
-                self.hkl_ref[:, 2]**2,
-                self.hkl_ref[:, 0]*self.hkl_ref[:, 2],
-                ))
-            check_data = np.stack((
-                hkl[:, :, 0]**2,
-                hkl[:, :, 1]**2,
-                hkl[:, :, 2]**2,
-                hkl[:, :, 0]*hkl[:, :, 2],
-                ),
-                axis=2
-                )
-        elif self.data_params['lattice_system'] == 'orthorhombic':
-            check_ref = np.column_stack((
-                self.hkl_ref[:, 0]**2,
-                self.hkl_ref[:, 1]**2,
-                self.hkl_ref[:, 2]**2
-                ))
-            check_data = np.stack((
-                hkl[:, :, 0]**2,
-                hkl[:, :, 1]**2,
-                hkl[:, :, 2]**2
-                ),
-                axis=2
-                )
-        elif self.data_params['lattice_system'] == 'rhombohedral':
-            check_ref = np.column_stack((
-                self.hkl_ref[:, 0]**2 + self.hkl_ref[:, 1]**2 + self.hkl_ref[:, 2]**2,
-                self.hkl_ref[:, 0]*self.hkl_ref[:, 1] + self.hkl_ref[:, 0]*self.hkl_ref[:, 2] + self.hkl_ref[:, 1]*self.hkl_ref[:, 2],
-                ))
-            check_data = np.stack((
-                hkl[:, :, 0]**2 + hkl[:, :, 1]**2 + hkl[:, :, 2]**2,
-                hkl[:, :, 0]*hkl[:, :, 1] + hkl[:, :, 0]*hkl[:, :, 2] + hkl[:, :, 1]*hkl[:, :, 2]
-                ),
-                axis=2
-                )
-        elif self.data_params['lattice_system'] == 'tetragonal':
-            check_ref = np.column_stack((
-                self.hkl_ref[:, 0]**2 + self.hkl_ref[:, 1]**2,
-                self.hkl_ref[:, 2]**2
-                ))
-            check_data = np.stack((
-                hkl[:, :, 0]**2 + hkl[:, :, 1]**2,
-                hkl[:, :, 2]**2
-                ),
-                axis=2
-                )
-        elif self.data_params['lattice_system'] == 'triclinic':
-            check_ref = np.column_stack((
-                self.hkl_ref[:, 0]**2,
-                self.hkl_ref[:, 1]**2,
-                self.hkl_ref[:, 2]**2,
-                self.hkl_ref[:, 0]*self.hkl_ref[:, 1],
-                self.hkl_ref[:, 0]*self.hkl_ref[:, 2],
-                self.hkl_ref[:, 1]*self.hkl_ref[:, 2],
-                ))
-            check_data = np.stack((
-                hkl[:, :, 0]**2,
-                hkl[:, :, 1]**2,
-                hkl[:, :, 2]**2,
-                hkl[:, :, 0]*hkl[:, :, 1],
-                hkl[:, :, 0]*hkl[:, :, 2],
-                hkl[:, :, 1]*hkl[:, :, 2],
-                ),
-                axis=2
-                )
-
+        self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
         hkl_labels = (self.data_params['hkl_ref_length'] - 1) * np.ones((
             len(self.data), self.data_params['n_points']),
             dtype=int
             )
-        # This is slow, and I am sure it could be sped up.
-        for entry_index in tqdm(range(len(self.data))):
-            for point_index in range(self.data_params['n_points']):
+        for bravais_lattice in self.data_params['bravais_lattices']:
+            self.hkl_ref[bravais_lattice] = np.load(
+                os.path.join(self.data_params['data_dir'], f'hkl_ref_{bravais_lattice}.npy')
+                )[:2*self.data_params['hkl_ref_length']]
+            bl_indices = self.data['bravais_lattice'] == bravais_lattice
+            bl_data = self.data[bl_indices]
 
-                hkl_ref_index = np.argwhere(np.all(
-                    check_ref[:, :] == check_data[entry_index, point_index, :],
-                    axis=1
-                    ))
-                if len(hkl_ref_index) == 1:
-                    hkl_labels[entry_index, point_index] = hkl_ref_index
-                    """
-                    if hkl_ref_index < point_index:
-                        print(check_ref[:, :])
-                        print(self.data.iloc[entry_index])
-                        print(f'{point_index} {hkl_ref_index} {check_data[entry_index, point_index, :]}')
-                        print(self.data.iloc[entry_index]['hkl'])
-                        print(self.data.iloc[entry_index]['q2'])
-                        print()
-                    """
+            bl_train_data = train[train['bravais_lattice'] == bravais_lattice]
+            unit_cell = np.stack(bl_train_data['reindexed_unit_cell'])[:, self.data_params['y_indices']]
+            q2_ref_calculator = Q2Calculator(
+                self.data_params['lattice_system'],
+                self.hkl_ref[bravais_lattice],
+                tensorflow=False,
+                representation='unit_cell'
+                )
+            q2_ref = q2_ref_calculator.get_q2(unit_cell)
+            sort_indices = np.argsort(q2_ref.mean(axis=0))
+            self.hkl_ref[bravais_lattice] = self.hkl_ref[bravais_lattice][sort_indices]
+            self.hkl_ref[bravais_lattice] = self.hkl_ref[bravais_lattice][:self.data_params['hkl_ref_length'] - 1]
+            self.hkl_ref[bravais_lattice] = np.concatenate((self.hkl_ref[bravais_lattice], np.zeros((1, 3))), axis=0)
+
+            check_ref = get_hkl_matrix(self.hkl_ref[bravais_lattice], self.data_params['lattice_system'])
+            check_data = get_hkl_matrix(np.stack(bl_data['reindexed_hkl']), self.data_params['lattice_system'])
+
+            hkl_labels_bl = (self.data_params['hkl_ref_length'] - 1) * np.ones((
+                len(bl_data), self.data_params['n_points']),
+                dtype=int
+                )
+
+            n_missing = 0
+            for entry_index in tqdm(range(len(bl_data))):
+                missing = False
+                for point_index in range(self.data_params['n_points']):
+                    hkl_ref_index = np.argwhere(np.all(
+                        check_ref[:, :] == check_data[entry_index, point_index, :],
+                        axis=1
+                        ))
+                    if len(hkl_ref_index) == 1:
+                        hkl_labels_bl[entry_index, point_index] = hkl_ref_index
+                    elif len(hkl_ref_index) == 0:
+                        missing = True
+                if missing:
+                    n_missing += 1
+            print(f'{bravais_lattice} has {n_missing} entries with unlabeled peaks')
+            hkl_labels[bl_indices] = hkl_labels_bl
         self.data['hkl_labels'] = list(hkl_labels)
 
     def augment_data(self):
@@ -885,24 +768,8 @@ class Indexing:
         fig.savefig(f'{self.save_to["data"]}/bl_counts.png')
         plt.close()
 
-        # histogram of true hkl order at peak position.
         unaugmented_data = self.data[~self.data['augmented']]
-        make_hkl_plot(
-            data=unaugmented_data,
-            n_points=self.data_params['n_points'],
-            hkl_ref_length=self.data_params['hkl_ref_length'],
-            save_to=f'{self.save_to["data"]}/hkl_labels_unaugmented.png',
-            )
-        if self.data_params['augment']:
-            augmented_data = self.data[self.data['augmented']]
-            if len(augmented_data) > 0:
-                make_hkl_plot(
-                    data=augmented_data,
-                    n_points=self.data_params['n_points'],
-                    hkl_ref_length=self.data_params['hkl_ref_length'],
-                    save_to=f'{self.save_to["data"]}/hkl_labels_augmented.png',
-                    )
-
+        augmented_data = self.data[self.data['augmented']]
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             make_hkl_plot(
                 data=unaugmented_data[unaugmented_data['bravais_lattice'] == bravais_lattice],
@@ -1134,6 +1001,35 @@ class Indexing:
                 fig.tight_layout()
                 fig.savefig(f'{self.save_to["data"]}/axis_order_{split_group}.png')
                 plt.close()
+
+    def setup_miller_index_templates(self):
+        # Templating use the xnn unit cell representation.
+        # These lines can be deleted once the datasets are regenerated.
+        reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
+        reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
+            reindexed_unit_cell, partial_unit_cell=False,
+            )
+        reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
+            reindexed_reciprocal_unit_cell, partial_unit_cell=False
+            )
+        self.data['reindexed_xnn'] = list(reindexed_xnn)
+
+        self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
+        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
+            self.miller_index_templator[bravais_lattice] = MITemplates(
+                group=bravais_lattice,
+                data_params=self.data_params,
+                template_params=self.template_params[bravais_lattice],
+                hkl_ref=self.hkl_ref[bravais_lattice],
+                save_to=self.save_to['template'],
+                seed=self.random_seed
+                )
+            if self.template_params[bravais_lattice]['load_from_tag']:
+                self.miller_index_templator[bravais_lattice].load_from_tag()
+            else:
+                self.miller_index_templator[bravais_lattice].setup(
+                    self.data[self.data['bravais_lattice'] == bravais_lattice]
+                    )
 
     def setup_regression(self):
         self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])
@@ -1373,8 +1269,6 @@ class Indexing:
             )
 
     def setup_assignment(self):
-        self.assigner = dict.fromkeys(self.assign_params.keys())
-
         # Assignments use the xnn unit cell representation.
         # This should be updated in the ParseDatabases.py file then these lines can be deleted
         # once the datasets are regenerated.
@@ -1386,57 +1280,64 @@ class Indexing:
             reindexed_reciprocal_unit_cell, partial_unit_cell=False
             )
         self.data['reindexed_xnn'] = list(reindexed_xnn)
-
-        for key in self.assign_params.keys():
-            self.assigner[key] = Assigner(
-                self.data_params,
-                self.assign_params[key],
-                self.hkl_ref,
-                self.q2_scaler,
-                self.save_to['assigner']
-                )
-            if self.assign_params[key]['load_from_tag']:
-                self.assigner[key].load_from_tag(
-                    self.assign_params[key]['tag'],
-                    self.assign_params[key]['mode']
+        self.assigner = dict.fromkeys(self.data_params['bravais_lattices'])
+        for bravais_lattice in self.data_params['bravais_lattices']:
+            self.assigner[bravais_lattice] = dict.fromkeys(self.assign_params[bravais_lattice].keys())
+            bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
+            for key in self.assign_params[bravais_lattice].keys():
+                self.assigner[bravais_lattice][key] = Assigner(
+                    self.data_params,
+                    self.assign_params[bravais_lattice][key],
+                    self.hkl_ref[bravais_lattice],
+                    self.q2_scaler,
+                    self.save_to['assigner']
                     )
-            else:
-                self.assigner[key].fit_model(
-                    data=self.data[~self.data['augmented']],
-                    xnn_key='reindexed_xnn',
-                    y_indices=self.data_params['y_indices'],
-                    )
+                if self.assign_params[bravais_lattice][key]['load_from_tag']:
+                    self.assigner[bravais_lattice][key].load_from_tag(
+                        self.assign_params[bravais_lattice][key]['tag'],
+                        self.assign_params[bravais_lattice][key]['mode']
+                        )
+                else:
+                    self.assigner[bravais_lattice][key].fit_model(
+                        data=bl_data[~bl_data['augmented']],
+                        xnn_key='reindexed_xnn',
+                        y_indices=self.data_params['y_indices'],
+                        )
 
     def inferences_assignment(self, keys):
-        for key in keys:
-            unaugmented_data = self.data[~self.data['augmented']].copy()
-            softmaxes = self.assigner[key].do_predictions(
-                unaugmented_data,
-                xnn_key='reindexed_xnn',
-                y_indices=self.data_params['y_indices'],
-                reload_model=False,
-                batch_size=1024,
-                )
-            hkl_pred = self.convert_softmax_to_assignments(softmaxes)
-            hkl_assign = softmaxes.argmax(axis=2)
+        for bravais_lattice in self.data_params['bravais_lattices']:
+            bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
+            for key in keys:
+                unaugmented_bl_data = bl_data[~bl_data['augmented']].copy()
+                softmaxes = self.assigner[bravais_lattice][key].do_predictions(
+                    unaugmented_bl_data,
+                    xnn_key='reindexed_xnn',
+                    y_indices=self.data_params['y_indices'],
+                    reload_model=False,
+                    batch_size=1024,
+                    )
+                hkl_pred = self.convert_softmax_to_assignments(
+                    softmaxes, self.hkl_ref[bravais_lattice]
+                    )
+                hkl_assign = softmaxes.argmax(axis=2)
 
-            unaugmented_data['hkl_labels_pred'] = list(hkl_assign)
-            unaugmented_data['hkl_pred'] = list(hkl_pred)
-            unaugmented_data['hkl_softmaxes'] = list(softmaxes)
-            self.assigner[key].evaluate(
-                unaugmented_data,
-                self.data_params['bravais_lattices'],
-                xnn_key='reindexed_xnn',
-                y_indices=self.data_params['y_indices'],
-                perturb_std=self.assign_params[key]['perturb_std']
-                )
+                unaugmented_bl_data['hkl_labels_pred'] = list(hkl_assign)
+                unaugmented_bl_data['hkl_pred'] = list(hkl_pred)
+                unaugmented_bl_data['hkl_softmaxes'] = list(softmaxes)
+                self.assigner[bravais_lattice][key].evaluate(
+                    unaugmented_bl_data,
+                    bravais_lattice,
+                    xnn_key='reindexed_xnn',
+                    y_indices=self.data_params['y_indices'],
+                    perturb_std=self.assign_params[bravais_lattice][key]['perturb_std']
+                    )
 
-            self.assigner[key].calibrate(unaugmented_data)
+                self.assigner[bravais_lattice][key].calibrate(unaugmented_bl_data)
 
-    def convert_softmax_to_assignments(self, softmaxes):
+    def convert_softmax_to_assignments(self, softmaxes, hkl_ref):
         n_entries = softmaxes.shape[0]
         hkl_assign = softmaxes.argmax(axis=2)
         hkl_pred = np.zeros((n_entries, self.data_params['n_points'], 3))
         for entry_index in range(n_entries):
-            hkl_pred[entry_index] = self.hkl_ref[hkl_assign[entry_index]]
+            hkl_pred[entry_index] = hkl_ref[hkl_assign[entry_index]]
         return hkl_pred

@@ -39,6 +39,7 @@ class EntryGenerator:
             'unit_cell': 'float64',
             'reindexed_spacegroup_symbol_hm': 'string',
             'reindexed_unit_cell': 'float64',
+            'reindexed_xnn': 'float64',
             'reindexed_volume': 'float64',
             'hkl_reindexer': 'float64',
             'permutation': 'string',
@@ -62,6 +63,7 @@ class EntryGenerator:
             'unit_cell',
             'reindexed_spacegroup_symbol_hm',
             'reindexed_unit_cell',
+            'reindexed_xnn',
             'reindexed_volume',
             'permutation',
             'hkl_reindexer',
@@ -191,9 +193,19 @@ class EntryGenerator:
             hkl = hkl_order[:, :3, index]
             reindexed_hkl = np.matmul(hkl, hkl_reindexer).round(decimals=0).astype(int)
             if lattice_system in ['monoclinic', 'orthorhombic']:
-                q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl, tensorflow=False)
+                q2_calculator = Q2Calculator(
+                    lattice_system='triclinic',
+                    hkl=hkl,
+                    tensorflow=False,
+                    representation='unit_cell'
+                    )
                 q2 = q2_calculator.get_q2(unit_cell_[np.newaxis])
-                reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl, tensorflow=False)
+                reindexed_q2_calculator = Q2Calculator(
+                    lattice_system='triclinic',
+                    hkl=reindexed_hkl,
+                    tensorflow=False,
+                    representation='unit_cell'
+                    )
                 reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[np.newaxis])
                 check = np.isclose(q2, reindexed_q2).all()
                 if not check:
@@ -204,9 +216,19 @@ class EntryGenerator:
             elif lattice_system == 'rhombohedral':
                 if np.all(unit_cell_[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
                     check_indices = np.invert(np.all(hkl == -100, axis=1))
-                    q2_calculator = Q2Calculator(lattice_system='hexagonal', hkl=hkl[check_indices], tensorflow=False)
+                    q2_calculator = Q2Calculator(
+                        lattice_system='hexagonal',
+                        hkl=hkl[check_indices],
+                        tensorflow=False,
+                        representation='unit_cell'
+                        )
                     q2 = q2_calculator.get_q2(unit_cell_[[0, 2]][np.newaxis])
-                    reindexed_q2_calculator = Q2Calculator(lattice_system='rhombohedral', hkl=reindexed_hkl[check_indices], tensorflow=False)
+                    reindexed_q2_calculator = Q2Calculator(
+                        lattice_system='rhombohedral',
+                        hkl=reindexed_hkl[check_indices],
+                        tensorflow=False,
+                        representation='unit_cell'
+                        )
                     reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[[0, 3]][np.newaxis])
                     check = np.isclose(q2[0], reindexed_q2[0]).all()
                     if not check:
