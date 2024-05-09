@@ -41,6 +41,11 @@ def vectorized_subsampling(p, n_picks, rng):
 
 def vectorized_resampling(softmaxes, rng):
     # This is a major performance bottleneck
+
+    # This function randomly resamples the peaks using the algorithm
+    #  1: Pick a peak at random
+    #  2: Assign Miller index according to softmaxes
+    #  3: Set the assigned Miller index softmax to zero for all other peaks
     n_entries = softmaxes.shape[0]
     n_peaks = softmaxes.shape[1]
     hkl_ref_length = softmaxes.shape[2]
@@ -49,35 +54,37 @@ def vectorized_resampling(softmaxes, rng):
     random_values = rng.random(size=(n_entries, n_peaks))
     point_order = rng.permutation(n_peaks)
     softmaxes_zeroed = softmaxes.copy()
+    i = 0
     for point_index in point_order:
-        # This is slow (21% of execution time)
-        cumsum = np.cumsum(softmaxes_zeroed[:, point_index, :], axis=1)
-        q = cumsum >= random_values[:, point_index][:, np.newaxis]
-        hkl_assign[:, point_index] = np.argmax(q, axis=1)
-        for candidate_index in range(n_entries):
-            softmaxes_zeroed[candidate_index, :, hkl_assign[candidate_index, point_index]] = 0
-        # This is slow (55% execution time)
-        softmaxes_zeroed /= softmaxes_zeroed.sum(axis=2)[:, :, np.newaxis]
+        # Fast random selection:
+        #  1: make cummulative sum along the distribution's axis (this is a cdf)
+        #  2: selection is the first point in cummulative sum greater than random value
+        #    - fastest way to do this, convert to bool array and find first True with argmax
+        #    - To account for adding zeros to the softmax array, the random values are scaled
+        #      instead of scaling the softmax array
 
-    # This could be sped up with np.take_along_axis
-    # This loop is about 10% of the execution time
-    softmax = np.zeros((n_entries, n_peaks))
-    for candidate_index in range(n_entries):
-        for point_index in range(n_peaks):
-            softmax[candidate_index, point_index] = softmaxes[
-                candidate_index,
-                point_index,
-                hkl_assign[candidate_index, point_index]
-                ]
+        # This line is slow (28% of execution time)
+        cumsum = np.cumsum(softmaxes_zeroed[:, point_index, :], axis=1)
+        q = cumsum >= (random_values[:, point_index] * cumsum[:, -1])[:, np.newaxis]
+        hkl_assign[:, point_index] = np.argmax(q, axis=1)
+        i += 1
+        if i < n_peaks:
+            np.put_along_axis(
+                softmaxes_zeroed,
+                hkl_assign[:, point_index][:, np.newaxis, np.newaxis],
+                values=0,
+                axis=2
+                )
+
+    softmax = np.take_along_axis(softmaxes, hkl_assign[:, :, np.newaxis], axis=2)[:, :, 0]
     return hkl_assign, softmax
 
 
-def best_assign_nocommon(softmaxes):
+def best_assign_nocommon_original(softmaxes):
     n_entries = softmaxes.shape[0]
     n_peaks = softmaxes.shape[1]
     hkl_ref_length = softmaxes.shape[2]
     hkl_assign = np.zeros((n_entries, n_peaks), dtype=int)
-    softmax_assign = np.zeros((n_entries, n_peaks))
 
     peak_choice = np.argsort(np.max(softmaxes, axis=2), axis=1)
     for candidate_index in range(n_entries):
@@ -86,7 +93,24 @@ def best_assign_nocommon(softmaxes):
             choice = np.argmax(softmaxes_zeroed[peak_index, :])
             hkl_assign[candidate_index, peak_index] = choice
             softmaxes_zeroed[:, hkl_assign[candidate_index, peak_index]] = 0
-            softmax_assign[candidate_index, peak_index] = softmaxes[candidate_index, peak_index, choice]
+
+    softmax_assign = np.take_along_axis(softmaxes, hkl_assign[:, :, np.newaxis], axis=2)
+    return hkl_assign, softmax_assign
+
+
+def best_assign_nocommon(softmaxes):
+    # This is three times faster than the version above.
+    # It picks the first occurance as opposed to the best occurance.
+    n_entries = softmaxes.shape[0]
+    n_peaks = softmaxes.shape[1]
+    hkl_ref_length = softmaxes.shape[2]
+    hkl_assign = np.zeros((n_entries, n_peaks), dtype=int)
+    softmax_assign = np.zeros((n_entries, n_peaks))
+    for peak_index in range(n_peaks):
+        softmaxes_peak = softmaxes[:, peak_index, :]
+        hkl_assign[:, peak_index] = np.argmax(softmaxes_peak, axis=1)
+        softmax_assign[:, peak_index] = np.take_along_axis(softmaxes_peak, hkl_assign[:, peak_index][:, np.newaxis], axis=1)[:, 0]
+        np.put(softmaxes, hkl_assign[:, np.newaxis, :], 0)
     return hkl_assign, softmax_assign
 
 
@@ -166,65 +190,17 @@ class Candidates:
         self.hkl_true_check = get_hkl_matrix(self.hkl_true, self.lattice_system)
 
     def update_xnn_from_unit_cell(self):
-        unit_cell = np.stack(self.candidates['unit_cell'])
-        unit_cell_full = np.zeros((self.n, 6))
-        if self.lattice_system == 'cubic':
-            unit_cell_full[:, :3] = unit_cell[:, 0][:, np.newaxis]
-            unit_cell_full[:, 3:] = np.pi/2
-        elif self.lattice_system == 'tetragonal':
-            unit_cell_full[:, :2] = unit_cell[:, 0][:, np.newaxis]
-            unit_cell_full[:, 2] = unit_cell[:, 1]
-            unit_cell_full[:, 3:] = np.pi/2
-        elif self.lattice_system == 'hexagonal':
-            unit_cell_full[:, :2] = unit_cell[:, 0][:, np.newaxis]
-            unit_cell_full[:, 2] = unit_cell[:, 1]
-            unit_cell_full[:, 3] = np.pi/2
-            unit_cell_full[:, 4] = np.pi/2
-            unit_cell_full[:, 5] = 2/3 * np.pi
-        elif self.lattice_system == 'rhombohedral':
-            unit_cell_full[:, :3] = unit_cell[:, 0][:, np.newaxis]
-            unit_cell_full[:, 3:] = unit_cell[:, 1][:, np.newaxis]
-        elif self.lattice_system == 'orthorhombic':
-            unit_cell_full[:, :3] = unit_cell[:, :3]
-            unit_cell_full[:, 3:] = np.pi/2
-        elif self.lattice_system == 'monoclinic':
-            unit_cell_full[:, :3] = unit_cell[:, :3]
-            unit_cell_full[:, 4] = unit_cell[:, 3]
-            unit_cell_full[:, 3] = np.pi/2
-            unit_cell_full[:, 5] = np.pi/2
-        elif self.lattice_system == 'triclinic':
-            unit_cell_full = unit_cell_pred
-        else:
-            assert False
-
-        reciprocal_unit_cell_full = reciprocal_uc_conversion(unit_cell_full)
-        xnn_full = get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell_full)
-
-        if self.lattice_system == 'cubic':
-            reciprocal_unit_cell = reciprocal_unit_cell_full[:, 0][:, np.newaxis]
-            xnn = xnn_full[:, 0][:, np.newaxis]
-        elif self.lattice_system in ['tetragonal', 'hexagonal']:
-            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 2]]
-            xnn = xnn_full[:, [0, 2]]
-        elif self.lattice_system == 'rhombohedral':
-            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 3]]
-            xnn = xnn_full[:, [0, 3]]
-        elif self.lattice_system == 'orthorhombic':
-            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 1, 2]]
-            xnn = xnn_full[:, [0, 1, 2]]
-        elif self.lattice_system == 'monoclinic':
-            reciprocal_unit_cell = reciprocal_unit_cell_full[:, [0, 1, 2, 4]]
-            xnn = xnn_full[:, [0, 1, 2, 4]]
-        elif self.lattice_system == 'triclinic':
-            reciprocal_unit_cell = reciprocal_unit_cell_full
-            xnn = xnn_full
-
+        reciprocal_unit_cell = reciprocal_uc_conversion(
+            np.stack(self.candidates['unit_cell']), partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        xnn = get_xnn_from_reciprocal_unit_cell(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
         self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
         self.candidates['xnn'] = list(xnn)
 
     def update_unit_cell_from_xnn(self):
         xnn = np.stack(self.candidates['xnn'])
-
         # This forces the xnn components x_hh, x_kk, and x_ll to their bounds
         if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
             too_small = xnn < (1 / self.maximum_unit_cell)**2
@@ -257,43 +233,12 @@ class Candidates:
 
         self.candidates['xnn'] = list(xnn)
 
-        unit_cell_full = np.zeros((self.n, 6))
-        xnn_full = np.zeros((self.n, 6))
-        if self.lattice_system == 'cubic':
-            xnn_full[:, :3] = xnn[:, 0][:, np.newaxis]
-        elif self.lattice_system == 'tetragonal':
-            xnn_full[:, :2] = xnn[:, 0][:, np.newaxis]
-            xnn_full[:, 2] = xnn[:, 1]
-        elif self.lattice_system == 'hexagonal':
-            xnn_full[:, :2] = xnn[:, 0][:, np.newaxis]
-            xnn_full[:, 2] = xnn[:, 1]
-            xnn_full[:, 5] = 2*xnn[:, 0]*np.cos(np.pi/3)
-        elif self.lattice_system == 'rhombohedral':
-            xnn_full[:, :3] = xnn[:, 0][:, np.newaxis]
-            xnn_full[:, 3:] = xnn[:, 1][:, np.newaxis]
-        elif self.lattice_system == 'orthorhombic':
-            xnn_full[:, :3] = xnn[:, :3]
-        elif self.lattice_system == 'monoclinic':
-            xnn_full[:, :3] = xnn[:, :3]
-            xnn_full[:, 4] = xnn[:, 3]
-        elif self.lattice_system == 'triclinic':
-            xnn_full = xnn
-
-        reciprocal_unit_cell_full = get_reciprocal_unit_cell_from_xnn(xnn_full)
-        unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
-        
-        if self.lattice_system == 'cubic':
-            unit_cell = unit_cell_full[:, 0][:, np.newaxis]
-        elif self.lattice_system in ['tetragonal', 'hexagonal']:
-            unit_cell = unit_cell_full[:, [0, 2]]
-        elif self.lattice_system == 'rhombohedral':
-            unit_cell = unit_cell_full[:, [0, 3]]
-        elif self.lattice_system == 'orthorhombic':
-            unit_cell = unit_cell_full[:, :3]
-        elif self.lattice_system == 'monoclinic':
-            unit_cell = unit_cell_full[:, [0, 1, 2, 4]]
-        elif self.lattice_system == 'triclinic':
-            unit_cell = unit_cell_full
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        unit_cell = reciprocal_uc_conversion(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
 
         self.candidates['unit_cell'] = list(unit_cell)
 
@@ -856,31 +801,12 @@ class Optimizer:
             print(end - start)
 
     def generate_unit_cells(self, uc_scaled_mean, uc_scaled_cov):
-        ### !!! This is redundant to candidates.fix_out_of_range_candidates,
-        ### !!! Convert to unscaled cordinates then call candidates.fix_out_of_range_candidates()
         if self.indexer.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
             candidates_scaled = self.rng.multivariate_normal(
                 mean=uc_scaled_mean,
                 cov=uc_scaled_cov,
                 size=self.opt_params['n_candidates_nn'],
                 )
-            too_small_lengths = candidates_scaled < self.opt_params['minimum_uc_scaled']
-            too_large_lengths = candidates_scaled > self.opt_params['maximum_uc_scaled']
-            if np.sum(too_small_lengths) > 0:
-                indices = np.argwhere(too_small_lengths)
-                candidates_scaled[indices[:, 0], indices[:, 1]] = self.rng.uniform(
-                    low=self.opt_params['minimum_uc_scaled'],
-                    high=self.opt_params['minimum_uc_scaled'] + 0.1*np.abs(self.opt_params['minimum_uc_scaled']),
-                    size=np.sum(too_small_lengths)
-                    )
-            if np.sum(too_large_lengths) > 0:
-                indices = np.argwhere(too_large_lengths)
-                candidates_scaled[indices[:, 0], indices[:, 1]] = self.rng.uniform(
-                    low=self.opt_params['maximum_uc_scaled'] - 0.1*np.abs(self.opt_params['maximum_uc_scaled']),
-                    high=self.opt_params['maximum_uc_scaled'],
-                    size=np.sum(too_large_lengths)
-                    )
-
         elif self.indexer.data_params['lattice_system'] == 'rhombohedral':
             uniform_angle = False
             if uc_scaled_mean[1] <= self.opt_params['minimum_angle_scaled']:
@@ -904,35 +830,6 @@ class Optimizer:
                     mean=uc_scaled_mean,
                     cov=uc_scaled_cov,
                     size=self.opt_params['n_candidates_nn'],
-                    )
-
-                too_small_angles = candidates_scaled[:, 1] < self.opt_params['minimum_angle_scaled']
-                too_large_angles = candidates_scaled[:, 1] > self.opt_params['maximum_angle_scaled']
-                # If the candidate angle is small than minimum_angle_scaled (0.5 degrees)
-                candidates_scaled[too_small_angles, 1] = self.rng.uniform(
-                    low=self.opt_params['minimum_angle_scaled'],
-                    high=self.opt_params['minimum_angle_scaled'] + 0.1*np.abs(self.opt_params['minimum_angle_scaled']),
-                    size=np.sum(too_small_angles)
-                    )
-                # If the candidate angle is larger than maximum_angle_scaled (120 degrees)
-                # Then uniformly sample between 100 and 120 degrees
-                candidates_scaled[too_large_angles, 1] = self.rng.uniform(
-                    low=(5/9*np.pi - np.pi/2) / self.indexer.angle_scale,
-                    high=self.opt_params['maximum_angle_scaled'],
-                    size=np.sum(too_large_angles)
-                    )
-
-                too_small_lengths = candidates_scaled[:, 0] < self.opt_params['minimum_uc_scaled']
-                too_large_lengths = candidates_scaled[:, 0] > self.opt_params['maximum_uc_scaled']
-                candidates_scaled[too_small_lengths, 0] = self.rng.uniform(
-                    low=self.opt_params['minimum_uc_scaled'],
-                    high=self.opt_params['minimum_uc_scaled'] + 0.1*np.abs(self.opt_params['minimum_uc_scaled']),
-                    size=np.sum(too_small_lengths)
-                    )
-                candidates_scaled[too_large_lengths, 0] = self.rng.uniform(
-                    low=self.opt_params['maximum_uc_scaled'] - 0.1*np.abs(self.opt_params['maximum_uc_scaled']),
-                    high=self.opt_params['maximum_uc_scaled'],
-                    size=np.sum(too_large_lengths)
                     )
         elif self.indexer.data_params['lattice_system'] == 'monoclinic':
             uniform_angle = False
@@ -958,48 +855,17 @@ class Optimizer:
                     cov=uc_scaled_cov,
                     size=self.opt_params['n_candidates_nn'],
                     )
-
-                too_small_angles = candidates_scaled[:, 3] < self.opt_params['minimum_angle_scaled']
-                too_large_angles = candidates_scaled[:, 3] > self.opt_params['maximum_angle_scaled']
-                # If the candidate angle is small than minimum_angle_scaled (0.5 degrees)
-                candidates_scaled[too_small_angles, 3] = self.rng.uniform(
-                    low=self.opt_params['minimum_angle_scaled'],
-                    high=self.opt_params['minimum_angle_scaled'] + 0.1*np.abs(self.opt_params['minimum_angle_scaled']),
-                    size=np.sum(too_small_angles)
-                    )
-                # If the candidate angle is larger than maximum_angle_scaled (180 degrees)
-                # Then uniformly sample between 100 and 180 degrees
-                candidates_scaled[too_large_angles, 3] = self.rng.uniform(
-                    low=self.opt_params['maximum_angle_scaled'] - 0.1*np.abs(self.opt_params['maximum_angle_scaled']),
-                    high=self.opt_params['maximum_angle_scaled'],
-                    size=np.sum(too_large_angles)
-                    )
-
-                too_small_lengths = candidates_scaled[:, :3] < self.opt_params['minimum_uc_scaled']
-                too_large_lengths = candidates_scaled[:, :3] > self.opt_params['maximum_uc_scaled']
-                indices = np.argwhere(too_small_lengths)
-                candidates_scaled[indices[:, 0], indices[:, 1]] = self.rng.uniform(
-                    low=self.opt_params['minimum_uc_scaled'],
-                    high=self.opt_params['minimum_uc_scaled'] + 0.1*np.abs(self.opt_params['minimum_uc_scaled']),
-                    size=np.sum(too_small_lengths)
-                    )
-                indices = np.argwhere(too_large_lengths)
-                candidates_scaled[indices[:, 0], indices[:, 1]] = self.rng.uniform(
-                    low=self.opt_params['maximum_uc_scaled'] - 0.1*np.abs(self.opt_params['maximum_uc_scaled']),
-                    high=self.opt_params['maximum_uc_scaled'],
-                    size=np.sum(too_large_lengths)
-                    )
         elif self.indexer.data_params['lattice_system'] == 'triclinic':
             assert False
 
-        return candidates_scaled
+        candidate_unit_cells = self.indexer.revert_predictions(uc_pred_scaled=candidates_scaled)
+        return candidate_unit_cells
 
     def generate_unit_cells_miller_index_templates(self, q2_obs):
         unit_cell_templates = self.indexer.miller_index_templator[self.bravais_lattice].do_predictions(
             q2_obs, n_templates=self.opt_params['n_candidates_template'],
             )
-        candidates_scaled = self.indexer.scale_predictions(uc_pred=unit_cell_templates)
-        return candidates_scaled
+        return unit_cell_templates
 
     def plot_candidate_unit_cells(self, candidate_uc, entry, entry_index):
         if self.indexer.data_params['lattice_system'] == 'monoclinic':
@@ -1091,7 +957,10 @@ class Optimizer:
                 axes[row, 2].set_ylabel('c')
                 axes[row, 3].set_xlabel('beta')
             fig.tight_layout()
-            fig.savefig(os.path.join(self.save_to, f'initial_candidates_{entry_index:03d}.png'))
+            fig.savefig(os.path.join(
+                self.save_to,
+                f'{self.bravais_lattice}_initial_candidates_{entry_index:03d}_{self.opt_params["tag"]}.png'
+                ))
             # This is a bit scorched earth, but it helps with memory leaks.
             plt.cla()
             plt.clf()
@@ -1099,7 +968,7 @@ class Optimizer:
 
     def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, uc_pred, entry, entry_index):
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
-        candidate_uc_scaled = np.zeros((
+        candidate_unit_cells = np.zeros((
             self.n_groups * n_candidates + self.opt_params['n_candidates_template'],
             self.indexer.data_params['n_outputs']
             ))
@@ -1107,11 +976,10 @@ class Optimizer:
             start = group_index * n_candidates
             stop = (group_index + 1) * n_candidates
             # Get candidates from the neural network model
-            candidates_scaled = self.generate_unit_cells(
-                uc_scaled_mean[group_index, :],
-                uc_scaled_cov[group_index, :, :]
-                )
-            candidate_uc_scaled[start: start + self.opt_params['n_candidates_nn'], :] = candidates_scaled
+            candidate_unit_cells[start: start + self.opt_params['n_candidates_nn'], :] = \
+                self.generate_unit_cells(
+                    uc_scaled_mean[group_index, :], uc_scaled_cov[group_index, :, :]
+                    )
 
             # Get candidates from the random forest model
             q2_scaled = np.array(entry['q2_scaled'])[np.newaxis]
@@ -1124,18 +992,19 @@ class Optimizer:
                 size=self.opt_params['n_candidates_rf'],
                 replace=False
                 )
-            candidates_uc_scaled_tree = candidates_scaled_tree[0, :, tree_indices]
-            candidate_uc_scaled[start + self.opt_params['n_candidates_nn']: stop, :] = \
-                candidates_uc_scaled_tree
+            candidate_unit_cells_tree = self.indexer.revert_predictions(
+                uc_pred_scaled=candidates_scaled_tree[0, :, tree_indices]
+                )
+            candidate_unit_cells[start + self.opt_params['n_candidates_nn']: stop, :] = \
+                candidate_unit_cells_tree
 
-        candidate_uc_scaled[self.n_groups * n_candidates:] = \
+        candidate_unit_cells[self.n_groups * n_candidates:] = \
             self.generate_unit_cells_miller_index_templates(np.array(entry['q2']))
 
-        candidate_uc = self.indexer.revert_predictions(uc_pred_scaled=candidate_uc_scaled)
-        self.plot_candidate_unit_cells(candidate_uc, entry, entry_index)
+        self.plot_candidate_unit_cells(candidate_unit_cells, entry, entry_index)
         candidates = Candidates(
             entry=entry,
-            unit_cell=candidate_uc,
+            unit_cell=candidate_unit_cells,
             unit_cell_pred=uc_pred,
             lattice_system=self.indexer.data_params['lattice_system'],
             bravais_lattice=self.bravais_lattice,
@@ -1188,7 +1057,7 @@ class Optimizer:
         acceptance_fraction = []
         for iteration_info in self.opt_params['iteration_info']:
             if iteration_info['worker'] == 'monoclinic_reset':
-                candidates.save_candidates(self.save_to, entry_index)
+                #candidates.save_candidates(self.save_to, entry_index)
                 candidates = self.monoclinic_reset(candidates, iteration_info)
                 print_list = [
                     f'{candidates.n},',
@@ -1327,22 +1196,20 @@ class Optimizer:
         return candidates
 
     def assign_hkls_closest(self, candidates):
-        """
-        This function may be super broken...
-        """
         xnn = np.stack(candidates.candidates['xnn'])
         q2_obs_scaled = np.repeat(
             candidates.q2_obs_scaled[np.newaxis, :], repeats=candidates.n, axis=0
             )
         pairwise_differences_scaled = self.indexer.assigner[self.bravais_lattice][self.opt_params['initial_assigner_key']].pairwise_difference_calculation_numpy.get_pairwise_differences(
-                xnn, q2_obs_scaled
-                )
-        pds_inv = self.indexer.assigner[self.bravais_lattice][self.opt_params['initial_assigner_key']].transform_pairwise_differences(
-            pairwise_differences_scaled, tensorflow=False
+            xnn, q2_obs_scaled
             )
-        softmax_all = scipy.special.softmax(pds_inv, axis=2)
-        candidates.candidates['softmax'] = list(softmax_all.max(axis=2))
-        candidates.candidates['hkl'] = list(self.indexer.convert_softmax_to_assignments(softmax_all))
+        candidates.candidates['softmax'] = list(np.ones((candidates.n, self.indexer.data_params['n_points'])))
+
+        hkl_assign = np.abs(pairwise_differences_scaled).argmin(axis=2)
+        hkl_pred = np.zeros((candidates.n, self.indexer.data_params['n_points'], 3))
+        for entry_index in range(candidates.n):
+            hkl_pred[entry_index] = self.indexer.hkl_ref[self.bravais_lattice][hkl_assign[entry_index]]
+        candidates.candidates['hkl'] = list(hkl_pred)
         return candidates
 
     def montecarlo_acceptance(self, candidates, next_candidates, acceptance_method, acceptance_fraction):
@@ -1367,7 +1234,6 @@ class Optimizer:
             next_candidates = self.assign_hkls_closest(next_candidates)
         else:
             next_candidates = self.assign_hkls(next_candidates, assigner_key, 'best')
-
         target_function = CandidateOptLoss_xnn(
             q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
             lattice_system=self.indexer.data_params['lattice_system'],

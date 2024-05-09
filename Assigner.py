@@ -179,6 +179,13 @@ class Assigner:
             }
         train_true = {'hkl_softmaxes': np.stack(train_data['hkl_labels'])}
         val_true = {'hkl_softmaxes': np.stack(val_data['hkl_labels'])}
+
+        # This increases the weighting for samples with dominant zone issues
+        #reindexed_hkl = np.stack(train_data['reindexed_hkl'])[:, :, :, 0]
+        #hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
+        #scale = 1 / (self.model_params['n_points'] + 1)
+        #sample_weight = scale * (self.model_params['n_points'] + 1 - hkl_information) + 1
+
         print(f'\n Starting assign model training: {self.model_params["tag"]} {self.model_params["perturb_std"]}')
         self.fit_history = self.model.fit(
             x=train_inputs,
@@ -187,6 +194,7 @@ class Assigner:
             shuffle=True,
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
+            sample_weight=None,
             callbacks=None,
             )
         self.save()

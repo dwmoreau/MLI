@@ -63,12 +63,7 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
         [a*b*np.cos(gamma), b**2, b*c*np.cos(alpha)],
         [a*c*np.cos(beta), b*c*np.cos(alpha), c**2]
         ])
-    #for i in range(a.size):
-    #    print(S[:, :, i])
-    #    print(np.linalg.inv(S[:, :, i]))
-    #    print()
-    #good = np.linalg.matrix_rank(S.T, hermitian=True) == 3
-    #print(np.sum(~good))
+
     S_inv = np.linalg.inv(S.T)
     a_inv = np.sqrt(S_inv[:, 0, 0])
     b_inv = np.sqrt(S_inv[:, 1, 1])
@@ -240,21 +235,21 @@ class Q2Calculator:
             self.get_q2_xnn = self.get_q2_xnn_numpy
 
         if self.representation in ['xnn', 'reciprocal_unit_cell']:
-            if self.lattice_system == 'cubic':
-                self.hkl2 = (hkl[:, 0]**2 + hkl[:, 1]**2 + hkl[:, 2]**2)[:, self.newaxis]
+            if self.lattice_system == 'monoclinic':
+                self.hkl2 = self.concatenate((
+                    hkl**2, 
+                    (hkl[:, 0] * hkl[:, 2])[:, self.newaxis]
+                    ),
+                    axis=1
+                    )
+            elif self.lattice_system == 'triclinic':
+                assert False
+            elif self.lattice_system == 'orthorhombic':
+                self.hkl2 = hkl**2
             elif self.lattice_system == 'tetragonal':
                 self.hkl2 = self.stack((
                     hkl[:, 0]**2 + hkl[:, 1]**2,
                     hkl[:, 2]**2
-                    ),
-                    axis=1
-                    )
-            elif self.lattice_system == 'orthorhombic':
-                self.hkl2 = hkl**2
-            elif self.lattice_system == 'monoclinic':
-                self.hkl2 = self.concatenate((
-                    hkl**2, 
-                    (hkl[:, 0] * hkl[:, 2])[:, self.newaxis]
                     ),
                     axis=1
                     )
@@ -272,8 +267,9 @@ class Q2Calculator:
                     ),
                     axis=1
                     )
-            elif self.lattice_system == 'triclinic':
-                assert False
+            elif self.lattice_system == 'cubic':
+                self.hkl2 = (hkl[:, 0]**2 + hkl[:, 1]**2 + hkl[:, 2]**2)[:, self.newaxis]
+            
         elif self.representation == 'unit_cell':
             self.hkl = hkl
             if self.lattice_system == 'cubic':

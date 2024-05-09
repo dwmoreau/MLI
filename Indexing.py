@@ -1,4 +1,33 @@
 """
+Readings:
+    - Bergmann 2004: Renewed interest in powder diffraction indexing
+        - round robin comparison of existing programs
+            - High quality data is the most important requirement for success
+            - Most programs will find the solution with high quality data
+            - Not a push button task. Need expert knowledge and manual intervention
+            - Trying all available programs is a recommended approach.
+    - Werner 1985: 
+        - Attempt indexing as a 2D crystal first to help with dominant zones
+        - Also used the 
+        - Idea is to assume the Miller index of the first line is known, then try different
+            miller indices for the rest of the pattern.
+    - Werner 1964:
+        - q2 error should be less than 0.0005 for all lines is CuKalpha radiation is used. Citing R. Hesse
+        - Crazy flow diagram
+    - Shirley 2003: Easy if all peaks are known
+    - Altomare 2008: Precision and accuracy in determining peak positions is critical
+    - Oishi-Tomiyasu 2013: Revised M20 scores
+    - Bergmann 2007
+    - Altomare 2009: Index-Heuristics
+    - Tam & Compton (1995)
+    - Paszkowicz 1996
+    - Kariuki 1999
+    - Le Bail 2004
+    - Le Bail 2008
+    - Harris 2000
+
+
+
 lattice system | accuracy
 -------------------------
 cubic          | 99.2%
@@ -13,20 +42,24 @@ Bravais Lattice | accuracy
 cF              | 99.5%
 cI              | 100.0%
 cP              | 99.7%
+mC              | 72 - 78%
+mP              | 85%
 
 * Refactor code:
     * redo Indexing.py to separate bravais lattices
         - Get working on tetragonal
         - Get working on hexagonal
         - Get working on rhombohedral
-        - Get working on monoclinic
     * setup so monoclinic & tetragonal groups work with bravais lattice names
 
 * Templating
+    * Weight dominant zones that can't fill bin
     * Get working on
-        - monoclinic
         - hexagonal
+        - tetragonal
         - rhombohedral
+        - orthorhombic
+    * ML Recalibration
 
 * reindex orthorhombic
 
@@ -44,20 +77,34 @@ cP              | 99.7%
 
 - Optimization:
     - monoclinic
-        - split monoclinic into different cases:
-            * P2: No systematic absences
-            - Pn: h0l: h+l=2n
-            * I2: hkl: h+k+l=2n
-            - Ia: hkl: h+k+l=2n; h0l: h=2n & l=2n
-        - correct the epsilon factor to be e^{-10}
-            - how does this parameter affect the optimization?
+        - poor performance with dominant zones
+            - Try indexing as a 2D crystal first (Werner 1985)
+        - reread SVD-Index
+
+    * MCMC
+        * Reread basics of MCMC
+        * Reformulate the MCMC algorithm in terms of Miller indices, without consideration for unit cells
+        - Parallel tempering / hot & cold chains
         - Constant sigma
-        - U-turns
-        - hot & cold chains
             - simulated annealing seems to help
             - http://bamm-project.org/mc3.html
-        - poor performance with dominant zones and low initial HKL assignment accuracy
-        - reread SVD-Index
+        - correct the epsilon factor to be e^{-10}
+            - how does this parameter affect the optimization?
+            - Hesse 1948, maybe use 0.00005
+    
+    * Understanding the optimization
+        * Track loss vs iteration for all candidates and plot the found and unfound entries
+        * Track moving averaged acceptance rate vs iteration for found and unfound entries
+        * Track the best unit cell / loss for each candidate instead of having "explainers"
+        * Performance vs number of initial candidates within xA of true unit cell
+        * number of times it has reached it's best value
+
+    * How to explore parameter space
+        - How to tell when a candidate is in a deadend?
+        - Nearest neighbors, create new candidates that 
+
+    * Monoclinic reset
+        - weight the number of observations by the local median
 
 - Indexing.py
 
@@ -68,8 +115,7 @@ cP              | 99.7%
     - (000) assignments
 
 - Data
-    * reindex tetragonal
-    * reindex orthorhombic
+    - reindex orthorhombic
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -81,15 +127,12 @@ cP              | 99.7%
         - ICSD
 
 - SWE:
-    * Refactor code:
-        - separate monoclinic by bravais lattice
-    * generate unit cells in unscaled units and call fix_out_of_range_candidates
     - remove angle scaler and use cos(angle)
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
     - get working on dials
         - Get a working environment
-        - Train ML models (monoclinic)
+        - Train ML models
 
 - Regression:
 """
@@ -1028,6 +1071,12 @@ class Indexing:
                 self.miller_index_templator[bravais_lattice].load_from_tag()
             else:
                 self.miller_index_templator[bravais_lattice].setup(
+                    self.data[self.data['bravais_lattice'] == bravais_lattice]
+                    )
+                #self.miller_index_templator[bravais_lattice].do_predictions_even_clusters(
+                #    np.array(self.data.iloc[0]['q2']), n_templates=1000,
+                #    )
+                self.miller_index_templator[bravais_lattice].test_evening_kmeans(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
                     )
 

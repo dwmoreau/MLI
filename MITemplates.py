@@ -3,6 +3,7 @@ import multiprocessing
 import numpy as np
 import os
 import scipy.stats
+import sklearn.cluster
 # This prevents tensorflow from doing the import printout repeatitively during multiprocessing
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1' 
 import tensorflow as tf
@@ -18,7 +19,6 @@ class MITemplates:
     def __init__(self, group, data_params, template_params, hkl_ref, save_to, seed):
         self.template_params = template_params
         template_params_defaults = {
-            'n_dominant_zone_bins': 4,
             'templates_per_dominant_zone_bin': 1000,
             'parallelization': None,
             'n_processes': None,
@@ -55,13 +55,11 @@ class MITemplates:
         params = read_params(f'{self.save_to}/{self.group}_template_params_{self.template_params["tag"]}.csv')
         params_keys = [
             'tag',
-            'n_dominant_zone_bins',
             'templates_per_dominant_zone_bin',
             'n_templates'
             ]
         self.template_params = dict.fromkeys(params_keys)
         self.template_params['tag'] = params['tag']
-        self.template_params['n_dominant_zone_bins'] = int(params['n_dominant_zone_bins'])
         self.template_params['templates_per_dominant_zone_bin'] = int(params['templates_per_dominant_zone_bin'])
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
 
@@ -106,32 +104,51 @@ class MITemplates:
                 self.rng
                 )
         else:
-            mi_sets = []
             reindexed_xnn = np.stack(training_data['reindexed_xnn'])
             ratio = reindexed_xnn[:, :3].min(axis=1) / reindexed_xnn[:, :3].max(axis=1)
-            n_bins = self.template_params['n_dominant_zone_bins']
-            bins = np.linspace(0, 1, n_bins + 1)
 
-            fig, axes = plt.subplots(1, 1, figsize=(5, 3))
-            axes.hist(ratio, bins=bins)
-            axes.set_xlabel('Dominant zone ratio (Min(Xnn) / max(Xnn))')
-            axes.set_ylabel('Counts')
+            reindexed_hkl = np.stack(training_data['reindexed_hkl'])[:, :, :, 0]
+            hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
+            hkl_information_hist = np.bincount(hkl_information, minlength=self.n_points)
+
+            mean_ratio = np.zeros((self.n_points, 2))
+            for i in range(self.n_points):
+                mean_ratio[i, 0] = np.mean(ratio[hkl_information == i])
+                mean_ratio[i, 1] = np.std(ratio[hkl_information == i])
+
+            fig, axes = plt.subplots(1, 3, figsize=(8, 3))
+            axes[0].hist(ratio, bins=np.linspace(0, 1, self.n_points + 1))
+            axes[1].bar(np.arange(self.n_points), hkl_information_hist, width=1)
+            axes[2].plot(
+                hkl_information, ratio,
+                marker='.', linestyle='none', markersize=0.25, alpha=0.5
+                )
+            axes[2].errorbar(np.arange(self.n_points), mean_ratio[:, 0], mean_ratio[:, 1])
+            axes[0].set_xlabel('Dominant zone ratio (Min/Max Xnn)')
+            axes[0].set_ylabel('Counts')
+            axes[1].set_xlabel('Minimum Information')
+            axes[1].set_ylabel('Counts')
+            axes[2].set_xlabel('Minimum Information')
+            axes[2].set_ylabel('Dominant zone ratio')
             fig.tight_layout()
             fig.savefig(f'{self.save_to}/{self.group}_dominant_zone_ratio_{self.template_params["tag"]}.png')
+            plt.close()
 
-            indices = np.searchsorted(bins, ratio)
-            for i in range(1, n_bins + 2):
-                hkl_labels_bin = hkl_labels_all[indices == i]
-                if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
-                    mi_sets.append(hkl_labels_bin)
-                else:
-                    mi_sets.append(make_sets(
-                        self.template_params['templates_per_dominant_zone_bin'],
-                        self.n_points,
-                        hkl_labels_bin,
-                        self.hkl_ref_length,
-                        self.rng
-                        ))
+            mi_sets = []
+            for i in range(self.n_points):
+                indices = hkl_information == i
+                if np.sum(indices) > 0:
+                    hkl_labels_bin = hkl_labels_all[indices]
+                    if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
+                        mi_sets.append(hkl_labels_bin)
+                    else:
+                        mi_sets.append(make_sets(
+                            self.template_params['templates_per_dominant_zone_bin'],
+                            self.n_points,
+                            hkl_labels_bin,
+                            self.hkl_ref_length,
+                            self.rng
+                            ))
             miller_index_templates = np.row_stack(mi_sets)
         self.miller_index_templates = np.unique(miller_index_templates, axis=0)
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
@@ -221,11 +238,32 @@ class MITemplates:
                 i += 1
             xnn[template_index] = xnn_current
             loss[template_index] = np.linalg.norm(1 - q2_calc/q2_obs)
+        xnn = self.fix_unphysical_xnn(xnn)
+        return xnn, loss
+
+    def fix_unphysical_xnn(self, xnn):
         if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
+            # The first three xnn's must be positive
+            xnn[:, :3] = np.abs(xnn[:, :3])
+            # They should also not be zero
             bad_indices = np.any(xnn[:, :3] == 0, axis=1)
             if np.sum(bad_indices) > 0:
                 xnn[bad_indices, :3] = xnn[:, :3].mean()
-        return xnn, loss
+        elif self.lattice_system in ['cubic', 'tetragonal', 'hexagonal']:
+            # The first three xnn's must be positive
+            xnn[:, :3] = np.abs(xnn[:, :3])
+            # They should also not be zero
+            bad_indices = np.any(xnn[:, :3] == 0, axis=1)
+            if np.sum(bad_indices) > 0:
+                xnn[bad_indices, :3] = xnn[:, :3].mean()
+        elif self.lattice_system == 'rhombohedral':
+            xnn[:, 0] = np.abs(xnn[:, 0])
+            # They should also not be zero
+            bad_indices = np.any(xnn[:, 0] == 0, axis=1)
+            if np.sum(bad_indices) > 0:
+                xnn[bad_indices, 0] = xnn[:, 0].mean()
+        ### !!! Ensure that the angles are physical
+        return xnn
 
     def do_predictions(self, q2_obs, n_templates='all'):
         # This is primary used to generate candidates for the optimizer, which expects that the
@@ -235,7 +273,7 @@ class MITemplates:
         if n_templates == 'all':
             pass
         elif n_templates < xnn_templates.shape[0]:
-            indices = self.rng.choice(xnn_templates.shape[0], size=n_templates)
+            indices = self.rng.choice(xnn_templates.shape[0], size=n_templates, replace=False)
             xnn_templates =  xnn_templates[indices]
         elif n_templates > xnn_templates.shape[0]:
             assert False
@@ -244,7 +282,174 @@ class MITemplates:
             xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system, radians=True
             )
         return unit_cell_templates
-  
+
+    def do_predictions_even_clusters(self, q2_obs, n_templates='all', n_clusters=20, n_per_cluster=400):
+        xnn_templates, _ = self.generate_xnn(q2_obs)
+        kmeans_xnn = sklearn.cluster.KMeans(n_clusters=n_clusters, n_init='auto').fit(xnn_templates)
+        xnn_templates_clustered = np.zeros((n_clusters, n_per_cluster, self.n_outputs))
+        for cluster_index in range(n_clusters):
+            indices = kmeans_xnn.labels_ == cluster_index
+            xnn_cluster = xnn_templates[indices]
+            cluster_size = xnn_cluster.shape[0]
+            if cluster_size < n_per_cluster:
+                xnn_templates_clustered[cluster_index, :cluster_size] = xnn_cluster
+                if cluster_size > 1:
+                    cov = np.cov(xnn_cluster, rowvar=False)
+                else:
+                    cov = 0.001 * np.eye(self.n_outputs)
+                xnn_cluster_sampled = self.rng.multivariate_normal(
+                    mean=kmeans_xnn.cluster_centers_[cluster_index],
+                    cov=cov,
+                    size=n_per_cluster - cluster_size
+                    )
+                xnn_cluster_sampled = self.fix_unphysical_xnn(xnn_cluster_sampled)
+                xnn_templates_clustered[cluster_index, cluster_size:] = xnn_cluster_sampled
+            elif cluster_size > n_per_cluster:
+                choice = self.rng.choice(cluster_size, size=n_per_cluster, replace=False)
+                xnn_templates_clustered[cluster_index] = xnn_cluster[choice]
+            else:
+                xnn_templates_clustered[cluster_index] = xnn_cluster
+        if n_templates == 'all':
+            xnn_output = xnn_templates_clustered.reshape((n_clusters*n_per_cluster, self.n_outputs))
+            assert np.all(xnn_output[0] == xnn_templates_clustered[0])
+        else:
+            xnn_output = np.zeros((n_templates, self.n_outputs))
+            samples_per_cluster = n_templates // n_clusters
+            assert samples_per_cluster < n_per_cluster
+            extra = n_templates % n_clusters
+            for cluster_index in range(n_clusters):
+                start = cluster_index * samples_per_cluster
+                stop = (cluster_index + 1) * samples_per_cluster
+                indices = self.rng.choice(n_per_cluster, size=samples_per_cluster, replace=False)
+                xnn_output[start: stop] = xnn_templates_clustered[cluster_index, indices]
+        unit_cell_templates = get_unit_cell_from_xnn(
+             xnn_output, partial_unit_cell=True, lattice_system=self.lattice_system, radians=True
+            )
+        return unit_cell_templates
+
+    def test_evening_affinity_propagation(self, data, n_entries=10):
+        print('starting testing')
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        alpha = 1
+        n_per_cluster = 200
+
+        q2_obs = np.stack(data['q2'])
+        for entry_index in range(n_entries):
+            xnn_templates, _ = self.generate_xnn(q2_obs[entry_index])
+            ap_xnn = sklearn.cluster.AffinityPropagation(verbose=True).fit(xnn_templates)
+            n_clusters = ap_xnn.cluster_centers_.shape[0]
+            fig, axes = plt.subplots(3, 3, figsize=(8, 6))
+            cluster_size = np.zeros(n_clusters, dtype=int)
+            for i in range(n_clusters):
+                indices = ap_xnn.labels_ == i
+                xnn_cluster = xnn_templates[indices]
+                cluster_size[i] = indices.sum()
+                for row in [0, 2]:
+                    axes[row, 0].plot(
+                        xnn_templates[indices, 0], xnn_templates[indices, 1],
+                        linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                        )
+                    axes[row, 1].plot(
+                        xnn_templates[indices, 0], xnn_templates[indices, 2],
+                        linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                        )
+                    axes[row, 2].plot(
+                        xnn_templates[indices, 1], xnn_templates[indices, 2],
+                        linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                        )
+
+                if 0 < cluster_size[i] < n_per_cluster:
+                    if cluster_size[i] > 1:
+                        cov = np.cov(xnn_cluster, rowvar=False)
+                    else:
+                        cov = 0.001 * np.eye(self.n_outputs)
+                    xnn_cluster_sampled = self.rng.multivariate_normal(
+                        mean=ap_xnn.cluster_centers_[i],
+                        cov=cov,
+                        size=n_per_cluster - cluster_size[i]
+                        )
+                    xnn_cluster_sampled = self.fix_unphysical_xnn(xnn_cluster_sampled)
+                    for row in [1, 2]:
+                        axes[row, 0].plot(
+                            xnn_cluster_sampled[:, 0], xnn_cluster_sampled[:, 1],
+                            linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                            )
+                        axes[row, 1].plot(
+                            xnn_cluster_sampled[:, 0], xnn_cluster_sampled[:, 2],
+                            linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                            )
+                        axes[row, 2].plot(
+                            xnn_cluster_sampled[:, 1], xnn_cluster_sampled[:, 2],
+                            linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                            )
+            fig.tight_layout()
+            plt.show()
+
+    def test_evening_kmeans(self, data, n_entries=10):
+        import sklearn.decomposition
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        alpha = 1
+        n_clusters = 50
+        n_per_cluster = 200
+
+        q2_obs = np.stack(data['q2'])
+        for entry_index in range(n_entries):
+            xnn_templates, _ = self.generate_xnn(q2_obs[entry_index])
+            kmeans_xnn = sklearn.cluster.KMeans(n_clusters=n_clusters, n_init='auto').fit(xnn_templates)
+
+            #pca = sklearn.decomposition.PCA(n_components=3)
+            #transformed_templates = pca.fit_transform(xnn_templates)
+            #kmeans_transformed = sklearn.cluster.KMeans(n_clusters=n_clusters, n_init='auto').fit(transformed_templates)
+
+            fig, axes = plt.subplots(3, 3, figsize=(8, 6))
+            cluster_size = np.zeros(n_clusters, dtype=int)
+            for i in range(n_clusters):
+                indices = kmeans_xnn.labels_ == i
+                xnn_cluster = xnn_templates[indices]
+
+                cluster_size[i] = indices.sum()
+                for row in [0, 2]:
+                    axes[row, 0].plot(
+                        xnn_templates[indices, 0], xnn_templates[indices, 1],
+                        linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                        )
+                    axes[row, 1].plot(
+                        xnn_templates[indices, 0], xnn_templates[indices, 2],
+                        linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                        )
+                    axes[row, 2].plot(
+                        xnn_templates[indices, 1], xnn_templates[indices, 2],
+                        linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                        )
+
+                if 0 < cluster_size[i] < n_per_cluster:
+                    if cluster_size[i] > 1:
+                        cov = np.cov(xnn_cluster, rowvar=False)
+                    else:
+                        cov = 0.001 * np.eye(self.n_outputs)
+                    xnn_cluster_sampled = self.rng.multivariate_normal(
+                        mean=kmeans_xnn.cluster_centers_[i],
+                        cov=cov,
+                        size=n_per_cluster - cluster_size[i]
+                        )
+                    xnn_cluster_sampled = self.fix_unphysical_xnn(xnn_cluster_sampled)
+                    for row in [1, 2]:
+                        axes[row, 0].plot(
+                            xnn_cluster_sampled[:, 0], xnn_cluster_sampled[:, 1],
+                            linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                            )
+                        axes[row, 1].plot(
+                            xnn_cluster_sampled[:, 0], xnn_cluster_sampled[:, 2],
+                            linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                            )
+                        axes[row, 2].plot(
+                            xnn_cluster_sampled[:, 1], xnn_cluster_sampled[:, 2],
+                            linestyle='none', marker='.', markersize=0.5, alpha=alpha, color=colors[i%len(colors)]
+                            )
+                
+            fig.tight_layout()
+            plt.show()
+
 
 class MITemplates_binning(MITemplates):
     def __init__(self, group, data_params, template_params, hkl_ref, save_to, seed):
@@ -399,9 +604,11 @@ class MITemplates_binning(MITemplates):
             if n_templates == 'all':
                 pass
             elif n_templates < xnn_templates.shape[0]:
-                indices = self.rng.choice(xnn_templates.shape[0], size=n_templates)
+                # subsample
+                indices = self.rng.choice(xnn_templates.shape[0], size=n_templates, replace=False)
                 xnn_templates =  xnn_templates[indices]
             elif n_templates > xnn_templates.shape[0]:
+                # Add templates
                 assert False
             unit_cell_templates = get_unit_cell_from_xnn(
                 xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system, radians=False
@@ -415,7 +622,7 @@ class MITemplates_binning(MITemplates):
         if n_templates == 'all':
             pass
         elif n_templates < xnn_templates.shape[0]:
-            indices = self.rng.choice(xnn_templates.shape[0], size=n_templates)
+            indices = self.rng.choice(xnn_templates.shape[0], size=n_templates, replace=False)
             xnn_templates = xnn_templates[indices]
         elif n_templates > xnn_templates.shape[0]:
             n_samples += n_templates - xnn_templates.shape[0]
