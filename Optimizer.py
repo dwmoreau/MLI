@@ -139,7 +139,7 @@ class Candidates:
             self.minimum_angle = 0.01
         elif self.lattice_system == 'monoclinic':
             self.maximum_angle = np.pi
-            self.minimum_angle = 4*np.pi/9
+            self.minimum_angle = np.pi/2
         elif self.lattice_system == 'triclinic':
             assert False
             self.maximum_angle = np.pi
@@ -149,24 +149,31 @@ class Candidates:
 
         unit_cell_true = np.array(entry['reindexed_unit_cell'])
         reciprocal_unit_cell_true = reciprocal_uc_conversion(unit_cell_true[np.newaxis])[0]
+        xnn_true = get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell_true[np.newaxis])[0]
         if lattice_system == 'cubic':
             self.unit_cell_true = unit_cell_true[0][np.newaxis]
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[0][np.newaxis]
+            self.xnn_true = xnn_true[0][np.newaxis]
         elif lattice_system in ['tetragonal', 'hexagonal']:
             self.unit_cell_true = unit_cell_true[[0, 2]]
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[[0, 2]]
+            self.xnn_true = xnn_true[[0, 2]]
         elif lattice_system == 'rhombohedral':
             self.unit_cell_true = unit_cell_true[[0, 3]]
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[[0, 3]]
+            self.xnn_true = xnn_true[[0, 3]]
         elif lattice_system == 'orthorhombic':
             self.unit_cell_true = unit_cell_true[:3]
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[:3]
+            self.xnn_true = xnn_true[:3]
         elif lattice_system == 'monoclinic':
             self.unit_cell_true = unit_cell_true[[0, 1, 2, 4]]
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true[[0, 1, 2, 4]]
+            self.xnn_true = xnn_true[[0, 1, 2, 4]]
         elif lattice_system == 'triclinic':
             self.unit_cell_true = unit_cell_true
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true
+            self.xnn_true = xnn_true
 
         self.hkl_true = np.array(entry['reindexed_hkl'])[:, :, 0]
         self.hkl_labels_true = np.array(entry['hkl_labels'])
@@ -181,13 +188,29 @@ class Candidates:
             'hkl',
             'softmax',
             'loss',
+            'best_loss',
+            'best_xnn',
+            'best_returns_trajectory',
+            'neighbors',
+            'accepted',
+            'loss_trajectory',
+            'xnn_trajectory',
+            'xnn_drift',
+            'acceptance_trajectory',
             ]
         self.candidates = pd.DataFrame(columns=self.df_columns)
         self.explainers = pd.DataFrame(columns=self.df_columns)
 
-        self.candidates['unit_cell'] = list(unit_cell)
+        self.candidates['unit_cell'] = list(unit_cell)    
         self.update_xnn_from_unit_cell()
         self.hkl_true_check = get_hkl_matrix(self.hkl_true, self.lattice_system)
+        self.candidates['best_returns'] = np.zeros(unit_cell.shape[0], dtype=int)
+        self.candidates['best_loss'] = np.zeros(unit_cell.shape[0])
+        self.candidates['best_xnn'] = self.candidates['xnn'].copy()
+
+        xnn = np.stack(self.candidates['xnn'])
+        distance = np.linalg.norm(xnn[:, np.newaxis, :] - xnn[np.newaxis, :, :], axis=2)
+        self.candidates['neighbors'] = np.sum(distance < 0.0005, axis=1)
 
     def update_xnn_from_unit_cell(self):
         reciprocal_unit_cell = reciprocal_uc_conversion(
@@ -243,7 +266,9 @@ class Candidates:
         self.candidates['unit_cell'] = list(unit_cell)
 
     def diagnostics(self, hkl_ref_length):
+        unit_cell = np.stack(self.candidates['unit_cell'])
         reciprocal_unit_cell = np.stack(self.candidates['reciprocal_unit_cell'])
+        xnn = np.stack(self.candidates['xnn'])
         reciprocal_unit_cell_rms = 1/np.sqrt(self.n_uc) * np.linalg.norm(reciprocal_unit_cell - self.reciprocal_unit_cell_true, axis=1)
         reciprocal_unit_cell_max_diff = np.max(np.abs(reciprocal_unit_cell - self.reciprocal_unit_cell_true), axis=1)
 
@@ -254,16 +279,31 @@ class Candidates:
 
         impossible = np.any(self.hkl_labels_true == hkl_ref_length - 1)
 
+        distance_ruc = np.linalg.norm(
+            reciprocal_unit_cell[:, :3] - self.reciprocal_unit_cell_true[:3][np.newaxis], axis=1
+            )
+        counts_ruc = [np.sum(distance_ruc < i) for i in [0.01, 0.02, 0.03]]
+
+        distance_uc = np.linalg.norm(unit_cell[:, :3] - self.unit_cell_true[:3][np.newaxis], axis=1)
+        counts_uc = [np.sum(distance_uc < i) for i in [1, 2, 3]]
+
+        distance_xnn = np.linalg.norm(xnn[:, :3] - self.xnn_true[:3][np.newaxis], axis=1)
+        counts_xnn = [np.sum(distance_xnn < i) for i in [0.00025, 0.0005, 0.001]]
+
         print(f'Starting # candidates:       {self.n}')
         print(f'Impossible:                  {impossible}')
         print(f'True unit cell:              {np.round(self.unit_cell_true, decimals=4)}')
         print(f'True reciprocal unit cell:   {np.round(self.reciprocal_unit_cell_true, decimals=4)}')
+        print(f'True Xnn:                    {np.round(self.xnn_true, decimals=4)}')
         print(f'Closest unit cell:           {np.round(reciprocal_unit_cell[np.argmin(reciprocal_unit_cell_rms)], decimals=4)}')
         print(f'Closest unit cell rms:       {reciprocal_unit_cell_rms.min():2.2f}')
         print(f'Smallest unit cell max diff: {reciprocal_unit_cell_max_diff.min():2.2f}')
         print(f'Mean unit cell rms:          {reciprocal_unit_cell_rms.mean():2.2f}')
         print(f'Best HKL accuracy:           {hkl_accuracy.max():1.2f}')
         print(f'Mean HKL accuracy:           {hkl_accuracy.mean():1.2f}')
+        print(f'Close Unit Cell:             {counts_uc[0]}, {counts_uc[1]}, {counts_uc[2]}')
+        print(f'Close Reciprocal UC:         {counts_ruc[0]}, {counts_ruc[1]}, {counts_ruc[2]}')
+        print(f'Close Xnn:                   {counts_xnn[0]}, {counts_xnn[1]}, {counts_xnn[2]}')
         print(f'Bravais Lattice:             {self.bl_true}')
         print(f'Spacegroup:                  {self.sg_true} {self.spacegroup_symbol_hm_true}')
 
@@ -276,7 +316,10 @@ class Candidates:
             'bravais_lattice': self.bl_true,
             'spacegroup': self.sg_true,
             'impossible': impossible,
-            'found': False
+            'found': False,
+            'counts_uc': counts_uc,
+            'counts_ruc': counts_ruc,
+            'counts_xnn': counts_xnn,
             }
 
         return pd.Series(output_dict)
@@ -388,9 +431,182 @@ class Candidates:
 
             # Fix candidates with too small or too large unit cells
             self.fix_out_of_range_candidates()
+            self.update_history()
         if len(self.candidates) > 1:
             self.pick_explainers()
-        self.candidates = self.candidates.sort_values(by='loss')
+        self.candidates = self.candidates.sort_values(by='best_loss')
+
+    def update_history(self):
+        returned = np.array(self.candidates['loss'] == self.candidates['best_loss'])
+        improved = np.array(self.candidates['loss'] < self.candidates['best_loss'])
+        if np.sum(improved) > 0:
+            best_loss = np.array(self.candidates['best_loss'])
+            best_loss[improved] = np.array(self.candidates['loss'])[improved]
+            best_xnn = np.stack(self.candidates['best_xnn'])
+            best_xnn[improved] = np.stack(self.candidates['xnn'])[improved]
+            self.candidates['best_loss'] = best_loss
+            self.candidates['best_xnn'] = list(best_xnn)
+
+        acceptance_trajectory = np.stack(self.candidates['acceptance_trajectory'])
+        best_returns_trajectory = np.stack(self.candidates['best_returns_trajectory'])
+        loss_trajectory = np.stack(self.candidates['loss_trajectory'])
+        xnn_trajectory = np.stack(self.candidates['xnn_trajectory'])
+        xnn_current = np.stack(self.candidates['xnn'])
+        xnn_drift = np.stack(self.candidates['xnn_drift'])
+        if np.isnan(np.sum(loss_trajectory)):
+            # This catches the first iteration when there is no loss
+            self.candidates['acceptance_trajectory'] = np.zeros(self.n, dtype=bool)
+            self.candidates['best_returns_trajectory'] = np.zeros(self.n, dtype=int)
+            self.candidates['loss_trajectory'] = np.array(self.candidates['loss'])
+            self.candidates['xnn_trajectory'] = np.array(self.candidates['xnn'])
+            self.candidates['xnn_drift'] = np.zeros(self.n)
+        elif len(loss_trajectory.shape) == 1:
+            self.candidates['acceptance_trajectory'] = list(np.concatenate((
+                acceptance_trajectory[:, np.newaxis], np.array(self.candidates['accepted'])[:, np.newaxis]
+                ),
+                axis=1
+                ))
+            new_best_returns = best_returns_trajectory.copy()
+            new_best_returns[returned] += 1
+            new_best_returns[improved] = 0
+            self.candidates['best_returns_trajectory'] = list(np.concatenate((
+                best_returns_trajectory[:, np.newaxis], new_best_returns[:, np.newaxis]
+                ),
+                axis=1
+                ))
+            self.candidates['loss_trajectory'] = list(np.concatenate((
+                loss_trajectory[:, np.newaxis], np.array(self.candidates['loss'])[:, np.newaxis]
+                ),
+                axis=1
+                ))
+            self.candidates['xnn_trajectory'] = list(np.concatenate((
+                xnn_trajectory[:, :, np.newaxis], xnn_current[:, :, np.newaxis]
+                ),
+                axis=2
+                ))
+            xnn_drift_current = np.linalg.norm(
+                xnn_trajectory[:, :3] - xnn_current[:, :3],
+                axis=1
+                )
+            self.candidates['xnn_drift'] = list(np.concatenate((
+                xnn_drift[:, np.newaxis], xnn_drift_current[:, np.newaxis]
+                ),
+                axis=1
+                ))
+        else:
+            self.candidates['acceptance_trajectory'] = list(np.concatenate((
+                acceptance_trajectory, np.array(self.candidates['accepted'])[:, np.newaxis]
+                ),
+                axis=1
+                ))
+            new_best_returns = best_returns_trajectory[:, -1].copy()
+            new_best_returns[returned] += 1
+            new_best_returns[improved] = 0
+            self.candidates['best_returns_trajectory'] = list(np.concatenate((
+                best_returns_trajectory, new_best_returns[:, np.newaxis]
+                ),
+                axis=1
+                ))
+            self.candidates['loss_trajectory'] = list(np.concatenate((
+                loss_trajectory, np.array(self.candidates['loss'])[:, np.newaxis]
+                ),
+                axis=1
+                ))
+            self.candidates['xnn_trajectory'] = list(np.concatenate((
+                xnn_trajectory, xnn_current[:, :, np.newaxis]
+                ),
+                axis=2
+                ))
+            xnn_drift_current = np.array(np.linalg.norm(
+                xnn_trajectory[:, :3, 0] - xnn_current[:, :3],
+                axis=1
+                ))
+            self.candidates['xnn_drift'] = list(np.concatenate((
+                np.stack(self.candidates['xnn_drift']), xnn_drift_current[:, np.newaxis]
+                ),
+                axis=1
+                ))
+
+    def plot_history(self, save_to):
+        """
+        - loss vs iteration
+        - xnn drift
+        - number of times reaching best value
+        - moving average of acceptance
+        """
+        loss_trajectory = np.stack(self.candidates['loss_trajectory'])
+        xnn_drift = np.stack(self.candidates['xnn_drift'])
+        best_returns_trajectory = np.stack(self.candidates['best_returns_trajectory'])
+        acceptance_trajectory = np.stack(self.candidates['acceptance_trajectory'])
+        xnn_trajectory = np.stack(self.candidates['xnn_trajectory'])
+        found = np.min(loss_trajectory, axis=1) < self.tolerance
+
+        true_error = np.linalg.norm(
+            xnn_trajectory[:, :3, :] - self.xnn_true[np.newaxis, :3, np.newaxis],
+            axis=1
+            )
+
+        """
+        np.save('acceptance_trajectory.npy', acceptance_trajectory)
+        np.save('loss_trajectory.npy', loss_trajectory)
+        np.save('xnn_drift.npy', xnn_drift)
+        np.save('xnn_trajectory.npy', xnn_trajectory)
+        np.save('best_returns_trajectory.npy', best_returns_trajectory)
+        assert False
+        """
+        xnn_cc = np.zeros(xnn_trajectory.shape)
+        for entry_index in range(xnn_trajectory.shape[0]):
+            for axis_index in range(self.n_uc):
+                xnn_cc[entry_index, axis_index] = scipy.signal.correlate(
+                    xnn_trajectory[entry_index, axis_index],
+                    xnn_trajectory[entry_index, axis_index],
+                    method='fft'
+                    )[xnn_trajectory.shape[2]-1:]
+
+        xnn_cc /= xnn_cc.max(axis=2)[:, :, np.newaxis]
+        fig, axes = plt.subplots(self.n_uc, 1, figsize=(5, 3 + self.n_uc*1.5), sharex=True)
+        for axis_index in range(self.n_uc):
+            axes[axis_index].plot(xnn_cc[~found, axis_index, :].T, alpha=0.1)
+            axes[axis_index].plot(xnn_cc[found, axis_index, :].T, linewidth=2, color=[0, 0, 0])
+        axes[0].set_title('Auto Correlation Plots')
+        fig.tight_layout()
+        fig.savefig(save_to + '_auto_correlation.png')
+        plt.cla()
+        plt.clf()
+        plt.close('all')
+
+        running_average = np.zeros(acceptance_trajectory.shape)
+        for index in range(1, acceptance_trajectory.shape[1]):
+            if index < 10:
+                running_average[:, index] = np.mean(acceptance_trajectory[:, :index], axis=1)
+            else:
+                running_average[:, index] = np.mean(acceptance_trajectory[:, index-10:index], axis=1)
+
+        fig, axes = plt.subplots(2, 3, figsize=(9, 5), sharex=True)
+        axes[0, 0].plot(loss_trajectory[~found].T, alpha=0.1)
+        axes[0, 0].plot(loss_trajectory[found].T, linewidth=2, color=[0, 0, 0])
+        axes[0, 1].semilogy(xnn_drift[~found, 1:].T, alpha=0.1)
+        axes[0, 1].semilogy(xnn_drift[found, 1:].T, linewidth=2, color=[0, 0, 0])
+        axes[0, 2].semilogy(true_error[~found, 1:].T, alpha=0.1)
+        axes[0, 2].semilogy(true_error[found, 1:].T, linewidth=2, color=[0, 0, 0])
+        axes[1, 0].plot(running_average[~found].T, alpha=0.1)
+        axes[1, 0].plot(running_average[found].T, linewidth=2, color=[0, 0, 0])
+        axes[1, 1].plot(best_returns_trajectory[~found].T, alpha=0.1)
+        axes[1, 1].plot(best_returns_trajectory[found].T, linewidth=2, color=[0, 0, 0])
+
+        axes[0, 0].set_ylabel('Loss')
+        axes[1, 0].set_ylabel('Acceptance Moving Average')
+        axes[0, 1].set_ylabel('RMS Xnn drift')
+        axes[0, 2].set_ylabel('RMS Xnn - Xnn True')
+        axes[1, 1].set_ylabel('Times returned to best')
+        axes[1, 0].set_xlabel('MCMC Iteration')
+        axes[1, 1].set_xlabel('MCMC Iteration')
+        axes[1, 2].set_xlabel('MCMC Iteration')
+        fig.tight_layout()
+        fig.savefig(save_to + '_MCMC_diagnostics.png')
+        plt.cla()
+        plt.clf()
+        plt.close('all')
 
     def pick_explainers(self):
         found = self.candidates['loss'] < self.tolerance
@@ -402,10 +618,17 @@ class Candidates:
             if len(self.explainers) == 0:
                 self.explainers = found_entries
             else:
-                self.explainers = pd.concat([self.explainers, found_entries], ignore_index=True)
-                self.explainers.sort_values(by='loss', inplace=True)
-            self.candidates = self.candidates.loc[~found]
-            self.n = len(self.candidates)
+                found_index = np.array(found_entries.index)
+                explainers_index = np.array(self.explainers.index)
+                new = np.ones(len(found_entries), dtype=bool)
+                for index in range(len(found_entries)):
+                    if found_index[index] in explainers_index:
+                        new[index] = False
+                if np.sum(new) > 0:
+                    self.explainers = pd.concat(
+                        [self.explainers, found_entries.loc[new]], ignore_index=False
+                        )
+                    self.explainers.sort_values(by='loss', inplace=True)
 
     def validate_candidate(self, unit_cell):
         atol = 1e-2
@@ -654,6 +877,9 @@ class Optimizer:
             )
         if not os.path.exists(self.save_to):
             os.mkdir(self.save_to)
+        figure_directory = os.path.join(self.save_to, 'figures')
+        if not os.path.exists(figure_directory):
+            os.mkdir(figure_directory)
 
         self.indexer = Indexing(
             assign_params=self.assign_params, 
@@ -767,6 +993,9 @@ class Optimizer:
             'spacegroup',
             'impossible',
             'found',
+            'counts_uc',
+            'counts_ruc',
+            'counts_xnn',
             ])
         if self.opt_params['rerun_failures']:
             print()
@@ -869,6 +1098,38 @@ class Optimizer:
 
     def plot_candidate_unit_cells(self, candidate_uc, entry, entry_index):
         if self.indexer.data_params['lattice_system'] == 'monoclinic':
+            ac_reindexer = [
+                np.eye(3),
+                np.array([
+                    [0, 0, 1],
+                    [0, 1, 0],
+                    [-1, 0, 0],
+                    ])
+                ]
+            transformations = [
+                np.eye(3),
+                np.array([
+                    [-1, 0, 1],
+                    [0, 1, 0],
+                    [-1, 0, 0],
+                    ]),
+                np.array([
+                    [0, 0, -1],
+                    [0, 1, 0],
+                    [1, 0, -1],
+                    ]),
+                np.array([
+                    [1, 0, 0],
+                    [0, 1, 0],
+                    [-1, 0, 1],
+                    ]),
+                np.array([
+                    [1, 0, 0],
+                    [0, 1, 0],
+                    [1, 0, 1],
+                    ]),
+                ]
+
             candidates_nn = np.zeros((self.n_groups * self.opt_params['n_candidates_nn'], 4))
             candidates_rf = np.zeros((self.n_groups * self.opt_params['n_candidates_rf'], 4))
 
@@ -924,14 +1185,46 @@ class Optimizer:
             hist_template, _ = np.histogram(candidates_template[:, 3], bins=angle_bins, density=True)
             axes[2, 3].bar(angle_centers, hist_template, width=w)
 
-            for row in range(3):
-                axes[row, 0].plot(unit_cell_true[0], unit_cell_true[1], linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0])
-                axes[row, 1].plot(unit_cell_true[0], unit_cell_true[2], linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0])
-                axes[row, 2].plot(unit_cell_true[1], unit_cell_true[2], linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0])
+            ucm = np.array([
+                [unit_cell_true[0], 0, unit_cell_true[2] * np.cos(unit_cell_true[4])],
+                [0, unit_cell_true[1], 0],
+                [0, 0, unit_cell_true[2] * np.sin(unit_cell_true[4])],
+                ])
+            for trans in transformations:
+                for perm in ac_reindexer:
+                    rucm = ucm @ perm @ trans
+                    reindexed_unit_cell_true = np.zeros(4)
+                    reindexed_unit_cell_true[0] = np.linalg.norm(rucm[:, 0])
+                    reindexed_unit_cell_true[1] = np.linalg.norm(rucm[:, 1])
+                    reindexed_unit_cell_true[2] = np.linalg.norm(rucm[:, 2])
+                    dot_product = np.dot(rucm[:, 0], rucm[:, 2])
+                    mag = reindexed_unit_cell_true[0] * reindexed_unit_cell_true[2]
+                    reindexed_unit_cell_true[3] = np.arccos(dot_product / mag)
+                    for row in range(3):
+                        axes[row, 0].plot(
+                            reindexed_unit_cell_true[0], reindexed_unit_cell_true[1], 
+                            linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
+                            )
+                        axes[row, 1].plot(
+                            reindexed_unit_cell_true[0], reindexed_unit_cell_true[2],
+                            linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
+                            )
+                        axes[row, 2].plot(
+                            reindexed_unit_cell_true[1], reindexed_unit_cell_true[2], 
+                            linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
+                            )
 
-                ylim = axes[row, 3].get_ylim()
-                axes[row, 3].plot([unit_cell_true[4], unit_cell_true[4]], 0.5*np.array(ylim), color=[0.8, 0, 0], linewidth=1)
-                axes[row, 3].set_ylim(ylim)
+                        ylim = axes[row, 3].get_ylim()
+                        if reindexed_unit_cell_true[3] > np.pi/2:
+                            angle = reindexed_unit_cell_true[3]
+                        else:
+                            angle = np.pi - reindexed_unit_cell_true[3]
+                        axes[row, 3].plot(
+                            [angle, angle],
+                            0.5*np.array(ylim),
+                            color=[0.8, 0, 0], linewidth=1
+                            )
+                        axes[row, 3].set_ylim(ylim)
 
             for col in range(3):
                 ylim0 = axes[0, col].get_ylim()
@@ -959,6 +1252,7 @@ class Optimizer:
             fig.tight_layout()
             fig.savefig(os.path.join(
                 self.save_to,
+                'figures',
                 f'{self.bravais_lattice}_initial_candidates_{entry_index:03d}_{self.opt_params["tag"]}.png'
                 ))
             # This is a bit scorched earth, but it helps with memory leaks.
@@ -1109,6 +1403,13 @@ class Optimizer:
                         f'{iteration_info["assigner_key"]}',
                         ]
                     print(' '.join(print_list))
+                save_to = os.path.join(
+                    self.save_to,
+                    'figures',
+                    f'{self.bravais_lattice}_{entry_index:03d}_{self.opt_params["tag"]}'
+                    )
+                if iteration_info['plot_history']:
+                    candidates.plot_history(save_to)
         print(np.mean(acceptance_fraction))
         return candidates, diagnostic_df_entry
 
@@ -1214,11 +1515,12 @@ class Optimizer:
 
     def montecarlo_acceptance(self, candidates, next_candidates, acceptance_method, acceptance_fraction):
         if acceptance_method == 'montecarlo':
-            ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']) /self.temperature)
+            ratio = np.exp(-(next_candidates.candidates['loss'] - candidates.candidates['loss']) / self.temperature)
             probability = self.rng.random(candidates.n)
             accepted = probability < ratio
             acceptance_fraction.append(accepted.sum() / accepted.size)
             candidates.candidates.loc[accepted] = next_candidates.candidates.loc[accepted]
+            candidates.candidates['accepted'] = accepted
         elif acceptance_method == 'always':
             candidates = next_candidates
             acceptance_fraction.append(1)

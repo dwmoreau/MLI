@@ -51,7 +51,12 @@ class MITemplates:
             )
 
     def load_from_tag(self):
-        self.miller_index_templates = np.load(f'{self.save_to}/{self.group}_miller_index_templates_{self.template_params["tag"]}.npy')
+        self.miller_index_templates = np.load(
+            f'{self.save_to}/{self.group}_miller_index_templates_{self.template_params["tag"]}.npy'
+            )
+        self.miller_index_templates_prob = np.load(
+            f'{self.save_to}/{self.group}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
+            )
         params = read_params(f'{self.save_to}/{self.group}_template_params_{self.template_params["tag"]}.csv')
         params_keys = [
             'tag',
@@ -135,13 +140,21 @@ class MITemplates:
             plt.close()
 
             mi_sets = []
+            sampling_probability = []
             for i in range(self.n_points):
                 indices = hkl_information == i
                 if np.sum(indices) > 0:
                     hkl_labels_bin = hkl_labels_all[indices]
                     if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
+                        ratio = hkl_labels_bin.shape[0] / self.template_params['templates_per_dominant_zone_bin']
+                        sampling_probability.append(
+                            ratio * np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
                         mi_sets.append(hkl_labels_bin)
                     else:
+                        sampling_probability.append(
+                            np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
                         mi_sets.append(make_sets(
                             self.template_params['templates_per_dominant_zone_bin'],
                             self.n_points,
@@ -150,11 +163,20 @@ class MITemplates:
                             self.rng
                             ))
             miller_index_templates = np.row_stack(mi_sets)
-        self.miller_index_templates = np.unique(miller_index_templates, axis=0)
+            sampling_probability = np.concatenate(sampling_probability)
+        self.miller_index_templates, unique_indices = np.unique(
+            miller_index_templates, axis=0, return_index=True
+            )
+        sampling_probability = sampling_probability[unique_indices]
+        self.miller_index_templates_prob = sampling_probability / sampling_probability.sum()
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
         np.save(
             f'{self.save_to}/{self.group}_miller_index_templates_{self.template_params["tag"]}.npy',
             self.miller_index_templates
+            )
+        np.save(
+            f'{self.save_to}/{self.group}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
+            self.miller_index_templates_prob
             )
 
     def setup(self, data):
@@ -273,7 +295,12 @@ class MITemplates:
         if n_templates == 'all':
             pass
         elif n_templates < xnn_templates.shape[0]:
-            indices = self.rng.choice(xnn_templates.shape[0], size=n_templates, replace=False)
+            indices = self.rng.choice(
+                xnn_templates.shape[0],
+                size=n_templates,
+                replace=False,
+                p=self.miller_index_templates_prob,
+                )
             xnn_templates =  xnn_templates[indices]
         elif n_templates > xnn_templates.shape[0]:
             assert False

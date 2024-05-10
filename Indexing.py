@@ -26,8 +26,6 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 
-
-
 lattice system | accuracy
 -------------------------
 cubic          | 99.2%
@@ -46,22 +44,12 @@ mC              | 72 - 78%
 mP              | 85%
 
 * Refactor code:
-    * redo Indexing.py to separate bravais lattices
-        - Get working on tetragonal
-        - Get working on hexagonal
-        - Get working on rhombohedral
+    * Get working on other lattice systems
     * setup so monoclinic & tetragonal groups work with bravais lattice names
+    * reindex orthorhombic
 
 * Templating
-    * Weight dominant zones that can't fill bin
-    * Get working on
-        - hexagonal
-        - tetragonal
-        - rhombohedral
-        - orthorhombic
-    * ML Recalibration
-
-* reindex orthorhombic
+    * Recalibration
 
 - Documentation
     - Update methods.md
@@ -76,6 +64,18 @@ mP              | 85%
             Nespolo 2014
 
 - Optimization:
+    * History
+        - loss vs iteration
+        - best loss / unit cell
+        - number of times reaching best value
+        - moving average of acceptance
+
+    * Redistribute candidates
+        * track initial ca
+        - Move initial candidates with large numbers of neighbors to less crowded areas
+        - Identify when a candidate has stagnated
+        - When stagnated, shift to position near a candidate with less than n-nearest neighbors
+
     - monoclinic
         - poor performance with dominant zones
             - Try indexing as a 2D crystal first (Werner 1985)
@@ -84,9 +84,9 @@ mP              | 85%
     * MCMC
         * Reread basics of MCMC
         * Reformulate the MCMC algorithm in terms of Miller indices, without consideration for unit cells
-        - Parallel tempering / hot & cold chains
         - Constant sigma
-            - simulated annealing seems to help
+        - Simulated annealing
+        - Parallel tempering / hot & cold chains
             - http://bamm-project.org/mc3.html
         - correct the epsilon factor to be e^{-10}
             - how does this parameter affect the optimization?
@@ -1076,9 +1076,9 @@ class Indexing:
                 #self.miller_index_templator[bravais_lattice].do_predictions_even_clusters(
                 #    np.array(self.data.iloc[0]['q2']), n_templates=1000,
                 #    )
-                self.miller_index_templator[bravais_lattice].test_evening_kmeans(
-                    self.data[self.data['bravais_lattice'] == bravais_lattice]
-                    )
+                #self.miller_index_templator[bravais_lattice].test_evening_kmeans(
+                #    self.data[self.data['bravais_lattice'] == bravais_lattice]
+                #    )
 
     def setup_regression(self):
         self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])
