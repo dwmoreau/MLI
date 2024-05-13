@@ -8,6 +8,7 @@ import scipy.special
 import time
 
 from Indexing import Indexing
+from Reindexing import get_different_monoclinic_settings
 from TargetFunctions import CandidateOptLoss_xnn
 from Utilities import get_hkl_matrix
 from Utilities import get_reciprocal_unit_cell_from_xnn
@@ -279,16 +280,31 @@ class Candidates:
 
         impossible = np.any(self.hkl_labels_true == hkl_ref_length - 1)
 
-        distance_ruc = np.linalg.norm(
-            reciprocal_unit_cell[:, :3] - self.reciprocal_unit_cell_true[:3][np.newaxis], axis=1
+        unit_cell_true = get_different_monoclinic_settings(self.unit_cell_true, partial_unit_cell=True)
+        reciprocal_unit_cell_true = reciprocal_uc_conversion(
+            unit_cell_true, partial_unit_cell=True, lattice_system=self.lattice_system
             )
-        counts_ruc = [np.sum(distance_ruc < i) for i in [0.01, 0.02, 0.03]]
+        xnn_true = get_xnn_from_reciprocal_unit_cell(
+            reciprocal_unit_cell_true, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
 
-        distance_uc = np.linalg.norm(unit_cell[:, :3] - self.unit_cell_true[:3][np.newaxis], axis=1)
+        distance_ruc = np.linalg.norm(
+            reciprocal_unit_cell[np.newaxis, :, :3] - reciprocal_unit_cell_true[:, np.newaxis, :3], 
+            axis=2
+            ).min(axis=0)
+        counts_ruc = [np.sum(distance_ruc < i) for i in [0.005, 0.01, 0.02]]
+
+        distance_uc = np.linalg.norm(
+            unit_cell[np.newaxis, :, :3] - unit_cell_true[:, np.newaxis, :3],
+            axis=2
+            ).min(axis=0)
         counts_uc = [np.sum(distance_uc < i) for i in [1, 2, 3]]
 
-        distance_xnn = np.linalg.norm(xnn[:, :3] - self.xnn_true[:3][np.newaxis], axis=1)
-        counts_xnn = [np.sum(distance_xnn < i) for i in [0.00025, 0.0005, 0.001]]
+        distance_xnn = np.linalg.norm(
+            xnn[np.newaxis, :, :3] - xnn_true[:, np.newaxis, :3],
+            axis=2
+            ).min(axis=0)
+        counts_xnn = [np.sum(distance_xnn < i) for i in [0.0005, 0.001, 0.002]]
 
         print(f'Starting # candidates:       {self.n}')
         print(f'Impossible:                  {impossible}')
@@ -422,6 +438,119 @@ class Candidates:
         self.candidates['unit_cell'] = list(unit_cells)
         self.update_xnn_from_unit_cell()
 
+    def redistribute_unit_cells(self, max_neighbors, radius):
+        unit_cells = np.stack(self.candidates['unit_cell'])
+        redistributed_unit_cells = unit_cells.copy()
+        largest_neighborhood = max_neighbors + 1
+        n_redistributed = 0 
+        while largest_neighborhood > max_neighbors:
+            distance = np.linalg.norm(
+                redistributed_unit_cells[np.newaxis, :, :3] - redistributed_unit_cells[:, np.newaxis, :3],
+                axis=2
+                )
+            neighbor_array = distance < radius
+            neighbor_count = np.sum(neighbor_array, axis=1)
+            largest_neighborhood = neighbor_count.max()
+            if largest_neighborhood > max_neighbors:
+                redistribute_from_indices = []
+                high_density_indices = np.where(neighbor_count > max_neighbors)[0]
+                for high_density_index in high_density_indices:
+                    neighbor_indices = np.where(neighbor_array[high_density_index])[0]
+                    excess_neighbors = neighbor_indices.size - max_neighbors
+                    if excess_neighbors <= neighbor_indices.size:
+                        replace = False
+                    else:
+                        replace = True
+                    redistribute_from_indices.append(neighbor_indices[
+                        self.rng.choice(neighbor_indices.size, size=excess_neighbors, replace=replace)
+                        ])
+                redistribute_from_indices = np.unique(np.concatenate(redistribute_from_indices))
+                excess_neighbors = redistribute_from_indices.size
+                n_redistributed += excess_neighbors
+        
+                low_density_indices = np.where(neighbor_count < max_neighbors)[0]
+                prob = max_neighbors - neighbor_count[low_density_indices]
+                prob = prob / prob.sum()
+                if excess_neighbors <= low_density_indices.size:
+                    replace = False
+                else:
+                    replace = True
+                redistribute_to_indices = low_density_indices[
+                    self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
+                    ]
+                
+                perturbation = self.rng.uniform(low=-1, high=1, size=(excess_neighbors, 3))
+                perturbation /= np.linalg.norm(perturbation, axis=1)[:, np.newaxis]
+                redistributed_unit_cells[redistribute_from_indices, :3] = \
+                    redistributed_unit_cells[redistribute_to_indices, :3] + perturbation
+
+                redistributed_unit_cells[:, :3] = np.abs(redistributed_unit_cells[:, :3])
+                permute_indices = redistributed_unit_cells[:, 0] > redistributed_unit_cells[:, 2]
+                redistributed_unit_cells[permute_indices] = np.column_stack((
+                    redistributed_unit_cells[permute_indices, 2],
+                    redistributed_unit_cells[permute_indices, 1],
+                    redistributed_unit_cells[permute_indices, 0],
+                    redistributed_unit_cells[permute_indices, 3],
+                    ))
+        print(f'Redistributed {n_redistributed} candidates')
+        self.candidates['unit_cell'] = list(redistributed_unit_cells)
+        self.fix_out_of_range_candidates()
+
+    def setup_exhaustive_search(self, max_neighbors, radius):
+        self.starting_unit_cells = np.stack(self.candidates['unit_cell']).copy()
+        self.max_neighbors = max_neighbors
+        self.radius = radius
+
+    def exhaustive_search(self):
+        unit_cells = np.stack(self.candidates['unit_cell']).copy()
+
+        distance = np.linalg.norm(
+            unit_cells[:, np.newaxis, :3] - self.starting_unit_cells[np.newaxis, :, :3],
+            axis=2
+            )
+        neighbor_array = distance < self.radius
+        neighbor_count = np.sum(neighbor_array, axis=1)
+        redistribute_from_indices = np.where(neighbor_count > self.max_neighbors)[0]
+        excess_neighbors = redistribute_from_indices.size
+        low_density_indices = np.where(neighbor_count < self.max_neighbors)[0]
+
+        prob = self.max_neighbors - neighbor_count[low_density_indices]
+        prob = prob / prob.sum()
+        if excess_neighbors <= low_density_indices.size:
+            replace = False
+        else:
+            replace = True
+        choice = self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
+        redistribute_to_indices = low_density_indices[choice]
+
+        perturbation = self.rng.uniform(low=-1, high=1, size=(excess_neighbors, 3))
+        perturbation /= np.linalg.norm(perturbation, axis=1)[:, np.newaxis]
+        unit_cells[redistribute_from_indices, :3] = unit_cells[redistribute_to_indices, :3] + perturbation
+
+        not_chosen = np.delete(np.arange(low_density_indices.size), choice)
+        perturb_indices = low_density_indices[not_chosen]
+        norm_factor = self.rng.uniform(low=0.25, high=0.75, size=not_chosen.size)
+        perturbation = self.rng.uniform(low=-1, high=1, size=(not_chosen.size, 3))
+        perturbation *= (norm_factor/np.linalg.norm(perturbation, axis=1))[:, np.newaxis]
+        unit_cells[perturb_indices, :3] = unit_cells[perturb_indices, :3] + perturbation
+
+        unit_cells[:, :3] = np.abs(unit_cells[:, :3])
+        permute_indices = unit_cells[:, 0] > unit_cells[:, 2]
+        unit_cells[permute_indices] = np.column_stack((
+            unit_cells[permute_indices, 2],
+            unit_cells[permute_indices, 1],
+            unit_cells[permute_indices, 0],
+            unit_cells[permute_indices, 3],
+            ))
+        self.starting_unit_cells = np.row_stack((self.starting_unit_cells, unit_cells))
+        print(f'Exhaustive search redistributed {excess_neighbors} candidates')
+        self.candidates['unit_cell'] = list(unit_cells)
+        start = self.candidates.index.max() + 1
+        self.candidates.reset_index(
+            names=list(np.arange(start, start + self.n)), drop=True, inplace=True
+            )
+        self.fix_out_of_range_candidates()
+
     def update(self):
         if self.n > 1:
             bad_candidates = np.isnan(self.candidates['loss'])
@@ -541,18 +670,23 @@ class Candidates:
         xnn_trajectory = np.stack(self.candidates['xnn_trajectory'])
         found = np.min(loss_trajectory, axis=1) < self.tolerance
 
+        unit_cell_true = get_different_monoclinic_settings(self.unit_cell_true, partial_unit_cell=True)
+        reciprocal_unit_cell_true = reciprocal_uc_conversion(
+            unit_cell_true, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        xnn_true = get_xnn_from_reciprocal_unit_cell(
+            reciprocal_unit_cell_true, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        true_error = np.linalg.norm(
+            xnn_trajectory[np.newaxis, :, :3, :] - xnn_true[:, np.newaxis, :3, np.newaxis],
+            axis=2
+            ).min(axis=0)
+        """
         true_error = np.linalg.norm(
             xnn_trajectory[:, :3, :] - self.xnn_true[np.newaxis, :3, np.newaxis],
             axis=1
             )
-
         """
-        np.save('acceptance_trajectory.npy', acceptance_trajectory)
-        np.save('loss_trajectory.npy', loss_trajectory)
-        np.save('xnn_drift.npy', xnn_drift)
-        np.save('xnn_trajectory.npy', xnn_trajectory)
-        np.save('best_returns_trajectory.npy', best_returns_trajectory)
-        assert False
         """
         xnn_cc = np.zeros(xnn_trajectory.shape)
         for entry_index in range(xnn_trajectory.shape[0]):
@@ -574,6 +708,7 @@ class Candidates:
         plt.cla()
         plt.clf()
         plt.close('all')
+        """
 
         running_average = np.zeros(acceptance_trajectory.shape)
         for index in range(1, acceptance_trajectory.shape[1]):
@@ -602,6 +737,12 @@ class Candidates:
         axes[1, 0].set_xlabel('MCMC Iteration')
         axes[1, 1].set_xlabel('MCMC Iteration')
         axes[1, 2].set_xlabel('MCMC Iteration')
+
+        ylim = axes[0, 1].get_ylim()
+        axes[0, 1].set_ylim([1e-8, ylim[1]])
+        ylim = axes[0, 2].get_ylim()
+        axes[0, 2].set_ylim([1e-8, ylim[1]])
+
         fig.tight_layout()
         fig.savefig(save_to + '_MCMC_diagnostics.png')
         plt.cla()
@@ -1098,38 +1239,6 @@ class Optimizer:
 
     def plot_candidate_unit_cells(self, candidate_uc, entry, entry_index):
         if self.indexer.data_params['lattice_system'] == 'monoclinic':
-            ac_reindexer = [
-                np.eye(3),
-                np.array([
-                    [0, 0, 1],
-                    [0, 1, 0],
-                    [-1, 0, 0],
-                    ])
-                ]
-            transformations = [
-                np.eye(3),
-                np.array([
-                    [-1, 0, 1],
-                    [0, 1, 0],
-                    [-1, 0, 0],
-                    ]),
-                np.array([
-                    [0, 0, -1],
-                    [0, 1, 0],
-                    [1, 0, -1],
-                    ]),
-                np.array([
-                    [1, 0, 0],
-                    [0, 1, 0],
-                    [-1, 0, 1],
-                    ]),
-                np.array([
-                    [1, 0, 0],
-                    [0, 1, 0],
-                    [1, 0, 1],
-                    ]),
-                ]
-
             candidates_nn = np.zeros((self.n_groups * self.opt_params['n_candidates_nn'], 4))
             candidates_rf = np.zeros((self.n_groups * self.opt_params['n_candidates_rf'], 4))
 
@@ -1150,7 +1259,9 @@ class Optimizer:
                     start_candidates + self.opt_params['n_candidates_nn']: stop_candidates
                     ]
             candidates_template = candidate_uc[self.n_groups * n_candidates:]
-            unit_cell_true = np.array(entry['reindexed_unit_cell'])
+            reindexed_unit_cell_true = get_different_monoclinic_settings(
+                np.array(entry['reindexed_unit_cell']), partial_unit_cell=True
+                )
             ms = 1
             alpha = 0.25
             angle_bins = np.linspace(np.pi/2, np.pi, 101)
@@ -1158,7 +1269,10 @@ class Optimizer:
             w = angle_bins[1] - angle_bins[0]
             fig, axes = plt.subplots(3, 4, figsize=(8, 6))
 
-            distance_nn = np.linalg.norm(candidates_nn[:, :3] - unit_cell_true[:3][np.newaxis], axis=1)
+            distance_nn = np.linalg.norm(
+                candidates_nn[np.newaxis, :, :3] - reindexed_unit_cell_true[:, np.newaxis, :3],
+                axis=2
+                ).min(axis=0)
             counts = [np.sum(distance_nn < i) for i in [1, 2, 3, 5]]
             axes[0, 1].set_title(f'Candidates within 1, 2, 3, 5A, (total): {counts[0]}, {counts[1]}, {counts[2]}, {counts[3]} ({candidates_nn.shape[0]})')
             axes[0, 0].plot(candidates_nn[:, 0], candidates_nn[:, 1], linestyle='none', marker='.', markersize=ms, alpha=alpha)
@@ -1167,7 +1281,10 @@ class Optimizer:
             hist_nn, _ = np.histogram(candidates_nn[:, 3], bins=angle_bins, density=True)
             axes[0, 3].bar(angle_centers, hist_nn, width=w)
 
-            distance_rf = np.linalg.norm(candidates_rf[:, :3] - unit_cell_true[:3][np.newaxis], axis=1)
+            distance_rf = np.linalg.norm(
+                candidates_rf[np.newaxis, :, :3] - reindexed_unit_cell_true[:, np.newaxis, :3],
+                axis=2
+                ).min(axis=0)
             counts = [np.sum(distance_rf < i) for i in [1, 2, 3, 5]]
             axes[1, 1].set_title(f'Candidates within 1, 2, 3, 5A, (total): {counts[0]}, {counts[1]}, {counts[2]}, {counts[3]} ({candidates_rf.shape[0]})')
             axes[1, 0].plot(candidates_rf[:, 0], candidates_rf[:, 1], linestyle='none', marker='.', markersize=ms, alpha=alpha)
@@ -1176,7 +1293,10 @@ class Optimizer:
             hist_rf, _ = np.histogram(candidates_rf[:, 3], bins=angle_bins, density=True)
             axes[1, 3].bar(angle_centers, hist_rf, width=w)
 
-            distance_template = np.linalg.norm(candidates_template[:, :3] - unit_cell_true[:3][np.newaxis], axis=1)
+            distance_template = np.linalg.norm(
+                candidates_template[np.newaxis, :, :3] - reindexed_unit_cell_true[:, np.newaxis, :3],
+                axis=2
+                ).min(axis=0)
             counts = [np.sum(distance_template < i) for i in [1, 2, 3, 5]]
             axes[2, 1].set_title(f'Candidates within 1, 2, 3, 5A, (total): {counts[0]}, {counts[1]}, {counts[2]}, {counts[3]} ({candidates_template.shape[0]})')
             axes[2, 0].plot(candidates_template[:, 0], candidates_template[:, 1], linestyle='none', marker='.', markersize=ms, alpha=alpha)
@@ -1184,47 +1304,32 @@ class Optimizer:
             axes[2, 2].plot(candidates_template[:, 1], candidates_template[:, 2], linestyle='none', marker='.', markersize=ms, alpha=alpha)
             hist_template, _ = np.histogram(candidates_template[:, 3], bins=angle_bins, density=True)
             axes[2, 3].bar(angle_centers, hist_template, width=w)
+            for reindexed_index in range(reindexed_unit_cell_true.shape[0]):
+                for row in range(3):
+                    axes[row, 0].plot(
+                        reindexed_unit_cell_true[reindexed_index, 0], reindexed_unit_cell_true[reindexed_index, 1], 
+                        linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
+                        )
+                    axes[row, 1].plot(
+                        reindexed_unit_cell_true[reindexed_index, 0], reindexed_unit_cell_true[reindexed_index, 2],
+                        linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
+                        )
+                    axes[row, 2].plot(
+                        reindexed_unit_cell_true[reindexed_index, 1], reindexed_unit_cell_true[reindexed_index, 2], 
+                        linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
+                        )
 
-            ucm = np.array([
-                [unit_cell_true[0], 0, unit_cell_true[2] * np.cos(unit_cell_true[4])],
-                [0, unit_cell_true[1], 0],
-                [0, 0, unit_cell_true[2] * np.sin(unit_cell_true[4])],
-                ])
-            for trans in transformations:
-                for perm in ac_reindexer:
-                    rucm = ucm @ perm @ trans
-                    reindexed_unit_cell_true = np.zeros(4)
-                    reindexed_unit_cell_true[0] = np.linalg.norm(rucm[:, 0])
-                    reindexed_unit_cell_true[1] = np.linalg.norm(rucm[:, 1])
-                    reindexed_unit_cell_true[2] = np.linalg.norm(rucm[:, 2])
-                    dot_product = np.dot(rucm[:, 0], rucm[:, 2])
-                    mag = reindexed_unit_cell_true[0] * reindexed_unit_cell_true[2]
-                    reindexed_unit_cell_true[3] = np.arccos(dot_product / mag)
-                    for row in range(3):
-                        axes[row, 0].plot(
-                            reindexed_unit_cell_true[0], reindexed_unit_cell_true[1], 
-                            linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
-                            )
-                        axes[row, 1].plot(
-                            reindexed_unit_cell_true[0], reindexed_unit_cell_true[2],
-                            linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
-                            )
-                        axes[row, 2].plot(
-                            reindexed_unit_cell_true[1], reindexed_unit_cell_true[2], 
-                            linestyle='none', marker='s', markersize=2*ms, color=[0.8, 0, 0]
-                            )
-
-                        ylim = axes[row, 3].get_ylim()
-                        if reindexed_unit_cell_true[3] > np.pi/2:
-                            angle = reindexed_unit_cell_true[3]
-                        else:
-                            angle = np.pi - reindexed_unit_cell_true[3]
-                        axes[row, 3].plot(
-                            [angle, angle],
-                            0.5*np.array(ylim),
-                            color=[0.8, 0, 0], linewidth=1
-                            )
-                        axes[row, 3].set_ylim(ylim)
+                    ylim = axes[row, 3].get_ylim()
+                    if reindexed_unit_cell_true[reindexed_index, 3] > np.pi/2:
+                        angle = reindexed_unit_cell_true[reindexed_index, 3]
+                    else:
+                        angle = np.pi - reindexed_unit_cell_true[reindexed_index, 3]
+                    axes[row, 3].plot(
+                        [angle, angle],
+                        0.5*np.array(ylim),
+                        color=[0.8, 0, 0], linewidth=1
+                        )
+                    axes[row, 3].set_ylim(ylim)
 
             for col in range(3):
                 ylim0 = axes[0, col].get_ylim()
@@ -1307,6 +1412,10 @@ class Optimizer:
             tolerance=self.opt_params['found_tolerance'],
             )
         candidates.fix_out_of_range_candidates()
+        if self.opt_params['redistribute_candidates']:
+            candidates.redistribute_unit_cells(
+                self.opt_params['max_neighbors'], self.opt_params['neighbor_radius']
+                )
 
         if self.opt_params['iteration_info'][0]['assigner_key'] == 'closest':
             candidates = self.assign_hkls_closest(candidates)
@@ -1344,7 +1453,16 @@ class Optimizer:
                 self._annealing_temperature_schedule[N:] = temp_end
             self.temperature = self._annealing_temperature_schedule[iter_index]
         else:
-            self.temperature = 1        
+            self.temperature = 1
+
+    def exhaustive_search(self, candidates, iteration_info, iter_index):
+        if iteration_info['exhaustive_search']:
+            if iter_index == 0:
+                candidates.setup_exhaustive_search(
+                    self.opt_params['max_neighbors'], self.opt_params['neighbor_radius']
+                    )
+            elif iter_index % iteration_info['exhaustive_search_period'] == 0:
+                candidates.exhaustive_search()
 
     def optimize_entry(self, candidates, entry_index):
         diagnostic_df_entry = candidates.diagnostics(self.indexer.data_params['hkl_ref_length'])
@@ -1366,6 +1484,7 @@ class Optimizer:
                 reindex_count = 0
                 for iter_index in range(iteration_info['n_iterations']):
                     self.update_annealing(iteration_info, iter_index)
+                    self.exhaustive_search(candidates, iteration_info, iter_index)
                     if iteration_info['worker'] in ['softmax_subsampling', 'random_subsampling']:
                         next_xnn = self.random_subsampling(candidates, iteration_info)
                     elif iteration_info['worker'] in ['resampling', 'resampling_softmax_subsampling']:
@@ -1532,10 +1651,13 @@ class Optimizer:
         next_candidates = copy.deepcopy(candidates)
         next_candidates.candidates['xnn'] = list(next_xnn)
         next_candidates.update_unit_cell_from_xnn()
+        next_candidates = self.assign_hkls_closest(next_candidates)
+        """
         if assigner_key == 'closest':
             next_candidates = self.assign_hkls_closest(next_candidates)
         else:
             next_candidates = self.assign_hkls(next_candidates, assigner_key, 'best')
+        """
         target_function = CandidateOptLoss_xnn(
             q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
             lattice_system=self.indexer.data_params['lattice_system'],

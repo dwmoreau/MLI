@@ -40,8 +40,8 @@ Bravais Lattice | accuracy
 cF              | 99.5%
 cI              | 100.0%
 cP              | 99.7%
-mC              | 72 - 78%
-mP              | 85%
+mC              | 75 - 85%
+mP              | 91%
 
 * Refactor code:
     * Get working on other lattice systems
@@ -64,47 +64,31 @@ mP              | 85%
             Nespolo 2014
 
 - Optimization:
-    * History
-        - loss vs iteration
-        - best loss / unit cell
-        - number of times reaching best value
-        - moving average of acceptance
+    * Redistribute candidates & exhaustive search
+        x Evaluate
+        - Incorporate different settings
 
-    * Redistribute candidates
-        * track initial ca
-        - Move initial candidates with large numbers of neighbors to less crowded areas
-        - Identify when a candidate has stagnated
-        - When stagnated, shift to position near a candidate with less than n-nearest neighbors
-
+    - monoclinic reindex
+        - Use all optimized candidates if exhaustive search
+        - Use different settings
     - monoclinic
         - poor performance with dominant zones
             - Try indexing as a 2D crystal first (Werner 1985)
         - reread SVD-Index
 
     * MCMC
-        * Reread basics of MCMC
-        * Reformulate the MCMC algorithm in terms of Miller indices, without consideration for unit cells
+        - what is the algorithm that I am using???
+        - Reread basics of MCMC
         - Constant sigma
-        - Simulated annealing
-        - Parallel tempering / hot & cold chains
-            - http://bamm-project.org/mc3.html
         - correct the epsilon factor to be e^{-10}
             - how does this parameter affect the optimization?
             - Hesse 1948, maybe use 0.00005
-    
-    * Understanding the optimization
-        * Track loss vs iteration for all candidates and plot the found and unfound entries
-        * Track moving averaged acceptance rate vs iteration for found and unfound entries
-        * Track the best unit cell / loss for each candidate instead of having "explainers"
-        * Performance vs number of initial candidates within xA of true unit cell
-        * number of times it has reached it's best value
-
-    * How to explore parameter space
-        - How to tell when a candidate is in a deadend?
-        - Nearest neighbors, create new candidates that 
 
     * Monoclinic reset
         - weight the number of observations by the local median
+
+- Dominant zone:
+    - 2D and 1D optimization
 
 - Indexing.py
 

@@ -555,3 +555,71 @@ def reindex_entry_monoclinic_conventional_setting(unit_cell, spacegroup_symbol, 
         hkl_reindexer = centered_reindexer
         
     return reindexed_unit_cell, reindexed_spacegroup_symbol, hkl_reindexer
+
+
+def get_different_monoclinic_settings(unit_cell, partial_unit_cell=False, radians=True):
+    if radians == False:
+        assert False
+    ac_reindexer = [
+        np.eye(3),
+        np.array([
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+        ]
+    transformations = [
+        np.eye(3),
+        np.array([
+            [-1, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ]),
+        np.array([
+            [0, 0, -1],
+            [0, 1, 0],
+            [1, 0, -1],
+            ]),
+        np.array([
+            [1, 0, 0],
+            [0, 1, 0],
+            [-1, 0, 1],
+            ]),
+        np.array([
+            [1, 0, 0],
+            [0, 1, 0],
+            [1, 0, 1],
+            ]),
+        ]
+    if partial_unit_cell:
+        ucm = np.array([
+            [unit_cell[0], 0, unit_cell[2] * np.cos(unit_cell[3])],
+            [0, unit_cell[1], 0],
+            [0, 0, unit_cell[2] * np.sin(unit_cell[3])],
+            ])
+        reindexed_unit_cell = np.zeros((10, 4))
+    else:
+        ucm = np.array([
+            [unit_cell[0], 0, unit_cell[2] * np.cos(unit_cell[4])],
+            [0, unit_cell[1], 0],
+            [0, 0, unit_cell[2] * np.sin(unit_cell[4])],
+            ])
+        reindexed_unit_cell = np.zeros((10, 6))
+    i = 0
+    for trans in transformations:
+        for perm in ac_reindexer:
+            rucm = ucm @ perm @ trans
+            reindexed_unit_cell[i, 0] = np.linalg.norm(rucm[:, 0])
+            reindexed_unit_cell[i, 1] = np.linalg.norm(rucm[:, 1])
+            reindexed_unit_cell[i, 2] = np.linalg.norm(rucm[:, 2])
+            dot_product = np.dot(rucm[:, 0], rucm[:, 2])
+            mag = reindexed_unit_cell[i, 0] * reindexed_unit_cell[i, 2]
+            beta = np.arccos(dot_product / mag)
+            if partial_unit_cell:
+                reindexed_unit_cell[i, 3] = beta
+            else:
+                reindexed_unit_cell[i, 3] = np.pi/2
+                reindexed_unit_cell[i, 4] = beta
+                reindexed_unit_cell[i, 5] = np.pi/2
+            i += 1
+    return reindexed_unit_cell
