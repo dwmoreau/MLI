@@ -40,16 +40,15 @@ Bravais Lattice | accuracy
 cF              | 99.5%
 cI              | 100.0%
 cP              | 99.7%
-mC              | 75 - 85%
-mP              | 91%
+mC              | 81 - 92%
+mP              | 83 - 86%
 
-* Refactor code:
+* Finish code Refactor:
     * Get working on other lattice systems
     * setup so monoclinic & tetragonal groups work with bravais lattice names
-    * reindex orthorhombic
 
-* Templating
-    * Recalibration
+- Templating
+    - Recalibration of template candidates
 
 - Documentation
     - Update methods.md
@@ -64,19 +63,13 @@ mP              | 91%
             Nespolo 2014
 
 - Optimization:
-    * Redistribute candidates & exhaustive search
-        x Evaluate
-        - Incorporate different settings
-
-    - monoclinic reindex
-        - Use all optimized candidates if exhaustive search
-        - Use different settings
+    - reread SVD-Index
+    - reread TREOR
     - monoclinic
         - poor performance with dominant zones
             - Try indexing as a 2D crystal first (Werner 1985)
-        - reread SVD-Index
 
-    * MCMC
+    - MCMC
         - what is the algorithm that I am using???
         - Reread basics of MCMC
         - Constant sigma
@@ -84,7 +77,8 @@ mP              | 91%
             - how does this parameter affect the optimization?
             - Hesse 1948, maybe use 0.00005
 
-    * Monoclinic reset
+    - Monoclinic reset
+        - Use different settings
         - weight the number of observations by the local median
 
 - Dominant zone:
@@ -111,6 +105,8 @@ mP              | 91%
         - ICSD
 
 - SWE:
+    - Can I use a sparse softmax array?
+        - use only the top 10 closest peaks as input to NN
     - remove angle scaler and use cos(angle)
     - memory leak during cyclic training
         - Try saving and loading weights with two different models

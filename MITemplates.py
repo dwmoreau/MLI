@@ -101,6 +101,8 @@ class MITemplates:
         hkl_labels_all = np.stack(training_data['hkl_labels'])
         
         if self.lattice_system in ['cubic', 'rhombohedral']:
+            # Cubic and rhombohedral do not have dominant zones
+            # Rhombohedral could be split into an angle range
             miller_index_templates = make_sets(
                 self.template_params['templates_per_dominant_zone_bin'],
                 self.n_points,
@@ -108,6 +110,7 @@ class MITemplates:
                 self.hkl_ref_length,
                 self.rng
                 )
+            sampling_probability = np.ones(self.template_params['templates_per_dominant_zone_bin'])
         else:
             reindexed_xnn = np.stack(training_data['reindexed_xnn'])
             ratio = reindexed_xnn[:, :3].min(axis=1) / reindexed_xnn[:, :3].max(axis=1)
@@ -184,7 +187,7 @@ class MITemplates:
         self.save()
 
     def generate_xnn_fast(self, q2_obs):
-        # This is slow
+        # This is still slow
         # original I just did linear least squares iteratively until q2_calc was ordered (1st for loop)
         # It is faster to use Gauss-Newton non-linear least squares (2nd for loop)
         # This is mostly copied from TargetFunctions.py
@@ -219,11 +222,7 @@ class MITemplates:
             xnn += delta_gn
         loss = np.linalg.norm(1 - q2_calc/q2_obs[np.newaxis], axis=1)
         
-        if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
-            bad_indices = np.any(xnn[:, :3] == 0, axis=1)
-            if np.sum(bad_indices) > 0:
-                print(np.sum(bad_indices))
-                xnn[bad_indices, :3] = xnn[:, :3].mean()
+        xnn = self.fix_unphysical_xnn(xnn)
         return xnn, loss
 
     def generate_xnn(self, q2_obs):
@@ -270,20 +269,20 @@ class MITemplates:
             # They should also not be zero
             bad_indices = np.any(xnn[:, :3] == 0, axis=1)
             if np.sum(bad_indices) > 0:
-                xnn[bad_indices, :3] = xnn[:, :3].mean()
+                xnn[bad_indices, :3] = xnn[~bad_indices, :3].mean()
         elif self.lattice_system in ['cubic', 'tetragonal', 'hexagonal']:
             # The first three xnn's must be positive
             xnn[:, :3] = np.abs(xnn[:, :3])
             # They should also not be zero
             bad_indices = np.any(xnn[:, :3] == 0, axis=1)
             if np.sum(bad_indices) > 0:
-                xnn[bad_indices, :3] = xnn[:, :3].mean()
+                xnn[bad_indices, :3] = xnn[~bad_indices, :3].mean()
         elif self.lattice_system == 'rhombohedral':
             xnn[:, 0] = np.abs(xnn[:, 0])
             # They should also not be zero
             bad_indices = np.any(xnn[:, 0] == 0, axis=1)
             if np.sum(bad_indices) > 0:
-                xnn[bad_indices, 0] = xnn[:, 0].mean()
+                xnn[bad_indices, 0] = xnn[~bad_indices, 0].mean()
         ### !!! Ensure that the angles are physical
         return xnn
 
