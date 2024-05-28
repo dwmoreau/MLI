@@ -9,10 +9,13 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 import tensorflow as tf
 from tqdm import tqdm
 
+from Utilities import fix_unphysical_triclinic
 from Utilities import get_hkl_matrix
 from Utilities import get_unit_cell_from_xnn
 from Utilities import read_params
 from Utilities import write_params
+from Utilities import get_reciprocal_unit_cell_from_xnn
+from Utilities import reciprocal_uc_conversion
 
 
 class MITemplates:
@@ -263,6 +266,9 @@ class MITemplates:
         return xnn, loss
 
     def fix_unphysical_xnn(self, xnn):
+        if self.lattice_system == 'triclinic':
+            xnn = fix_unphysical_triclinic(xnn=xnn, rng=self.rng)
+
         if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
             # The first three xnn's must be positive
             xnn[:, :3] = np.abs(xnn[:, :3])
@@ -272,18 +278,17 @@ class MITemplates:
                 xnn[bad_indices, :3] = xnn[~bad_indices, :3].mean()
         elif self.lattice_system in ['cubic', 'tetragonal', 'hexagonal']:
             # The first three xnn's must be positive
-            xnn[:, :3] = np.abs(xnn[:, :3])
+            xnn = np.abs(xnn)
             # They should also not be zero
-            bad_indices = np.any(xnn[:, :3] == 0, axis=1)
+            bad_indices = np.any(xnn == 0, axis=1)
             if np.sum(bad_indices) > 0:
-                xnn[bad_indices, :3] = xnn[~bad_indices, :3].mean()
+                xnn[bad_indices] = xnn[~bad_indices].mean()
         elif self.lattice_system == 'rhombohedral':
             xnn[:, 0] = np.abs(xnn[:, 0])
             # They should also not be zero
             bad_indices = np.any(xnn[:, 0] == 0, axis=1)
             if np.sum(bad_indices) > 0:
                 xnn[bad_indices, 0] = xnn[~bad_indices, 0].mean()
-        ### !!! Ensure that the angles are physical
         return xnn
 
     def do_predictions(self, q2_obs, n_templates='all'):

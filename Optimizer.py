@@ -9,7 +9,9 @@ import time
 
 from Indexing import Indexing
 from Reindexing import get_different_monoclinic_settings
+from Reindexing import reindex_entry_triclinic
 from TargetFunctions import CandidateOptLoss_xnn
+from Utilities import fix_unphysical_triclinic
 from Utilities import get_hkl_matrix
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -138,9 +140,9 @@ class Candidates:
             self.maximum_angle = np.pi
             self.minimum_angle = np.pi/2
         elif self.lattice_system == 'triclinic':
-            assert False
             self.maximum_angle = np.pi
-            self.minimum_angle = 0.01
+            self.minimum_angle_beta_gamma = np.pi/2
+            self.minimum_angle_alpha = 0.01
         self.rng = np.random.default_rng()
         self.tolerance = tolerance
 
@@ -206,13 +208,37 @@ class Candidates:
         self.candidates['best_xnn'] = self.candidates['xnn'].copy()
 
     def update_xnn_from_unit_cell(self):
+        unit_cell = np.stack(self.candidates['unit_cell'])
         reciprocal_unit_cell = reciprocal_uc_conversion(
-            np.stack(self.candidates['unit_cell']), partial_unit_cell=True, lattice_system=self.lattice_system
+            unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )
         xnn = get_xnn_from_reciprocal_unit_cell(
             reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )
+
+        unit_cell = np.stack(self.candidates['unit_cell'])
+        for i in range(unit_cell.shape[0]):
+            if np.sum(np.isnan(reciprocal_unit_cell[i])) > 0:
+                print('Get Xnn from unit cell')
+                print(unit_cell[i])
+                print(reciprocal_unit_cell[i])
+                print(xnn[i])
+                print()
+
+        bad_conversions = np.sum(np.isnan(reciprocal_unit_cell), axis=1) > 0
+        good_indices = np.arange(self.n)[~bad_conversions]
+        n_bad = np.sum(bad_conversions)
+        if n_bad > 0:
+            if n_bad > bad_conversions.size - n_bad:
+                good_indices = self.rng.choice(good_indices, replace=True, size=n_bad)
+            else:
+                good_indices = self.rng.choice(good_indices, replace=False, size=n_bad)
+            xnn[bad_conversions] = xnn[good_indices]
+            reciprocal_unit_cell[bad_conversions] = reciprocal_unit_cell[good_indices]
+            unit_cell[bad_conversions] = unit_cell[good_indices]
+
         self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
+        self.candidates['unit_cell'] = list(unit_cell)
         self.candidates['xnn'] = list(xnn)
 
     def update_unit_cell_from_xnn(self):
@@ -233,21 +259,18 @@ class Candidates:
             too_large = cos_ralpha > 1
             xnn[too_small, 1] = -2*0.999 * xnn[too_small, 0]
             xnn[too_large, 1] = 2*0.999 * xnn[too_large, 0]
-        elif self.lattice_system in ['monoclinic', 'triclinic']:
+        elif self.lattice_system == 'monoclinic':
             too_small = xnn[:, :3] < (1 / self.maximum_unit_cell)**2
             too_large = xnn[:, :3] > (1 / self.minimum_unit_cell)**2
             xnn[:, :3][too_small] = (1 / self.maximum_unit_cell)**2
             xnn[:, :3][too_large] = (1 / self.minimum_unit_cell)**2
-            if self.lattice_system == 'monoclinic':
-                cos_rbeta = xnn[:, 3] / (2 * np.sqrt(xnn[:, 0] * xnn[:, 2]))
-                too_small = cos_rbeta < -1
-                too_large = cos_rbeta > 1
-                xnn[too_small, 3] = -2*0.999 * np.sqrt(xnn[too_small, 0] * xnn[too_small, 2])
-                xnn[too_large, 3] = 2*0.999 * np.sqrt(xnn[too_large, 0] * xnn[too_large, 2])
-            elif self.lattice_system == 'triclinic':
-                assert False
-
-        self.candidates['xnn'] = list(xnn)
+            cos_rbeta = xnn[:, 3] / (2 * np.sqrt(xnn[:, 0] * xnn[:, 2]))
+            too_small = cos_rbeta < -1
+            too_large = cos_rbeta > 1
+            xnn[too_small, 3] = -2*0.999 * np.sqrt(xnn[too_small, 0] * xnn[too_small, 2])
+            xnn[too_large, 3] = 2*0.999 * np.sqrt(xnn[too_large, 0] * xnn[too_large, 2])
+        elif self.lattice_system == 'triclinic':
+            xnn = fix_unphysical_triclinic(xnn=xnn, rng=self.rng)
 
         reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
             xnn, partial_unit_cell=True, lattice_system=self.lattice_system
@@ -255,8 +278,29 @@ class Candidates:
         unit_cell = reciprocal_uc_conversion(
             reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )
+        for i in range(unit_cell.shape[0]):
+            if np.sum(np.isnan(reciprocal_unit_cell[i])) > 0:
+                print('Get unit cell from Xnn')
+                print(unit_cell[i])
+                print(reciprocal_unit_cell[i])
+                print(xnn[i])
+                print()
 
+        bad_conversions = np.sum(np.isnan(reciprocal_unit_cell), axis=1) > 0
+        good_indices = np.arange(self.n)[~bad_conversions]
+        n_bad = np.sum(bad_conversions)
+        if n_bad > 0:
+            if n_bad > bad_conversions.size - n_bad:
+                good_indices = self.rng.choice(good_indices, replace=True, size=n_bad)
+            else:
+                good_indices = self.rng.choice(good_indices, replace=False, size=n_bad)
+            xnn[bad_conversions] = xnn[good_indices]
+            reciprocal_unit_cell[bad_conversions] = reciprocal_unit_cell[good_indices]
+            unit_cell[bad_conversions] = unit_cell[good_indices]
+
+        self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
         self.candidates['unit_cell'] = list(unit_cell)
+        self.candidates['xnn'] = list(xnn)
 
     def diagnostics(self, hkl_ref_length):
         unit_cell = np.stack(self.candidates['unit_cell'])
@@ -271,6 +315,28 @@ class Candidates:
         hkl_accuracy = np.count_nonzero(hkl_correct, axis=1) / self.n_points
 
         impossible = np.any(self.hkl_labels_true == hkl_ref_length - 1)
+
+        if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
+            h_info = self.n_points - np.sum(self.hkl_true[:, 0]**2 == 0)
+            k_info = self.n_points - np.sum(self.hkl_true[:, 1]**2 == 0)
+            l_info = self.n_points - np.sum(self.hkl_true[:, 2]**2 == 0)
+            dominant_axis_info = np.sort([h_info, k_info, l_info])[1]
+            dominant_zone_info = np.min([h_info, k_info, l_info])
+        elif self.lattice_system == 'tetragonal':
+            hk = self.hkl_true[:, 0]**2 + self.hkl_true[:, 1]**2
+            hk_info = self.n_points - np.sum(hk == 0)
+            l2_info = self.n_points - np.sum(self.hkl_true[:, 2]**2 == 0)
+            dominant_axis_info = min(hk_info, l2_info)
+            dominant_zone_info = self.n_points
+        elif self.lattice_system == 'hexagonal':
+            hk = self.hkl_true[:, 0]**2 + self.hkl_true[:, 0]*self.hkl_true[:, 1] + self.hkl_true[:, 1]**2
+            hk_info = self.n_points - np.sum(hk == 0)
+            l2_info = self.n_points - np.sum(self.hkl_true[:, 2]**2 == 0)
+            dominant_axis_info = min(hk_info, l2_info)
+            dominant_zone_info = self.n_points
+        elif self.lattice_system in ['cubic', 'rhombohedral']:
+            dominant_axis_info = self.n_points
+            dominant_zone_info = self.n_points
 
         if self.lattice_system == 'monoclinic':
             unit_cell_true = get_different_monoclinic_settings(self.unit_cell_true, partial_unit_cell=True)
@@ -322,6 +388,8 @@ class Candidates:
 
         print(f'Starting # candidates:       {self.n}')
         print(f'Impossible:                  {impossible}')
+        print(f'True dominant axis info:     {dominant_axis_info}')
+        print(f'True dominant zone info:     {dominant_zone_info}')
         print(f'True unit cell:              {np.round(self.unit_cell_true, decimals=4)}')
         print(f'True reciprocal unit cell:   {np.round(self.reciprocal_unit_cell_true, decimals=4)}')
         print(f'True Xnn:                    {np.round(self.xnn_true, decimals=4)}')
@@ -350,6 +418,8 @@ class Candidates:
             'counts_uc': counts_uc,
             'counts_ruc': counts_ruc,
             'counts_xnn': counts_xnn,
+            'dominant_axis_info': dominant_axis_info,
+            'dominant_zone_info': dominant_zone_info,
             }
 
         return pd.Series(output_dict)
@@ -402,7 +472,16 @@ class Candidates:
                     high=self.maximum_angle,
                     size=np.sum(too_large_angles)
                     )
-        elif self.lattice_system in ['monoclinic', 'triclinic']:
+        elif self.lattice_system == 'triclinic':
+            unit_cells = fix_unphysical_triclinic(
+                unit_cell=unit_cells,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell, 
+                maximum_unit_cell=self.maximum_unit_cell,
+                )
+            for index in range(unit_cells.shape[0]):
+                unit_cells[index], _ = reindex_entry_triclinic(unit_cells[index], radians=True)
+        elif self.lattice_system == 'monoclinic':
             too_small_lengths = unit_cells[:, :3] < self.minimum_unit_cell
             too_large_lengths = unit_cells[:, :3] > self.maximum_unit_cell
             if np.sum(too_small_lengths) > 0:
@@ -419,35 +498,17 @@ class Candidates:
                     high=self.maximum_unit_cell,
                     size=np.sum(too_large_lengths)
                     )
-            
-            if self.lattice_system == 'triclinic':
-                too_small_angles = unit_cells[:, 3:] < self.minimum_angle
-                too_large_angles = unit_cells[:, 3:] > self.maximum_angle
-                if np.sum(too_small_angles) > 0:
-                    indices = np.argwhere(too_small_angles)
-                    unit_cells[indices[:, 0], 3 + indices[:, 1]] = self.rng.uniform(
-                        low=self.minimum_angle,
-                        high=1.05*self.minimum_angle,
-                        size=np.sum(too_small_angles)
-                        )
-                if np.sum(too_large_angles) > 0:
-                    indices = np.argwhere(too_large_angles)
-                    unit_cells[indices[:, 0], 3 + indices[:, 1]] = self.rng.uniform(
-                        low=0.95*self.maximum_angle,
-                        high=self.maximum_angle,
-                        size=np.sum(too_large_angles)
-                        )
-            elif self.lattice_system == 'monoclinic':
-                too_small_angles = unit_cells[:, 3] < self.minimum_angle
-                too_large_angles = unit_cells[:, 3] > self.maximum_angle
-                if np.sum(too_small_angles) > 0:
-                    unit_cells[too_small_angles, 3] = np.pi - unit_cells[too_small_angles, 3]
-                if np.sum(too_large_angles) > 0:
-                    unit_cells[too_large_angles, 3] = self.rng.uniform(
-                        low=0.95*self.maximum_angle,
-                        high=self.maximum_angle,
-                        size=np.sum(too_large_angles)
-                        )
+
+            too_small_angles = unit_cells[:, 3] < self.minimum_angle
+            too_large_angles = unit_cells[:, 3] > self.maximum_angle
+            if np.sum(too_small_angles) > 0:
+                unit_cells[too_small_angles, 3] = np.pi - unit_cells[too_small_angles, 3]
+            if np.sum(too_large_angles) > 0:
+                unit_cells[too_large_angles, 3] = self.rng.uniform(
+                    low=0.95*self.maximum_angle,
+                    high=self.maximum_angle,
+                    size=np.sum(too_large_angles)
+                    )
             
         self.candidates['unit_cell'] = list(unit_cells)
         self.update_xnn_from_unit_cell()
@@ -478,8 +539,13 @@ class Candidates:
                     self.rng.uniform(low=-1, high=0, size=n_indices)
                     )
             elif self.lattice_system == 'triclinic':
-                unit_cells[from_indices, 3:] = np.arccos(
-                    self.rng.uniform(low=-1, high=1, size=(n_indices, 3))
+                unit_cells[from_indices, 3:] = unit_cells[to_indices, 3:]
+                # This leads to unphysical unit cells. They cannot be converted to reciprocal space
+                unit_cells[from_indices, 3] = np.arccos(
+                    self.rng.uniform(low=-1, high=1, size=n_indices)
+                    )
+                unit_cells[from_indices, 4:] = np.arccos(
+                    self.rng.uniform(low=-1, high=0, size=(n_indices, 2))
                     )
         elif self.lattice_system in ['cubic', 'tetragonal', 'hexagonal', 'orthorhombic']:
             perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.n_uc))
@@ -506,7 +572,11 @@ class Candidates:
             order = np.argsort(redistributed_unit_cells, axis=1)
             unit_cells = np.take_along_axis(unit_cells, order, axis=1)
         elif self.lattice_system == 'triclinic':
-            assert False
+            # This is incorrect for reindexing, the angles don't let the axes
+            # simply permute.
+            # But the angles are randomly generated, so it is fine.
+            order = np.argsort(unit_cells, axis=1)
+            unit_cells = np.take_along_axis(unit_cells, order, axis=1)
         return unit_cells
 
     def redistribute_unit_cells(self, max_neighbors, radius):
@@ -928,8 +998,19 @@ class Candidates:
                                         off_by_two = True
             return found, off_by_two
         elif self.lattice_system == 'triclinic':
+            reindexed_unit_cell, _ = reindex_entry_triclinic(unit_cell, radians=True)
+            found = False
+            off_by_two = False
             if np.all(np.isclose(self.unit_cell_true, unit_cell, atol=atol)):
-                return True, False
+                found = True
+            mult_factors = np.array([1/2, 1, 2])
+            for mf0 in mult_factors:
+                for mf1 in mult_factors:
+                    for mf2 in mult_factors:
+                        mf = np.array([mf0, mf1, mf2, 1, 1, 1])
+                        if np.all(np.isclose(self.unit_cell_true, mf * reindexed_unit_cell, atol=atol)):
+                            off_by_two = True
+            return found, off_by_two
         return False, False
 
     def get_best_candidates(self, report_counts):
@@ -1114,7 +1195,9 @@ class Optimizer:
             self.opt_params['minimum_angle_scaled'] = (np.pi/2 - np.pi/2) / self.indexer.angle_scale
             self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
         elif self.indexer.data_params['lattice_system'] == 'triclinic':
-            assert False
+            self.opt_params['minimum_beta_gamma_scaled'] = (np.pi/2 - np.pi/2) / self.indexer.angle_scale
+            self.opt_params['minimum_alpha_scaled'] = (0.0 - np.pi/2) / self.indexer.angle_scale
+            self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
 
         self.n_groups = len(self.indexer.data_params['split_groups'])
         if self.opt_params['assignment_batch_size'] == 'max':
@@ -1174,6 +1257,8 @@ class Optimizer:
             'counts_uc',
             'counts_ruc',
             'counts_xnn',
+            'dominant_axis_info',
+            'dominant_zone_info',
             ])
         if self.opt_params['rerun_failures']:
             print()
@@ -1262,7 +1347,44 @@ class Optimizer:
                     size=self.opt_params['n_candidates_nn'],
                     )
         elif self.indexer.data_params['lattice_system'] == 'triclinic':
-            assert False
+            uniform_alpha = False
+            uniform_beta = False
+            uniform_gamma = False
+            if uc_scaled_mean[3] <= self.opt_params['minimum_alpha_scaled']:
+                uniform_alpha = True
+            elif uc_scaled_mean[3] >= self.opt_params['maximum_angle_scaled']:
+                uniform_alpha = True
+            if uc_scaled_mean[4] <= self.opt_params['minimum_beta_gamma_scaled']:
+                uniform_beta = True
+            elif uc_scaled_mean[4] >= self.opt_params['maximum_angle_scaled']:
+                uniform_beta = True
+            if uc_scaled_mean[5] <= self.opt_params['minimum_beta_gamma_scaled']:
+                uniform_gamma = True
+            elif uc_scaled_mean[3] >= self.opt_params['maximum_angle_scaled']:
+                uniform_gamma = True
+            candidates_scaled = self.rng.multivariate_normal(
+                mean=uc_scaled_mean,
+                cov=uc_scaled_cov,
+                size=self.opt_params['n_candidates_nn'],
+                )
+            if uniform_alpha:
+                candidates_scaled[:, 3] = self.rng.uniform(
+                    low=self.opt_params['minimum_alpha_scaled'],
+                    high=self.opt_params['maximum_angle_scaled'],
+                    size=self.opt_params['n_candidates_nn']
+                    )
+            if uniform_beta:
+                candidates_scaled[:, 4] = self.rng.uniform(
+                    low=self.opt_params['minimum_beta_gamma_scaled'],
+                    high=self.opt_params['maximum_angle_scaled'],
+                    size=self.opt_params['n_candidates_nn']
+                    )
+            if uniform_gamma:
+                candidates_scaled[:, 5] = self.rng.uniform(
+                    low=self.opt_params['minimum_beta_gamma_scaled'],
+                    high=self.opt_params['maximum_angle_scaled'],
+                    size=self.opt_params['n_candidates_nn']
+                    )
 
         candidate_unit_cells = self.indexer.revert_predictions(uc_pred_scaled=candidates_scaled)
         return candidate_unit_cells
@@ -1338,7 +1460,7 @@ class Optimizer:
                 axis=1
                 )
         elif self.indexer.data_params['lattice_system'] == 'triclinic':
-            fig, axes = plt.subplots(3, 6, figsize=(8, 6))
+            fig, axes = plt.subplots(3, 6, figsize=(8, 8))
             reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])
             distance_nn = np.linalg.norm(
                 candidates_nn[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
@@ -1396,7 +1518,7 @@ class Optimizer:
             elif self.indexer.data_params['lattice_system'] == 'triclinic':
                 for angle_index in range(3, 6):
                     hist_template, _ = np.histogram(candidates_template[:, angle_index], bins=angle_bins, density=True)
-                    axes[1, angle_index].bar(angle_centers, hist_template, width=w)
+                    axes[2, angle_index].bar(angle_centers, hist_template, width=w)
 
             if self.indexer.data_params['lattice_system'] == 'monoclinic':
                 for reindexed_index in range(reindexed_unit_cell_true.shape[0]):
@@ -1529,7 +1651,18 @@ class Optimizer:
         candidate_unit_cells[self.n_groups * n_candidates:] = \
             self.generate_unit_cells_miller_index_templates(np.array(entry['q2']))
 
+        if self.indexer.data_params['lattice_system'] == 'triclinic':
+            candidate_unit_cells = fix_unphysical_triclinic(
+                unit_cell=candidate_unit_cells,
+                rng=self.rng,
+                minimum_unit_cell=self.opt_params['minimum_uc'],
+                maximum_unit_cell=self.opt_params['maximum_uc'],
+                )
+            for index in range(candidate_unit_cells.shape[0]):
+                candidate_unit_cells[index], _ = reindex_entry_triclinic(candidate_unit_cells[index], radians=True)
+
         self.plot_candidate_unit_cells(candidate_unit_cells, entry, entry_index)
+
         candidates = Candidates(
             entry=entry,
             unit_cell=candidate_unit_cells,
@@ -1544,7 +1677,6 @@ class Optimizer:
             candidates.redistribute_unit_cells(
                 self.opt_params['max_neighbors'], self.opt_params['neighbor_radius']
                 )
-
         if self.opt_params['initial_assigner_key'] == 'closest':
             candidates = self.assign_hkls_closest(candidates)
         else:

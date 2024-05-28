@@ -623,3 +623,136 @@ def get_different_monoclinic_settings(unit_cell, partial_unit_cell=False, radian
                 reindexed_unit_cell[i, 5] = np.pi/2
             i += 1
     return reindexed_unit_cell
+
+
+def reindex_entry_triclinic(unit_cell, radians):
+    if radians:
+        check = np.pi/2
+    else:
+        check = 90
+
+    order = np.argsort(unit_cell[:3])
+    if np.all(order == [0, 1, 2]):
+        reorderer = np.eye(3)
+        reindexed_unit_cell = unit_cell.copy()
+    elif np.all(order == [0, 2, 1]):
+        # a > a
+        # b > c
+        # c > -b
+        reorderer = np.array([
+            [1, 0, 0],
+            [0, 0, 1],
+            [0, -1, 0],
+            ])
+        reindexed_unit_cell = np.zeros(6)
+        reindexed_unit_cell[0] = unit_cell[0]
+        reindexed_unit_cell[1] = unit_cell[2]
+        reindexed_unit_cell[2] = unit_cell[1]
+        reindexed_unit_cell[3] = 2*check - unit_cell[3]
+        reindexed_unit_cell[4] = unit_cell[5]
+        reindexed_unit_cell[5] = 2*check - unit_cell[4]
+    elif np.all(order == [1, 0, 2]):
+        # a > b
+        # b > -a
+        # c > c
+        reorderer = np.array([
+            [0, 1, 0],
+            [-1, 0, 0],
+            [0, 0, 1],
+            ])
+        reindexed_unit_cell = np.zeros(6)
+        reindexed_unit_cell[0] = unit_cell[1]
+        reindexed_unit_cell[1] = unit_cell[0]
+        reindexed_unit_cell[2] = unit_cell[2]
+        reindexed_unit_cell[3] = unit_cell[4]
+        reindexed_unit_cell[4] = 2*check - unit_cell[3]
+        reindexed_unit_cell[5] = 2*check - unit_cell[5]
+    elif np.all(order == [1, 2, 0]):
+        # a > b
+        # b > c
+        # c > a
+        reorderer = np.array([
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 0, 0],
+            ])
+        reindexed_unit_cell = np.zeros(6)
+        reindexed_unit_cell[0] = unit_cell[2]
+        reindexed_unit_cell[1] = unit_cell[0]
+        reindexed_unit_cell[2] = unit_cell[1]
+        reindexed_unit_cell[3] = unit_cell[5]
+        reindexed_unit_cell[4] = unit_cell[3]
+        reindexed_unit_cell[5] = unit_cell[4]
+    elif np.all(order == [2, 0, 1]):
+        # a > c
+        # b > a
+        # c > b
+        reorderer = np.array([
+            [0, 0, 1],
+            [1, 0, 0],
+            [0, 1, 0],
+            ])
+        reindexed_unit_cell = np.zeros(6)
+        reindexed_unit_cell[0] = unit_cell[1]
+        reindexed_unit_cell[1] = unit_cell[2]
+        reindexed_unit_cell[2] = unit_cell[0]
+        reindexed_unit_cell[3] = unit_cell[4]
+        reindexed_unit_cell[4] = unit_cell[5]
+        reindexed_unit_cell[5] = unit_cell[3]
+    elif np.all(order == [2, 1, 0]):
+        # a > c
+        # b > b
+        # c > -a
+        reorderer = np.array([
+            [0, 0, 1],
+            [0, 1, 0],
+            [-1, 0, 0],
+            ])
+        reindexed_unit_cell = np.zeros(6)
+        reindexed_unit_cell[0] = unit_cell[2]
+        reindexed_unit_cell[1] = unit_cell[1]
+        reindexed_unit_cell[2] = unit_cell[0]
+        reindexed_unit_cell[3] = unit_cell[5]
+        reindexed_unit_cell[4] = 2*check - unit_cell[4]
+        reindexed_unit_cell[5] = 2*check - unit_cell[3]
+    
+    # enforce: gamma > pi/2 & beta > pi/2
+    # The >= is important because a non-trivial amount of entries have
+    # angles == pi/2
+    if reindexed_unit_cell[5] < check and reindexed_unit_cell[4] < check:
+        #if gamma < pi/2 and beta < pi/2:
+        #    b => -b, c => -c 
+        angle_reindexer = np.array([
+            [1, 0, 0],
+            [0, -1, 0],
+            [0, 0, -1]
+            ])
+        reindexed_unit_cell[5] = 2*check - reindexed_unit_cell[5]
+        reindexed_unit_cell[4] = 2*check - reindexed_unit_cell[4]
+    elif reindexed_unit_cell[5] < check and reindexed_unit_cell[4] >= check:
+        #if gamma < pi/2 and beta >= pi/2:
+        #   a => -a, c => -c
+        angle_reindexer = np.array([
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, 0, -1]
+            ])
+        reindexed_unit_cell[5] = 2*check - reindexed_unit_cell[5]
+        reindexed_unit_cell[3] = 2*check - reindexed_unit_cell[3]
+    elif reindexed_unit_cell[5] >= check and reindexed_unit_cell[4] < check:
+        #if gamma >= pi/2 and beta < pi/2:
+        #    a => - a, b => -b
+        angle_reindexer = np.array([
+            [-1, 0, 0],
+            [0, -1, 0],
+            [0, 0, 1]
+            ])
+        reindexed_unit_cell[4] = 2*check - reindexed_unit_cell[4]
+        reindexed_unit_cell[3] = 2*check - reindexed_unit_cell[3]
+    else:
+        #if gamma >= pi/2 and beta >= pi/2:
+        #   no transformation
+        angle_reindexer = np.eye(3)
+
+    hkl_reindexer = reorderer @ angle_reindexer
+    return reindexed_unit_cell, hkl_reindexer

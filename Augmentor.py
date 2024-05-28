@@ -6,7 +6,9 @@ import scipy.stats
 import scipy.optimize
 from sklearn.decomposition import PCA
 from sklearn.metrics import ConfusionMatrixDisplay
+from tqdm import tqdm
 
+from Reindexing import reindex_entry_triclinic
 from Utilities import Q2Calculator
 from Utilities import get_fwhm_and_overlap_threshold
 
@@ -200,8 +202,9 @@ class Augmentor:
 
         augmented_entries = []
         for sub_group in sub_groups:
+            print(sub_group)
             sub_group_data = data[data[subgroup_label] == sub_group]
-            for entry_index in range(len(sub_group_data)):
+            for entry_index in tqdm(range(len(sub_group_data))):
                 entry = sub_group_data.iloc[entry_index]
                 for augment_index in range(n_augment[sub_group][entry_index]):
                     augmented_entry = None
@@ -338,7 +341,11 @@ class Augmentor:
                 if minimum_angle_scaled < perturbed_unit_cell_scaled[3] < maximum_angle_scaled:
                     return True
         elif self.lattice_system == 'triclinic':
-            assert False
+            #print(perturbed_unit_cell_scaled)
+            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
+            if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
+                if np.all(perturbed_unit_cell_scaled[3:] <= maximum_angle_scaled):
+                    return True
         elif self.lattice_system == 'rhombohedral':
             # Rhombohedral has a maximum angle of 120 degrees (4pi/6 radians)
             # Because the scaled angles are centered at zero, 90 degrees is 0 
@@ -366,7 +373,12 @@ class Augmentor:
         elif self.lattice_system == 'orthorhombic':
             perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
         elif self.lattice_system == 'triclinic':
-            assert False
+            perturbed_unit_cell = np.zeros(6)
+            perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+            perturbed_unit_cell[3:] = self.angle_scale * perturbed_unit_cell_scaled[3:] + np.pi/2
+            perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell, radians=True)
+            perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+            perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_std(self, unit_cell_scaled):
@@ -414,9 +426,9 @@ class Augmentor:
             perturbed_unit_cell_scaled = self.pca.inverse_transform(
                 perturbed_unit_cell_scaled_transformed[np.newaxis, :]
                 )[0, :]
+            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
+                perturbed_unit_cell_scaled, unit_cell_scaled
+                )
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
-        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
-            perturbed_unit_cell_scaled, unit_cell_scaled
-            )
         return perturbed_unit_cell_scaled

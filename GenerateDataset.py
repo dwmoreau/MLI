@@ -192,7 +192,7 @@ class EntryGenerator:
         for index, tag in enumerate(self.peak_removal_tags):
             hkl = hkl_order[:, :3, index]
             reindexed_hkl = np.matmul(hkl, hkl_reindexer).round(decimals=0).astype(int)
-            if lattice_system in ['monoclinic', 'orthorhombic']:
+            if lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
                 q2_calculator = Q2Calculator(
                     lattice_system='triclinic',
                     hkl=hkl,
@@ -381,7 +381,7 @@ if __name__ == '__main__':
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    entries_per_group = 30000
+    entries_per_group = 100000
     bad_identifiers_csd = []
     bad_identifiers_cod = []
     csd_entry_reader = EntryReader('CSD')
@@ -399,8 +399,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'monoclinic']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'monoclinic']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'triclinic']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'triclinic']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')

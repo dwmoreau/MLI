@@ -11,6 +11,7 @@ from EntryHelpers import verify_volume
 from Reindexing import get_permuter
 from Reindexing import reindex_entry_monoclinic
 from Reindexing import reindex_entry_orthorhombic
+from Reindexing import reindex_entry_triclinic
 from Reindexing import hexagonal_to_rhombohedral_unit_cell
 from Reindexing import hexagonal_to_rhombohedral_hkl
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -58,6 +59,7 @@ class ProcessEntry:
         self.status = True
         self.reason = None
 
+        self.hkl_ref_triclinic = np.load('data/hkl_ref_triclinic.npy')[:60]
         self.hkl_ref_monoclinic = np.load('data/hkl_ref_monoclinic.npy')[:60]
         hkl_ref_hexagonal = np.load('data/hkl_ref_hexagonal.npy')
         check = -hkl_ref_hexagonal[:, 0] + hkl_ref_hexagonal[:, 1] + hkl_ref_hexagonal[:, 2]
@@ -99,6 +101,7 @@ class ProcessEntry:
         }
 
     def verify_reindexing(self):
+        # This gets used for monoclinic and orthorhombic
         unit_cell = self.unit_cell.copy()
         unit_cell[3:] *= np.pi/180
         q2_calculator = Q2Calculator(
@@ -112,6 +115,31 @@ class ProcessEntry:
         reindexed_unit_cell = self.reindexed_unit_cell.copy()
         reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = self.hkl_ref_monoclinic @ self.hkl_reindexer
+        reindexed_q2_calculator = Q2Calculator(
+            lattice_system='triclinic',
+            hkl=reindexed_hkl,
+            tensorflow=False,
+            representation='unit_cell'
+            )
+        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
+        check = np.isclose(q2, reindexed_q2).all()
+        return check
+
+    def verify_reindexing_triclinic(self):
+        # This gets used for monoclinic and orthorhombic
+        unit_cell = self.unit_cell.copy()
+        unit_cell[3:] *= np.pi/180
+        q2_calculator = Q2Calculator(
+            lattice_system='triclinic',
+            hkl=self.hkl_ref_triclinic,
+            tensorflow=False,
+            representation='unit_cell'
+            )
+        q2 = q2_calculator.get_q2(unit_cell[np.newaxis])
+
+        reindexed_unit_cell = self.reindexed_unit_cell.copy()
+        reindexed_unit_cell[3:] *= np.pi/180
+        reindexed_hkl = self.hkl_ref_triclinic @ self.hkl_reindexer
         reindexed_q2_calculator = Q2Calculator(
             lattice_system='triclinic',
             hkl=reindexed_hkl,
@@ -169,6 +197,12 @@ class ProcessEntry:
             # There is like one of these entries in all the CSD. I'm excluding these to make
             # logistics easier.
             self.reason = 'Excluding F centered monoclinic'
+            self.status = False
+            return None
+
+        if self.lattice_system == 'triclinic' and not self.spacegroup_symbol_hm.startswith('P'):
+            # There are ~ 300 triclinic entries with space groups A1, B1, C1, F1 and I1. WTF???
+            self.reason = 'Excluding centered triclinic'
             self.status = False
             return None
 
@@ -301,6 +335,24 @@ class ProcessEntry:
                 self.reason = 'Could not read reindexed spacegroup symbol'
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
+                return None
+        elif self.lattice_system == 'triclinic':
+            self.reindexed_unit_cell, self.hkl_reindexer = reindex_entry_triclinic(
+                self.unit_cell, radians=False
+                )
+            self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
+            self.reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
+                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
+                )[0]
+            self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
+                self.reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
+                )[0]
+            self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
+            self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
+            if not self.verify_reindexing_triclinic():
+                self.reason = 'Triclinic Reindexing Error'
+                self.status = False
+                print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.spacegroup_symbol_hm}')
                 return None
         elif self.lattice_system == 'rhombohedral':
             if np.all(self.unit_cell[3:] == [90, 90, 120]):

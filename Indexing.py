@@ -28,12 +28,10 @@ Readings:
 
 lattice system | accuracy
 -------------------------
-cubic          | 99.2%
 hexagonal      | 98.5%
 rhombohedral   | 94%
 tetragonal     | 95%
 orthorhombic   | 93%
-monoclinic     | 70% - 75%
 
 Bravais Lattice | accuracy
 --------------------------
@@ -41,20 +39,30 @@ cF              | 99.5%
 cI              | 100.0%
 cP              | 99.7%
 mC              | 81 - 92%
-mP              | 83 - 86%
+mP              | 85%
 
-* Finish code Refactor:
-    * Get working on other lattice systems
-    * setup so monoclinic & tetragonal groups work with bravais lattice names
 
-- Templating
-    - Recalibration of template candidates
+* Get working on other lattice systems
+    - tetragonal
+        - optimization
+    - hexagonal
+        - optimization
+    - rhombohedral
+        - fix bug in Miller index labeling
+        - run training
+        - optimization
+    - orthorhombic
+        - regenerate dataset
+        - run training
+        - optimization
 
-- Documentation
+* Documentation
     - Update methods.md
         - Update text
         - Add figures
     - Update README.md
+    - reread SVD-Index
+    - reread TREOR
     - Reread ML pxrd papers
     - powder extinction classes
         Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
@@ -63,37 +71,23 @@ mP              | 83 - 86%
             Nespolo 2014
 
 - Optimization:
-    - reread SVD-Index
-    - reread TREOR
-    - monoclinic
-        - poor performance with dominant zones
-            - Try indexing as a 2D crystal first (Werner 1985)
-
-    - MCMC
-        - what is the algorithm that I am using???
-        - Reread basics of MCMC
-        - Constant sigma
-        - correct the epsilon factor to be e^{-10}
-            - how does this parameter affect the optimization?
-            - Hesse 1948, maybe use 0.00005
-
+    - Determine appropriate levels of randomness
+    - correct the epsilon factor to be e^{-10}
+        - how does this parameter affect the optimization?
+        - Hesse 1948, maybe use 0.00005
     - Monoclinic reset
         - Use different settings
         - weight the number of observations by the local median
 
-- Dominant zone:
-    - 2D and 1D optimization
-
-- Indexing.py
-
-- Augmentation
-    - augmented entries have a bug in the Miller indices
+- Templating
+    - Recalibration of template candidates
 
 - Assignments
     - (000) assignments
+    - How to improve this over baseline performance
 
 - Data
-    - reindex orthorhombic
+    * verify throwing out centered triclinic entries works
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -105,8 +99,6 @@ mP              | 83 - 86%
         - ICSD
 
 - SWE:
-    - Can I use a sparse softmax array?
-        - use only the top 10 closest peaks as input to NN
     - remove angle scaler and use cos(angle)
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
@@ -114,7 +106,13 @@ mP              | 83 - 86%
         - Get a working environment
         - Train ML models
 
+- Dominant zone:
+    - 2D and 1D optimization
+
+
 - Regression:
+- Indexing.py
+- Augmentation
 """
 import joblib
 import matplotlib.pyplot as plt
@@ -311,6 +309,7 @@ class Indexing:
             'reindexed_spacegroup_symbol_hm',
             'unit_cell',
             'reindexed_unit_cell',
+            'reindexed_xnn',
             f'd_spacing_{self.data_params["points_tag"]}',
             f'h_{self.data_params["points_tag"]}',
             f'k_{self.data_params["points_tag"]}',
@@ -380,7 +379,7 @@ class Indexing:
             # These groups won't have entries, so this just pulls out the groups with entries.
             self.data_params['split_groups'] = sorted(list(self.data['split_group'].unique()))
         elif self.data_params['lattice_system'] == 'triclinic':
-            assert False
+            self.data['split_group'] = self.data['group']
 
         data_grouped = self.data.groupby('split_group')
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]

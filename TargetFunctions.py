@@ -166,7 +166,14 @@ class CandidateOptLoss_xnn:
                 axis=2
                 )
         else:
-            assert False
+            self.hkl2 = np.concatenate((
+                self.hkl**2, 
+                (self.hkl[:, :, 1] * self.hkl[:, :, 2])[:, :, np.newaxis],
+                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis],
+                (self.hkl[:, :, 0] * self.hkl[:, :, 1])[:, :, np.newaxis],
+                ),
+                axis=2
+                )
 
         q2_pred_init = self.get_q2_pred(xnn_init, jac=False)
         delta_q2 = np.abs(q2_pred_init - self.q2_obs)
