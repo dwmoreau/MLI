@@ -26,6 +26,7 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 
+
 lattice system | accuracy
 -------------------------
 hexagonal      | 98.5%
@@ -38,20 +39,35 @@ Bravais Lattice | accuracy
 cF              | 99.5%
 cI              | 100.0%
 cP              | 99.7%
+tP              | 98.5%
+tI              | 96.5%
+hP              | 99.5%
+hR              |
+oP              |
+oC              |
+oI              |
+oF              |
 mC              | 81 - 92%
 mP              | 85%
+aP              | 30 - 80%
 
+
+* triclinic settings
+    * test combinations of lattices to find minimum volume setting
+    * Reduce templates to minimum volume setting
+    * Reduce optimization candidates to minimum volume setting during
+        - candidate generation
+        - reset
+        - validation
 
 * Get working on other lattice systems
-    - tetragonal
-        - optimization
-    - hexagonal
-        - optimization
     - rhombohedral
-        - fix bug in Miller index labeling
         - run training
         - optimization
     - orthorhombic
+        - Reconsider reindexing
+            oP, oI, oF
+            oC: reindex to C-centered
         - regenerate dataset
         - run training
         - optimization
@@ -83,11 +99,13 @@ mP              | 85%
     - Recalibration of template candidates
 
 - Assignments
+    - Convert to a recalibration approach:
+        - pairwise differences get converted to a set of polynomial coefficients that operate on the pairwise difference array
     - (000) assignments
     - How to improve this over baseline performance
 
 - Data
-    * verify throwing out centered triclinic entries works
+    - verify throwing out centered triclinic entries works
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -108,7 +126,6 @@ mP              | 85%
 
 - Dominant zone:
     - 2D and 1D optimization
-
 
 - Regression:
 - Indexing.py

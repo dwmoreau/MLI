@@ -1015,6 +1015,46 @@ class Candidates:
 
     def get_best_candidates(self, report_counts):
         found = False
+        found_best = False
+        found_not_best = False
+        found_off_by_two = False
+
+        if len(self.explainers) == 0:
+            unit_cell = np.stack(self.candidates['unit_cell'])[:20]
+            loss = np.array(self.candidates['loss'])[:20]
+        else:
+            found = True
+            unit_cell = np.stack(self.explainers['unit_cell'])
+            loss = np.array(self.explainers['loss'])
+
+        for index in range(unit_cell.shape[0]):
+            correct, off_by_two = self.validate_candidate(unit_cell[index])
+            if correct and index == 0:
+                found_best = True
+            elif correct:
+                found_not_best = True
+            elif off_by_two:
+                found_off_by_two = True
+
+        print(np.concatenate((
+            unit_cell.round(decimals=3), loss.round(decimals=1)[:, np.newaxis]
+            ),
+            axis=1))
+
+        if found_best:
+            report_counts['Found and best'] += 1
+        elif found_not_best:
+            report_counts['Found but not best'] += 1
+        elif found_off_by_two:
+            report_counts['Found but off by two'] += 1
+        elif found:
+            report_counts['Found explainers'] += 1
+        else:
+            report_counts['Not found'] += 1
+        return report_counts, found
+
+    def get_best_candidates_old(self, report_counts):
+        found = False
         if len(self.explainers) == 0:
             print(np.stack(self.candidates['reciprocal_unit_cell'])[:10].round(decimals=4))
             report_counts['Not found'] += 1

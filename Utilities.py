@@ -361,7 +361,7 @@ def get_hkl_matrix(hkl, lattice_system):
             )
     elif lattice_system == 'rhombohedral':
         hkl_matrix = np.stack((
-            np.sum(hkl[..., :2]**2, axis=last_axis),
+            np.sum(hkl**2, axis=last_axis),
             hkl[..., 0]*hkl[..., 1] + hkl[..., 0]*hkl[..., 2] + hkl[..., 1]*hkl[..., 2],
             ),
             axis=last_axis
