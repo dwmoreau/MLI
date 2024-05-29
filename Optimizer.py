@@ -11,6 +11,7 @@ from Indexing import Indexing
 from Reindexing import get_different_monoclinic_settings
 from Reindexing import reindex_entry_triclinic
 from TargetFunctions import CandidateOptLoss_xnn
+from Utilities import fix_unphysical_rhombohedral
 from Utilities import fix_unphysical_triclinic
 from Utilities import get_hkl_matrix
 from Utilities import get_reciprocal_unit_cell_from_xnn
@@ -250,15 +251,7 @@ class Candidates:
             xnn[too_small] = (1 / self.maximum_unit_cell)**2
             xnn[too_large] = (1 / self.minimum_unit_cell)**2
         elif self.lattice_system == 'rhombohedral':
-            too_small = xnn[:, 0] < (1 / self.maximum_unit_cell)**2
-            too_large = xnn[:, 0] > (1 / self.minimum_unit_cell)**2
-            xnn[:, 0][too_small] = (1 / self.maximum_unit_cell)**2
-            xnn[:, 0][too_large] = (1 / self.minimum_unit_cell)**2
-            cos_ralpha = xnn[:, 1] / (2*xnn[:, 0])
-            too_small = cos_ralpha < -1
-            too_large = cos_ralpha > 1
-            xnn[too_small, 1] = -2*0.999 * xnn[too_small, 0]
-            xnn[too_large, 1] = 2*0.999 * xnn[too_large, 0]
+            xnn = fix_unphysical_rhombohedral(xnn=xnn, rng=self.rng)
         elif self.lattice_system == 'monoclinic':
             too_small = xnn[:, :3] < (1 / self.maximum_unit_cell)**2
             too_large = xnn[:, :3] > (1 / self.minimum_unit_cell)**2
@@ -444,34 +437,12 @@ class Candidates:
                     size=np.sum(too_large_lengths)
                     )
         elif self.lattice_system == 'rhombohedral':
-            too_small_lengths = unit_cells[:, 0] < self.minimum_unit_cell
-            too_large_lengths = unit_cells[:, 0] > self.maximum_unit_cell
-            if np.sum(too_small_lengths) > 0:
-                unit_cells[too_small_lengths, 0] = self.rng.uniform(
-                    low=self.minimum_unit_cell,
-                    high=1.05*self.minimum_unit_cell,
-                    size=np.sum(too_small_lengths)
-                    )
-            if np.sum(too_large_lengths) > 0:
-                unit_cells[too_large_lengths, 0] = self.rng.uniform(
-                    low=0.95*self.maximum_unit_cell,
-                    high=self.maximum_unit_cell,
-                    size=np.sum(too_large_lengths)
-                    )
-            too_small_angles = unit_cells[:, 1] < self.minimum_angle
-            too_large_angles = unit_cells[:, 1] > self.maximum_angle
-            if np.sum(too_small_angles) > 0:
-                unit_cells[too_small_angles, 1] = self.rng.uniform(
-                    low=self.minimum_angle,
-                    high=1.05*self.minimum_angle,
-                    size=np.sum(too_small_angles)
-                    )
-            if np.sum(too_large_angles) > 0:
-                unit_cells[too_large_angles, 0] = self.rng.uniform(
-                    low=0.95*self.maximum_angle,
-                    high=self.maximum_angle,
-                    size=np.sum(too_large_angles)
-                    )
+            unit_cells = fix_unphysical_rhombohedral(
+                unit_cell=unit_cells,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell, 
+                maximum_unit_cell=self.maximum_unit_cell,
+                )
         elif self.lattice_system == 'triclinic':
             unit_cells = fix_unphysical_triclinic(
                 unit_cell=unit_cells,
@@ -607,6 +578,8 @@ class Candidates:
                 n_redistributed += excess_neighbors
         
                 low_density_indices = np.where(neighbor_count < max_neighbors)[0]
+                if low_density_indices.size == 0:
+                    break
                 prob = max_neighbors - neighbor_count[low_density_indices]
                 prob = prob / prob.sum()
                 if excess_neighbors <= low_density_indices.size:
@@ -644,22 +617,28 @@ class Candidates:
         excess_neighbors = from_indices.size
         low_density_indices = np.where(neighbor_count < self.max_neighbors)[0]
 
-        prob = self.max_neighbors - neighbor_count[low_density_indices]
-        prob = prob / prob.sum()
-        if excess_neighbors <= low_density_indices.size:
-            replace = False
-        else:
-            replace = True
-        choice = self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
-        to_indices = low_density_indices[choice]
-        unit_cells = self.redistribute_and_perturb_unit_cells(unit_cells, from_indices, to_indices)
+        if low_density_indices.size > 0:
+            prob = self.max_neighbors - neighbor_count[low_density_indices]
+            prob = prob / prob.sum()
+            if excess_neighbors <= low_density_indices.size:
+                replace = False
+            else:
+                replace = True
+            choice = self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
+            to_indices = low_density_indices[choice]
+            unit_cells = self.redistribute_and_perturb_unit_cells(unit_cells, from_indices, to_indices)
 
-        not_chosen = np.delete(np.arange(low_density_indices.size), choice)
-        not_chosen_indices = low_density_indices[not_chosen]
-        
-        unit_cells = self.redistribute_and_perturb_unit_cells(
-            unit_cells, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
-            )
+            not_chosen = np.delete(np.arange(low_density_indices.size), choice)
+            not_chosen_indices = low_density_indices[not_chosen]
+            
+            unit_cells = self.redistribute_and_perturb_unit_cells(
+                unit_cells, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
+                )
+        else:
+            not_chosen_indices = np.ones(unit_cells.shape[0], dtype=bool)
+            unit_cells = self.redistribute_and_perturb_unit_cells(
+                unit_cells, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
+                )
 
         self.starting_unit_cells = np.row_stack((self.starting_unit_cells, unit_cells))
         print(f'Exhaustive search redistributed {excess_neighbors} candidates')
@@ -913,7 +892,7 @@ class Candidates:
                 return True, False
             mult_factors = np.array([1/2, 2])
             for mf in mult_factors:
-                if np.isclose(self.unit_cell_true, np.array([mf0, 1]) * unit_cell, atol=atol):
+                if np.all(np.isclose(self.unit_cell_true, np.array([mf, 1]) * unit_cell, atol=atol)):
                     return False, True
         elif self.lattice_system == 'orthorhombic':
             unit_cell_true_sorted = np.sort(self.unit_cell_true)
@@ -1051,44 +1030,6 @@ class Candidates:
             report_counts['Found explainers'] += 1
         else:
             report_counts['Not found'] += 1
-        return report_counts, found
-
-    def get_best_candidates_old(self, report_counts):
-        found = False
-        if len(self.explainers) == 0:
-            print(np.stack(self.candidates['reciprocal_unit_cell'])[:10].round(decimals=4))
-            report_counts['Not found'] += 1
-        else:
-            if len(self.explainers) == 1:
-                print(self.explainers[['unit_cell', 'loss']].round(decimals={'unit_cell': 3, 'loss': 1}))
-            else:
-                uc_print = np.stack(self.explainers['unit_cell']).round(decimals=3)
-                loss_print = np.array(self.explainers['loss']).round(decimals=1)
-                print(np.concatenate((uc_print, loss_print[:, np.newaxis]), axis=1))
-            found_best = False
-            found_not_best = False
-            found_off_by_two = False
-            for explainer_index in range(len(self.explainers)):
-                unit_cell = np.array(self.explainers.iloc[explainer_index]['unit_cell'])
-                correct, off_by_two = self.validate_candidate(unit_cell)
-                if correct and explainer_index == 0:
-                    found_best = True
-                elif correct:
-                    found_not_best = True
-                elif off_by_two:
-                    found_off_by_two = True
-            if found_best:
-                report_counts['Found and best'] += 1
-                found = True
-            elif found_not_best:
-                report_counts['Found but not best'] += 1
-                found = True
-            elif found_off_by_two:
-                report_counts['Found but off by two'] += 1
-                found = True
-            else:
-                report_counts['Found explainers'] += 1
-                found = True
         return report_counts, found
 
     def monoclinic_reset(self, n_best, n_angles):
@@ -1700,6 +1641,13 @@ class Optimizer:
                 )
             for index in range(candidate_unit_cells.shape[0]):
                 candidate_unit_cells[index], _ = reindex_entry_triclinic(candidate_unit_cells[index], radians=True)
+        elif self.indexer.data_params['lattice_system'] == 'rhombohedral':
+            candidate_unit_cells = fix_unphysical_rhombohedral(
+                unit_cell=candidate_unit_cells,
+                rng=self.rng,
+                minimum_unit_cell=self.opt_params['minimum_uc'],
+                maximum_unit_cell=self.opt_params['maximum_uc'],
+                )
 
         self.plot_candidate_unit_cells(candidate_unit_cells, entry, entry_index)
 
@@ -1918,7 +1866,12 @@ class Optimizer:
         q2_obs_scaled = np.repeat(
             candidates.q2_obs_scaled[np.newaxis, :], repeats=candidates.n, axis=0
             )
+        """
         pairwise_differences_scaled = self.indexer.assigner[self.bravais_lattice][self.opt_params['initial_assigner_key']].pairwise_difference_calculation_numpy.get_pairwise_differences(
+            xnn, q2_obs_scaled
+            )
+        """
+        pairwise_differences_scaled = self.indexer.assigner[self.bravais_lattice]['0'].pairwise_difference_calculation_numpy.get_pairwise_differences(
             xnn, q2_obs_scaled
             )
         candidates.candidates['softmax'] = list(np.ones((candidates.n, self.indexer.data_params['n_points'])))

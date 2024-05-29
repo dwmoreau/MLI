@@ -60,10 +60,9 @@ aP              | 30 - 80%
         - reset
         - validation
 
-* Get working on other lattice systems
+* Get working on high symmetry lattice systems
     - rhombohedral
-        - run training
-        - optimization
+        - optimization seems off
     - orthorhombic
         - Reconsider reindexing
             oP, oI, oF

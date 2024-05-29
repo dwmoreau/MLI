@@ -322,6 +322,56 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
         return unit_cell
 
 
+def fix_unphysical_rhombohedral(xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500):
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if not xnn is None:
+        if xnn.shape[1] != 2:
+            assert False
+        # xnn[:, 0] = a**2. Should be positive and not zero
+        xnn[:, 0] = np.abs(xnn[:, 0])
+        zero_indices = xnn[:, 0] == 0
+        if np.sum(zero_indices) > 0:
+            xnn[zero_indices, 0] = rng.normal(
+                loc=xnn[~zero_indices, 0].mean(),
+                scale=xnn[~zero_indices, 0].std(),
+                size=np.sum(zero_indices)
+                )
+
+        # Direct space & Reciprocal unit cell angle must be
+        # between 0 and 120 degrees (2/3 pi radians)
+        cos_ralpha = xnn[:, 1] / (2 * xnn[:, 0])
+        bad_angle = np.logical_or(cos_ralpha < -1/2, cos_ralpha >= 1)
+        if np.sum(bad_angle) > 0:
+            cos_ralpha[bad_angle] = rng.uniform(low=-1/2, high=1, size=np.sum(bad_angle))
+            xnn[bad_angle, 1] = cos_ralpha[bad_angle] * 2 * xnn[bad_angle, 0]
+        return xnn
+
+    elif not unit_cell is None:
+        if unit_cell.shape[1] != 2:
+            assert False
+        too_small_lengths = unit_cell[:, 0] < minimum_unit_cell
+        too_large_lengths = unit_cell[:, 0] > maximum_unit_cell
+        if np.sum(too_small_lengths) > 0:
+            unit_cell[too_small_lengths, 0] = rng.uniform(
+                low=minimum_unit_cell,
+                high=1.05*minimum_unit_cell,
+                size=np.sum(too_small_lengths)
+                )
+        if np.sum(too_large_lengths) > 0:
+            unit_cell[too_large_lengths, 0] = rng.uniform(
+                low=0.95*maximum_unit_cell,
+                high=maximum_unit_cell,
+                size=np.sum(too_large_lengths)
+                )
+
+        bad_angle = np.logical_or(unit_cell[:, 1] <= 0, unit_cell[:, 1] > 2*np.pi/3)
+        if np.sum(bad_angle) > 0:
+            unit_cell[bad_angle, 1] = rng.uniform(low=0, high=2*np.pi/3, size=np.sum(bad_angle))
+        return unit_cell
+
+
 def get_hkl_matrix(hkl, lattice_system):
     last_axis = len(hkl.shape) - 1
     # hkl shape:
