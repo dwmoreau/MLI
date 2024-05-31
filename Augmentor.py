@@ -9,8 +9,10 @@ from sklearn.metrics import ConfusionMatrixDisplay
 from tqdm import tqdm
 
 from Reindexing import reindex_entry_triclinic
-from Utilities import Q2Calculator
 from Utilities import get_fwhm_and_overlap_threshold
+from Utilities import Q2Calculator
+from Utilities import reciprocal_uc_conversion
+from Utilities import get_xnn_from_reciprocal_unit_cell
 
 
 class Augmentor:
@@ -222,13 +224,18 @@ class Augmentor:
         augmented_entry = copy.deepcopy(entry)
         augmented_entry['augmented'] = True
         reindexed_unit_cell_scaled = np.array(augmented_entry['reindexed_unit_cell_scaled'])
-        perturbed_reindexed_unit_cell_scaled = reindexed_unit_cell_scaled.copy()
-        perturbed_reindexed_unit_cell_scaled[self.y_indices] = self.perturb_unit_cell(reindexed_unit_cell_scaled[self.y_indices])
+        perturbed_reindexed_unit_cell_scaled = self.perturb_unit_cell_common(reindexed_unit_cell_scaled)
         perturbed_reindexed_unit_cell = np.zeros(6)
         perturbed_reindexed_unit_cell[:3] = perturbed_reindexed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
         perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
         augmented_entry['reindexed_unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
         augmented_entry['reindexed_unit_cell'] = perturbed_reindexed_unit_cell
+        perturbed_reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
+            perturbed_reindexed_unit_cell[np.newaxis], partial_unit_cell=False, radians=True
+            )[0]
+        augmented_entry['reindexed_xnn'] = get_xnn_from_reciprocal_unit_cell(
+            perturbed_reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False, radians=True
+            )[0]
 
         # calculate new d-spacings
         reindexed_hkl_sa = np.stack(augmented_entry['reindexed_hkl_sa']).round(decimals=0).astype(int)
@@ -347,14 +354,28 @@ class Augmentor:
                 if np.all(perturbed_unit_cell_scaled[3:] <= maximum_angle_scaled):
                     return True
         elif self.lattice_system == 'rhombohedral':
-            # Rhombohedral has a maximum angle of 120 degrees (4pi/6 radians)
-            # Because the scaled angles are centered at zero, 90 degrees is 0 
-            # in scaled units. Then 120 degrees is pi/6 / scale
-            minimum = -np.pi/2 / self.angle_scale
-            maximum = np.pi/6 / self.angle_scale 
+            good_angle = False
+            reciprocalable = False
+            perturbed_unit_cell = np.zeros(2)
+            perturbed_unit_cell[0] = perturbed_unit_cell_scaled[0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+            perturbed_unit_cell[1] = perturbed_unit_cell_scaled[1] * self.angle_scale + np.pi/2
+
             if perturbed_unit_cell_scaled[0] > self.min_unit_cell_scaled:
-                if minimum < perturbed_unit_cell_scaled[1] < maximum:
-                    return True
+                if 0 < perturbed_unit_cell[1]:
+                    if perturbed_unit_cell[1] < 2*np.pi/3:
+                        good_angle = True
+            if good_angle == False:
+                return None
+
+            reciprocal_unit_cell = reciprocal_uc_conversion(
+                perturbed_unit_cell[np.newaxis],
+                partial_unit_cell=True,
+                lattice_system='rhombohedral',
+                radians=True
+                )[0]
+            reciprocalable = np.invert(np.any(np.isnan(reciprocal_unit_cell)))
+            if good_angle and reciprocalable:
+                return True
         else:
             if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
                 return True
@@ -379,6 +400,20 @@ class Augmentor:
             perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell, radians=True)
             perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
             perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
+        return perturbed_unit_cell_scaled
+
+    def perturb_unit_cell_common(self, unit_cell_scaled):
+        perturbed_unit_cell_scaled = unit_cell_scaled.copy()
+        perturbed_unit_cell_scaled[self.y_indices] = self.perturb_unit_cell(
+            perturbed_unit_cell_scaled[self.y_indices]
+            )
+        if self.lattice_system == 'cubic':
+            perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[0]
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
+            perturbed_unit_cell_scaled[1] = perturbed_unit_cell_scaled[0]
+        elif self.lattice_system == 'rhombohedral':
+            perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[0]
+            perturbed_unit_cell_scaled[3:] = perturbed_unit_cell_scaled[3]
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_std(self, unit_cell_scaled):

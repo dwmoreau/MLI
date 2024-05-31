@@ -42,8 +42,8 @@ cP              | 99.7%
 tP              | 98.5%
 tI              | 96.5%
 hP              | 99.5%
-hR              |
-oP              |
+hR              | 85 - 95%
+oP              | 
 oC              |
 oI              |
 oF              |
@@ -576,7 +576,6 @@ class Indexing:
     def setup_hkl(self):
         print('Setting up the hkl labels')
         indices = np.logical_and(self.data['train'], ~self.data['augmented'])
-        train = self.data[indices]
         self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
         hkl_labels = (self.data_params['hkl_ref_length'] - 1) * np.ones((
             len(self.data), self.data_params['n_points']),
@@ -586,10 +585,15 @@ class Indexing:
             self.hkl_ref[bravais_lattice] = np.load(
                 os.path.join(self.data_params['data_dir'], f'hkl_ref_{bravais_lattice}.npy')
                 )[:2*self.data_params['hkl_ref_length']]
+
             bl_indices = self.data['bravais_lattice'] == bravais_lattice
             bl_data = self.data[bl_indices]
+            indices = np.logical_and(
+                bl_data['bravais_lattice'] == bravais_lattice,
+                bl_data['augmented'] == False
+                )
+            bl_train_data = bl_data[indices]
 
-            bl_train_data = train[train['bravais_lattice'] == bravais_lattice]
             unit_cell = np.stack(bl_train_data['reindexed_unit_cell'])[:, self.data_params['y_indices']]
             q2_ref_calculator = Q2Calculator(
                 self.data_params['lattice_system'],
@@ -599,6 +603,24 @@ class Indexing:
                 )
             q2_ref = q2_ref_calculator.get_q2(unit_cell)
             sort_indices = np.argsort(q2_ref.mean(axis=0))
+            if self.data_params['lattice_system'] == 'rhombohedral':
+                # Rhombohedral struggles with the previous sorting based on q2 position
+                # The entries with large unit cell angles (~120) tend to have many unlabeled peaks
+                # This essentially sorts based on average increasing q2 given all unit cell
+                # angles are 110, cos(110) = -1/2. Using a large hkl ref helps as well
+                # number of entries with unlabeled peaks using a given angle (hkl_ref_length = 600):
+                #   120: 200
+                #   115: 193
+                #   110: 189
+                #   105: 184
+                #   100: 249
+                #   Other sorting: 870
+                bl_hkl = self.hkl_ref[bravais_lattice]
+                term0 = np.sum(bl_hkl**2, axis=1)
+                cosine_term = np.cos(105 * np.pi/180)
+                term1 = 2 * cosine_term * (bl_hkl[:, 0]*bl_hkl[:, 2] + bl_hkl[:, 1]*bl_hkl[:, 2] + bl_hkl[:, 0]*bl_hkl[:, 1])
+                sort_indices = np.argsort(term0 + term1)
+
             self.hkl_ref[bravais_lattice] = self.hkl_ref[bravais_lattice][sort_indices]
             self.hkl_ref[bravais_lattice] = self.hkl_ref[bravais_lattice][:self.data_params['hkl_ref_length'] - 1]
             self.hkl_ref[bravais_lattice] = np.concatenate((self.hkl_ref[bravais_lattice], np.zeros((1, 3))), axis=0)
@@ -625,7 +647,9 @@ class Indexing:
                         missing = True
                 if missing:
                     n_missing += 1
+            empty_ref = self.data_params['hkl_ref_length'] - np.unique(hkl_labels_bl).size
             print(f'{bravais_lattice} has {n_missing} entries with unlabeled peaks')
+            print(f'{bravais_lattice} has {empty_ref} unused hkls in reference')
             hkl_labels[bl_indices] = hkl_labels_bl
         self.data['hkl_labels'] = list(hkl_labels)
 
@@ -1045,10 +1069,10 @@ class Indexing:
         # These lines can be deleted once the datasets are regenerated.
         reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
         reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-            reindexed_unit_cell, partial_unit_cell=False,
+            reindexed_unit_cell, partial_unit_cell=False, radians=True
             )
         reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-            reindexed_reciprocal_unit_cell, partial_unit_cell=False
+            reindexed_reciprocal_unit_cell, partial_unit_cell=False, radians=True
             )
         self.data['reindexed_xnn'] = list(reindexed_xnn)
 

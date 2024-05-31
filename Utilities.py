@@ -342,10 +342,14 @@ def fix_unphysical_rhombohedral(xnn=None, unit_cell=None, rng=None, minimum_unit
         # Direct space & Reciprocal unit cell angle must be
         # between 0 and 120 degrees (2/3 pi radians)
         cos_ralpha = xnn[:, 1] / (2 * xnn[:, 0])
-        bad_angle = np.logical_or(cos_ralpha < -1/2, cos_ralpha >= 1)
-        if np.sum(bad_angle) > 0:
-            cos_ralpha[bad_angle] = rng.uniform(low=-1/2, high=1, size=np.sum(bad_angle))
-            xnn[bad_angle, 1] = cos_ralpha[bad_angle] * 2 * xnn[bad_angle, 0]
+        negative_angle = cos_ralpha >= 1
+        large_angle = cos_ralpha < -0.5
+        if np.sum(negative_angle) > 0:
+            cos_ralpha[negative_angle] = rng.uniform(low=0.95, high=1, size=np.sum(negative_angle))
+            xnn[negatived_angle, 1] = cos_ralpha[negative_angle] * 2 * xnn[negative_angle, 0]
+        if np.sum(large_angle) > 0:
+            cos_ralpha[large_angle] = rng.uniform(low=-0.5, high=-0.475, size=np.sum(large_angle))
+            xnn[large_angle, 1] = cos_ralpha[large_angle] * 2 * xnn[large_angle, 0]
         return xnn
 
     elif not unit_cell is None:

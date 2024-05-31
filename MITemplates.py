@@ -104,7 +104,7 @@ class MITemplates:
         training_data = data[data['train']]
         hkl_labels_all = np.stack(training_data['hkl_labels'])
         
-        if self.lattice_system in ['cubic', 'rhombohedral']:
+        if self.lattice_system == 'cubic':
             # Cubic and rhombohedral do not have dominant zones
             # Rhombohedral could be split into an angle range
             miller_index_templates = make_sets(
@@ -115,6 +115,47 @@ class MITemplates:
                 self.rng
                 )
             sampling_probability = np.ones(self.template_params['templates_per_dominant_zone_bin'])
+        elif self.lattice_system == 'rhombohedral':
+            reindexed_xnn = np.stack(training_data['reindexed_xnn'])
+            ratio = reindexed_xnn[:, 3] / reindexed_xnn[:, 0]
+            ratio_bins = np.linspace(-1, 2, 21)
+            ra = np.sqrt(reindexed_xnn[:, 0])
+            cos_ralpha = 1/2 * ratio
+            fig, axes = plt.subplots(1, 2, figsize=(8, 3))
+            axes[0].plot(ra, cos_ralpha, linestyle='none', marker='.', markersize=1, alpha=0.2)
+            axes[1].hist(ratio, bins=ratio_bins)
+            axes[0].set_ylabel('$cos(\\alpha*)$')
+            axes[0].set_xlabel('a*')
+            axes[1].set_xlabel('$2 x cos(\\alpha*)$')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to}/{self.group}_dominant_zone_ratio_{self.template_params["tag"]}.png')
+            plt.close()
+
+            mi_sets = []
+            sampling_probability = []
+            for i in range(20):
+                indices = np.logical_and(ratio > ratio_bins[i], ratio <= ratio_bins[i + 1])
+                if np.sum(indices) > 0:
+                    hkl_labels_bin = hkl_labels_all[indices]
+                    if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
+                        sampling_ratio = hkl_labels_bin.shape[0] / self.template_params['templates_per_dominant_zone_bin']
+                        sampling_probability.append(
+                            sampling_ratio * np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
+                        mi_sets.append(hkl_labels_bin)
+                    else:
+                        sampling_probability.append(
+                            np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
+                        mi_sets.append(make_sets(
+                            self.template_params['templates_per_dominant_zone_bin'],
+                            self.n_points,
+                            hkl_labels_bin,
+                            self.hkl_ref_length,
+                            self.rng
+                            ))
+            miller_index_templates = np.row_stack(mi_sets)
+            sampling_probability = np.concatenate(sampling_probability)
         else:
             reindexed_xnn = np.stack(training_data['reindexed_xnn'])
             ratio = reindexed_xnn[:, :3].min(axis=1) / reindexed_xnn[:, :3].max(axis=1)
@@ -153,9 +194,9 @@ class MITemplates:
                 if np.sum(indices) > 0:
                     hkl_labels_bin = hkl_labels_all[indices]
                     if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
-                        ratio = hkl_labels_bin.shape[0] / self.template_params['templates_per_dominant_zone_bin']
+                        sampling_ratio = hkl_labels_bin.shape[0] / self.template_params['templates_per_dominant_zone_bin']
                         sampling_probability.append(
-                            ratio * np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            sampling_ratio * np.ones(self.template_params['templates_per_dominant_zone_bin'])
                             )
                         mi_sets.append(hkl_labels_bin)
                     else:
