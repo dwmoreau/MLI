@@ -8,7 +8,6 @@ from EntryHelpers import spacegroup_to_symmetry
 from EntryHelpers import verify_crystal_system_bravais_lattice_consistency
 from EntryHelpers import verify_unit_cell_consistency_by_bravais_lattice
 from EntryHelpers import verify_volume
-from Reindexing import get_permuter
 from Reindexing import reindex_entry_monoclinic
 from Reindexing import reindex_entry_orthorhombic
 from Reindexing import reindex_entry_triclinic
@@ -299,6 +298,11 @@ class ProcessEntry:
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
+            if self.reindexed_spacegroup_symbol_hm[0] in ['A', 'B']:
+                self.reason = 'Orthorhombic Reindexing Failure'
+                self.status = False
+                print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm} {self.reindexed_spacegroup_symbol_hm}')
+                return None
         elif self.lattice_system == 'monoclinic':
             try:
                 self.reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, self.hkl_reindexer = \
@@ -379,7 +383,7 @@ class ProcessEntry:
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
 
-        if self.lattice_system in ['cubic', 'orthorhombic']:
+        if self.lattice_system in ['cubic', 'rhombohedral', 'hexagonal', 'triclinic']:
             self.split = 0
         elif self.lattice_system == 'tetragonal':
             if self.unit_cell[0] < self.unit_cell[2]:
@@ -408,8 +412,17 @@ class ProcessEntry:
                     self.status = False
                     print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.spacegroup_symbol_hm}')
                     return None
-        else:
-            self.split = 0
+        elif self.lattice_system == 'orthorhombic':
+            if self.reindexed_spacegroup_symbol_hm[0] in ['P', 'I', 'F']:
+                self.split = 0
+            else:
+                if self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[2]:
+                    if self.reindexed_unit_cell[1] <= self.reindexed_unit_cell[2]:
+                        self.split = 0 # abc
+                    else:
+                        self.split = 1 # acb
+                else:
+                    self.split = 2 # cab
 
 
 class ProcessCSDEntry(ProcessEntry):

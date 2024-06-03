@@ -381,7 +381,7 @@ if __name__ == '__main__':
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    entries_per_group = 100000
+    entries_per_group = 25000
     bad_identifiers_csd = []
     bad_identifiers_cod = []
     csd_entry_reader = EntryReader('CSD')
@@ -399,8 +399,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'triclinic']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'triclinic']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'orthorhombic']
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'orthorhombic']
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')

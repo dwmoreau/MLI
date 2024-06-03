@@ -39,20 +39,21 @@ Bravais Lattice | accuracy
 cF              | 99.5%
 cI              | 100.0%
 cP              | 99.7%
+tI              | 99.0%
 tP              | 98.5%
-tI              | 96.5%
 hP              | 99.5%
-hR              | 85 - 95%
-oP              | 
-oC              |
-oI              |
-oF              |
+hR              | 92 - 99.4%
+oC              | 97.5%
+oF              | 96%
+oI              | 97.5%
+oP              | 99.3%
 mC              | 81 - 92%
 mP              | 85%
 aP              | 30 - 80%
 
 
-* triclinic settings
+* triclinic
+    * Bug in unit cell reindexing - not always correctly ordered unit cell
     * test combinations of lattices to find minimum volume setting
     * Reduce templates to minimum volume setting
     * Reduce optimization candidates to minimum volume setting during
@@ -61,18 +62,12 @@ aP              | 30 - 80%
         - validation
 
 * Get working on high symmetry lattice systems
-    - rhombohedral
-        - optimization seems off
-    - orthorhombic
-        - Reconsider reindexing
-            oP, oI, oF
-            oC: reindex to C-centered
-        - regenerate dataset
-        - run training
-        - optimization
+    - rerun and assess errors:
+        - orthorhombic
+        - tetragonal
 
 * Documentation
-    - Update methods.md
+    - Rewrite methods.md
         - Update text
         - Add figures
     - Update README.md
@@ -86,13 +81,20 @@ aP              | 30 - 80%
             Nespolo 2014
 
 - Optimization:
+    - ncdist metric to measure distance between unit cells
+    - fix initial candidates plot
+    - repulsion of redundant candidates
     - Determine appropriate levels of randomness
+        - subsampling: random / softmax
+        - weighting: random / softmax
+        - resampling
     - correct the epsilon factor to be e^{-10}
         - how does this parameter affect the optimization?
         - Hesse 1948, maybe use 0.00005
     - Monoclinic reset
         - Use different settings
         - weight the number of observations by the local median
+        - extend to orthorhombic & triclinic
 
 - Templating
     - Recalibration of template candidates
@@ -104,6 +106,7 @@ aP              | 30 - 80%
     - How to improve this over baseline performance
 
 - Data
+    - Regenerate tetragonal dataset to get reindexed_xnn
     - verify throwing out centered triclinic entries works
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
@@ -116,6 +119,8 @@ aP              | 30 - 80%
         - ICSD
 
 - SWE:
+    - MITemplates.py fails after dataset creation. 
+        - hkl_* is dropped from self.data during self.save()
     - remove angle scaler and use cos(angle)
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
@@ -307,6 +312,12 @@ class Indexing:
                 self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_3_'))
                 self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_4_'))
                 self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_5_'))
+        elif self.data_params['lattice_system'] == 'orthorhombic':
+            self.data_params['split_groups'] = []
+            for group in self.data_params['groups']:
+                self.data_params['split_groups'].append(group.replace('orthorhombic_', 'orthorhombic_0_'))
+                self.data_params['split_groups'].append(group.replace('orthorhombic_', 'orthorhombic_1_'))
+                self.data_params['split_groups'].append(group.replace('orthorhombic_', 'orthorhombic_2_'))
         else:
             self.data_params['split_groups'] = self.data_params['groups']
         self.group_mappings = dict.fromkeys(group_spec['hm symbol'].unique())
@@ -325,7 +336,7 @@ class Indexing:
             'reindexed_spacegroup_symbol_hm',
             'unit_cell',
             'reindexed_unit_cell',
-            'reindexed_xnn',
+            #'reindexed_xnn',
             f'd_spacing_{self.data_params["points_tag"]}',
             f'h_{self.data_params["points_tag"]}',
             f'k_{self.data_params["points_tag"]}',
@@ -338,6 +349,8 @@ class Indexing:
             ]
 
         if self.data_params['augment']:
+            # These are all the non-systematically absent peaks and are used during augmentation
+            # to pick new peaks.
             read_columns += [
                 'd_spacing_sa',
                 'h_sa', 'k_sa', 'l_sa',
@@ -370,7 +383,7 @@ class Indexing:
         self.data['group'] = self.data['reindexed_spacegroup_symbol_hm'].map(
             lambda x: self.group_mappings[x]
             )
-        if self.data_params['lattice_system'] in ['cubic', 'orthorhombic', 'hexagonal', 'rhombohedral']:
+        if self.data_params['lattice_system'] in ['cubic', 'hexagonal', 'rhombohedral', 'triclinic']:
             self.data['split_group'] = self.data['group']
         elif self.data_params['lattice_system'] == 'tetragonal':
             # split_0: a < c
@@ -383,19 +396,22 @@ class Indexing:
             self.data.loc[split_1, 'split_group'] = self.data.loc[split_1, 'split_group'].map(
                 lambda x: x.replace('tetragonal_0_', 'tetragonal_1_')
                 )
-        elif self.data_params['lattice_system'] == 'monoclinic':
-            # Monoclinic groups are split into different permutations of abc
+        elif self.data_params['lattice_system'] in ['monoclinic', 'orthorhombic']:
+            # Orthorhombic & Monoclinic groups are split into different permutations of abc
+            # For Orthorhombic, this is only the case for C-centered. 
+            # I, F, & P centered have unit cells ordered as a < b < c
             split_group = []
             group = list(self.data['group'])
             split = np.array(self.data['split']).astype(int)
             for entry_index in range(len(self.data)):
-                split_group.append(group[entry_index].replace('monoclinic_', f'monoclinic_{split[entry_index]}_'))
+                split_group.append(group[entry_index].replace(
+                    f'{self.data_params["lattice_system"]}_',
+                    f'{self.data_params["lattice_system"]}_{split[entry_index]}_')
+                    )
             self.data['split_group'] = split_group
             # Spacegroups where a & c have no symmetry elements are reindexed so a < c
             # These groups won't have entries, so this just pulls out the groups with entries.
             self.data_params['split_groups'] = sorted(list(self.data['split_group'].unique()))
-        elif self.data_params['lattice_system'] == 'triclinic':
-            self.data['split_group'] = self.data['group']
 
         data_grouped = self.data.groupby('split_group')
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]

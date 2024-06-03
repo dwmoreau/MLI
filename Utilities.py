@@ -346,9 +346,9 @@ def fix_unphysical_rhombohedral(xnn=None, unit_cell=None, rng=None, minimum_unit
         large_angle = cos_ralpha < -0.5
         if np.sum(negative_angle) > 0:
             cos_ralpha[negative_angle] = rng.uniform(low=0.95, high=1, size=np.sum(negative_angle))
-            xnn[negatived_angle, 1] = cos_ralpha[negative_angle] * 2 * xnn[negative_angle, 0]
+            xnn[negative_angle, 1] = cos_ralpha[negative_angle] * 2 * xnn[negative_angle, 0]
         if np.sum(large_angle) > 0:
-            cos_ralpha[large_angle] = rng.uniform(low=-0.5, high=-0.475, size=np.sum(large_angle))
+            cos_ralpha[large_angle] = rng.uniform(low=-0.5, high=-0.49, size=np.sum(large_angle))
             xnn[large_angle, 1] = cos_ralpha[large_angle] * 2 * xnn[large_angle, 0]
         return xnn
 
@@ -635,6 +635,7 @@ class PairwiseDifferenceCalculator(Q2Calculator):
         # differences = n_entries x n_peaks x hkl_ref_length
         pairwise_differences_scaled = q2_ref_scaled[:, self.newaxis, :] - q2_scaled[:, :, self.newaxis]
         return pairwise_differences_scaled
+
 
 def write_params(params, filename):
     with open(filename, 'w') as output_file:

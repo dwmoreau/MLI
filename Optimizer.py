@@ -540,8 +540,10 @@ class Candidates:
                 unit_cells[permute_indices, 3],
                 ))
         elif self.lattice_system == 'orthorhombic':
-            order = np.argsort(redistributed_unit_cells, axis=1)
-            unit_cells = np.take_along_axis(unit_cells, order, axis=1)
+            if self.bravais_lattice != 'oC':
+                # base centered orthombic unit cells are not ordered
+                order = np.argsort(unit_cells, axis=1)
+                unit_cells = np.take_along_axis(unit_cells, order, axis=1)
         elif self.lattice_system == 'triclinic':
             # This is incorrect for reindexing, the angles don't let the axes
             # simply permute.
@@ -881,7 +883,7 @@ class Candidates:
         elif self.lattice_system in ['tetragonal', 'hexagonal']:
             if np.all(np.isclose(self.unit_cell_true, unit_cell, atol=atol)):
                 return True, False
-            mult_factors = np.array([1/2, 1, 2])
+            mult_factors = np.array([1/3, 1/2, 1, 2, 3])
             for mf0 in mult_factors:
                 for mf1 in mult_factors:
                     mf = np.array([mf0, mf1])
@@ -891,9 +893,55 @@ class Candidates:
             if np.all(np.isclose(self.unit_cell_true, unit_cell, atol=atol)):
                 return True, False
             mult_factors = np.array([1/2, 2])
-            for mf in mult_factors:
-                if np.all(np.isclose(self.unit_cell_true, np.array([mf, 1]) * unit_cell, atol=atol)):
-                    return False, True
+            transformations = [
+                np.eye(3),
+                np.array([
+                    [-1, 1, 1],
+                    [1, -1, 1],
+                    [1, 1, -1],
+                    ]),
+                np.array([
+                    [3, -1, -1],
+                    [-1, 3, -1],
+                    [-1, -1, 3],
+                    ]),
+                np.array([
+                    [0, 0.5, 0.5],
+                    [0.5, 0, 0.5],
+                    [0.5, 0.5, 0],
+                    ]),
+                np.array([
+                    [0.50, 0.25, 0.25],
+                    [0.25, 0.50, 0.25],
+                    [0.25, 0.25, 0.50],
+                    ])
+                ]
+            ax = unit_cell[0]
+            bx = unit_cell[0]*np.cos(unit_cell[1])
+            by = unit_cell[0]*np.sin(unit_cell[1])
+            cx = unit_cell[0]*np.cos(unit_cell[1])
+            arg = (np.cos(unit_cell[1]) - np.cos(unit_cell[1])**2) / np.sin(unit_cell[1])
+            cy = unit_cell[0] * arg
+            cz = unit_cell[0] * np.sqrt(np.sin(unit_cell[1])**2 - arg**2)
+            ucm = np.array([
+                [ax, bx, cx],
+                [0,  by, cy],
+                [0,  0,  cz]
+                ])
+            found = False
+            off_by_two = False
+            for trans in transformations:
+                rucm = ucm @ trans
+                reindexed_unit_cell = np.zeros(2)
+                reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
+                reindexed_unit_cell[1] = np.arccos(np.dot(rucm[:, 1], rucm[:, 2]) / reindexed_unit_cell[0]**2)
+                if np.all(np.isclose(self.unit_cell_true, reindexed_unit_cell, atol=atol)):
+                    found = True
+                mult_factors = np.array([1/2, 2])
+                for mf in mult_factors:
+                    if np.all(np.isclose(self.unit_cell_true, np.array([mf, 1]) * reindexed_unit_cell, atol=atol)):
+                        off_by_two = True
+            return found, off_by_two
         elif self.lattice_system == 'orthorhombic':
             unit_cell_true_sorted = np.sort(self.unit_cell_true)
             unit_cell_sorted = np.sort(unit_cell)
@@ -1010,10 +1058,13 @@ class Candidates:
             correct, off_by_two = self.validate_candidate(unit_cell[index])
             if correct and index == 0:
                 found_best = True
+                found = True
             elif correct:
                 found_not_best = True
+                found = True
             elif off_by_two:
                 found_off_by_two = True
+                found = True
 
         print(np.concatenate((
             unit_cell.round(decimals=3), loss.round(decimals=1)[:, np.newaxis]
@@ -1406,9 +1457,9 @@ class Optimizer:
         candidates_template = candidate_uc[self.n_groups * n_candidates:]
 
         if self.indexer.data_params['lattice_system'] == 'monoclinic':
-            fig, axes = plt.subplots(3, 4, figsize=(8, 6))
+            #fig, axes = plt.subplots(3, 4, figsize=(8, 6))
             reindexed_unit_cell_true = get_different_monoclinic_settings(
-                np.array(entry['reindexed_unit_cell']), partial_unit_cell=True
+                np.array(entry['reindexed_unit_cell']), partial_unit_cell=False, radians=True
                 )
             distance_nn = np.linalg.norm(
                 candidates_nn[np.newaxis, :, :3] - reindexed_unit_cell_true[:, np.newaxis, :3],
@@ -1426,8 +1477,8 @@ class Optimizer:
             angle_centers = (angle_bins[1:] + angle_bins[:-1]) / 2
             w = angle_bins[1] - angle_bins[0]
         elif self.indexer.data_params['lattice_system'] == 'orthorhombic':
-            fig, axes = plt.subplots(3, 3, figsize=(8, 6))
-            reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])
+            #fig, axes = plt.subplots(3, 3, figsize=(8, 6))
+            reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])[:3]
             distance_nn = np.linalg.norm(
                 candidates_nn - reindexed_unit_cell_true[np.newaxis],
                 axis=1

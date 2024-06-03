@@ -381,7 +381,7 @@ class Augmentor:
                 return True
 
     def _permute_perturbed_unit_cell(self, perturbed_unit_cell_scaled, unit_cell_scaled):
-        if self.lattice_system == 'monoclinic':
+        if self.lattice_system in ['monoclinic', 'orthorhombic']:
             initial_order = np.argsort(unit_cell_scaled[:3])
             initial_inverse_sort = np.argsort(initial_order)
             current_sort = np.argsort(perturbed_unit_cell_scaled[:3])
@@ -391,8 +391,6 @@ class Augmentor:
                 print(unit_cell_scaled)
                 print(perturbed_unit_cell_scaled)
                 print()
-        elif self.lattice_system == 'orthorhombic':
-            perturbed_unit_cell_scaled = np.sort(perturbed_unit_cell_scaled)
         elif self.lattice_system == 'triclinic':
             perturbed_unit_cell = np.zeros(6)
             perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]

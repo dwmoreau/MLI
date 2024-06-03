@@ -106,7 +106,6 @@ class MITemplates:
         
         if self.lattice_system == 'cubic':
             # Cubic and rhombohedral do not have dominant zones
-            # Rhombohedral could be split into an angle range
             miller_index_templates = make_sets(
                 self.template_params['templates_per_dominant_zone_bin'],
                 self.n_points,
@@ -158,58 +157,95 @@ class MITemplates:
             sampling_probability = np.concatenate(sampling_probability)
         else:
             reindexed_xnn = np.stack(training_data['reindexed_xnn'])
-            ratio = reindexed_xnn[:, :3].min(axis=1) / reindexed_xnn[:, :3].max(axis=1)
+            ratio_xnn = reindexed_xnn[:, :3].min(axis=1) / reindexed_xnn[:, :3].max(axis=1)
+
+            reindexed_unit_cell = np.stack(training_data['reindexed_unit_cell'])
+            ratio_unit_cell = reindexed_unit_cell[:, :3].min(axis=1) / reindexed_unit_cell[:, :3].max(axis=1)
+
+            reindexed_rec_unit_cell = reciprocal_uc_conversion(reindexed_unit_cell, partial_unit_cell=False, radians=True)
+            ratio_rec_unit_cell = reindexed_rec_unit_cell[:, :3].min(axis=1) / reindexed_rec_unit_cell[:, :3].max(axis=1)
 
             reindexed_hkl = np.stack(training_data['reindexed_hkl'])[:, :, :, 0]
             hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
             hkl_information_hist = np.bincount(hkl_information, minlength=self.n_points)
 
-            mean_ratio = np.zeros((self.n_points, 2))
+            mean_ratio = np.zeros((self.n_points, 2, 2))
             for i in range(self.n_points):
-                mean_ratio[i, 0] = np.mean(ratio[hkl_information == i])
-                mean_ratio[i, 1] = np.std(ratio[hkl_information == i])
+                mean_ratio[i, 0, 0] = np.mean(ratio_xnn[hkl_information == i])
+                mean_ratio[i, 1, 0] = np.std(ratio_xnn[hkl_information == i])
+                mean_ratio[i, 0, 1] = np.mean(ratio_unit_cell[hkl_information == i])
+                mean_ratio[i, 1, 1] = np.std(ratio_unit_cell[hkl_information == i])
 
-            fig, axes = plt.subplots(1, 3, figsize=(8, 3))
-            axes[0].hist(ratio, bins=np.linspace(0, 1, self.n_points + 1))
-            axes[1].bar(np.arange(self.n_points), hkl_information_hist, width=1)
-            axes[2].plot(
-                hkl_information, ratio,
+            fig, axes = plt.subplots(1, 5, figsize=(12, 3))
+            axes[0].hist(ratio_xnn, bins=np.linspace(0, 1, self.n_points + 1))
+            axes[1].hist(ratio_unit_cell, bins=np.linspace(0, 1, self.n_points + 1))
+            axes[2].hist(ratio_rec_unit_cell, bins=np.linspace(0, 1, self.n_points + 1))
+            axes[3].bar(np.arange(self.n_points), hkl_information_hist, width=1)
+            axes[4].plot(
+                hkl_information, ratio_unit_cell,
                 marker='.', linestyle='none', markersize=0.25, alpha=0.5
                 )
-            axes[2].errorbar(np.arange(self.n_points), mean_ratio[:, 0], mean_ratio[:, 1])
-            axes[0].set_xlabel('Dominant zone ratio (Min/Max Xnn)')
+            axes[4].errorbar(np.arange(self.n_points), mean_ratio[:, 0, 1], mean_ratio[:, 1, 1])
+
+            axes[0].set_xlabel('Dominant zone ratio\n(Min/Max Xnn)')
+            axes[1].set_xlabel('Dominant zone ratio\n(Min/Max Unit Cell)')
+            axes[2].set_xlabel('Dominant zone ratio\n(Min/Max Reciprocal Unit Cell)')
+
             axes[0].set_ylabel('Counts')
-            axes[1].set_xlabel('Minimum Information')
             axes[1].set_ylabel('Counts')
-            axes[2].set_xlabel('Minimum Information')
-            axes[2].set_ylabel('Dominant zone ratio')
+            axes[2].set_ylabel('Counts')
+            axes[3].set_ylabel('Counts')
+            
+            axes[3].set_xlabel('Minimum Information')
+            axes[4].set_xlabel('Minimum Information')
+            axes[4].set_ylabel('Dominant zone ratio (Unit Cell)')
             fig.tight_layout()
             fig.savefig(f'{self.save_to}/{self.group}_dominant_zone_ratio_{self.template_params["tag"]}.png')
             plt.close()
 
             mi_sets = []
             sampling_probability = []
+            n_ratio_bins = 10
+            ratio_bins = np.linspace(0, 1, n_ratio_bins + 1)
+            templates_per_information_bin = self.template_params['templates_per_dominant_zone_bin']
+            templates_per_dominant_zone_bin = int(self.template_params['templates_per_dominant_zone_bin'] / n_ratio_bins)
             for i in range(self.n_points):
                 indices = hkl_information == i
                 if np.sum(indices) > 0:
                     hkl_labels_bin = hkl_labels_all[indices]
-                    if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
-                        sampling_ratio = hkl_labels_bin.shape[0] / self.template_params['templates_per_dominant_zone_bin']
+                    ratio_unit_cell_bin = ratio_unit_cell[indices]
+                    if hkl_labels_bin.shape[0] < templates_per_information_bin:
+                        sampling_ratio = templates_per_information_bin / hkl_labels_bin.shape[0]
                         sampling_probability.append(
-                            sampling_ratio * np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            sampling_ratio * np.ones(templates_per_information_bin)
                             )
                         mi_sets.append(hkl_labels_bin)
                     else:
-                        sampling_probability.append(
-                            np.ones(self.template_params['templates_per_dominant_zone_bin'])
-                            )
-                        mi_sets.append(make_sets(
-                            self.template_params['templates_per_dominant_zone_bin'],
-                            self.n_points,
-                            hkl_labels_bin,
-                            self.hkl_ref_length,
-                            self.rng
-                            ))
+                        for ratio_bin_index in range(n_ratio_bins):
+                            ratio_indices = np.logical_and(
+                                ratio_unit_cell_bin > ratio_bins[ratio_bin_index],
+                                ratio_unit_cell_bin <= ratio_bins[ratio_bin_index + 1],
+                                )
+                            if np.sum(ratio_indices) > 0:
+                                hkl_labels_ratio_bin = hkl_labels_bin[ratio_indices]
+                                if hkl_labels_ratio_bin.shape[0] < templates_per_dominant_zone_bin:
+                                    sampling_ratio = templates_per_dominant_zone_bin / hkl_labels_ratio_bin.shape[0]
+                                    sampling_probability.append(
+                                        sampling_ratio * np.ones(templates_per_dominant_zone_bin)
+                                        )
+                                    mi_sets.append(hkl_labels_ratio_bin)
+                                else:
+                                    sampling_probability.append(
+                                        np.ones(templates_per_dominant_zone_bin)
+                                        )
+                                    mi_sets.append(make_sets(
+                                        templates_per_dominant_zone_bin,
+                                        self.n_points,
+                                        hkl_labels_bin,
+                                        self.hkl_ref_length,
+                                        self.rng
+                                        ))
+
             miller_index_templates = np.row_stack(mi_sets)
             sampling_probability = np.concatenate(sampling_probability)
         self.miller_index_templates, unique_indices = np.unique(
