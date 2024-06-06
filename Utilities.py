@@ -164,61 +164,64 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
         rng = np.random.default_rng()
 
     if not xnn is None:
+        def get_limits(cos_angle_0, cos_angle_1):
+            pa = -1
+            pb = 2*cos_angle_0*cos_angle_1
+            pc = 1 - cos_angle_0**2 - cos_angle_1**2
+            roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
+            if min(roots) > 1:
+                lower_root = 0
+            else:
+                lower_root = max(min(roots), 0)
+            if max(roots) < 0:
+                upper_root = 1
+            else:    
+                upper_root = min(max(roots), 1)
+            return lower_root, upper_root
+
         xnn[:, :3] = np.abs(xnn[:, :3])
 
         zero = xnn[:, :3] == 0
         zero_indices = np.sum(zero, axis=1) > 0
         xnn[zero_indices, :3] = np.mean(xnn[~zero_indices, :3])
 
-        # gamma & beta > pi/2
-        # Then the reciprocal gamma and beta < pi/2
-        # - However, I am just making the angles physical (0 -> pi) then they should be
-        #   corrected during a reindexing step
+        # alpha, beta, & gamma > pi/2
+        # Then the reciprocal angles < pi/2
         ra = np.sqrt(xnn[:, 0])
         rb = np.sqrt(xnn[:, 1])
         rc = np.sqrt(xnn[:, 2])
         cos_ralpha = xnn[:, 3] / (2 * rb * rc)
         cos_rbeta = xnn[:, 4] / (2 * ra * rc)    
         cos_rgamma = xnn[:, 5] / (2 * ra * rb)
-        bad_ralpha = np.abs(cos_ralpha) > 1
-        bad_rbeta = np.abs(cos_rbeta) > 1
-        bad_rgamma = np.abs(cos_rgamma) > 1
-        if np.sum(bad_ralpha) > 0:
-            xnn[bad_ralpha, 3] = (2 * rb * rc)[bad_ralpha] * rng.uniform(low=-1, high=1, size=np.sum(bad_ralpha))
-        if np.sum(bad_rbeta) > 0:
-            xnn[bad_rbeta, 4] = (2 * ra * rc)[bad_rbeta] * rng.uniform(low=-1, high=1, size=np.sum(bad_rbeta))
-        if np.sum(bad_rgamma) > 0:
-            xnn[bad_rgamma, 5] = (2 * ra * rb)[bad_rgamma] * rng.uniform(low=-1, high=1, size=np.sum(bad_rgamma))
 
-        # convert right handed coordinates to left handed
+        bad_ralpha = np.logical_or(cos_ralpha < 0, cos_ralpha > 1)
+        bad_rbeta = np.logical_or(cos_rbeta < 0, cos_rbeta > 1)
+        bad_rgamma = np.logical_or(cos_rgamma < 0, cos_rgamma > 1)
+        if np.sum(bad_ralpha) > 0:
+            xnn[bad_ralpha, 3] = (2 * rb * rc)[bad_ralpha] * rng.uniform(low=0, high=1, size=np.sum(bad_ralpha))
+        if np.sum(bad_rbeta) > 0:
+            xnn[bad_rbeta, 4] = (2 * ra * rc)[bad_rbeta] * rng.uniform(low=0, high=1, size=np.sum(bad_rbeta))
+        if np.sum(bad_rgamma) > 0:
+            xnn[bad_rgamma, 5] = (2 * ra * rb)[bad_rgamma] * rng.uniform(low=0, high=1, size=np.sum(bad_rgamma))
+        
+        # Unit cell volume:
+        # abc * sqrt[1 - cos(alpha)**2 - cos(beta)**2 - cos(gamma)**2 + 2*cos(alpha)*cos(beta)*cos(gamma)]
+        #   Enforce the argument in the sqrt to be positive
         cos_ralpha = xnn[:, 3] / (2 * rb * rc)
         cos_rbeta = xnn[:, 4] / (2 * ra * rc)    
         cos_rgamma = xnn[:, 5] / (2 * ra * rb)
-
-        # Unit cell volume:
-        # abc * sqrt[1 - cos(alpha)**2 - cos(beta)**2 - cos(gamma)**2 + 2*cos(alpha)*cos(beta)*cos(gamma)]
-        #   * Enforce the argument in the sqrt to be positive
         volume_arg = 1 - cos_ralpha**2 - cos_rbeta**2 - cos_rgamma**2 + 2*cos_ralpha*cos_rbeta*cos_rgamma
         for index in np.argwhere(volume_arg < 0):
             status = True
             while status:
-                pa = -1
+                lower_root, upper_root = get_limits(cos_rbeta[index], cos_rgamma[index])
+                cos_ralpha0 = rng.uniform(low=lower_root, high=upper_root)
 
-                pb = 2*cos_rbeta[index]*cos_rgamma[index]
-                pc = 1 - cos_rbeta[index]**2 - cos_rgamma[index]**2
-                roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
-                cos_ralpha0 = rng.uniform(low=min(roots), high=max(roots))
+                lower_root, upper_root = get_limits(cos_ralpha[index], cos_rgamma[index])
+                cos_rbeta0 = rng.uniform(low=lower_root, high=upper_root)
 
-                pb = 2*cos_ralpha[index]*cos_rgamma[index]
-                pc = 1 - cos_ralpha[index]**2 - cos_rgamma[index]**2
-                roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
-                cos_rbeta0 = rng.uniform(low=min(roots), high=max(roots))
-
-
-                pb = 2*cos_ralpha[index]*cos_rbeta[index]
-                pc = 1 - cos_ralpha[index]**2 - cos_rbeta[index]**2
-                roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
-                cos_rgamma0 = rng.uniform(low=min(roots), high=max(roots))
+                lower_root, upper_root = get_limits(cos_ralpha[index], cos_rbeta[index])
+                cos_rgamma0 = rng.uniform(low=lower_root, high=upper_root)
 
                 volume_arg = 1 - cos_ralpha0**2 - cos_rbeta0**2 - cos_rgamma0**2 + 2*cos_ralpha0*cos_rbeta0*cos_rgamma0
                 if volume_arg > 0:
@@ -229,9 +232,25 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
         return xnn
 
     elif not unit_cell is None:
-        minimum_angle_alpha = 0.01
-        maximum_angle = np.pi - 0.01
-        minimum_angle_beta_gamma = np.pi/2
+        def get_limits(cos_angle_0, cos_angle_1):
+            pa = -1
+            pb = 2*cos_angle_0*cos_angle_1
+            pc = 1 - cos_angle_0**2 - cos_angle_1**2
+            roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
+            if min(roots) > 0:
+                lower_root = -1
+            else:
+                lower_root = max(min(roots), -1)
+            if max(roots) < -1:
+                upper_root = 0
+            else:    
+                upper_root = min(max(roots), 0)
+            return lower_root, upper_root
+
+        # Unit cell here is direct space. So angles are obtuse. The case above is for the Xnn 
+        # coordinates which are based on reciprocal space unit cells
+        maximum_angle = np.pi
+        minimum_angle = np.pi/2
 
         too_small_lengths = unit_cell[:, :3] < minimum_unit_cell
         too_large_lengths = unit_cell[:, :3] > maximum_unit_cell
@@ -250,68 +269,42 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
                 size=np.sum(too_large_lengths)
                 )
         
-        too_small_angles = unit_cell[:, 3:] < minimum_angle_alpha
+        too_small_angles = unit_cell[:, 3:] < minimum_angle
         too_large_angles = unit_cell[:, 3:] > maximum_angle
 
         if np.sum(too_large_angles) > 0:
             indices = np.argwhere(too_large_angles)
             unit_cell[indices[:, 0], 3 + indices[:, 1]] = rng.uniform(
-                low=0.90*maximum_angle,
+                low=0.95*maximum_angle,
                 high=maximum_angle,
                 size=np.sum(too_large_angles)
                 )
         if np.sum(too_small_angles) > 0:
             indices = np.argwhere(too_small_angles)
             unit_cell[indices[:, 0], 3 + indices[:, 1]] = rng.uniform(
-                low=minimum_angle_alpha,
-                high=minimum_angle_alpha,
+                low=minimum_angle,
+                high=1.05*minimum_angle,
                 size=np.sum(too_small_angles)
                 )
-
-        too_small_only_gamma = unit_cell[:, 5] < minimum_angle_beta_gamma
-        too_small_only_beta = unit_cell[:, 4] < minimum_angle_beta_gamma
-        too_small_gamma = np.logical_and(too_small_only_gamma, ~too_small_only_beta)
-        too_small_beta = np.logical_and(~too_small_only_gamma, too_small_only_beta)
-        too_small_gamma_beta = np.logical_and(too_small_only_gamma, too_small_only_beta)
-        if np.sum(too_small_gamma_beta) > 0:
-            unit_cell[too_small_gamma_beta, 5] = np.pi - unit_cell[too_small_gamma_beta, 5]
-            unit_cell[too_small_gamma_beta, 4] = np.pi - unit_cell[too_small_gamma_beta, 4]
-        if np.sum(too_small_gamma) > 0:
-            unit_cell[too_small_gamma, 5] = np.pi - unit_cell[too_small_gamma, 5]
-            unit_cell[too_small_gamma, 3] = np.pi - unit_cell[too_small_gamma, 3]
-        if np.sum(too_small_beta) > 0:
-            unit_cell[too_small_beta, 4] = np.pi - unit_cell[too_small_beta, 4]
-            unit_cell[too_small_beta, 3] = np.pi - unit_cell[too_small_beta, 3]
-
-        cos_alpha = np.cos(unit_cell[:, 3])
-        cos_beta = np.cos(unit_cell[:, 4])
-        cos_gamma = np.cos(unit_cell[:, 5])
 
         # Unit cell volume:
         # abc * sqrt[1 - cos(alpha)**2 - cos(beta)**2 - cos(gamma)**2 + 2*cos(alpha)*cos(beta)*cos(gamma)]
         #   * Enforce the argument in the sqrt to be positive
+        cos_alpha = np.cos(unit_cell[:, 3])
+        cos_beta = np.cos(unit_cell[:, 4])
+        cos_gamma = np.cos(unit_cell[:, 5])
         volume_arg = 1 - cos_alpha**2 - cos_beta**2 - cos_gamma**2 + 2*cos_alpha*cos_beta*cos_gamma
         for index in np.argwhere(volume_arg < 0):
             status = True
             while status:
-                pa = -1
+                lower_root, upper_root = get_limits(cos_beta[index], cos_gamma[index])
+                cos_alpha0 = rng.uniform(low=lower_root, high=upper_root)
 
-                pb = 2*cos_beta[index]*cos_gamma[index]
-                pc = 1 - cos_beta[index]**2 - cos_gamma[index]**2
-                roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
-                cos_alpha0 = rng.uniform(low=min(roots), high=max(roots))
+                lower_root, upper_root = get_limits(cos_alpha[index], cos_gamma[index])
+                cos_beta0 = rng.uniform(low=lower_root, high=upper_root)
 
-
-                pb = 2*cos_alpha[index]*cos_gamma[index]
-                pc = 1 - cos_alpha[index]**2 - cos_gamma[index]**2
-                roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
-                cos_beta0 = rng.uniform(low=min(roots), high=max(roots))
-
-
-                pb = 2*cos_alpha[index]*cos_beta[index]
-                pc = 1 - cos_alpha[index]**2 - cos_beta[index]**2
-                roots = [(-pb - np.sqrt(pb**2 - 4*pa*pc)) / (2*pa), (-pb + np.sqrt(pb**2 - 4*pa*pc)) / (2*pa)]
-                cos_gamma0 = rng.uniform(low=min(roots), high=max(roots))
+                lower_root, upper_root = get_limits(cos_alpha[index], cos_beta[index])
+                cos_gamma0 = rng.uniform(low=lower_root, high=upper_root)
 
                 volume_arg = 1 - cos_alpha0**2 - cos_beta0**2 - cos_gamma0**2 + 2*cos_alpha0*cos_beta0*cos_gamma0
                 if volume_arg > 0:

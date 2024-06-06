@@ -26,45 +26,27 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 
-
-lattice system | accuracy
--------------------------
-hexagonal      | 98.5%
-rhombohedral   | 94%
-tetragonal     | 95%
-orthorhombic   | 93%
-
+python bootstrap.py --builder=xfel --use-conda=$PWD/conda_base --python=39 --no-boost-src hot update build
 Bravais Lattice | accuracy
 --------------------------
 cF              | 99.5%
 cI              | 100.0%
 cP              | 99.7%
 tI              | 99.0%
-tP              | 98.5%
+tP              | 99.5%
 hP              | 99.5%
 hR              | 92 - 99.4%
-oC              | 97.5%
-oF              | 96%
-oI              | 97.5%
-oP              | 99.3%
+oC              | 98.5%
+oF              | 99.0%
+oI              | 99.0%
+oP              | 99.5%
 mC              | 81 - 92%
 mP              | 85%
 aP              | 30 - 80%
 
 
 * triclinic
-    * Bug in unit cell reindexing - not always correctly ordered unit cell
-    * test combinations of lattices to find minimum volume setting
-    * Reduce templates to minimum volume setting
-    * Reduce optimization candidates to minimum volume setting during
-        - candidate generation
-        - reset
-        - validation
-
-* Get working on high symmetry lattice systems
-    - rerun and assess errors:
-        - orthorhombic
-        - tetragonal
+    * perform Selling reduction in validation
 
 * Documentation
     - Rewrite methods.md
@@ -81,7 +63,6 @@ aP              | 30 - 80%
             Nespolo 2014
 
 - Optimization:
-    - ncdist metric to measure distance between unit cells
     - fix initial candidates plot
     - repulsion of redundant candidates
     - Determine appropriate levels of randomness
@@ -95,8 +76,12 @@ aP              | 30 - 80%
         - Use different settings
         - weight the number of observations by the local median
         - extend to orthorhombic & triclinic
+    - ncdist metric to measure distance between unit cells
+    - track the best optimized candidates for each candidate in a reasonable manner
+    - check the top N candidates for off-by-two / off-by-three against the data.
 
 - Templating
+    - Templating for large unit cell volumes
     - Recalibration of template candidates
 
 - Assignments
@@ -107,7 +92,8 @@ aP              | 30 - 80%
 
 - Data
     - Regenerate tetragonal dataset to get reindexed_xnn
-    - verify throwing out centered triclinic entries works
+    - Peak lists
+        - ly65 / SACLA
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -121,6 +107,7 @@ aP              | 30 - 80%
 - SWE:
     - MITemplates.py fails after dataset creation. 
         - hkl_* is dropped from self.data during self.save()
+    - convert angles to radians asap and delete all degree code
     - remove angle scaler and use cos(angle)
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
@@ -1108,12 +1095,6 @@ class Indexing:
                 self.miller_index_templator[bravais_lattice].setup(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
                     )
-                #self.miller_index_templator[bravais_lattice].do_predictions_even_clusters(
-                #    np.array(self.data.iloc[0]['q2']), n_templates=1000,
-                #    )
-                #self.miller_index_templator[bravais_lattice].test_evening_kmeans(
-                #    self.data[self.data['bravais_lattice'] == bravais_lattice]
-                #    )
 
     def setup_regression(self):
         self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])

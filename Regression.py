@@ -452,7 +452,7 @@ class Regression_AlphaBeta(RegressionBase):
 
         for key in model_params_defaults['random_forest'].keys():
             if key not in self.model_params['random_forest'].keys():
-                self.model_params['random_forest'][key] = random_forest_defaults[key]
+                self.model_params['random_forest'][key] = model_params_defaults['random_forest'][key]
 
         self.reg_loss = LikelihoodLoss('alpha_beta', n=self.n_outputs, beta_nll=self.model_params['beta_nll'])
         self.loss_weights = {
@@ -469,7 +469,7 @@ class Regression_AlphaBeta(RegressionBase):
         model_params = copy.deepcopy(self.model_params)
         write_params(model_params, f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
-
+    
         if self.model_params['predict_pca']:
             joblib.dump(self.pca, f'{self.save_to}/{self.group}_pca.bin')
         if self.model_params['fit_trees']:

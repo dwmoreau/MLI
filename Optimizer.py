@@ -137,13 +137,9 @@ class Candidates:
         if self.lattice_system == 'rhombohedral':
             self.maximum_angle = 2*np.pi/3
             self.minimum_angle = 0.01
-        elif self.lattice_system == 'monoclinic':
+        elif self.lattice_system in ['monoclinic', 'triclinic']:
             self.maximum_angle = np.pi
             self.minimum_angle = np.pi/2
-        elif self.lattice_system == 'triclinic':
-            self.maximum_angle = np.pi
-            self.minimum_angle_beta_gamma = np.pi/2
-            self.minimum_angle_alpha = 0.01
         self.rng = np.random.default_rng()
         self.tolerance = tolerance
 
@@ -450,8 +446,7 @@ class Candidates:
                 minimum_unit_cell=self.minimum_unit_cell, 
                 maximum_unit_cell=self.maximum_unit_cell,
                 )
-            for index in range(unit_cells.shape[0]):
-                unit_cells[index], _ = reindex_entry_triclinic(unit_cells[index], radians=True)
+            unit_cells, _ = reindex_entry_triclinic(unit_cells, radians=True)
         elif self.lattice_system == 'monoclinic':
             too_small_lengths = unit_cells[:, :3] < self.minimum_unit_cell
             too_large_lengths = unit_cells[:, :3] > self.maximum_unit_cell
@@ -511,12 +506,9 @@ class Candidates:
                     )
             elif self.lattice_system == 'triclinic':
                 unit_cells[from_indices, 3:] = unit_cells[to_indices, 3:]
-                # This leads to unphysical unit cells. They cannot be converted to reciprocal space
-                unit_cells[from_indices, 3] = np.arccos(
-                    self.rng.uniform(low=-1, high=1, size=n_indices)
-                    )
-                unit_cells[from_indices, 4:] = np.arccos(
-                    self.rng.uniform(low=-1, high=0, size=(n_indices, 2))
+                # This can lead to unphysical unit cells. Some cannot be converted to reciprocal space
+                unit_cells[from_indices, 3:] = np.arccos(
+                    self.rng.uniform(low=-1, high=0, size=(n_indices, 3))
                     )
         elif self.lattice_system in ['cubic', 'tetragonal', 'hexagonal', 'orthorhombic']:
             perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.n_uc))
@@ -1218,17 +1210,13 @@ class Optimizer:
             # for the reciprocal space conversion.
             self.opt_params['minimum_angle_scaled'] = (0.01 - np.pi/2) / self.indexer.angle_scale
             self.opt_params['maximum_angle_scaled'] = (2*np.pi/3 - np.pi/2) / self.indexer.angle_scale
-        elif self.indexer.data_params['lattice_system'] == 'monoclinic':
+        elif self.indexer.data_params['lattice_system'] in ['monoclinic', 'triclinic']:
             # Minimum / Maximum angle = 90 / 180 degrees
             # Monoclinic angles are restricted to be above 90 degrees because
             # the same monoclinic unit cell can be represented with either an
             # obtuse or acute angle.
             # Scaling is (angle - pi/2) / angle_scale
             self.opt_params['minimum_angle_scaled'] = (np.pi/2 - np.pi/2) / self.indexer.angle_scale
-            self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
-        elif self.indexer.data_params['lattice_system'] == 'triclinic':
-            self.opt_params['minimum_beta_gamma_scaled'] = (np.pi/2 - np.pi/2) / self.indexer.angle_scale
-            self.opt_params['minimum_alpha_scaled'] = (0.0 - np.pi/2) / self.indexer.angle_scale
             self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
 
         self.n_groups = len(self.indexer.data_params['split_groups'])
@@ -1382,17 +1370,17 @@ class Optimizer:
             uniform_alpha = False
             uniform_beta = False
             uniform_gamma = False
-            if uc_scaled_mean[3] <= self.opt_params['minimum_alpha_scaled']:
+            if uc_scaled_mean[3] <= self.opt_params['minimum_angle_scaled']:
                 uniform_alpha = True
             elif uc_scaled_mean[3] >= self.opt_params['maximum_angle_scaled']:
                 uniform_alpha = True
-            if uc_scaled_mean[4] <= self.opt_params['minimum_beta_gamma_scaled']:
+            if uc_scaled_mean[4] <= self.opt_params['minimum_angle_scaled']:
                 uniform_beta = True
             elif uc_scaled_mean[4] >= self.opt_params['maximum_angle_scaled']:
                 uniform_beta = True
-            if uc_scaled_mean[5] <= self.opt_params['minimum_beta_gamma_scaled']:
+            if uc_scaled_mean[5] <= self.opt_params['minimum_angle_scaled']:
                 uniform_gamma = True
-            elif uc_scaled_mean[3] >= self.opt_params['maximum_angle_scaled']:
+            elif uc_scaled_mean[5] >= self.opt_params['maximum_angle_scaled']:
                 uniform_gamma = True
             candidates_scaled = self.rng.multivariate_normal(
                 mean=uc_scaled_mean,
@@ -1506,7 +1494,7 @@ class Optimizer:
                 candidates_template[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
                 axis=1
                 )
-            angle_bins = np.linspace(0, np.pi, 101)
+            angle_bins = np.linspace(np.pi/2, np.pi, 101)
             angle_centers = (angle_bins[1:] + angle_bins[:-1]) / 2
             w = angle_bins[1] - angle_bins[0]
 
@@ -1690,8 +1678,7 @@ class Optimizer:
                 minimum_unit_cell=self.opt_params['minimum_uc'],
                 maximum_unit_cell=self.opt_params['maximum_uc'],
                 )
-            for index in range(candidate_unit_cells.shape[0]):
-                candidate_unit_cells[index], _ = reindex_entry_triclinic(candidate_unit_cells[index], radians=True)
+            candidate_unit_cells, _ = reindex_entry_triclinic(candidate_unit_cells, radians=True)
         elif self.indexer.data_params['lattice_system'] == 'rhombohedral':
             candidate_unit_cells = fix_unphysical_rhombohedral(
                 unit_cell=candidate_unit_cells,

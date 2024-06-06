@@ -344,6 +344,7 @@ class ProcessEntry:
             self.reindexed_unit_cell, self.hkl_reindexer = reindex_entry_triclinic(
                 self.unit_cell, radians=False
                 )
+
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
             self.reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
                 self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
