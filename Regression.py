@@ -20,6 +20,7 @@ class RegressionBase:
         self.n_points = data_params['n_points']
         self.n_outputs = data_params['n_outputs']
         self.y_indices = data_params['y_indices']
+        self.lattice_system = data_params['lattice_system']
         self.group = group
         self.save_to = save_to
         self.seed = seed
@@ -102,6 +103,87 @@ class RegressionBase:
 
     def fit_trees(self, data):
         train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
+        if self.lattice_system == 'cubic':
+            self.random_forest_regressor = RandomForestRegressor(
+                random_state=self.model_params['random_forest']['random_state'],
+                n_estimators=self.model_params['random_forest']['n_estimators'],
+                min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
+                max_depth=self.model_params['random_forest']['max_depth'],
+                max_samples=self.model_params['random_forest']['subsample'],
+                )
+            # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
+            # function. The true values are 'reindexed_unit_cell_scaled'
+            self.random_forest_regressor.fit(
+                train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}']
+                )
+        else:
+            n_ratio_bins = self.model_params['random_forest']['n_dominant_zone_bins']
+            train = data[data['train']]
+            unit_cell_train = np.stack(train['reindexed_unit_cell'])
+            if self.lattice_system == 'rhombohedral':
+                # Ratio in rhombohedral is the cosine of the angle
+                # angle is limited between 0 and 120 degrees or 1 and -1/2 (cos(alpha))
+                ratio_bins = np.linspace(-1/2, 1, n_ratio_bins + 1)
+                ratio = np.cos(unit_cell_train[:, 3])
+            else:
+                # unit_cell_train is a N x 6 array. So the first three indices of the
+                # first axis are unit cell magnitudes.
+                ratio_bins = np.concatenate([[0], np.linspace(0.3, 1, n_ratio_bins)])
+                ratio = unit_cell_train[:, :3].min(axis=1) / unit_cell_train[:, :3].max(axis=1)
+
+            n_estimators_per_bin = int(np.ceil(
+                self.model_params['random_forest']['n_estimators'] / n_ratio_bins
+                ))
+            self.random_forest_regressor = [
+                RandomForestRegressor(
+                    random_state=0, 
+                    n_estimators=n_estimators_per_bin,
+                    min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
+                    max_depth=self.model_params['random_forest']['max_depth'],
+                    max_samples=self.model_params['random_forest']['subsample'],
+                    ) for _ in range(n_ratio_bins)
+                ]
+            for ratio_index in range(n_ratio_bins):
+                indices_train = np.logical_and(
+                    ratio >= ratio_bins[ratio_index],
+                    ratio < ratio_bins[ratio_index + 1]
+                    )
+                # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
+                # function. The true values are 'reindexed_unit_cell_scaled'
+                self.random_forest_regressor[ratio_index].fit(
+                    train_inputs['q2_scaled'][indices_train],
+                    train_true[f'uc_pred_scaled_{self.group}'][indices_train]
+                    )
+
+    def do_predictions_trees(self, data=None, inputs=None, q2_scaled=None):
+        if not data is None:
+            q2_scaled = np.stack(data['q2_scaled'])
+        elif not inputs is None:
+            q2_scaled = inputs['q2_scaled']
+        N = q2_scaled.shape[0]
+        if self.lattice_system == 'cubic':
+            uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)[:, np.newaxis]
+            for tree in range(self.model_params['random_forest']['n_estimators']):
+                uc_pred_scaled_tree[:, :, tree] = \
+                    self.random_forest_regressor.estimators_[tree].predict(q2_scaled)[:, np.newaxis]
+        else:
+            uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
+            tree_index = 0
+            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                for tree in range(len(self.random_forest_regressor[ratio_index].estimators_)):
+                    uc_pred_scaled_tree[:, :, tree_index] = \
+                        self.random_forest_regressor[ratio_index].estimators_[tree].predict(q2_scaled)
+                    tree_index += 1
+
+        uc_pred_scaled = uc_pred_scaled_tree.mean(axis=2)
+        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
+        for index in range(N):
+            uc_pred_scaled_cov[index] = np.cov(uc_pred_scaled_tree[index])
+        return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
+
+    """
+    def fit_trees(self, data):
+        train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
         self.random_forest_regressor = RandomForestRegressor(
             random_state=self.model_params['random_forest']['random_state'],
             n_estimators=self.model_params['random_forest']['n_estimators'],
@@ -133,14 +215,8 @@ class RegressionBase:
         uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
         for index in range(N):
             uc_pred_scaled_cov[index] = np.cov(uc_pred_scaled_tree[index])
-        """
-        uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
-        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = uc_pred_scaled_var[index]
-        """
         return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
+    """
 
     def fit_model_cycles(self, data):
         self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
@@ -404,6 +480,7 @@ class Regression_AlphaBeta(RegressionBase):
                 'min_samples_leaf': 10,
                 'max_depth': None,
                 'subsample': 0.1,
+                'n_dominant_zone_bins': 10,
                 },
             }
         for key in model_params_defaults.keys():
@@ -473,10 +550,17 @@ class Regression_AlphaBeta(RegressionBase):
         if self.model_params['predict_pca']:
             joblib.dump(self.pca, f'{self.save_to}/{self.group}_pca.bin')
         if self.model_params['fit_trees']:
-            joblib.dump(
-                self.random_forest_regressor,
-                f'{self.save_to}/{self.group}_random_forest_regressor.bin'
-                )
+            if self.lattice_system == 'cubic':
+                joblib.dump(
+                    self.random_forest_regressor,
+                    f'{self.save_to}/{self.group}_random_forest_regressor.bin'
+                    )
+            else:
+                for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                    joblib.dump(
+                        self.random_forest_regressor[ratio_index],
+                        f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
+                        )
 
     def load_from_tag(self):
         params = read_params(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
@@ -521,7 +605,7 @@ class Regression_AlphaBeta(RegressionBase):
         for element in params['random_forest'].split('{')[1].split('}')[0].split(','):
             key = element.split(':')[0].split("'")[1]
             value = element.split(':')[1]
-            if key in ['random_state', 'n_estimators', 'min_samples_leaf']:
+            if key in ['random_state', 'n_estimators', 'min_samples_leaf', 'n_dominant_zone_bins']:
                 self.model_params['random_forest'][key] = int(value)
             elif key == 'subsample':
                 self.model_params['random_forest'][key] = float(value)
@@ -532,7 +616,16 @@ class Regression_AlphaBeta(RegressionBase):
                     self.model_params['random_forest']['max_depth'] = int(value)
         if params['fit_trees'] == 'True':
             self.model_params['fit_trees'] = True
-            self.random_forest_regressor = joblib.load(f'{self.save_to}/{self.group}_random_forest_regressor.bin')
+            if self.lattice_system == 'cubic':
+                self.random_forest_regressor = joblib.load(
+                    f'{self.save_to}/{self.group}_random_forest_regressor.bin'
+                    )
+            else:
+                self.random_forest_regressor = []
+                for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                    self.random_forest_regressor.append(joblib.load(
+                        f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
+                        ))
         elif params['fit_trees'] == 'False':
             self.model_params['fit_trees'] = False
 

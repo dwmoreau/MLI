@@ -6,6 +6,7 @@ import pandas as pd
 import scipy.optimize
 import scipy.special
 import time
+from tqdm import tqdm
 
 from Indexing import Indexing
 from Reindexing import get_different_monoclinic_settings
@@ -122,7 +123,7 @@ def best_assign_nocommon(softmaxes):
 
 
 class Candidates:
-    def __init__(self, entry, unit_cell, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell, tolerance):
+    def __init__(self, entry, unit_cell, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell, tolerance, epsilon):
         self.q2_obs = np.array(entry['q2'])
         self.q2_obs_scaled = np.array(entry['q2_scaled'])
         self.n_points = self.q2_obs.size
@@ -141,6 +142,9 @@ class Candidates:
             self.maximum_angle = np.pi
             self.minimum_angle = np.pi/2
         self.rng = np.random.default_rng()
+
+        self.epsilon = epsilon
+        self.min_loss = np.sum(np.log(np.sqrt(2*np.pi * self.q2_obs * epsilon)))
         self.tolerance = tolerance
 
         unit_cell_true = np.array(entry['reindexed_unit_cell'])
@@ -186,6 +190,7 @@ class Candidates:
             'loss',
             'best_loss',
             'best_xnn',
+            'best_unit_cell',
             'best_returns_trajectory',
             'neighbors',
             'accepted',
@@ -203,6 +208,9 @@ class Candidates:
         self.candidates['best_returns'] = np.zeros(unit_cell.shape[0], dtype=int)
         self.candidates['best_loss'] = np.zeros(unit_cell.shape[0])
         self.candidates['best_xnn'] = self.candidates['xnn'].copy()
+        self.candidates['best_unit_cell'] = self.candidates['unit_cell'].copy()
+        self.ending_unit_cells = None
+        self.ending_loss = None
 
     def update_xnn_from_unit_cell(self):
         unit_cell = np.stack(self.candidates['unit_cell'])
@@ -376,6 +384,7 @@ class Candidates:
         counts_xnn = [np.sum(distance_xnn < i) for i in [0.0005, 0.001, 0.002]]
 
         print(f'Starting # candidates:       {self.n}')
+        print(f'Minimum Loss:                {np.round(self.min_loss, decimals=2)}')
         print(f'Impossible:                  {impossible}')
         print(f'True dominant axis info:     {dominant_axis_info}')
         print(f'True dominant zone info:     {dominant_zone_info}')
@@ -506,7 +515,6 @@ class Candidates:
                     )
             elif self.lattice_system == 'triclinic':
                 unit_cells[from_indices, 3:] = unit_cells[to_indices, 3:]
-                # This can lead to unphysical unit cells. Some cannot be converted to reciprocal space
                 unit_cells[from_indices, 3:] = np.arccos(
                     self.rng.uniform(low=-1, high=0, size=(n_indices, 3))
                     )
@@ -537,11 +545,13 @@ class Candidates:
                 order = np.argsort(unit_cells, axis=1)
                 unit_cells = np.take_along_axis(unit_cells, order, axis=1)
         elif self.lattice_system == 'triclinic':
-            # This is incorrect for reindexing, the angles don't let the axes
-            # simply permute.
-            # But the angles are randomly generated, so it is fine.
-            order = np.argsort(unit_cells, axis=1)
-            unit_cells = np.take_along_axis(unit_cells, order, axis=1)
+            unit_cells = fix_unphysical_triclinic(
+                unit_cell=unit_cells,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell,
+                maximum_unit_cell=self.maximum_unit_cell,
+                )
+            unit_cells, _ = reindex_entry_triclinic(unit_cells, radians=True)
         return unit_cells
 
     def redistribute_unit_cells(self, max_neighbors, radius):
@@ -592,17 +602,19 @@ class Candidates:
         self.fix_out_of_range_candidates()
 
     def setup_exhaustive_search(self, max_neighbors, radius):
-        self.ending_unit_cells = None
         self.starting_unit_cells = np.stack(self.candidates['unit_cell']).copy()
         self.max_neighbors = max_neighbors
         self.radius = radius
 
     def exhaustive_search(self):
-        unit_cells = np.stack(self.candidates['unit_cell']).copy()
+        unit_cells = np.stack(self.candidates['best_unit_cell']).copy()
+        loss = np.stack(self.candidates['best_loss']).copy()
         if self.ending_unit_cells is None:
             self.ending_unit_cells = unit_cells.copy()
+            self.ending_loss = loss.copy()
         else:
             self.ending_unit_cells = np.row_stack((self.ending_unit_cells, unit_cells))
+            self.ending_loss = np.concatenate((self.ending_loss, loss))
 
         distance = self.get_neighbor_distance(unit_cells, self.starting_unit_cells)
         neighbor_array = distance < self.radius
@@ -637,6 +649,9 @@ class Candidates:
         self.starting_unit_cells = np.row_stack((self.starting_unit_cells, unit_cells))
         print(f'Exhaustive search redistributed {excess_neighbors} candidates')
         self.candidates['unit_cell'] = list(unit_cells)
+        self.candidates['best_unit_cell'] = list(unit_cells)
+        #self.candidates['best_xnn'] = np.zeros(unit_cells.shape)
+        self.candidates['best_loss'] = np.zeros(unit_cells.shape[0])
         start = self.candidates.index.max() + 1
         self.candidates.reset_index(
             names=list(np.arange(start, start + self.n)), drop=True, inplace=True
@@ -652,7 +667,11 @@ class Candidates:
 
             # Fix candidates with too small or too large unit cells
             self.fix_out_of_range_candidates()
-            self.update_history()
+            #self.update_history()
+            improved_loss = self.candidates['loss'] < self.candidates['best_loss']
+            self.candidates.loc[improved_loss, 'best_loss'] = self.candidates.loc[improved_loss, 'loss'].copy()
+            self.candidates.loc[improved_loss, 'best_unit_cell'] = self.candidates.loc[improved_loss, 'unit_cell'].copy()
+            self.candidates.loc[improved_loss, 'best_xnn'] = self.candidates.loc[improved_loss, 'xnn'].copy()
         if len(self.candidates) > 1:
             self.pick_explainers()
         self.candidates = self.candidates.sort_values(by='best_loss')
@@ -760,7 +779,7 @@ class Candidates:
         best_returns_trajectory = np.stack(self.candidates['best_returns_trajectory'])
         acceptance_trajectory = np.stack(self.candidates['acceptance_trajectory'])
         xnn_trajectory = np.stack(self.candidates['xnn_trajectory'])
-        found = np.min(loss_trajectory, axis=1) < self.tolerance
+        found = np.min(loss_trajectory, axis=1) < self.tolerance*self.min_loss
 
         unit_cell_true = get_different_monoclinic_settings(self.unit_cell_true, partial_unit_cell=True)
         reciprocal_unit_cell_true = reciprocal_uc_conversion(
@@ -842,7 +861,7 @@ class Candidates:
         plt.close('all')
 
     def pick_explainers(self):
-        found = self.candidates['loss'] < self.tolerance
+        found = self.candidates['loss'] < self.tolerance*self.min_loss
         if np.count_nonzero(found) > 0:
             # If I keep the 'hkl' column I get an error:
             #  ValueError: all the input array dimensions except for the concatenation axis must match exactly
@@ -1039,8 +1058,16 @@ class Candidates:
         found_off_by_two = False
 
         if len(self.explainers) == 0:
-            unit_cell = np.stack(self.candidates['unit_cell'])[:20]
-            loss = np.array(self.candidates['loss'])[:20]
+            if self.ending_unit_cells is None:
+                best_loss = np.array(self.candidates['best_loss'])
+                best_unit_cell = np.array(self.candidates['best_loss'])
+                indices = np.argsort(best_loss)[:20]
+                unit_cell = best_unit_cell[indices]
+                loss = best_loss[indices]
+            else:
+                indices = np.argsort(self.ending_loss)[:20]
+                unit_cell = self.ending_unit_cells[indices]
+                loss = self.ending_loss[indices]
         else:
             found = True
             unit_cell = np.stack(self.explainers['unit_cell'])
@@ -1255,6 +1282,78 @@ class Optimizer:
                 self.uc_scaled_cov[:, group_index, :, :] = uc_cov_scaled_group
             np.save(uc_scaled_mean_filename, self.uc_scaled_mean)
             np.save(uc_scaled_cov_filename, self.uc_scaled_cov)
+
+    def evaluate_regression(self):
+        efficiency = np.zeros((self.N, 3))
+        for entry_index in tqdm(range(self.N)):
+            for group_index, group in enumerate(self.indexer.data_params['split_groups']):
+                entry = self.indexer.data.iloc[entry_index]
+
+                candidate_uc_nn = self.generate_unit_cells(
+                    self.uc_scaled_mean[entry_index, group_index, :],
+                    self.uc_scaled_cov[entry_index, group_index, :, :]
+                    )
+
+                # Get candidates from the random forest model
+                q2_scaled = np.array(entry['q2_scaled'])[np.newaxis]
+                # candidates_scaled_tree: n_entries, n_outputs, n_trees
+                #   n_entries = 1 because there is only one q2_scaled input
+                _, _, candidates_scaled_tree = \
+                    self.indexer.unit_cell_generator[group].do_predictions_trees(q2_scaled=q2_scaled)
+                tree_indices = self.rng.choice(
+                    candidates_scaled_tree.shape[2],
+                    size=self.opt_params['n_candidates_rf'],
+                    replace=False
+                    )
+                candidate_uc_rf = self.indexer.revert_predictions(
+                    uc_pred_scaled=candidates_scaled_tree[0, :, tree_indices]
+                    )
+
+            candidate_uc_tm = self.generate_unit_cells_miller_index_templates(np.array(entry['q2']))
+
+            if self.indexer.data_params['lattice_system'] == 'triclinic':
+                candidate_uc_nn = fix_unphysical_triclinic(
+                    unit_cell=candidate_uc_nn,
+                    rng=self.rng,
+                    minimum_unit_cell=self.opt_params['minimum_uc'],
+                    maximum_unit_cell=self.opt_params['maximum_uc'],
+                    )
+                candidate_uc_nn, _ = reindex_entry_triclinic(candidate_uc_nn, radians=True)
+
+                candidate_uc_rf = fix_unphysical_triclinic(
+                    unit_cell=candidate_uc_rf,
+                    rng=self.rng,
+                    minimum_unit_cell=self.opt_params['minimum_uc'],
+                    maximum_unit_cell=self.opt_params['maximum_uc'],
+                    )
+                candidate_uc_rf, _ = reindex_entry_triclinic(candidate_uc_rf, radians=True)
+
+                candidate_uc_tm = fix_unphysical_triclinic(
+                    unit_cell=candidate_uc_tm,
+                    rng=self.rng,
+                    minimum_unit_cell=self.opt_params['minimum_uc'],
+                    maximum_unit_cell=self.opt_params['maximum_uc'],
+                    )
+                candidate_uc_tm, _ = reindex_entry_triclinic(candidate_uc_tm, radians=True)
+            
+            reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])
+            distance_nn = np.linalg.norm(
+                candidate_uc_nn[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
+                axis=1
+                )
+            distance_rf = np.linalg.norm(
+                candidate_uc_rf[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
+                axis=1
+                )
+            distance_tm = np.linalg.norm(
+                candidate_uc_tm[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
+                axis=1
+                )
+
+            efficiency[entry_index, 0] = np.sum(distance_nn<1) / distance_nn.size
+            efficiency[entry_index, 1] = np.sum(distance_rf<1) / distance_rf.size
+            efficiency[entry_index, 2] = np.sum(distance_tm<1) / distance_tm.size
+        np.save('efficiency.npy', efficiency)
 
     def run(self):
         report_counts = {
@@ -1697,6 +1796,7 @@ class Optimizer:
             minimum_unit_cell=self.opt_params['minimum_uc'],
             maximum_unit_cell=self.opt_params['maximum_uc'],
             tolerance=self.opt_params['found_tolerance'],
+            epsilon=self.opt_params['epsilon'],
             )
         candidates.fix_out_of_range_candidates()
         if self.opt_params['redistribute_candidates']:

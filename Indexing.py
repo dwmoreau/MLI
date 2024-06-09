@@ -26,7 +26,6 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 
-python bootstrap.py --builder=xfel --use-conda=$PWD/conda_base --python=39 --no-boost-src hot update build
 Bravais Lattice | accuracy
 --------------------------
 cF              | 99.5%
@@ -42,46 +41,42 @@ oI              | 99.0%
 oP              | 99.5%
 mC              | 81 - 92%
 mP              | 85%
-aP              | 30 - 80%
+aP              | 61 - 84%
 
-
-* triclinic
-    * perform Selling reduction in validation
 
 * Documentation
-    - Rewrite methods.md
-        - Update text
-        - Add figures
-    - Update README.md
-    - reread SVD-Index
-    - reread TREOR
-    - Reread ML pxrd papers
-    - powder extinction classes
-        Hahn, T., Ed. International Tables for X-ray Crystallography Volume A (Space Group Symmetry); Kluwer Academic Publishers: Dordrecht, The Netherlands, 1989
-            Buerger 1935, 1942, 1969
-            Buerger 2002
-            Nespolo 2014
+    * Read MLIMethods and update for clarity
+    - reread papers
 
-- Optimization:
-    - fix initial candidates plot
-    - repulsion of redundant candidates
-    - Determine appropriate levels of randomness
+* Regression
+    * Reestimate efficiency / robustness
+
+* Optimization:
+    * subsampling
+        - don't completely throw out drop peaks. 
+          Increase the peaks sigma so it still updates the unit cell if there is no information
+          about one axis
+    * triclinic
+        - does reducing the unit cells during optimization change many unit cells?
+            - in check out of range
+        - does reducing the unit cells during optimization hurt?
+    * ncdist metric to measure distance between unit cells
+        - Calculate ncdist in a notebook
+            - How does this scale with unit cell length magnitude distance?
+            - How does this differ if calculated in reciprocal space?
+    * repulsion of redundant candidates
+        - check for redundancy
+    * Determine appropriate levels of randomness
         - subsampling: random / softmax
         - weighting: random / softmax
         - resampling
-    - correct the epsilon factor to be e^{-10}
-        - how does this parameter affect the optimization?
-        - Hesse 1948, maybe use 0.00005
+
     - Monoclinic reset
         - Use different settings
         - weight the number of observations by the local median
-        - extend to orthorhombic & triclinic
-    - ncdist metric to measure distance between unit cells
-    - track the best optimized candidates for each candidate in a reasonable manner
-    - check the top N candidates for off-by-two / off-by-three against the data.
+        - extend to triclinic
 
 - Templating
-    - Templating for large unit cell volumes
     - Recalibration of template candidates
 
 - Assignments
@@ -91,7 +86,6 @@ aP              | 30 - 80%
     - How to improve this over baseline performance
 
 - Data
-    - Regenerate tetragonal dataset to get reindexed_xnn
     - Peak lists
         - ly65 / SACLA
     - experimental data from rruff
@@ -118,7 +112,6 @@ aP              | 30 - 80%
 - Dominant zone:
     - 2D and 1D optimization
 
-- Regression:
 - Indexing.py
 - Augmentation
 """
