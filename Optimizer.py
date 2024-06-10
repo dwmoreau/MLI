@@ -11,6 +11,7 @@ from tqdm import tqdm
 from Indexing import Indexing
 from Reindexing import get_different_monoclinic_settings
 from Reindexing import reindex_entry_triclinic
+from Reindexing import get_s6_from_unit_cell
 from TargetFunctions import CandidateOptLoss_xnn
 from Utilities import fix_unphysical_rhombohedral
 from Utilities import fix_unphysical_triclinic
@@ -365,10 +366,10 @@ class Candidates:
                 unit_cell[:, :3] - self.unit_cell_true[np.newaxis, :3],
                 axis=1
                 )
-            distance_xnn = np.linalg.norm(
-                xnn[:, :3] - self.xnn_true[np.newaxis, :3],
-                axis=1
-                )
+            distance_xnn = np.linalg.norm(xnn - self.xnn_true[np.newaxis], axis=1)
+            s6 = get_s6_from_unit_cell(unit_cell)
+            s6_true = get_s6_from_unit_cell(self.unit_cell_true[np.newaxis])[0]
+            distance_s6 = np.linalg.norm(s6 - s6_true[np.newaxis], axis=1)
         elif self.lattice_system == 'rhombohedral':
             distance_ruc = np.abs(reciprocal_unit_cell[:, 0] - self.reciprocal_unit_cell_true[np.newaxis, 0])
             distance_uc = np.abs(unit_cell[:, 0] - self.unit_cell_true[np.newaxis, 0])
@@ -381,7 +382,9 @@ class Candidates:
             distance_xnn = np.linalg.norm(xnn - self.xnn_true[np.newaxis], axis=1)
         counts_ruc = [np.sum(distance_ruc < i) for i in [0.005, 0.01, 0.02]]
         counts_uc = [np.sum(distance_uc < i) for i in [1, 2, 3]]
-        counts_xnn = [np.sum(distance_xnn < i) for i in [0.0005, 0.001, 0.002]]
+        counts_xnn = [np.sum(distance_xnn < i) for i in [0.003, 0.004, 0.005]]
+        if self.lattice_system == 'triclinic':
+            counts_s6 = [np.sum(distance_s6 < i) for i in [50, 75, 100]]
 
         print(f'Starting # candidates:       {self.n}')
         print(f'Minimum Loss:                {np.round(self.min_loss, decimals=2)}')
@@ -400,6 +403,8 @@ class Candidates:
         print(f'Close Unit Cell:             {counts_uc[0]}, {counts_uc[1]}, {counts_uc[2]}')
         print(f'Close Reciprocal UC:         {counts_ruc[0]}, {counts_ruc[1]}, {counts_ruc[2]}')
         print(f'Close Xnn:                   {counts_xnn[0]}, {counts_xnn[1]}, {counts_xnn[2]}')
+        if self.lattice_system == 'triclinic':
+            print(f'Close S6:                    {counts_s6[0]}, {counts_s6[1]}, {counts_s6[2]}')
         print(f'Bravais Lattice:             {self.bl_true}')
         print(f'Spacegroup:                  {self.sg_true} {self.spacegroup_symbol_hm_true}')
 
@@ -489,8 +494,18 @@ class Candidates:
         self.update_xnn_from_unit_cell()
 
     def get_neighbor_distance(self, uc0, uc1):
-        if self.lattice_system in ['monoclinic', 'triclinic']:
+        if self.lattice_system == 'monoclinic':
             distance = np.linalg.norm(uc0[:, np.newaxis, :3] - uc1[np.newaxis, :, :3], axis=2)
+        elif self.lattice_system == 'triclinic':
+            #distance = np.linalg.norm(uc0[:, np.newaxis, :3] - uc1[np.newaxis, :, :3], axis=2)
+            
+            #s60 = get_s6_from_unit_cell(uc0)
+            #s61 = get_s6_from_unit_cell(uc1)
+            #distance = np.linalg.norm(s60[:, np.newaxis] - s61[np.newaxis, :], axis=2)
+
+            xnn0 = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(uc0))
+            xnn1 = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(uc1))
+            distance = np.linalg.norm(xnn0[:, np.newaxis] - xnn1[np.newaxis, :], axis=2)
         elif self.lattice_system in ['tetragonal', 'hexagonal', 'cubic', 'orthorhombic']:
             distance = np.linalg.norm(uc0[:, np.newaxis, :] - uc1[np.newaxis, :, :], axis=2)
         elif self.lattice_system == 'rhombohedral':
@@ -1060,7 +1075,7 @@ class Candidates:
         if len(self.explainers) == 0:
             if self.ending_unit_cells is None:
                 best_loss = np.array(self.candidates['best_loss'])
-                best_unit_cell = np.array(self.candidates['best_loss'])
+                best_unit_cell = np.stack(self.candidates['best_unit_cell'])
                 indices = np.argsort(best_loss)[:20]
                 unit_cell = best_unit_cell[indices]
                 loss = best_loss[indices]
@@ -1283,9 +1298,24 @@ class Optimizer:
             np.save(uc_scaled_mean_filename, self.uc_scaled_mean)
             np.save(uc_scaled_cov_filename, self.uc_scaled_cov)
 
-    def evaluate_regression(self):
-        efficiency = np.zeros((self.N, 3))
-        for entry_index in tqdm(range(self.N)):
+    def evaluate_regression(self, N_entries):
+        candidates_per_model = min(
+            len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_nn'],
+            len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_rf'],
+            self.opt_params['n_candidates_template'],
+            )
+        n_candidates_steps = 20
+        n_evaluations = 100
+        #threshold = 1
+        threshold = 0.003
+        candidate_steps = np.round(
+            np.linspace(100, candidates_per_model, n_candidates_steps),
+            decimals=0
+            ).astype(int)
+        efficiency = np.zeros((N_entries, n_candidates_steps, 7))
+        failure_rate = np.zeros((N_entries, n_candidates_steps, 7))
+        print(f'Performing evaluation assuming each group generates {candidates_per_model} candidates')
+        for entry_index in tqdm(range(N_entries)):
             for group_index, group in enumerate(self.indexer.data_params['split_groups']):
                 entry = self.indexer.data.iloc[entry_index]
 
@@ -1337,23 +1367,68 @@ class Optimizer:
                 candidate_uc_tm, _ = reindex_entry_triclinic(candidate_uc_tm, radians=True)
             
             reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])
-            distance_nn = np.linalg.norm(
+            xnn_true = np.array(entry['reindexed_xnn'])
+            candidate_xnn_nn = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(candidate_uc_nn))
+            candidate_xnn_rf = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(candidate_uc_rf))
+            candidate_xnn_tm = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(candidate_uc_tm))
+            """
+            distance_nn_all = np.linalg.norm(
                 candidate_uc_nn[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
                 axis=1
                 )
-            distance_rf = np.linalg.norm(
+            distance_rf_all = np.linalg.norm(
                 candidate_uc_rf[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
                 axis=1
                 )
-            distance_tm = np.linalg.norm(
+            distance_tm_all = np.linalg.norm(
                 candidate_uc_tm[:, :3] - reindexed_unit_cell_true[np.newaxis, :3],
                 axis=1
                 )
+            """
+            distance_nn_all = np.linalg.norm(candidate_xnn_nn - xnn_true[np.newaxis], axis=1)
+            distance_rf_all = np.linalg.norm(candidate_xnn_rf - xnn_true[np.newaxis], axis=1)
+            distance_tm_all = np.linalg.norm(candidate_xnn_tm - xnn_true[np.newaxis], axis=1)
+            for step_index, step_size in enumerate(candidate_steps):
+                efficiency_step = np.zeros((n_evaluations, 7))
+                for eval_index in range(n_evaluations):
+                    indices = self.rng.choice(candidates_per_model, step_size, replace=False)
+                    distance_nn = distance_nn_all[indices]
+                    distance_rf = distance_rf_all[indices]
+                    distance_tm = distance_tm_all[indices]
+                    efficiency_step[eval_index, 0] = np.sum(distance_nn < threshold) / step_size
+                    efficiency_step[eval_index, 1] = np.sum(distance_rf < threshold) / step_size
+                    efficiency_step[eval_index, 2] = np.sum(distance_tm < threshold) / step_size
+                    efficiency_step[eval_index, 3] = (np.sum(distance_nn < threshold) + np.sum(distance_rf < threshold)) / (2*step_size)
+                    efficiency_step[eval_index, 4] = (np.sum(distance_nn < threshold) + np.sum(distance_tm < threshold)) / (2*step_size)
+                    efficiency_step[eval_index, 5] = (np.sum(distance_rf < threshold) + np.sum(distance_tm < threshold)) / (2*step_size)
+                    efficiency_step[eval_index, 6] = (np.sum(distance_nn < threshold) + np.sum(distance_rf < threshold) + np.sum(distance_tm < threshold)) / (3*step_size)
 
-            efficiency[entry_index, 0] = np.sum(distance_nn<1) / distance_nn.size
-            efficiency[entry_index, 1] = np.sum(distance_rf<1) / distance_rf.size
-            efficiency[entry_index, 2] = np.sum(distance_tm<1) / distance_tm.size
-        np.save('efficiency.npy', efficiency)
+                efficiency[entry_index, step_index, :] = efficiency_step.mean(axis=0)
+
+                failure_rate[entry_index, step_index, :] = np.sum(efficiency_step == 0, axis=0) / n_evaluations
+
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        fig, axes = plt.subplots(2, 2, figsize=(8, 5), sharex=True)
+        labels = ['NN', 'RF', 'Temp', 'NN & RF', 'NN & Temp', 'RF & Temp', 'All']
+        for i in range(3):
+            axes[0, 0].plot(candidate_steps, efficiency[:, :, i].mean(axis=0), label=labels[i], color=colors[i])
+            axes[0, 1].plot(candidate_steps, failure_rate[:, :, i].mean(axis=0), label=labels[i], color=colors[i])
+        for i in range(3, 7):
+            axes[1, 0].plot(candidate_steps, efficiency[:, :, i].mean(axis=0), label=labels[i], color=colors[i])
+            axes[1, 1].plot(candidate_steps, failure_rate[:, :, i].mean(axis=0), label=labels[i], color=colors[i])
+
+        axes[1, 0].set_xlabel('Number of candidates')
+        axes[1, 1].set_xlabel('Number of candidates')
+        for i in range(2):
+            axes[i, 0].set_ylabel('Efficiency')
+            axes[i, 1].set_ylabel('Failure Rate')
+            axes[i, 1].legend(frameon=False)
+        fig.tight_layout()
+        fig.savefig(os.path.join(
+            self.save_to,
+            f'{self.bravais_lattice}_EfficiencyFailures_{self.opt_params["tag"]}.png'
+            ))
+        plt.show()
 
     def run(self):
         report_counts = {

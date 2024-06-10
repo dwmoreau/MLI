@@ -47,23 +47,16 @@ aP              | 61 - 84%
 * Documentation
     * Read MLIMethods and update for clarity
     - reread papers
-
-* Regression
-    * Reestimate efficiency / robustness
-
 * Optimization:
+    * xnn dist metric to measure distance between unit cells
+        - Perform perturbations in xnn space
     * subsampling
-        - don't completely throw out drop peaks. 
-          Increase the peaks sigma so it still updates the unit cell if there is no information
-          about one axis
+        - don't completely throw out dropped peaks. 
+          Increase the peaks sigma so it still updates the unit cell if there is no information about one axis
     * triclinic
         - does reducing the unit cells during optimization change many unit cells?
             - in check out of range
         - does reducing the unit cells during optimization hurt?
-    * ncdist metric to measure distance between unit cells
-        - Calculate ncdist in a notebook
-            - How does this scale with unit cell length magnitude distance?
-            - How does this differ if calculated in reciprocal space?
     * repulsion of redundant candidates
         - check for redundancy
     * Determine appropriate levels of randomness
@@ -82,6 +75,7 @@ aP              | 61 - 84%
 - Assignments
     - Convert to a recalibration approach:
         - pairwise differences get converted to a set of polynomial coefficients that operate on the pairwise difference array
+    - convert to a non-nn model
     - (000) assignments
     - How to improve this over baseline performance
 
@@ -99,21 +93,21 @@ aP              | 61 - 84%
         - ICSD
 
 - SWE:
+    - Convert all code to be based on Xnn
     - MITemplates.py fails after dataset creation. 
         - hkl_* is dropped from self.data during self.save()
     - convert angles to radians asap and delete all degree code
     - remove angle scaler and use cos(angle)
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
-    - get working on dials
-        - Get a working environment
-        - Train ML models
+    - Maybe throw out NN
 
 - Dominant zone:
     - 2D and 1D optimization
 
 - Indexing.py
 - Augmentation
+- Regression
 """
 import joblib
 import matplotlib.pyplot as plt

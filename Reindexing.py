@@ -487,7 +487,54 @@ def get_different_monoclinic_settings(unit_cell, partial_unit_cell=False, radian
     return reindexed_unit_cell
 
 
-def selling_reduction(unit_cell):
+def get_s6_from_unit_cell(unit_cell):
+    a = unit_cell[:, 0]
+    b = unit_cell[:, 1]
+    c = unit_cell[:, 2]
+    alpha = unit_cell[:, 3]
+    beta = unit_cell[:, 4]
+    gamma = unit_cell[:, 5]
+
+    ax = a
+    bx = b*np.cos(gamma)
+    by = b*np.sin(gamma)
+    cx = c*np.cos(beta)
+    arg = (np.cos(alpha) - np.cos(beta)*np.cos(gamma)) / np.sin(gamma)
+    cy = c * arg
+    cz = c * np.sqrt(np.sin(beta)**2 - arg**2)
+    z = np.zeros(unit_cell.shape[0])
+    om = np.array([
+        [ax, bx, cx],
+        [z,  by, cy],
+        [z,  z,  cz]
+        ])
+    om = np.moveaxis(om, [0, 1, 2], [1, 2, 0])
+    d = -np.sum(om, axis=2)
+
+    s6 = np.column_stack((
+        np.sum(om[:, :, 1] * om[:, :, 2], axis=1),
+        np.sum(om[:, :, 0] * om[:, :, 2], axis=1),
+        np.sum(om[:, :, 0] * om[:, :, 1], axis=1),
+        np.sum(om[:, :, 0] * d, axis=1),
+        np.sum(om[:, :, 1] * d, axis=1),
+        np.sum(om[:, :, 2] * d, axis=1),
+        ))
+    return s6
+
+
+def get_unit_cell_from_s6(s6):
+    a = np.sqrt(-(s6[:, 3] + s6[:, 1] + s6[:, 2]))
+    b = np.sqrt(-(s6[:, 4] + s6[:, 0] + s6[:, 2]))
+    c = np.sqrt(-(s6[:, 5] + s6[:, 0] + s6[:, 1]))
+    alpha = np.arccos(s6[:, 0] / (b*c))
+    beta = np.arccos(s6[:, 1] / (a*c))
+    gamma = np.arccos(s6[:, 2] / (a*b))
+
+    unit_cell = np.column_stack((a, b, c, alpha, beta, gamma))
+    return unit_cell
+
+
+def selling_reduction(unit_cell, space='direct'):
     reduction_op_bc = np.array([
         [-1, 0, 0, 0, 0, 0], 
         [1, 1, 0, 0, 0, 0],
@@ -813,37 +860,7 @@ def selling_reduction(unit_cell):
         [1, 0, 0],
         ])
 
-    a = unit_cell[:, 0]
-    b = unit_cell[:, 1]
-    c = unit_cell[:, 2]
-    alpha = unit_cell[:, 3]
-    beta = unit_cell[:, 4]
-    gamma = unit_cell[:, 5]
-
-    ax = a
-    bx = b*np.cos(gamma)
-    by = b*np.sin(gamma)
-    cx = c*np.cos(beta)
-    arg = (np.cos(alpha) - np.cos(beta)*np.cos(gamma)) / np.sin(gamma)
-    cy = c * arg
-    cz = c * np.sqrt(np.sin(beta)**2 - arg**2)
-    z = np.zeros(unit_cell.shape[0])
-    om = np.array([
-        [ax, bx, cx],
-        [z,  by, cy],
-        [z,  z,  cz]
-        ])
-    om = np.moveaxis(om, [0, 1, 2], [1, 2, 0])
-    d = -np.sum(om, axis=2)
-
-    s6 = np.column_stack((
-        np.sum(om[:, :, 1] * om[:, :, 2], axis=1),
-        np.sum(om[:, :, 0] * om[:, :, 2], axis=1),
-        np.sum(om[:, :, 0] * om[:, :, 1], axis=1),
-        np.sum(om[:, :, 0] * d, axis=1),
-        np.sum(om[:, :, 1] * d, axis=1),
-        np.sum(om[:, :, 2] * d, axis=1),
-        ))
+    s6 = get_s6_from_unit_cell(unit_cell)
 
     s6_reduced = s6.copy()
     hkl_transformation = np.repeat(np.eye(3)[np.newaxis], unit_cell.shape[0], axis=0)
@@ -853,10 +870,16 @@ def selling_reduction(unit_cell):
         s6_max_index = np.argmax(s6_reduced, axis=1)
         s6_max = np.take_along_axis(s6_reduced, s6_max_index[:, np.newaxis], axis=1)[:, 0]
         for axis_index in range(6):
-            indices = np.logical_and(
-                s6_max_index == axis_index,
-                s6_max > 0
-                )
+            if space == 'direct':
+                indices = np.logical_and(
+                    s6_max_index == axis_index,
+                    s6_max > 0
+                    )
+            elif space == 'reciprocal':
+                indices = np.logical_and(
+                    s6_max_index == axis_index,
+                    s6_max < 0
+                    )
             if indices.sum() > 0:
                 s6_reduced_next[indices] = np.matmul(
                     reduction_ops[axis_index],
@@ -875,6 +898,8 @@ def selling_reduction(unit_cell):
         np.sqrt(-(s6_reduced[:, 4] + s6_reduced[:, 0] + s6_reduced[:, 2])),
         np.sqrt(-(s6_reduced[:, 5] + s6_reduced[:, 0] + s6_reduced[:, 1]))
         )), axis=1)
+    if space == 'reciprocal':
+        order = order[:, ::-1]
 
     abc = np.all(order == np.array([0, 1, 2]), axis=1)
     acb = np.all(order == np.array([0, 2, 1]), axis=1)
@@ -897,16 +922,7 @@ def selling_reduction(unit_cell):
     hkl_transformation[cab] = hkl_transformation[cab] @ reflection_op_cab_hkl[np.newaxis]
     hkl_transformation[cba] = hkl_transformation[cba] @ reflection_op_cba_hkl[np.newaxis]
 
-    a_reduced = np.sqrt(-(s6_reduced[:, 3] + s6_reduced[:, 1] + s6_reduced[:, 2]))
-    b_reduced = np.sqrt(-(s6_reduced[:, 4] + s6_reduced[:, 0] + s6_reduced[:, 2]))
-    c_reduced = np.sqrt(-(s6_reduced[:, 5] + s6_reduced[:, 0] + s6_reduced[:, 1]))
-    alpha_reduced = np.arccos(s6_reduced[:, 0] / (b_reduced*c_reduced))
-    beta_reduced = np.arccos(s6_reduced[:, 1] / (a_reduced*c_reduced))
-    gamma_reduced = np.arccos(s6_reduced[:, 2] / (a_reduced*b_reduced))
-
-    unit_cell_reduced = np.column_stack((
-        a_reduced, b_reduced, c_reduced, alpha_reduced, beta_reduced, gamma_reduced
-        ))
+    unit_cell_reduced = get_unit_cell_from_s6(s6_reduced)
     return unit_cell_reduced, hkl_transformation, s6_reduced
 
 
