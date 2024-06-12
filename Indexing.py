@@ -41,29 +41,34 @@ oI              | 99.0%
 oP              | 99.5%
 mC              | 81 - 92%
 mP              | 85%
-aP              | 61 - 84%
+aP              | 78 - 85%
 
+* Generalization
+    - Goal:
+        1: Accuracy vs. error type
+            a: Unobserved peaks
+            b: Error in peak position
+            c: a & b
+        2: Implementation on in-house data
+        3: Implementation on RRUFF data
+    Steps:
+        1: Characterize peak lists
+            a: Peak breadth vs q2
+            b: Peak position error vs q2
+        2: Regenerate data with different types of error
+        3: Test model on 
 
 * Documentation
+    * Add discussion on mixture integer linear programing
     * Read MLIMethods and update for clarity
     - reread papers
-* Optimization:
-    * xnn dist metric to measure distance between unit cells
-        - Perform perturbations in xnn space
-    * subsampling
-        - don't completely throw out dropped peaks. 
-          Increase the peaks sigma so it still updates the unit cell if there is no information about one axis
-    * triclinic
-        - does reducing the unit cells during optimization change many unit cells?
-            - in check out of range
-        - does reducing the unit cells during optimization hurt?
-    * repulsion of redundant candidates
-        - check for redundancy
-    * Determine appropriate levels of randomness
-        - subsampling: random / softmax
-        - weighting: random / softmax
-        - resampling
 
+* Optimization:
+    * Testing
+        - Repulsion
+        - subsampling: random / softmax
+        - reweighting: random / softmax
+        - resampling
     - Monoclinic reset
         - Use different settings
         - weight the number of observations by the local median
@@ -73,11 +78,7 @@ aP              | 61 - 84%
     - Recalibration of template candidates
 
 - Assignments
-    - Convert to a recalibration approach:
-        - pairwise differences get converted to a set of polynomial coefficients that operate on the pairwise difference array
-    - convert to a non-nn model
     - (000) assignments
-    - How to improve this over baseline performance
 
 - Data
     - Peak lists
@@ -94,13 +95,9 @@ aP              | 61 - 84%
 
 - SWE:
     - Convert all code to be based on Xnn
-    - MITemplates.py fails after dataset creation. 
-        - hkl_* is dropped from self.data during self.save()
     - convert angles to radians asap and delete all degree code
-    - remove angle scaler and use cos(angle)
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
-    - Maybe throw out NN
 
 - Dominant zone:
     - 2D and 1D optimization
@@ -542,15 +539,16 @@ class Indexing:
 
     def save(self):
         hkl = np.stack(self.data['hkl'])
-        self.data['h'] = list(hkl[:, :, 0])
-        self.data['k'] = list(hkl[:, :, 1])
-        self.data['l'] = list(hkl[:, :, 2])
         reindexed_hkl = np.stack(self.data['reindexed_hkl'])
-        self.data['reindexed_h'] = list(reindexed_hkl[:, :, 0])
-        self.data['reindexed_k'] = list(reindexed_hkl[:, :, 1])
-        self.data['reindexed_l'] = list(reindexed_hkl[:, :, 2])
-        self.data.drop(columns=['hkl', 'reindexed_hkl'], inplace=True)
-        self.data.to_parquet(f'{self.save_to["data"]}/data.parquet')
+        save_to_data = self.data.copy()
+        save_to_data['h'] = list(hkl[:, :, 0])
+        save_to_data['k'] = list(hkl[:, :, 1])
+        save_to_data['l'] = list(hkl[:, :, 2])
+        save_to_data['reindexed_h'] = list(reindexed_hkl[:, :, 0])
+        save_to_data['reindexed_k'] = list(reindexed_hkl[:, :, 1])
+        save_to_data['reindexed_l'] = list(reindexed_hkl[:, :, 2])
+        save_to_data.drop(columns=['hkl', 'reindexed_hkl'], inplace=False)
+        save_to_data.to_parquet(f'{self.save_to["data"]}/data.parquet')
 
         for bravais_lattice in self.data_params['bravais_lattices']:
             np.save(

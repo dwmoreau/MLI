@@ -155,6 +155,52 @@ def get_unit_cell_from_xnn(xnn, partial_unit_cell=False, lattice_system=None, ra
     return reciprocal_uc_conversion(reciprocal_unit_cell, partial_unit_cell, lattice_system, radians)
 
 
+def get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False, lattice_system=None, radians=True):
+    reciprocal_unit_cell = reciprocal_uc_conversion(unit_cell, partial_unit_cell, lattice_system, radians)
+    return get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell, partial_unit_cell, lattice_system, radians)
+
+
+def fix_unphysical(xnn=None, unit_cell=None, rng=None, lattice_system=None, minimum_unit_cell=2, maximum_unit_cell=500):
+    if rng is None:
+        rng = np.random.default_rng()
+    if not xnn is None:
+        if lattice_system == 'triclinic':
+            xnn = fix_unphysical_triclinic(
+                xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        elif lattice_system == 'monoclinic':
+            xnn = fix_unphysical_monoclinic(
+                xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        elif lattice_system == 'rhombohedral':
+            xnn = fix_unphysical_rhombohedral(
+                xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        elif lattice_system in ['cubic', 'orthorhombic', 'tetragonal', 'hexagonal']:
+            xnn = fix_unphysical_box(
+                xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        return xnn
+    elif not unit_cell is None:
+        if lattice_system == 'triclinic':
+            unit_cell = fix_unphysical_triclinic(
+                unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        elif lattice_system == 'monoclinic':
+            unit_cell = fix_unphysical_monoclinic(
+                unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        elif lattice_system == 'rhombohedral':
+            unit_cell = fix_unphysical_rhombohedral(
+                unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        elif lattice_system in ['cubic', 'orthorhombic', 'tetragonal', 'hexagonal']:
+            unit_cell = fix_unphysical_box(
+                unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
+                )
+        return unit_cell
+
+
 def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500):
     """
     The purpose of this function is to ensure that RANDOMLY GENERATED triclinic unit cells are physically
@@ -366,6 +412,83 @@ def fix_unphysical_rhombohedral(xnn=None, unit_cell=None, rng=None, minimum_unit
         bad_angle = np.logical_or(unit_cell[:, 1] <= 0, unit_cell[:, 1] > 2*np.pi/3)
         if np.sum(bad_angle) > 0:
             unit_cell[bad_angle, 1] = rng.uniform(low=0, high=2*np.pi/3, size=np.sum(bad_angle))
+        return unit_cell
+
+
+def fix_unphysical_box(xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500):
+    if rng is None:
+        rng = np.random.default_rng()
+    if not xnn is None:
+        xnn = np.abs(xnn)
+        zero = xnn == 0
+        zero_indices = np.sum(zero, axis=1) > 0
+        xnn[zero_indices] = np.mean(xnn[~zero_indices])
+        return xnn
+    elif not unit_cell is None:
+        too_small_lengths = unit_cell < minimum_unit_cell
+        too_large_lengths = unit_cell > maximum_unit_cell
+        if np.sum(too_small_lengths) > 0:
+            indices = np.argwhere(too_small_lengths)
+            unit_cell[indices[:, 0], indices[:, 1]] = rng.uniform(
+                low=minimum_unit_cell,
+                high=1.05*minimum_unit_cell,
+                size=np.sum(too_small_lengths)
+                )
+        if np.sum(too_large_lengths) > 0:
+            indices = np.argwhere(too_large_lengths)
+            unit_cell[indices[:, 0], indices[:, 1]] = rng.uniform(
+                low=0.95*maximum_unit_cell,
+                high=maximum_unit_cell,
+                size=np.sum(too_large_lengths)
+                )
+        return unit_cell
+
+
+def fix_unphysical_monoclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500):
+    if rng is None:
+        rng = np.random.default_rng()
+    if not xnn is None:
+        xnn[:, :3] = np.abs(xnn[:, :3])
+        zero = xnn[:, :3] == 0
+        zero_indices = np.sum(zero[:, :3], axis=1) > 0
+        xnn[zero_indices, :3] = np.mean(xnn[~zero_indices, :3])
+        # reciprocal space => reciprocal_beta is acute
+        # 1 > cos(reciprocal_beta) > 0
+        xnn[:, 3] = np.abs(xnn[:, 3])
+        cos_rbeta = xnn[:, 3] / (2 * np.sqrt(xnn[:, 0]*xnn[:, 2]))
+        unphysical_angle = cos_rbeta >= 1
+        if np.sum(unphysical_angle) > 0:
+            cos_rbeta[unphysical_angle] = rng.uniform(low=0, high=1, size=np.sum(unphysical_angle))
+            xnn[unphysical_angle, 3] = cos_rbeta[unphysical_angle] * (2 * np.sqrt(xnn[unphysical_angle, 0]*xnn[unphysical_angle, 2]))
+        return xnn
+    elif not unit_cell is None:
+        too_small_lengths = unit_cells[:, :3] < minimum_unit_cell
+        too_large_lengths = unit_cells[:, :3] > maximum_unit_cell
+        if np.sum(too_small_lengths) > 0:
+            indices = np.argwhere(too_small_lengths)
+            unit_cells[indices[:, 0], indices[:, 1]] = rng.uniform(
+                low=minimum_unit_cell,
+                high=1.05*minimum_unit_cell,
+                size=np.sum(too_small_lengths)
+                )
+        if np.sum(too_large_lengths) > 0:
+            indices = np.argwhere(too_large_lengths)
+            unit_cells[indices[:, 0], indices[:, 1]] = rng.uniform(
+                low=0.95*maximum_unit_cell,
+                high=maximum_unit_cell,
+                size=np.sum(too_large_lengths)
+                )
+
+        too_small_angles = unit_cells[:, 3] < np.pi / 2
+        too_large_angles = unit_cells[:, 3] > np.pi
+        if np.sum(too_small_angles) > 0:
+            unit_cells[too_small_angles, 3] = np.pi - unit_cells[too_small_angles, 3]
+        if np.sum(too_large_angles) > 0:
+            unit_cells[too_large_angles, 3] = rng.uniform(
+                low=0.95*maximum_angle,
+                high=maximum_angle,
+                size=np.sum(too_large_angles)
+                )
         return unit_cell
 
 
