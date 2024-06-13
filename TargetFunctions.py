@@ -133,7 +133,23 @@ class CandidateOptLoss_xnn:
     def update(self, hkl, softmax, xnn_init):
         self.hkl = hkl
         self.softmax = softmax
-        if self.lattice_system == 'cubic':
+        if self.lattice_system == 'triclinic':
+            self.hkl2 = np.concatenate((
+                self.hkl**2, 
+                (self.hkl[:, :, 1] * self.hkl[:, :, 2])[:, :, np.newaxis],
+                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis],
+                (self.hkl[:, :, 0] * self.hkl[:, :, 1])[:, :, np.newaxis],
+                ),
+                axis=2
+                )
+        elif self.lattice_system == 'monoclinic':
+            self.hkl2 = np.concatenate((
+                self.hkl**2, 
+                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis]
+                ),
+                axis=2
+                )
+        elif self.lattice_system == 'cubic':
             self.hkl2 = (self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2 + self.hkl[:, :, 2]**2)[:, :, np.newaxis]
         elif self.lattice_system == 'tetragonal':
             self.hkl2 = np.stack((
@@ -144,13 +160,6 @@ class CandidateOptLoss_xnn:
                 )
         elif self.lattice_system == 'orthorhombic':
             self.hkl2 = self.hkl**2
-        elif self.lattice_system == 'monoclinic':
-            self.hkl2 = np.concatenate((
-                self.hkl**2, 
-                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis]
-                ),
-                axis=2
-                )
         elif self.lattice_system == 'hexagonal':
             self.hkl2 = np.stack((
                 (self.hkl[:, :, 0]**2 + self.hkl[:, :, 0]*self.hkl[:, :, 1] + self.hkl[:, :, 1]**2),
@@ -162,15 +171,6 @@ class CandidateOptLoss_xnn:
             self.hkl2 = np.stack((
                 (self.hkl[:, :, 0]**2 + self.hkl[:, :, 1]**2 + self.hkl[:, :, 2]**2),
                 (self.hkl[:, :, 0]*self.hkl[:, :, 1] + self.hkl[:, :, 0]*self.hkl[:, :, 2] + self.hkl[:, :, 1]*self.hkl[:, :, 2]),
-                ),
-                axis=2
-                )
-        else:
-            self.hkl2 = np.concatenate((
-                self.hkl**2, 
-                (self.hkl[:, :, 1] * self.hkl[:, :, 2])[:, :, np.newaxis],
-                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis],
-                (self.hkl[:, :, 0] * self.hkl[:, :, 1])[:, :, np.newaxis],
                 ),
                 axis=2
                 )

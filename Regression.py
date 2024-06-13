@@ -120,6 +120,8 @@ class RegressionBase:
             n_ratio_bins = self.model_params['random_forest']['n_dominant_zone_bins']
             train = data[data['train']]
             unit_cell_train = np.stack(train['reindexed_unit_cell'])
+            unit_cell_volume = np.array(train['reindexed_volume'])
+            sorted_unit_cell_volume = np.sort(unit_cell_volume)
             if self.lattice_system == 'rhombohedral':
                 # Ratio in rhombohedral is the cosine of the angle
                 # angle is limited between 0 and 120 degrees or 1 and -1/2 (cos(alpha))
@@ -130,9 +132,13 @@ class RegressionBase:
                 # first axis are unit cell magnitudes.
                 ratio_bins = np.concatenate([[0], np.linspace(0.3, 1, n_ratio_bins)])
                 ratio = unit_cell_train[:, :3].min(axis=1) / unit_cell_train[:, :3].max(axis=1)
-
+            volume_bins = np.linspace(
+                sorted_unit_cell_volume[int(0.001*sorted_unit_cell_volume.size)],
+                sorted_unit_cell_volume[int(0.999*sorted_unit_cell_volume.size)],
+                11
+                )
             n_estimators_per_bin = int(np.ceil(
-                self.model_params['random_forest']['n_estimators'] / n_ratio_bins
+                self.model_params['random_forest']['n_estimators'] / (2*n_ratio_bins)
                 ))
             self.random_forest_regressor = [
                 RandomForestRegressor(
@@ -141,7 +147,7 @@ class RegressionBase:
                     min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
                     max_depth=self.model_params['random_forest']['max_depth'],
                     max_samples=self.model_params['random_forest']['subsample'],
-                    ) for _ in range(n_ratio_bins)
+                    ) for _ in range(2*n_ratio_bins)
                 ]
             for ratio_index in range(n_ratio_bins):
                 indices_train = np.logical_and(
@@ -151,6 +157,17 @@ class RegressionBase:
                 # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
                 # function. The true values are 'reindexed_unit_cell_scaled'
                 self.random_forest_regressor[ratio_index].fit(
+                    train_inputs['q2_scaled'][indices_train],
+                    train_true[f'uc_pred_scaled_{self.group}'][indices_train]
+                    )
+            for volume_index in range(n_ratio_bins):
+                indices_train = np.logical_and(
+                    unit_cell_volume >= volume_bins[ratio_index],
+                    unit_cell_volume < volume_bins[ratio_index + 1]
+                    )
+                # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
+                # function. The true values are 'reindexed_unit_cell_scaled'
+                self.random_forest_regressor[volume_index + ratio_index + 1].fit(
                     train_inputs['q2_scaled'][indices_train],
                     train_true[f'uc_pred_scaled_{self.group}'][indices_train]
                     )
@@ -169,7 +186,7 @@ class RegressionBase:
         else:
             uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
             tree_index = 0
-            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+            for ratio_index in range(2*self.model_params['random_forest']['n_dominant_zone_bins']):
                 for tree in range(len(self.random_forest_regressor[ratio_index].estimators_)):
                     uc_pred_scaled_tree[:, :, tree_index] = \
                         self.random_forest_regressor[ratio_index].estimators_[tree].predict(q2_scaled)
@@ -556,7 +573,7 @@ class Regression_AlphaBeta(RegressionBase):
                     f'{self.save_to}/{self.group}_random_forest_regressor.bin'
                     )
             else:
-                for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                for ratio_index in range(2*self.model_params['random_forest']['n_dominant_zone_bins']):
                     joblib.dump(
                         self.random_forest_regressor[ratio_index],
                         f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
@@ -622,7 +639,7 @@ class Regression_AlphaBeta(RegressionBase):
                     )
             else:
                 self.random_forest_regressor = []
-                for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                for ratio_index in range(2*self.model_params['random_forest']['n_dominant_zone_bins']):
                     self.random_forest_regressor.append(joblib.load(
                         f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
                         ))

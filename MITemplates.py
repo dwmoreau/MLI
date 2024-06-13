@@ -116,6 +116,13 @@ class MITemplates:
             sampling_probability = np.ones(self.template_params['templates_per_dominant_zone_bin'])
         elif self.lattice_system == 'rhombohedral':
             reindexed_xnn = np.stack(training_data['reindexed_xnn'])
+            unit_cell_volume = np.array(training_data['reindexed_volume'])
+            sorted_unit_cell_volume = np.sort(unit_cell_volume)
+            volume_bins = np.linspace(
+                sorted_unit_cell_volume[int(0.001*sorted_unit_cell_volume.size)],
+                sorted_unit_cell_volume[int(0.999*sorted_unit_cell_volume.size)],
+                11
+                )
             ratio = reindexed_xnn[:, 3] / reindexed_xnn[:, 0]
             ratio_bins = np.linspace(-1, 2, 21)
             ra = np.sqrt(reindexed_xnn[:, 0])
@@ -153,6 +160,30 @@ class MITemplates:
                             self.hkl_ref_length,
                             self.rng
                             ))
+            for i in range(10):
+                indices = np.logical_and(
+                    unit_cell_volume > volume_bins[i],
+                    unit_cell_volume <= volume_bins[i + 1]
+                    )
+                if np.sum(indices) > 0:
+                    hkl_labels_bin = hkl_labels_all[indices]
+                    if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
+                        sampling_ratio = hkl_labels_bin.shape[0] / self.template_params['templates_per_dominant_zone_bin']
+                        sampling_probability.append(
+                            sampling_ratio * np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
+                        mi_sets.append(hkl_labels_bin)
+                    else:
+                        sampling_probability.append(
+                            np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
+                        mi_sets.append(make_sets(
+                            self.template_params['templates_per_dominant_zone_bin'],
+                            self.n_points,
+                            hkl_labels_bin,
+                            self.hkl_ref_length,
+                            self.rng
+                            ))
             miller_index_templates = np.row_stack(mi_sets)
             sampling_probability = np.concatenate(sampling_probability)
         else:
@@ -168,6 +199,14 @@ class MITemplates:
             reindexed_hkl = np.stack(training_data['reindexed_hkl'])[:, :, :, 0]
             hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
             hkl_information_hist = np.bincount(hkl_information, minlength=self.n_points)
+
+            unit_cell_volume = np.array(training_data['reindexed_volume'])
+            sorted_unit_cell_volume = np.sort(unit_cell_volume)
+            volume_bins = np.linspace(
+                sorted_unit_cell_volume[int(0.001*sorted_unit_cell_volume.size)],
+                sorted_unit_cell_volume[int(0.999*sorted_unit_cell_volume.size)],
+                11
+                )
 
             mean_ratio = np.zeros((self.n_points, 2, 2))
             for i in range(self.n_points):
@@ -246,8 +285,33 @@ class MITemplates:
                                         self.rng
                                         ))
 
+            for i in range(10):
+                indices = np.logical_and(
+                    unit_cell_volume > volume_bins[i],
+                    unit_cell_volume <= volume_bins[i + 1]
+                    )
+                if np.sum(indices) > 0:
+                    hkl_labels_bin = hkl_labels_all[indices]
+                    if hkl_labels_bin.shape[0] < self.template_params['templates_per_dominant_zone_bin']:
+                        sampling_ratio = hkl_labels_bin.shape[0] / self.template_params['templates_per_dominant_zone_bin']
+                        sampling_probability.append(
+                            sampling_ratio * np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
+                        mi_sets.append(hkl_labels_bin)
+                    else:
+                        sampling_probability.append(
+                            np.ones(self.template_params['templates_per_dominant_zone_bin'])
+                            )
+                        mi_sets.append(make_sets(
+                            self.template_params['templates_per_dominant_zone_bin'],
+                            self.n_points,
+                            hkl_labels_bin,
+                            self.hkl_ref_length,
+                            self.rng
+                            ))
             miller_index_templates = np.row_stack(mi_sets)
             sampling_probability = np.concatenate(sampling_probability)
+
         self.miller_index_templates, unique_indices = np.unique(
             miller_index_templates, axis=0, return_index=True
             )

@@ -41,7 +41,8 @@ oI              | 99.0%
 oP              | 99.5%
 mC              | 81 - 92%
 mP              | 85%
-aP              | 78 - 85%
+aP              | 80 - 87%
+
 
 * Generalization
     - Goal:
@@ -65,14 +66,24 @@ aP              | 78 - 85%
 
 * Optimization:
     * Testing
+        - subsampling: random
+        - reweighting: random
+        - no common assignments
+        - subsampling: random
+        - reweighting: random
         - Repulsion
-        - subsampling: random / softmax
-        - reweighting: random / softmax
-        - resampling
+        - n_drop
     - Monoclinic reset
         - Use different settings
         - weight the number of observations by the local median
         - extend to triclinic
+    - Performance
+        - Strip out NN assigner model & softmaxes
+        - Find better parameters
+            - Maximum number of explainers. Would 10 work fine?
+            - Number of candidates
+            - Number of exhaustive search cycles
+            - Exhaustive search period
 
 - Templating
     - Recalibration of template candidates
