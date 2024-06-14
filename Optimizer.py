@@ -144,101 +144,60 @@ class Candidates:
         self.sg_true = int(entry['spacegroup_number'])
         self.spacegroup_symbol_hm_true = entry['reindexed_spacegroup_symbol_hm']
 
-        self.df_columns = [
-            'unit_cell',
-            'reciprocal_unit_cell',
-            'xnn',
-            'hkl',
-            'loss',
-            'best_loss',
-            'best_xnn',
-            'best_unit_cell',
-            'best_returns_trajectory',
-            'neighbors',
-            'loss_trajectory',
-            'xnn_trajectory',
-            'xnn_drift',
-            ]
-        self.candidates = pd.DataFrame(columns=self.df_columns)
+        self.df_columns = ['unit_cell', 'xnn', 'loss', 'candidate_index']
         self.explainers = pd.DataFrame(columns=self.df_columns)
 
-        self.candidates['unit_cell'] = list(unit_cell)    
+        self.unit_cell = unit_cell
         self.update_xnn_from_unit_cell()
         self.hkl_true_check = get_hkl_matrix(self.hkl_true, self.lattice_system)
-        self.candidates['best_returns'] = np.zeros(unit_cell.shape[0], dtype=int)
-        self.candidates['best_loss'] = np.zeros(unit_cell.shape[0])
-        self.candidates['best_xnn'] = self.candidates['xnn'].copy()
-        self.candidates['best_unit_cell'] = self.candidates['unit_cell'].copy()
-        self.ending_xnn = None
-        self.ending_loss = None
-
-        # Exhaustive search parameters
-        self.starting_xnn = np.stack(self.candidates['xnn']).copy()
-        self.max_neighbors = max_neighbors
-        self.radius = radius
+        self.best_loss = np.zeros(self.n)
+        self.best_xnn = self.xnn.copy()
+        self.xnn_for_reset = None
+        self.candidate_index = np.arange(self.n)
 
         self.fix_out_of_range_candidates()
+        # Exhaustive search parameters
+        self.max_neighbors = max_neighbors
+        self.radius = radius
         self.redistribute_candidates()
+        self.starting_xnn = self.xnn.copy()
+
+    def fix_bad_conversions(self):
+        bad_conversions = np.sum(np.isnan(self.reciprocal_unit_cell), axis=1) > 0
+        good_indices = np.arange(self.n)[~bad_conversions]
+        n_bad = np.sum(bad_conversions)
+        if n_bad > 0:
+            if n_bad > bad_conversions.size - n_bad:
+                good_indices = self.rng.choice(good_indices, replace=True, size=n_bad)
+            else:
+                good_indices = self.rng.choice(good_indices, replace=False, size=n_bad)
+            self.xnn[bad_conversions] = self.xnn[good_indices]
+            self.reciprocal_unit_cell[bad_conversions] = self.reciprocal_unit_cell[good_indices]
+            self.unit_cell[bad_conversions] = self.unit_cell[good_indices]
 
     def update_xnn_from_unit_cell(self):
-        unit_cell = np.stack(self.candidates['unit_cell'])
-        reciprocal_unit_cell = reciprocal_uc_conversion(
-            unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+        self.reciprocal_unit_cell = reciprocal_uc_conversion(
+            self.unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )
-        xnn = get_xnn_from_reciprocal_unit_cell(
-            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+        self.xnn = get_xnn_from_reciprocal_unit_cell(
+            self.reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )
-
-        bad_conversions = np.sum(np.isnan(reciprocal_unit_cell), axis=1) > 0
-        good_indices = np.arange(self.n)[~bad_conversions]
-        n_bad = np.sum(bad_conversions)
-        if n_bad > 0:
-            if n_bad > bad_conversions.size - n_bad:
-                good_indices = self.rng.choice(good_indices, replace=True, size=n_bad)
-            else:
-                good_indices = self.rng.choice(good_indices, replace=False, size=n_bad)
-            xnn[bad_conversions] = xnn[good_indices]
-            reciprocal_unit_cell[bad_conversions] = reciprocal_unit_cell[good_indices]
-            unit_cell[bad_conversions] = unit_cell[good_indices]
-
-        self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
-        self.candidates['unit_cell'] = list(unit_cell)
-        self.candidates['xnn'] = list(xnn)
+        self.fix_bad_conversions()
 
     def update_unit_cell_from_xnn(self):
-        xnn = np.stack(self.candidates['xnn'])
-        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+        self.reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            self.xnn, partial_unit_cell=True, lattice_system=self.lattice_system
             )
-        unit_cell = reciprocal_uc_conversion(
-            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+        self.unit_cell = reciprocal_uc_conversion(
+            self.reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )
-
-        bad_conversions = np.sum(np.isnan(reciprocal_unit_cell), axis=1) > 0
-        good_indices = np.arange(self.n)[~bad_conversions]
-        n_bad = np.sum(bad_conversions)
-        if n_bad > 0:
-            if n_bad > bad_conversions.size - n_bad:
-                good_indices = self.rng.choice(good_indices, replace=True, size=n_bad)
-            else:
-                good_indices = self.rng.choice(good_indices, replace=False, size=n_bad)
-            xnn[bad_conversions] = xnn[good_indices]
-            reciprocal_unit_cell[bad_conversions] = reciprocal_unit_cell[good_indices]
-            unit_cell[bad_conversions] = unit_cell[good_indices]
-
-        self.candidates['reciprocal_unit_cell'] = list(reciprocal_unit_cell)
-        self.candidates['unit_cell'] = list(unit_cell)
-        self.candidates['xnn'] = list(xnn)
+        self.fix_bad_conversions()
 
     def diagnostics(self, hkl_ref_length):
-        unit_cell = np.stack(self.candidates['unit_cell'])
-        reciprocal_unit_cell = np.stack(self.candidates['reciprocal_unit_cell'])
-        xnn = np.stack(self.candidates['xnn'])
-        reciprocal_unit_cell_rms = 1/np.sqrt(self.n_uc) * np.linalg.norm(reciprocal_unit_cell - self.reciprocal_unit_cell_true, axis=1)
-        reciprocal_unit_cell_max_diff = np.max(np.abs(reciprocal_unit_cell - self.reciprocal_unit_cell_true), axis=1)
+        reciprocal_unit_cell_rms = 1/np.sqrt(self.n_uc) * np.linalg.norm(self.reciprocal_unit_cell - self.reciprocal_unit_cell_true, axis=1)
+        reciprocal_unit_cell_max_diff = np.max(np.abs(self.reciprocal_unit_cell - self.reciprocal_unit_cell_true), axis=1)
 
-        hkl = np.stack(self.candidates['hkl'])
-        hkl_pred_check = get_hkl_matrix(hkl, self.lattice_system)
+        hkl_pred_check = get_hkl_matrix(self.hkl, self.lattice_system)
         hkl_correct = self.hkl_true_check[np.newaxis] == hkl_pred_check
         hkl_accuracy = np.count_nonzero(hkl_correct, axis=1) / self.n_points
 
@@ -276,40 +235,40 @@ class Candidates:
                 )
 
             distance_ruc = np.linalg.norm(
-                reciprocal_unit_cell[np.newaxis, :, :3] - reciprocal_unit_cell_true[:, np.newaxis, :3], 
+                self.reciprocal_unit_cell[np.newaxis, :, :3] - reciprocal_unit_cell_true[:, np.newaxis, :3], 
                 axis=2
                 ).min(axis=0)
             distance_uc = np.linalg.norm(
-                unit_cell[np.newaxis, :, :3] - unit_cell_true[:, np.newaxis, :3],
+                self.unit_cell[np.newaxis, :, :3] - unit_cell_true[:, np.newaxis, :3],
                 axis=2
                 ).min(axis=0)
             distance_xnn = np.linalg.norm(
-                xnn[np.newaxis, :, :3] - xnn_true[:, np.newaxis, :3],
+                self.xnn[np.newaxis, :, :3] - xnn_true[:, np.newaxis, :3],
                 axis=2
                 ).min(axis=0)
         elif self.lattice_system == 'triclinic':
             distance_ruc = np.linalg.norm(
-                reciprocal_unit_cell[:, :3] - self.reciprocal_unit_cell_true[np.newaxis, :3], 
+                self.reciprocal_unit_cell[:, :3] - self.reciprocal_unit_cell_true[np.newaxis, :3], 
                 axis=1
                 )
             distance_uc = np.linalg.norm(
-                unit_cell[:, :3] - self.unit_cell_true[np.newaxis, :3],
+                self.unit_cell[:, :3] - self.unit_cell_true[np.newaxis, :3],
                 axis=1
                 )
-            distance_xnn = np.linalg.norm(xnn - self.xnn_true[np.newaxis], axis=1)
-            s6 = get_s6_from_unit_cell(unit_cell)
+            distance_xnn = np.linalg.norm(self.xnn - self.xnn_true[np.newaxis], axis=1)
+            s6 = get_s6_from_unit_cell(self.unit_cell)
             s6_true = get_s6_from_unit_cell(self.unit_cell_true[np.newaxis])[0]
             distance_s6 = np.linalg.norm(s6 - s6_true[np.newaxis], axis=1)
         elif self.lattice_system == 'rhombohedral':
-            distance_ruc = np.abs(reciprocal_unit_cell[:, 0] - self.reciprocal_unit_cell_true[np.newaxis, 0])
-            distance_uc = np.abs(unit_cell[:, 0] - self.unit_cell_true[np.newaxis, 0])
-            distance_xnn = np.abs(xnn[:, 0] - self.xnn_true[np.newaxis, 0])
+            distance_ruc = np.abs(self.reciprocal_unit_cell[:, 0] - self.reciprocal_unit_cell_true[np.newaxis, 0])
+            distance_uc = np.abs(self.unit_cell[:, 0] - self.unit_cell_true[np.newaxis, 0])
+            distance_xnn = np.abs(self.xnn[:, 0] - self.xnn_true[np.newaxis, 0])
         else:
             distance_ruc = np.linalg.norm(
-                reciprocal_unit_cell - self.reciprocal_unit_cell_true[np.newaxis], axis=1
+                self.reciprocal_unit_cell - self.reciprocal_unit_cell_true[np.newaxis], axis=1
                 )
-            distance_uc = np.linalg.norm(unit_cell - self.unit_cell_true[np.newaxis], axis=1)
-            distance_xnn = np.linalg.norm(xnn - self.xnn_true[np.newaxis], axis=1)
+            distance_uc = np.linalg.norm(self.unit_cell - self.unit_cell_true[np.newaxis], axis=1)
+            distance_xnn = np.linalg.norm(self.xnn - self.xnn_true[np.newaxis], axis=1)
         counts_ruc = [np.sum(distance_ruc < i) for i in [0.005, 0.01, 0.02]]
         counts_uc = [np.sum(distance_uc < i) for i in [1, 2, 3]]
         counts_xnn = [np.sum(distance_xnn < i) for i in [0.003, 0.004, 0.005]]
@@ -324,7 +283,7 @@ class Candidates:
         print(f'True unit cell:              {np.round(self.unit_cell_true, decimals=4)}')
         print(f'True reciprocal unit cell:   {np.round(self.reciprocal_unit_cell_true, decimals=4)}')
         print(f'True Xnn:                    {np.round(self.xnn_true, decimals=4)}')
-        print(f'Closest unit cell:           {np.round(reciprocal_unit_cell[np.argmin(reciprocal_unit_cell_rms)], decimals=4)}')
+        print(f'Closest unit cell:           {np.round(self.reciprocal_unit_cell[np.argmin(reciprocal_unit_cell_rms)], decimals=4)}')
         print(f'Closest unit cell rms:       {reciprocal_unit_cell_rms.min():2.2f}')
         print(f'Smallest unit cell max diff: {reciprocal_unit_cell_max_diff.min():2.2f}')
         print(f'Mean unit cell rms:          {reciprocal_unit_cell_rms.mean():2.2f}')
@@ -341,7 +300,7 @@ class Candidates:
         output_dict = {
             'entry_index': None,
             'true_unit_cell': self.reciprocal_unit_cell_true,
-            'closest_unit_cell': reciprocal_unit_cell[np.argmin(reciprocal_unit_cell_rms)],
+            'closest_unit_cell': self.reciprocal_unit_cell[np.argmin(reciprocal_unit_cell_rms)],
             'best_hkl_accuracy': hkl_accuracy.max(),
             'mean_hkl_accuracy': hkl_accuracy.mean(),
             'bravais_lattice': self.bl_true,
@@ -358,16 +317,16 @@ class Candidates:
         return pd.Series(output_dict)
 
     def fix_out_of_range_candidates(self):
-        xnn = np.stack(self.candidates['xnn'])
-        if self.lattice_system in ['rhombohedral', 'triclinic', 'cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            xnn = fix_unphysical(
-                xnn=xnn,
-                rng=self.rng,
-                minimum_unit_cell=self.minimum_unit_cell, 
-                maximum_unit_cell=self.maximum_unit_cell,
-                lattice_system=self.lattice_system,
-                )
+        self.xnn = fix_unphysical(
+            xnn=self.xnn,
+            rng=self.rng,
+            minimum_unit_cell=self.minimum_unit_cell, 
+            maximum_unit_cell=self.maximum_unit_cell,
+            lattice_system=self.lattice_system,
+            )
+        """
         elif self.lattice_system == 'monoclinic':
+            assert False
             # The fix unphysical equivalent has not been tested
             too_small_lengths = unit_cells[:, :3] < self.minimum_unit_cell
             too_large_lengths = unit_cells[:, :3] > self.maximum_unit_cell
@@ -396,8 +355,7 @@ class Candidates:
                     high=self.maximum_angle,
                     size=np.sum(too_large_angles)
                     )
-            
-        self.candidates['xnn'] = list(xnn)
+        """
         self.update_unit_cell_from_xnn()
 
     def get_neighbor_distance(self, xnn0, xnn1):
@@ -412,19 +370,22 @@ class Candidates:
         else:
             norm_factor = np.ones(n_indices)
 
-        if self.lattice_system in ['triclinic', 'monoclinic', 'cubic', 'tetragonal', 'hexagonal', 'orthorhombic']:
-            perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.n_uc))
-            perturbation *= (self.radius*norm_factor/np.linalg.norm(perturbation, axis=1))[:, np.newaxis]
-            xnn[from_indices] = xnn[to_indices] + perturbation
-        elif self.lattice_system == 'rhombohedral':
-            perturbation = self.rng.uniform(low=-1, high=1, size=n_indices)
-            unit_cells[from_indices, 0] = unit_cells[to_indices, 0] + norm_factor*perturbation
-            unit_cells[:, 0] = np.abs(unit_cells[:, 0])
-            unit_cells[from_indices, 1] = np.arccos(
-                self.rng.uniform(low=-0.5, high=1, size=n_indices)
-                )
+        perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.n_uc))
+        perturbation *= (self.radius*norm_factor/np.linalg.norm(perturbation, axis=1))[:, np.newaxis]
+        xnn[from_indices] = xnn[to_indices] + perturbation
+        xnn = fix_unphysical(
+            xnn=xnn,
+            rng=self.rng,
+            minimum_unit_cell=self.minimum_unit_cell, 
+            maximum_unit_cell=self.maximum_unit_cell,
+            lattice_system=self.lattice_system
+            )
 
+        # Enforce the constraints on the unit cells.
+        # This is the reindexing task
         if self.lattice_system == 'monoclinic':
+            assert False
+            # Order lattice
             permute_indices = unit_cells[:, 0] > unit_cells[:, 2]
             unit_cells[permute_indices] = np.column_stack((
                 unit_cells[permute_indices, 2],
@@ -433,29 +394,15 @@ class Candidates:
                 unit_cells[permute_indices, 3],
                 ))
         elif self.lattice_system == 'orthorhombic':
-            if self.bravais_lattice != 'oC':
-                # base centered orthombic unit cells are not ordered
-                order = np.argsort(unit_cells, axis=1)
-                unit_cells = np.take_along_axis(unit_cells, order, axis=1)
-        elif self.lattice_system in ['triclinic', 'rhombohedral', 'cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            xnn = fix_unphysical(
-                xnn=xnn,
-                rng=self.rng,
-                minimum_unit_cell=self.minimum_unit_cell, 
-                maximum_unit_cell=self.maximum_unit_cell,
-                lattice_system=self.lattice_system
-                )
-            if self.lattice_system == 'triclinic':
-                unit_cell = get_unit_cell_from_xnn(xnn)
-                unit_cell, _ = reindex_entry_triclinic(unit_cell, radians=True)
-                xnn = get_xnn_from_unit_cell(unit_cell)
-            self.candidates['xnn'] = list(xnn)
-            self.update_unit_cell_from_xnn()
+            assert False            
+        elif self.lattice_system == 'triclinic':
+            unit_cell = get_unit_cell_from_xnn(xnn)
+            unit_cell, _ = reindex_entry_triclinic(unit_cell, radians=True)
+            xnn = get_xnn_from_unit_cell(unit_cell)
         return xnn
 
     def redistribute_candidates(self):
-        xnn = np.stack(self.candidates['xnn'])
-        redistributed_xnn = xnn.copy()
+        redistributed_xnn = self.xnn.copy()
         largest_neighborhood = self.max_neighbors + 1
         n_redistributed = 0 
         while largest_neighborhood > self.max_neighbors:
@@ -492,27 +439,25 @@ class Candidates:
                 to_indices = low_density_indices[
                     self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
                     ]
-                xnn = self.redistribute_and_perturb_xnn(
+                redistributed_xnn = self.redistribute_and_perturb_xnn(
                     redistributed_xnn, from_indices, to_indices
                     )
+        self.xnn = redistributed_xnn
+        self.update_unit_cell_from_xnn()
         print(f'Redistributed {n_redistributed} candidates')
 
     def exhaustive_search(self):
-        xnn = np.stack(self.candidates['best_xnn']).copy()
         if self.lattice_system == 'triclinic':
-            unit_cell_ = get_unit_cell_from_xnn(xnn)
-            unit_cell, _ = reindex_entry_triclinic(unit_cell_, radians=True)
-            xnn = get_xnn_from_unit_cell(unit_cell)
+            self.unit_cell, _ = reindex_entry_triclinic(get_unit_cell_from_xnn(self.xnn), radians=True)
+            self.xnn = get_xnn_from_unit_cell(self.unit_cell)
 
-        loss = np.stack(self.candidates['best_loss']).copy()
-        if self.ending_xnn is None:
-            self.ending_xnn = xnn.copy()
-            self.ending_loss = loss.copy()
+        # This get the best candidate during this round for use in monoclinic_reset()
+        if self.xnn_for_reset is None:
+            self.xnn_for_reset = self.best_xnn.copy()
         else:
-            self.ending_xnn = np.row_stack((self.ending_xnn, xnn))
-            self.ending_loss = np.concatenate((self.ending_loss, loss))
+            self.xnn_for_reset = np.row_stack((self.xnn_for_reset, self.best_xnn))
 
-        distance = self.get_neighbor_distance(xnn, self.starting_xnn)
+        distance = self.get_neighbor_distance(self.xnn, self.starting_xnn)
         neighbor_array = distance < self.radius
         neighbor_count = np.sum(neighbor_array, axis=1)
         from_indices = np.where(neighbor_count > self.max_neighbors)[0]
@@ -528,230 +473,58 @@ class Candidates:
                 replace = True
             choice = self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
             to_indices = low_density_indices[choice]
-            xnn = self.redistribute_and_perturb_xnn(xnn, from_indices, to_indices)
+            self.xnn = self.redistribute_and_perturb_xnn(self.xnn, from_indices, to_indices)
 
             not_chosen = np.delete(np.arange(low_density_indices.size), choice)
             not_chosen_indices = low_density_indices[not_chosen]
             
-            xnn = self.redistribute_and_perturb_xnn(
-                xnn, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
+            self.xnn = self.redistribute_and_perturb_xnn(
+                self.xnn, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
                 )
         else:
-            not_chosen_indices = np.ones(xnn.shape[0], dtype=bool)
-            xnn = self.redistribute_and_perturb_xnn(
-                xnn, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
+            not_chosen_indices = np.ones(self.xnn.shape[0], dtype=bool)
+            self.xnn = self.redistribute_and_perturb_xnn(
+                self.xnn, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
                 )
 
-        self.starting_xnn = np.row_stack((self.starting_xnn, xnn))
         print(f'Exhaustive search redistributed {excess_neighbors} candidates')
-        self.candidates['xnn'] = list(xnn)
+        self.starting_xnn = np.row_stack((self.starting_xnn, self.xnn))
         self.update_unit_cell_from_xnn()
-        self.candidates['best_xnn'] = list(xnn)
-        self.candidates['best_loss'] = np.zeros(xnn.shape[0])
-        start = self.candidates.index.max() + 1
-        self.candidates.reset_index(
-            names=list(np.arange(start, start + self.n)), drop=True, inplace=True
-            )
+        self.best_xnn = self.xnn.copy()
+        self.best_loss = np.zeros(self.xnn.shape[0])
+        start = self.candidate_index.max() + 1
+        self.candidate_index = np.arange(start, start + self.n)
         self.fix_out_of_range_candidates()
 
-    def update_loss_and_explainers(self):
-        if self.n > 1:
-            bad_candidates = np.isnan(self.candidates['loss'])
-            if np.sum(bad_candidates) > 0:
-                self.candidates = self.candidates.loc[~bad_candidates]
-                self.n = len(self.candidates)
-
-            #self.update_history()
-            improved_loss = self.candidates['loss'] < self.candidates['best_loss']
-            self.candidates.loc[improved_loss, 'best_loss'] = self.candidates.loc[improved_loss, 'loss'].copy()
-            self.candidates.loc[improved_loss, 'best_unit_cell'] = self.candidates.loc[improved_loss, 'unit_cell'].copy()
-            self.candidates.loc[improved_loss, 'best_xnn'] = self.candidates.loc[improved_loss, 'xnn'].copy()
-        if len(self.candidates) > 1:
-            self.pick_explainers()
-        self.candidates = self.candidates.sort_values(by='best_loss')
-
-    def update_history(self):
-        returned = np.array(self.candidates['loss'] == self.candidates['best_loss'])
-        improved = np.array(self.candidates['loss'] < self.candidates['best_loss'])
-        if np.sum(improved) > 0:
-            best_loss = np.array(self.candidates['best_loss'])
-            best_loss[improved] = np.array(self.candidates['loss'])[improved]
-            best_xnn = np.stack(self.candidates['best_xnn'])
-            best_xnn[improved] = np.stack(self.candidates['xnn'])[improved]
-            self.candidates['best_loss'] = best_loss
-            self.candidates['best_xnn'] = list(best_xnn)
-
-        best_returns_trajectory = np.stack(self.candidates['best_returns_trajectory'])
-        loss_trajectory = np.stack(self.candidates['loss_trajectory'])
-        xnn_trajectory = np.stack(self.candidates['xnn_trajectory'])
-        xnn_current = np.stack(self.candidates['xnn'])
-        xnn_drift = np.stack(self.candidates['xnn_drift'])
-        if np.isnan(np.sum(loss_trajectory)):
-            # This catches the first iteration when there is no loss
-            self.candidates['best_returns_trajectory'] = np.zeros(self.n, dtype=int)
-            self.candidates['loss_trajectory'] = np.array(self.candidates['loss'])
-            self.candidates['xnn_trajectory'] = np.array(self.candidates['xnn'])
-            self.candidates['xnn_drift'] = np.zeros(self.n)
-        elif len(loss_trajectory.shape) == 1:
-            new_best_returns = best_returns_trajectory.copy()
-            new_best_returns[returned] += 1
-            new_best_returns[improved] = 0
-            self.candidates['best_returns_trajectory'] = list(np.concatenate((
-                best_returns_trajectory[:, np.newaxis], new_best_returns[:, np.newaxis]
-                ),
-                axis=1
-                ))
-            self.candidates['loss_trajectory'] = list(np.concatenate((
-                loss_trajectory[:, np.newaxis], np.array(self.candidates['loss'])[:, np.newaxis]
-                ),
-                axis=1
-                ))
-            self.candidates['xnn_trajectory'] = list(np.concatenate((
-                xnn_trajectory[:, :, np.newaxis], xnn_current[:, :, np.newaxis]
-                ),
-                axis=2
-                ))
-            xnn_drift_current = np.linalg.norm(
-                xnn_trajectory[:, :3] - xnn_current[:, :3],
-                axis=1
-                )
-            self.candidates['xnn_drift'] = list(np.concatenate((
-                xnn_drift[:, np.newaxis], xnn_drift_current[:, np.newaxis]
-                ),
-                axis=1
-                ))
-        else:
-            new_best_returns = best_returns_trajectory[:, -1].copy()
-            new_best_returns[returned] += 1
-            new_best_returns[improved] = 0
-            self.candidates['best_returns_trajectory'] = list(np.concatenate((
-                best_returns_trajectory, new_best_returns[:, np.newaxis]
-                ),
-                axis=1
-                ))
-            self.candidates['loss_trajectory'] = list(np.concatenate((
-                loss_trajectory, np.array(self.candidates['loss'])[:, np.newaxis]
-                ),
-                axis=1
-                ))
-            self.candidates['xnn_trajectory'] = list(np.concatenate((
-                xnn_trajectory, xnn_current[:, :, np.newaxis]
-                ),
-                axis=2
-                ))
-            xnn_drift_current = np.array(np.linalg.norm(
-                xnn_trajectory[:, :3, 0] - xnn_current[:, :3],
-                axis=1
-                ))
-            self.candidates['xnn_drift'] = list(np.concatenate((
-                np.stack(self.candidates['xnn_drift']), xnn_drift_current[:, np.newaxis]
-                ),
-                axis=1
-                ))
-
-    def plot_history(self, save_to):
-        """
-        - loss vs iteration
-        - xnn drift
-        - number of times reaching best value
-        """
-        loss_trajectory = np.stack(self.candidates['loss_trajectory'])
-        xnn_drift = np.stack(self.candidates['xnn_drift'])
-        best_returns_trajectory = np.stack(self.candidates['best_returns_trajectory'])
-        xnn_trajectory = np.stack(self.candidates['xnn_trajectory'])
-        found = np.min(loss_trajectory, axis=1) < self.tolerance*self.min_loss
-
-        unit_cell_true = get_different_monoclinic_settings(self.unit_cell_true, partial_unit_cell=True)
-        reciprocal_unit_cell_true = reciprocal_uc_conversion(
-            unit_cell_true, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        xnn_true = get_xnn_from_reciprocal_unit_cell(
-            reciprocal_unit_cell_true, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        true_error = np.linalg.norm(
-            xnn_trajectory[np.newaxis, :, :3, :] - xnn_true[:, np.newaxis, :3, np.newaxis],
-            axis=2
-            ).min(axis=0)
-        """
-        true_error = np.linalg.norm(
-            xnn_trajectory[:, :3, :] - self.xnn_true[np.newaxis, :3, np.newaxis],
-            axis=1
-            )
-        """
-        """
-        xnn_cc = np.zeros(xnn_trajectory.shape)
-        for entry_index in range(xnn_trajectory.shape[0]):
-            for axis_index in range(self.n_uc):
-                xnn_cc[entry_index, axis_index] = scipy.signal.correlate(
-                    xnn_trajectory[entry_index, axis_index],
-                    xnn_trajectory[entry_index, axis_index],
-                    method='fft'
-                    )[xnn_trajectory.shape[2]-1:]
-
-        xnn_cc /= xnn_cc.max(axis=2)[:, :, np.newaxis]
-        fig, axes = plt.subplots(self.n_uc, 1, figsize=(5, 3 + self.n_uc*1.5), sharex=True)
-        for axis_index in range(self.n_uc):
-            axes[axis_index].plot(xnn_cc[~found, axis_index, :].T, alpha=0.1)
-            axes[axis_index].plot(xnn_cc[found, axis_index, :].T, linewidth=2, color=[0, 0, 0])
-        axes[0].set_title('Auto Correlation Plots')
-        fig.tight_layout()
-        fig.savefig(save_to + '_auto_correlation.png')
-        plt.cla()
-        plt.clf()
-        plt.close('all')
-        """
-
-        fig, axes = plt.subplots(2, 3, figsize=(9, 5), sharex=True)
-        axes[0, 0].plot(loss_trajectory[~found].T, alpha=0.1)
-        axes[0, 0].plot(loss_trajectory[found].T, linewidth=2, color=[0, 0, 0])
-        axes[0, 1].semilogy(xnn_drift[~found, 1:].T, alpha=0.1)
-        axes[0, 1].semilogy(xnn_drift[found, 1:].T, linewidth=2, color=[0, 0, 0])
-        axes[0, 2].semilogy(true_error[~found, 1:].T, alpha=0.1)
-        axes[0, 2].semilogy(true_error[found, 1:].T, linewidth=2, color=[0, 0, 0])
-        axes[1, 0].plot(running_average[~found].T, alpha=0.1)
-        axes[1, 0].plot(running_average[found].T, linewidth=2, color=[0, 0, 0])
-        axes[1, 1].plot(best_returns_trajectory[~found].T, alpha=0.1)
-        axes[1, 1].plot(best_returns_trajectory[found].T, linewidth=2, color=[0, 0, 0])
-
-        axes[0, 0].set_ylabel('Loss')
-        axes[1, 0].set_ylabel('Acceptance Moving Average')
-        axes[0, 1].set_ylabel('RMS Xnn drift')
-        axes[0, 2].set_ylabel('RMS Xnn - Xnn True')
-        axes[1, 1].set_ylabel('Times returned to best')
-        axes[1, 0].set_xlabel('MCMC Iteration')
-        axes[1, 1].set_xlabel('MCMC Iteration')
-        axes[1, 2].set_xlabel('MCMC Iteration')
-
-        ylim = axes[0, 1].get_ylim()
-        axes[0, 1].set_ylim([1e-8, ylim[1]])
-        ylim = axes[0, 2].get_ylim()
-        axes[0, 2].set_ylim([1e-8, ylim[1]])
-
-        fig.tight_layout()
-        fig.savefig(save_to + '_MCMC_diagnostics.png')
-        plt.cla()
-        plt.clf()
-        plt.close('all')
-
     def pick_explainers(self):
-        found = self.candidates['loss'] < self.tolerance*self.min_loss
+        found = self.loss < self.tolerance*self.min_loss
         if np.count_nonzero(found) > 0:
             # If I keep the 'hkl' column I get an error:
             #  ValueError: all the input array dimensions except for the concatenation axis must match exactly
             # I believe this is due to a data type mismatch. The easiest way to deal with this was to drop the column
-            found_entries = self.candidates.loc[found].copy().drop(columns=['hkl'])
             if len(self.explainers) == 0:
-                self.explainers = found_entries
+                self.explainers = pd.DataFrame({
+                    'unit_cell': list(self.unit_cell[found]),
+                    'xnn': list(self.xnn[found]),
+                    'loss': self.loss[found],
+                    'candidate_index': self.candidate_index[found],
+                    })
             else:
-                found_index = np.array(found_entries.index)
-                explainers_index = np.array(self.explainers.index)
-                new = np.ones(len(found_entries), dtype=bool)
-                for index in range(len(found_entries)):
+                found_index = self.candidate_index[found]
+                explainers_index = np.array(self.explainers['candidate_index'])
+                new = np.ones(np.sum(found), dtype=bool)
+                for index in range(np.sum(found)):
                     if found_index[index] in explainers_index:
                         new[index] = False
                 if np.sum(new) > 0:
+                    new_explainers = pd.DataFrame({
+                        'unit_cell': list(self.unit_cell[found][new]),
+                        'xnn': list(self.xnn[found][new]),
+                        'loss': self.loss[found][new],
+                        'candidate_index': self.candidate_index[found][new],
+                        })
                     self.explainers = pd.concat(
-                        [self.explainers, found_entries.loc[new]], ignore_index=False
+                        [self.explainers, new_explainers], ignore_index=False
                         )
                     self.explainers.sort_values(by='loss', inplace=True)
 
@@ -931,16 +704,10 @@ class Candidates:
         found_off_by_two = False
 
         if len(self.explainers) == 0:
-            if self.ending_xnn is None:
-                best_loss = np.array(self.candidates['best_loss'])
-                best_unit_cell = reciprocal_uc_conversion(get_reciprocal_unit_cell_from_xnn(np.stack(self.candidates['best_xnn'])))
-                indices = np.argsort(best_loss)[:20]
-                unit_cell = best_unit_cell[indices]
-                loss = best_loss[indices]
-            else:
-                indices = np.argsort(self.ending_loss)[:20]
-                unit_cell = reciprocal_uc_conversion(get_reciprocal_unit_cell_from_xnn(self.ending_xnn[indices]))
-                loss = self.ending_loss[indices]
+            best_unit_cell = reciprocal_uc_conversion(get_reciprocal_unit_cell_from_xnn(self.best_xnn))
+            indices = np.argsort(self.best_loss)[:20]
+            unit_cell = best_unit_cell[indices]
+            loss = self.best_loss[indices]
         else:
             found = True
             unit_cell = np.stack(self.explainers['unit_cell'])
@@ -1024,14 +791,6 @@ class Candidates:
         unit_cell_full = reciprocal_uc_conversion(reciprocal_unit_cell_full)
         unit_cell = unit_cell_full[:, [0, 1, 2, 4]]
         self.candidates['unit_cell'] = list(unit_cell)
-
-    def save_candidates(self, save_to, index):
-        # This is a diagnostic function that saves info to work with in isolated cases.
-        np.save(f'{save_to}/{self.bravais_lattice}_uc_true_{index:03d}.npy', self.unit_cell_true)
-        np.save(f'{save_to}/{self.bravais_lattice}_q2_obs_{index:03d}.npy', self.q2_obs)
-        np.save(f'{save_to}/{self.bravais_lattice}_xnn_{index:03d}.npy', np.stack(self.candidates['xnn']))
-        np.save(f'{save_to}/{self.bravais_lattice}_hkl_{index:03d}.npy', np.stack(self.candidates['hkl']))
-        np.save(f'{save_to}/{self.bravais_lattice}_unit_cell_{index:03d}.npy', np.stack(self.candidates['unit_cell']))
 
 
 class Optimizer:
@@ -1318,15 +1077,15 @@ class Optimizer:
                 entry_index,
                 )
             candidates, diagnostic_df_entry = self.optimize_entry(candidates, entry_index)
-            #candidates.save_candidates(self.save_to, entry_index)
             report_counts, found = candidates.get_best_candidates(report_counts)
             diagnostic_df_entry['found'] = found
             diagnostic_df_entry['entry_index'] = entry_index
             diagnostic_df.loc[entry_index] = diagnostic_df_entry
             if self.opt_params['rerun_failures'] == False:
-                diagnostic_df.to_json(
-                    os.path.join(self.save_to, f'{self.bravais_lattice}_optimization_diagnostics.json')
-                    )
+                diagnostic_df.to_json(os.path.join(
+                    self.save_to,
+                    f'{self.bravais_lattice}_optimization_diagnostics.json'
+                    ))
             print(report_counts)
             end = time.time()
             print(end - start)
@@ -1701,7 +1460,7 @@ class Optimizer:
         if self.indexer.data_params['lattice_system'] == 'triclinic':
             candidate_unit_cells, _ = reindex_entry_triclinic(candidate_unit_cells, radians=True)
 
-        self.plot_candidate_unit_cells(candidate_unit_cells, entry, entry_index)
+        #self.plot_candidate_unit_cells(candidate_unit_cells, entry, entry_index)
 
         candidates = Candidates(
             entry=entry,
@@ -1723,13 +1482,10 @@ class Optimizer:
             lattice_system=self.indexer.data_params['lattice_system'],
             epsilon=self.opt_params['epsilon'],
             )
-        xnn = np.stack(candidates.candidates['xnn'])
-        target_function.update(
-            np.stack(candidates.candidates['hkl']), 
-            xnn
-            )
-        candidates.candidates['loss'] = target_function.get_loss(xnn)
-        candidates.update_loss_and_explainers()
+        target_function.update(candidates.hkl, candidates.xnn)
+        candidates.loss = target_function.get_loss(candidates.xnn)
+        candidates.best_loss = candidates.loss.copy()
+        candidates.best_xnn = candidates.xnn.copy()
         return candidates
 
     def optimize_entry(self, candidates, entry_index):
@@ -1740,34 +1496,24 @@ class Optimizer:
                 print_list = [
                     f'{candidates.n},',
                     f'{len(candidates.explainers)},',
-                    f'{candidates.candidates["loss"].mean():0.2f},',
-                    f'{candidates.candidates["loss"].min():0.2f},',
+                    f'{candidates.loss.mean():0.2f},',
+                    f'{candidates.loss.min():0.2f},',
                     f'{iteration_info["worker"]},',
-                    f'{iteration_info["assigner_key"]}',
                     ]
                 print(' '.join(print_list))
             else:
-                reindex_count = 0
                 for iter_index in range(iteration_info['n_iterations']):
                     if iter_index > 0 and iter_index % iteration_info['exhaustive_search_period'] == 0:
                         candidates.exhaustive_search()
-                    next_xnn = self.random_subsampling(candidates, iteration_info)
-                    candidates = self.update_candidates(
-                        candidates,
-                        iteration_info['assigner_key'],
-                        next_xnn,
-                        )
-                    if candidates.n <= 1:
-                        return candidates, diagnostic_df_entry
+                    candidates = self.random_subsampling(candidates, iteration_info)
                     if len(candidates.explainers) > self.opt_params['max_explainers']:
                         return candidates, diagnostic_df_entry
                     print_list = [
                         f'{candidates.n},',
                         f'{len(candidates.explainers)},',
-                        f'{candidates.candidates["loss"].mean():0.2f},',
-                        f'{candidates.candidates["loss"].min():0.2f},',
+                        f'{candidates.loss.mean():0.2f},',
+                        f'{candidates.loss.min():0.2f},',
                         f'{iteration_info["worker"]},',
-                        f'{iteration_info["assigner_key"]}',
                         ]
                     print(' '.join(print_list))
                 save_to = os.path.join(
@@ -1775,58 +1521,30 @@ class Optimizer:
                     'figures',
                     f'{self.bravais_lattice}_{entry_index:03d}_{self.opt_params["tag"]}'
                     )
-                if iteration_info['plot_history']:
-                    candidates.plot_history(save_to)
         return candidates, diagnostic_df_entry
 
     def assign_hkls_closest(self, candidates):
-        xnn = np.stack(candidates.candidates['xnn'])
-
-        q2_ref_calc = self.q2_calculator.get_q2(xnn)
+        q2_ref_calc = self.q2_calculator.get_q2(candidates.xnn)
         pairwise_differences = scipy.spatial.distance.cdist(
             candidates.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
             ).reshape((self.indexer.data_params['n_points'], candidates.n, self.indexer.data_params['hkl_ref_length']))
         hkl_assign = pairwise_differences.argmin(axis=2).T
-        hkl_pred = np.take(
-            self.indexer.hkl_ref[self.bravais_lattice], hkl_assign, axis=0
-            )
-
-        candidates.candidates['hkl'] = list(hkl_pred)
-        return candidates
-
-    def update_candidates(self, candidates, assigner_key, next_xnn):
-        candidates.candidates['xnn'] = list(next_xnn)
-        candidates.fix_out_of_range_candidates()
-
-        candidates = self.assign_hkls_closest(candidates)
-        target_function = CandidateOptLoss(
-            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
-            lattice_system=self.indexer.data_params['lattice_system'],
-            epsilon=self.opt_params['epsilon'],
-            )
-
-        target_function.update(
-            np.stack(candidates.candidates['hkl']),
-            next_xnn
-            )
-        candidates.candidates['loss'] = target_function.get_loss(next_xnn)
-        candidates.update_loss_and_explainers()
+        hkl_pred = np.take(self.indexer.hkl_ref[self.bravais_lattice], hkl_assign, axis=0)
+        candidates.hkl = hkl_pred
         return candidates
 
     def random_subsampling(self, candidates, iteration_info):
-        hkl = np.stack(candidates.candidates['hkl'])
-        xnn = np.stack(candidates.candidates['xnn'])
-        n_keep = self.indexer.data_params['n_points'] - iteration_info['n_drop']
+        if type(iteration_info['n_drop']) == list:
+            n_drop = self.rng.choice(iteration_info['n_drop'], size=1)[0]
+        else:
+            n_drop = iteration_info['n_drop']
+        n_keep = self.indexer.data_params['n_points'] - n_drop
         subsampled_indices = self.rng.permuted(
-            np.repeat(
-                np.arange(self.indexer.data_params['n_points'])[np.newaxis],
-                candidates.n,
-                axis=0
-                ),
+            np.repeat(np.arange(self.indexer.data_params['n_points'])[np.newaxis], candidates.n, axis=0),
             axis=1
             )[:, :n_keep]
 
-        hkl_subsampled = np.take_along_axis(hkl, subsampled_indices[:, :, np.newaxis], axis=1)
+        hkl_subsampled = np.take_along_axis(candidates.hkl, subsampled_indices[:, :, np.newaxis], axis=1)
         q2_subsampled = np.take(candidates.q2_obs, subsampled_indices)
 
         target_function = CandidateOptLoss(
@@ -1834,11 +1552,25 @@ class Optimizer:
             lattice_system=self.indexer.data_params['lattice_system'],
             epsilon=self.opt_params['epsilon'],
             )
-        target_function.update(hkl_subsampled, xnn)
+        target_function.update(hkl_subsampled, candidates.xnn)
+        delta_gn = target_function.gauss_newton_step(candidates.xnn)
+        candidates.xnn = candidates.xnn + delta_gn
 
-        delta_gn = target_function.gauss_newton_step(xnn)
-        next_xnn = xnn + delta_gn
-        return next_xnn
+        candidates.fix_out_of_range_candidates()
+        candidates = self.assign_hkls_closest(candidates)
+        target_function = CandidateOptLoss(
+            q2_obs=np.repeat(candidates.q2_obs[np.newaxis, :], repeats=candidates.n, axis=0), 
+            lattice_system=self.indexer.data_params['lattice_system'],
+            epsilon=self.opt_params['epsilon'],
+            )
+        target_function.update(candidates.hkl, candidates.xnn)
+        candidates.loss = target_function.get_loss(candidates.xnn)
+
+        improved_loss = candidates.loss < candidates.best_loss
+        candidates.best_loss[improved_loss] = candidates.loss[improved_loss]
+        candidates.best_xnn[improved_loss] = candidates.xnn[improved_loss]
+        candidates.pick_explainers()
+        return candidates
 
     def monoclinic_reset(self, candidates, iteration_info):
         assert self.indexer.data_params['lattice_system'] == 'monoclinic'
