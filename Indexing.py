@@ -43,6 +43,8 @@ mC              | 81 - 92%
 mP              | 85%
 aP              | 80 - 87%
 
+* Refactoring
+    
 
 * Generalization
     - Goal:
@@ -66,13 +68,11 @@ aP              | 80 - 87%
 
 * Optimization:
     * Testing
-        - subsampling: random
-        - reweighting: random
+        x reweighting
+        x Repulsion
+        - resampling: Pick N and assign closest N peaks randomly 
         - no common assignments
-        - subsampling: random
-        - reweighting: random
-        - Repulsion
-        - n_drop
+        - n_drop: 12, 18
     - Monoclinic reset
         - Use different settings
         - weight the number of observations by the local median
@@ -89,7 +89,8 @@ aP              | 80 - 87%
     - Recalibration of template candidates
 
 - Assignments
-    - (000) assignments
+    - convert NN to a polynomial scaling
+    - 
 
 - Data
     - Peak lists

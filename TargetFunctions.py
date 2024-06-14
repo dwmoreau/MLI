@@ -111,7 +111,7 @@ class LikelihoodLoss:
         return tf.reduce_mean(absolute_difference, axis=1)
 
 
-class CandidateOptLoss_xnn:
+class CandidateOptLoss:
     def __init__(self, q2_obs, lattice_system, epsilon):
         self.q2_obs = q2_obs
         self.lattice_system = lattice_system
@@ -130,9 +130,8 @@ class CandidateOptLoss_xnn:
         elif lattice_system == 'triclinic':
             self.uc_length = 6
 
-    def update(self, hkl, softmax, xnn_init):
+    def update(self, hkl, xnn_init):
         self.hkl = hkl
-        self.softmax = softmax
         if self.lattice_system == 'triclinic':
             self.hkl2 = np.concatenate((
                 self.hkl**2, 
@@ -179,7 +178,7 @@ class CandidateOptLoss_xnn:
         delta_q2 = np.abs(q2_pred_init - self.q2_obs)
         self.sigma = np.sqrt(self.q2_obs * (delta_q2 + self.delta_q_eps))
 
-        self.prefactor = np.log(np.sqrt(2*np.pi) * self.sigma) - np.log(self.softmax)
+        self.prefactor = np.log(np.sqrt(2*np.pi) * self.sigma)
         self.hessian_prefactor = (1 / self.sigma**2)[:, :, np.newaxis, np.newaxis]
 
     def get_q2_pred(self, xnn, jac=True):
@@ -263,174 +262,6 @@ class CandidateOptLoss_xnn:
         residuals = (q2_pred - self.q2_obs) / self.sigma
         likelihood = self.prefactor + 1/2 * residuals**2
         loss = np.sum(likelihood, axis=1)
-        return loss
-
-
-class CandidateOptLoss:
-    def __init__(self, q2_obs, lattice_system):
-        self.q2_obs = q2_obs
-        self.lattice_system = lattice_system
-        self.delta_q_eps = 1e-10
-        #self.delta_q_eps = np.exp(-10)
-        self.n_points = q2_obs.size
-
-        if lattice_system == 'cubic':
-            self.uc_length = 1
-        elif lattice_system in ['tetragonal', 'hexagonal', 'rhombohedral']:
-            self.uc_length = 2
-        elif lattice_system == 'orthorhombic':
-            self.uc_length = 3
-        elif lattice_system == 'monoclinic':
-            self.uc_length = 4
-        elif lattice_system == 'triclinic':
-            self.uc_length = 6
-
-        self.__diag_indices = np.arange(self.uc_length)
-        self.__term1 = np.zeros((self.n_points, self.uc_length, self.uc_length))
-
-    def update(self, hkl, softmax, uc_init):
-        self.hkl = hkl
-        self.softmax = softmax
-        if self.lattice_system == 'cubic':
-            self.hkl2 = (self.hkl[:, 0]**2 + self.hkl[:, 1]**2 + self.hkl[:, 2]**2)[:, np.newaxis]
-        elif self.lattice_system == 'tetragonal':
-            self.hkl2 = np.column_stack((
-                self.hkl[:, 0]**2 + self.hkl[:, 1]**2,
-                self.hkl[:, 2]**2
-                ))
-        elif self.lattice_system == 'orthorhombic':
-            self.hkl2 = self.hkl**2
-        elif self.lattice_system == 'monoclinic':
-            self.hkl2 = np.concatenate((
-                self.hkl**2,
-                (self.hkl[:, :, 0] * self.hkl[:, :, 2])[:, :, np.newaxis]
-                ),
-                axis=2
-                )
-        elif self.lattice_system == 'hexagonal':
-            self.hkl2 = np.column_stack((
-                4/3 * (self.hkl[:, 0]**2 + self.hkl[:, 0]*self.hkl[:, 1] + self.hkl[:, 1]**2),
-                self.hkl[:, 2]**2
-                ))
-
-        if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            uc_inv2_init = 1 / uc_init**2
-        elif self.lattice_system == 'monoclinic':
-            uc_inv2_init = np.zeros(4)
-            sin_beta = np.sin(uc_init[3])
-            cos_beta = np.cos(uc_init[3])
-            uc_inv2_init[0] = 1 / (uc_init[0] * sin_beta)**2
-            uc_inv2_init[1] = 1 / uc_init[1]**2
-            uc_inv2_init[2] = 1 / (uc_init[2] * sin_beta)**2
-            uc_inv2_init[3] = -2 * cos_beta / (uc_init[0] * uc_init[2] * sin_beta**2)
-
-        q2_pred_init, _ = self.get_q2_pred(uc_inv2_init)
-        delta_q2 = np.abs(q2_pred_init - self.q2_obs)
-        self.sigma = np.sqrt(self.q2_obs * (delta_q2 + self.delta_q_eps))
-
-        self.prefactor = np.log(np.sqrt(2*np.pi) * self.sigma) - np.log(self.softmax)
-        self.hessian_prefactor = (1 / self.sigma**2)[:, np.newaxis, np.newaxis]
-
-        return uc_inv2_init
-
-    def get_optimized_uc(self, uc_inv2):
-        if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            uc = 1 / np.sqrt(np.abs(uc_inv2))
-        elif self.lattice_system == 'monoclinic':
-            a_sin_beta2 = 1 / np.abs(uc_inv2[0])
-            b = 1 / np.sqrt(np.abs(uc_inv2[1]))
-            c_sin_beta2 = 1 / np.abs(uc_inv2[2])
-            aoc = np.sqrt(a_sin_beta2 / c_sin_beta2)
-            aoc_cos_beta = -1/2 * uc_inv2[3] * a_sin_beta2
-            cos_beta = aoc_cos_beta / aoc
-            if np.abs(cos_beta) >= 1:
-                # If cos_beta >= 1, then the monoclinic angle is not physically possible
-                # and a, c, & beta will be calculated as np.nan.
-                # Returning a very large unit cell will prevent nan errors downstream.
-                # The candidate unit cell should be identifiable by this unit cell or large loss
-                return np.array([1000, 1000, 1000, np.pi/2])
-            else:
-                beta = np.arccos(cos_beta)
-                sin_beta = np.sin(beta)
-                a = np.sqrt(a_sin_beta2) / sin_beta
-                c = np.sqrt(c_sin_beta2) / sin_beta
-                uc = np.array([a, b, c, beta])
-        return uc
-
-    def get_q2_pred(self, uc_inv2, jac=True):
-        """
-        cubic:
-            uc_inv2 = 1 / a**2
-            self.hkl2 = h**2 + k**2 + l**2
-        tetragonal:
-            uc_inv2[0] = 1 / a**2
-            uc_inv2[1] = 1 / c**2
-            self.hkl2 = h**2 + k**2, l**2
-        orthorhombic:
-            uc_inv2[0] = 1 / a**2
-            uc_inv2[1] = 1 / b**2
-            uc_inv2[2] = 1 / c**2
-            self.hkl2 = h**2, k**2, l**2
-        monoclinic:
-            uc_inv2[0] = 1 / (a * sin(beta))**2
-            uc_inv2[1] = 1 / b**2
-            uc_inv2[2] = 1 / (c * sin(beta))**2
-            uc_inv2[3] = -2 * cos(beta) / (a * c * sin(beta)**2)
-            self.hkl2 = h**2, k**2, l**2, h*l
-        hexagonal:
-            uc_inv2[0] = 1 / a**2
-            uc_inv2[1] = 1 / c**2
-            self.hkl2 = 4/3 * (h**2 + h*k + k**2), l**2
-        """
-        arg = self.hkl2 * uc_inv2[np.newaxis, :]
-        q2_pred = np.sum(arg, axis=1)
-        if jac:
-            dq2_pred_duc_inv2 = self.hkl2
-            return q2_pred, dq2_pred_duc_inv2
-        else:
-            return q2_pred
-
-    def least_squares(self):
-        LS = LinearRegression(fit_intercept=False)
-        LS.fit(self.hkl2, self.q2_obs, sample_weight=1/self.sigma**2)
-        return self.get_optimized_uc(LS.coef_)
-
-    def least_squares_svd(self):
-        #https://sthalles.github.io/svd-for-regression/
-        U,S,Vt = np.linalg.svd(self.hkl2, full_matrices=False)
-        x_hat = Vt.T @ np.linalg.inv(np.diag(S)) @ U.T @ self.q2_obs
-        q2_pred = self.hkl2 @ x_hat
-        print(x_hat)
-        print(q2_pred)
-        return self.get_optimized_uc(x_hat)
-
-    def loss_likelihood(self, uc_inv2):
-        q2_pred, dq2_pred_duc_inv2 = self.get_q2_pred(uc_inv2)
-
-        residuals = (q2_pred - self.q2_obs) / self.sigma
-        likelihood = self.prefactor + 1/2 * residuals**2
-
-        dlikelihood_dq2_pred = residuals / self.sigma
-
-        loss = np.sum(likelihood)
-        dloss_duc_inv2 = np.sum(dlikelihood_dq2_pred[:, np.newaxis] * dq2_pred_duc_inv2, axis=0)
-        return loss, dloss_duc_inv2
-
-    def loss_likelihood_hessian(self, uc_inv2):
-        q2_pred, dq2_pred_duc_inv2 = self.get_q2_pred(uc_inv2, jac=True)
-        term0 = np.matmul(dq2_pred_duc_inv2[:, :, np.newaxis], dq2_pred_duc_inv2[:, np.newaxis, :])
-        H = np.sum(self.hessian_prefactor * term0, axis=0)
-        return H
-
-    def loss_likelihood_no_jac(self, uc_inv2):
-        q2_pred = self.get_q2_pred(uc_inv2, jac=False)
-        residuals = (q2_pred - self.q2_obs) / self.sigma
-        likelihood = self.prefactor + 1/2 * residuals**2
-        loss = np.sum(likelihood)
-        return loss, q2_pred
-
-    def get_loss(self, uc_inv2):
-        loss, q2_pred = self.loss_likelihood_no_jac(uc_inv2)
         return loss
 
 

@@ -26,8 +26,7 @@ class RegressionBase:
         self.seed = seed
 
     def train_regression(self, data):
-        if self.model_params['fit_trees']:
-            self.fit_trees(data)
+        self.fit_trees(data)
         self.build_model()
         if self.model_params['fit_strategy'] == 'cycles':
             self.fit_model_cycles(data)
@@ -82,27 +81,37 @@ class RegressionBase:
         val = data[~data['train']]
         train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])}
         val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])}
-        if self.model_params['predict_pca']:
-            unit_cell_scaled_train = np.stack(train['reindexed_unit_cell_scaled'])[:, self.y_indices]
-            unit_cell_scaled_val = np.stack(val['reindexed_unit_cell_scaled'])[:, self.y_indices]
-            self.pca = PCA(n_components=self.n_outputs).fit(unit_cell_scaled_train)
-            train_true = {
-                f'uc_pred_scaled_{self.group}': self.pca.transform(unit_cell_scaled_train)
-                }
-            val_true = {
-                f'uc_pred_scaled_{self.group}': self.pca.transform(unit_cell_scaled_val)
-                }
-        else:
-            train_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.y_indices],
-                }
-            val_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.y_indices],
-                }
-        return train_inputs, val_inputs, train_true, val_true
+        train_true = {
+            f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.y_indices],
+            }
+        val_true = {
+            f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.y_indices],
+            }
+
+        volume_train = np.stack(train['reindexed_volume'])
+        volume_train_sorted = np.sort(volume_train)
+        n_volume_bins = 25
+        volume_bins = np.linspace(
+            volume_train_sorted[int(0.01*volume_train_sorted.size)],
+            volume_train_sorted[int(0.99*volume_train_sorted.size)],
+            n_volume_bins + 1
+            )
+        volume_bins[0] = 0
+        volume_bins[-1] = volume_train_sorted[-1]
+        volume_bin_indices = np.searchsorted(volume_bins, volume_train) - 1
+        volume_hist, _ = np.histogram(volume_train, bins=volume_bins, density=True)
+        volume_bin_weights = np.ones(n_volume_bins)
+        good = volume_hist > 0
+        volume_bin_weights[good] = np.sqrt(1/volume_hist[good])
+        volume_bin_weights /= volume_bin_weights[good].min()
+        too_large = volume_bin_weights > 10
+        volume_bin_weights[too_large] = 10
+        volume_train_weights = volume_bin_weights[volume_bin_indices]
+
+        return train_inputs, val_inputs, train_true, val_true, volume_train_weights
 
     def fit_trees(self, data):
-        train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
+        train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
         if self.lattice_system == 'cubic':
             self.random_forest_regressor = RandomForestRegressor(
                 random_state=self.model_params['random_forest']['random_state'],
@@ -120,8 +129,7 @@ class RegressionBase:
             n_ratio_bins = self.model_params['random_forest']['n_dominant_zone_bins']
             train = data[data['train']]
             unit_cell_train = np.stack(train['reindexed_unit_cell'])
-            unit_cell_volume = np.array(train['reindexed_volume'])
-            sorted_unit_cell_volume = np.sort(unit_cell_volume)
+
             if self.lattice_system == 'rhombohedral':
                 # Ratio in rhombohedral is the cosine of the angle
                 # angle is limited between 0 and 120 degrees or 1 and -1/2 (cos(alpha))
@@ -132,13 +140,9 @@ class RegressionBase:
                 # first axis are unit cell magnitudes.
                 ratio_bins = np.concatenate([[0], np.linspace(0.3, 1, n_ratio_bins)])
                 ratio = unit_cell_train[:, :3].min(axis=1) / unit_cell_train[:, :3].max(axis=1)
-            volume_bins = np.linspace(
-                sorted_unit_cell_volume[int(0.001*sorted_unit_cell_volume.size)],
-                sorted_unit_cell_volume[int(0.999*sorted_unit_cell_volume.size)],
-                11
-                )
+
             n_estimators_per_bin = int(np.ceil(
-                self.model_params['random_forest']['n_estimators'] / (2*n_ratio_bins)
+                self.model_params['random_forest']['n_estimators'] / (n_ratio_bins)
                 ))
             self.random_forest_regressor = [
                 RandomForestRegressor(
@@ -147,7 +151,7 @@ class RegressionBase:
                     min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
                     max_depth=self.model_params['random_forest']['max_depth'],
                     max_samples=self.model_params['random_forest']['subsample'],
-                    ) for _ in range(2*n_ratio_bins)
+                    ) for _ in range(n_ratio_bins)
                 ]
             for ratio_index in range(n_ratio_bins):
                 indices_train = np.logical_and(
@@ -158,18 +162,8 @@ class RegressionBase:
                 # function. The true values are 'reindexed_unit_cell_scaled'
                 self.random_forest_regressor[ratio_index].fit(
                     train_inputs['q2_scaled'][indices_train],
-                    train_true[f'uc_pred_scaled_{self.group}'][indices_train]
-                    )
-            for volume_index in range(n_ratio_bins):
-                indices_train = np.logical_and(
-                    unit_cell_volume >= volume_bins[ratio_index],
-                    unit_cell_volume < volume_bins[ratio_index + 1]
-                    )
-                # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
-                # function. The true values are 'reindexed_unit_cell_scaled'
-                self.random_forest_regressor[volume_index + ratio_index + 1].fit(
-                    train_inputs['q2_scaled'][indices_train],
-                    train_true[f'uc_pred_scaled_{self.group}'][indices_train]
+                    train_true[f'uc_pred_scaled_{self.group}'][indices_train],
+                    sample_weight=train_weights[indices_train]
                     )
 
     def do_predictions_trees(self, data=None, inputs=None, q2_scaled=None):
@@ -186,7 +180,7 @@ class RegressionBase:
         else:
             uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
             tree_index = 0
-            for ratio_index in range(2*self.model_params['random_forest']['n_dominant_zone_bins']):
+            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
                 for tree in range(len(self.random_forest_regressor[ratio_index].estimators_)):
                     uc_pred_scaled_tree[:, :, tree_index] = \
                         self.random_forest_regressor[ratio_index].estimators_[tree].predict(q2_scaled)
@@ -198,46 +192,9 @@ class RegressionBase:
             uc_pred_scaled_cov[index] = np.cov(uc_pred_scaled_tree[index])
         return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
 
-    """
-    def fit_trees(self, data):
-        train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
-        self.random_forest_regressor = RandomForestRegressor(
-            random_state=self.model_params['random_forest']['random_state'],
-            n_estimators=self.model_params['random_forest']['n_estimators'],
-            min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
-            max_depth=self.model_params['random_forest']['max_depth'],
-            max_samples=self.model_params['random_forest']['subsample'],
-            )
-        # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
-        # function. The true values are 'reindexed_unit_cell_scaled'
-        self.random_forest_regressor.fit(train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}'])
-
-    def do_predictions_trees(self, data=None, inputs=None, q2_scaled=None):
-        if not data is None:
-            q2_scaled = np.stack(data['q2_scaled'])
-        elif not inputs is None:
-            q2_scaled = inputs['q2_scaled']
-        N = q2_scaled.shape[0]
-        uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)
-        if self.n_outputs == 1:
-            uc_pred_scaled = uc_pred_scaled[:, np.newaxis]
-        uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
-        for tree in range(self.model_params['random_forest']['n_estimators']):
-            prediction = self.random_forest_regressor.estimators_[tree].predict(q2_scaled)
-            if self.n_outputs == 1:
-                uc_pred_scaled_tree[:, :, tree] = prediction[:, np.newaxis]
-            else:
-                uc_pred_scaled_tree[:, :, tree] = prediction
-
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index] = np.cov(uc_pred_scaled_tree[index])
-        return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
-    """
-
     def fit_model_cycles(self, data):
         self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
-        train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
+        train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
         for cycle_index in range(self.model_params['cycles']):
             self.compile_model('mean')
             print(f'\n Starting cycle {cycle_index} mean for {self.group}')
@@ -248,6 +205,7 @@ class RegressionBase:
                 shuffle=True,
                 batch_size=self.model_params['batch_size'], 
                 validation_data=(val_inputs, val_true),
+                sample_weight=train_weights,
                 )
             tf.keras.backend.clear_session()
             gc.collect()
@@ -260,6 +218,7 @@ class RegressionBase:
                 shuffle=True,
                 batch_size=self.model_params['batch_size'], 
                 validation_data=(val_inputs, val_true),
+                sample_weight=train_weights,
                 )
             # https://github.com/tensorflow/tensorflow/issues/37505
             # these are to deal with a memory leak.
@@ -340,7 +299,7 @@ class RegressionBase:
 
     def fit_model_warmup(self, data):
         self.fit_history = [None for _ in range(3)]
-        train_inputs, val_inputs, train_true, val_true = self._get_train_val(data)
+        train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
 
         self.compile_model('mean')
         print(f'\n Starting warmup mean for {self.group}')
@@ -352,7 +311,7 @@ class RegressionBase:
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
             callbacks=None,
-            sample_weight=None
+            sample_weight=train_weights
             )
         self.compile_model('variance')
         print(f'\n Starting warmup variance for {self.group}')
@@ -364,7 +323,7 @@ class RegressionBase:
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
             callbacks=None,
-            sample_weight=None
+            sample_weight=train_weights
             )
         self.compile_model('both')
         print(f'\n Training mean & variance for {self.group}')
@@ -376,7 +335,7 @@ class RegressionBase:
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
             callbacks=None,
-            sample_weight=None
+            sample_weight=train_weights
             )
 
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -455,8 +414,6 @@ class Regression_AlphaBeta(RegressionBase):
         model_params_defaults = {
             'nn_type': 'mlp',
             'fit_strategy': 'cycles',
-            'predict_pca': False,
-            'fit_trees': True,
             'epochs': 10,
             'cycles': 5,
             'beta_nll': 0.5,
@@ -563,21 +520,17 @@ class Regression_AlphaBeta(RegressionBase):
         model_params = copy.deepcopy(self.model_params)
         write_params(model_params, f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
-    
-        if self.model_params['predict_pca']:
-            joblib.dump(self.pca, f'{self.save_to}/{self.group}_pca.bin')
-        if self.model_params['fit_trees']:
-            if self.lattice_system == 'cubic':
+        if self.lattice_system == 'cubic':
+            joblib.dump(
+                self.random_forest_regressor,
+                f'{self.save_to}/{self.group}_random_forest_regressor.bin'
+                )
+        else:
+            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
                 joblib.dump(
-                    self.random_forest_regressor,
-                    f'{self.save_to}/{self.group}_random_forest_regressor.bin'
+                    self.random_forest_regressor[ratio_index],
+                    f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
                     )
-            else:
-                for ratio_index in range(2*self.model_params['random_forest']['n_dominant_zone_bins']):
-                    joblib.dump(
-                        self.random_forest_regressor[ratio_index],
-                        f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
-                        )
 
     def load_from_tag(self):
         params = read_params(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
@@ -593,8 +546,6 @@ class Regression_AlphaBeta(RegressionBase):
             'cycles',
             'learning_rate',
             'fit_strategy',
-            'predict_pca',
-            'fit_trees',
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
@@ -612,12 +563,6 @@ class Regression_AlphaBeta(RegressionBase):
                 dtype=int
                 )
 
-        if params['predict_pca'] == 'True':
-            self.model_params['predict_pca'] = True
-            self.pca = joblib.load(f'{self.save_to}/{self.group}_pca.bin')
-        elif params['predict_pca'] == 'False':
-            self.model_params['predict_pca'] = False
-
         self.model_params['random_forest'] = {}
         for element in params['random_forest'].split('{')[1].split('}')[0].split(','):
             key = element.split(':')[0].split("'")[1]
@@ -631,20 +576,16 @@ class Regression_AlphaBeta(RegressionBase):
                     self.model_params['random_forest']['max_depth'] = 'None'
                 else:
                     self.model_params['random_forest']['max_depth'] = int(value)
-        if params['fit_trees'] == 'True':
-            self.model_params['fit_trees'] = True
-            if self.lattice_system == 'cubic':
-                self.random_forest_regressor = joblib.load(
-                    f'{self.save_to}/{self.group}_random_forest_regressor.bin'
-                    )
-            else:
-                self.random_forest_regressor = []
-                for ratio_index in range(2*self.model_params['random_forest']['n_dominant_zone_bins']):
-                    self.random_forest_regressor.append(joblib.load(
-                        f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
-                        ))
-        elif params['fit_trees'] == 'False':
-            self.model_params['fit_trees'] = False
+        if self.lattice_system == 'cubic':
+            self.random_forest_regressor = joblib.load(
+                f'{self.save_to}/{self.group}_random_forest_regressor.bin'
+                )
+        else:
+            self.random_forest_regressor = []
+            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                self.random_forest_regressor.append(joblib.load(
+                    f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
+                    ))
 
         params_keys = [
             'dropout_rate',
@@ -902,15 +843,9 @@ class Regression_AlphaBeta(RegressionBase):
                 pred_beta = outputs[:, :, 2]
                 pred_var[start: start + batch_size] = pred_beta / (pred_alpha - 1)
 
-        if self.model_params['predict_pca']:
-            uc_pred_scaled = self.pca.inverse_transform(pred)
-            temp = np.matmul(np.sqrt(pred_var), self.pca.components_)
-            uc_pred_scaled_cov = np.matmul(temp[:, :, np.newaxis], temp[:, np.newaxis, :])
-            #uc_pred_scaled_cov = np.matmul(pred_var[:, np.newaxis, :], self.pca.components_)
-        else:
-            uc_pred_scaled = pred
-            diag_indices = np.diag_indices(self.n_outputs, ndim=2)
-            uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-            for index in range(N):
-                uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = pred_var[index]
+        uc_pred_scaled = pred
+        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
+        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
+        for index in range(N):
+            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = pred_var[index]
         return uc_pred_scaled, uc_pred_scaled_cov
