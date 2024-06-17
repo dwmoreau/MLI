@@ -743,14 +743,17 @@ class PairwiseDifferenceCalculator(Q2Calculator):
         super().__init__(lattice_system, hkl_ref, tensorflow, 'xnn')
         self.q2_scaler = q2_scaler
 
-    def get_pairwise_differences(self, xnn, q2_scaled):
+    def get_pairwise_differences(self, xnn, q2_scaled, return_q2_ref=False):
         q2_ref = self.get_q2(xnn)
         q2_ref_scaled = (q2_ref - self.q2_scaler.mean_[0]) / self.q2_scaler.scale_[0]
         # d_spacing_ref: n_entries x hkl_ref_length
         # x: n_entries x n_peaks
         # differences = n_entries x n_peaks x hkl_ref_length
         pairwise_differences_scaled = q2_ref_scaled[:, self.newaxis, :] - q2_scaled[:, :, self.newaxis]
-        return pairwise_differences_scaled
+        if return_q2_ref:
+            return pairwise_differences_scaled, q2_ref
+        else:
+            return pairwise_differences_scaled
 
 
 def write_params(params, filename):

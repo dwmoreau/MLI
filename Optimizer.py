@@ -273,7 +273,7 @@ class Candidates:
         counts_uc = [np.sum(distance_uc < i) for i in [1, 2, 3]]
         counts_xnn = [np.sum(distance_xnn < i) for i in [0.003, 0.004, 0.005]]
         if self.lattice_system == 'triclinic':
-            counts_s6 = [np.sum(distance_s6 < i) for i in [50, 75, 100]]
+            counts_s6 = [np.sum(distance_s6 < i) for i in [25, 50, 75]]
 
         print(f'Starting # candidates:       {self.n}')
         print(f'Minimum Loss:                {np.round(self.min_loss, decimals=2)}')
@@ -361,7 +361,11 @@ class Candidates:
     def get_neighbor_distance(self, xnn0, xnn1):
         # scipy.spatial is considerably better than a pure numpy distance
         # Faster and less memory load
-        return scipy.spatial.distance.cdist(xnn0, xnn1)
+        distance = scipy.spatial.distance.cdist(xnn0, xnn1)
+        #s60 = get_s6_from_unit_cell(get_unit_cell_from_xnn(xnn0))
+        #s61 = get_s6_from_unit_cell(get_unit_cell_from_xnn(xnn1))
+        #distance = scipy.spatial.distance.cdist(s60, s61)
+        return distance
 
     def redistribute_and_perturb_xnn(self, xnn, from_indices, to_indices, norm_factor=None):
         n_indices = from_indices.size
@@ -404,8 +408,9 @@ class Candidates:
     def redistribute_candidates(self):
         redistributed_xnn = self.xnn.copy()
         largest_neighborhood = self.max_neighbors + 1
-        n_redistributed = 0 
-        while largest_neighborhood > self.max_neighbors:
+        n_redistributed = 0
+        iteration = 0
+        while largest_neighborhood > self.max_neighbors and iteration < 10:
             distance = self.get_neighbor_distance(redistributed_xnn, redistributed_xnn)
             neighbor_array = distance < self.radius
             neighbor_count = np.sum(neighbor_array, axis=1)
@@ -442,6 +447,7 @@ class Candidates:
                 redistributed_xnn = self.redistribute_and_perturb_xnn(
                     redistributed_xnn, from_indices, to_indices
                     )
+            iteration += 1
         self.xnn = redistributed_xnn
         self.update_unit_cell_from_xnn()
         print(f'Redistributed {n_redistributed} candidates')

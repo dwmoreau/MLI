@@ -41,10 +41,13 @@ oI              | 99.0%
 oP              | 99.5%
 mC              | 81 - 92%
 mP              | 85%
-aP              | 80 - 87%
+aP              | 95 - 98%
+
 
 * Refactoring
-    
+    - Rerun all Bravais lattices
+        - Redo training with new RF and template code
+        - Redo optimization
 
 * Generalization
     - Goal:
@@ -62,23 +65,18 @@ aP              | 80 - 87%
         3: Test model on 
 
 * Documentation
-    * Add discussion on mixture integer linear programing
-    * Read MLIMethods and update for clarity
+    * Delete excess
+    * One page summary
+    - Add discussion on mixture integer linear programing
+    - Read MLIMethods and update for clarity
     - reread papers
 
-* Optimization:
-    * Testing
-        x reweighting
-        x Repulsion
-        - resampling: Pick N and assign closest N peaks randomly 
-        - no common assignments
-        - n_drop: 12, 18
+- Optimization:
     - Monoclinic reset
         - Use different settings
         - weight the number of observations by the local median
         - extend to triclinic
     - Performance
-        - Strip out NN assigner model & softmaxes
         - Find better parameters
             - Maximum number of explainers. Would 10 work fine?
             - Number of candidates
@@ -88,13 +86,11 @@ aP              | 80 - 87%
 - Templating
     - Recalibration of template candidates
 
-- Assignments
-    - convert NN to a polynomial scaling
-    - 
-
 - Data
     - Peak lists
         - ly65 / SACLA
+        - add sum of vectors to augmentation
+        - plot vector dot products and cross product magnitudes
     - experimental data from rruff
         - verify that unit cell is consistent with diffraction
         - Create new peak list
@@ -114,9 +110,16 @@ aP              | 80 - 87%
 - Dominant zone:
     - 2D and 1D optimization
 
+- Physics informed target function
+    - Convert the xnn prediction to a likelihood MVE model
+    - Plot training loss
+    - Evaluations
+    -
+
+- Regression
 - Indexing.py
 - Augmentation
-- Regression
+- Assignments
 """
 import joblib
 import matplotlib.pyplot as plt
@@ -133,6 +136,7 @@ from Evaluations import evaluate_regression
 from Evaluations import calibrate_regression
 from MITemplates import MITemplates
 from MITemplates import MITemplates_binning
+from PhysicsInformedModel import PhysicsInformedModel
 from Regression import Regression_AlphaBeta
 from Utilities import get_hkl_matrix
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -143,7 +147,7 @@ from Utilities import write_params
 
 
 class Indexing:
-    def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, template_params=None, seed=12345):
+    def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, template_params=None, pitf_params=None, seed=12345):
         self.random_seed = seed
         self.rng = np.random.default_rng(self.random_seed)
         self.n_generated_points = 60  # This is the peak length of the generated dataset.
@@ -153,6 +157,7 @@ class Indexing:
         self.data_params = data_params
         self.reg_params = reg_params
         self.template_params = template_params
+        self.pitf_params = pitf_params
 
         results_directory = os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'])
         self.save_to = {
@@ -162,6 +167,7 @@ class Indexing:
             'data': os.path.join(results_directory, 'data'),
             'regression': os.path.join(results_directory, 'regression'),
             'template': os.path.join(results_directory, 'template'),
+            'pitf': os.path.join(results_directory, 'pitf'),
             }
         if not os.path.exists(self.save_to['results']):
             os.mkdir(self.save_to['results'])
@@ -170,6 +176,7 @@ class Indexing:
             os.mkdir(self.save_to['data'])
             os.mkdir(self.save_to['regression'])
             os.mkdir(self.save_to['template'])
+            os.mkdir(self.save_to['pitf'])
 
         if self.data_params['load_from_tag']:
             self.setup_from_tag()
@@ -221,6 +228,7 @@ class Indexing:
         self.uc_scaler = joblib.load(f'{self.save_to["data"]}/uc_scaler.bin')
         self.volume_scaler = joblib.load(f'{self.save_to["data"]}/volume_scaler.bin')
         self.q2_scaler = joblib.load(f'{self.save_to["data"]}/q2_scaler.bin')
+        self.xnn_scaler = joblib.load(f'{self.save_to["data"]}/xnn_scaler.bin')
 
         params = read_params(f'{self.save_to["data"]}/data_params.csv')
         data_params_keys = [
@@ -485,6 +493,15 @@ class Indexing:
         reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
         reindexed_unit_cell[:, 3:] = np.pi/180 * reindexed_unit_cell[:, 3:]
         self.data['reindexed_unit_cell'] = list(reindexed_unit_cell)
+        # Templating use the xnn unit cell representation.
+        # These lines can be deleted once the datasets are regenerated.
+        reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
+            reindexed_unit_cell, partial_unit_cell=False, radians=True
+            )
+        reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
+            reindexed_reciprocal_unit_cell, partial_unit_cell=False, radians=True
+            )
+        self.data['reindexed_xnn'] = list(reindexed_xnn)
         self.setup_scalers()
 
         if self.data_params['augment']:
@@ -559,7 +576,7 @@ class Indexing:
         save_to_data['reindexed_h'] = list(reindexed_hkl[:, :, 0])
         save_to_data['reindexed_k'] = list(reindexed_hkl[:, :, 1])
         save_to_data['reindexed_l'] = list(reindexed_hkl[:, :, 2])
-        save_to_data.drop(columns=['hkl', 'reindexed_hkl'], inplace=False)
+        save_to_data.drop(columns=['hkl', 'reindexed_hkl'], inplace=True)
         save_to_data.to_parquet(f'{self.save_to["data"]}/data.parquet')
 
         for bravais_lattice in self.data_params['bravais_lattices']:
@@ -571,6 +588,7 @@ class Indexing:
         joblib.dump(self.uc_scaler, f'{self.save_to["data"]}/uc_scaler.bin')
         joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
         joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
+        joblib.dump(self.xnn_scaler, f'{self.save_to["data"]}/xnn_scaler.bin')
         write_params(self.data_params, f'{self.save_to["data"]}/data_params.csv')
 
     def setup_hkl(self):
@@ -763,6 +781,13 @@ class Indexing:
         # this hard codes the minimum allowed unit cell in augmented data to 1 A
         self.min_unit_cell_scaled = (1 - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
 
+        # xnn scaling
+        self.xnn_scaler = StandardScaler()
+        xnn_train = np.stack(training_data['reindexed_xnn'])
+        self.xnn_scaler.fit(xnn_train[xnn_train != 0][:, np.newaxis])
+        self.data['reindexed_xnn_scaled'] = list(
+            (np.stack(self.data['reindexed_xnn']) - self.xnn_scaler.mean_[0]) / self.xnn_scaler.scale_[0]
+            )
 
         # Volume scaling
         self.volume_scaler = StandardScaler()
@@ -1001,6 +1026,55 @@ class Indexing:
             fig.savefig(f'{self.save_to["data"]}/regression_inputs_{split_group}.png')
             plt.close()
 
+        # Histograms of Xnn
+        xnn_labels = ['Xhh', 'Xkk', 'Xll', 'Xhk', 'Xhl', 'Xkl']
+        for split_group in self.data_params['split_groups']:
+            group_data = self.data.loc[self.data['split_group'] == split_group]
+            fig, axes = plt.subplots(2, 6, figsize=(14, 5))
+            bins_scaled = np.linspace(-4, 4, 101)
+            centers_scaled = (bins_scaled[1:] + bins_scaled[:-1]) / 2
+            dbin_scaled = bins_scaled[1] - bins_scaled[0]
+
+            # Unit cell
+            xnn = np.stack(data['reindexed_xnn'])
+            if self.data_params['augment']:
+                xnn_augmented = np.stack(data_augmented['reindexed_xnn'])
+                xnn_augmented_scaled = np.stack(data_augmented['reindexed_xnn_scaled'])
+            xnn_scaled = np.stack(data['reindexed_xnn_scaled'])
+            sorted_xnn = np.sort(xnn.ravel())
+            lower = sorted_xnn[int(0.005*sorted_xnn.size)]
+            upper = sorted_xnn[int(0.995*sorted_xnn.size)]
+            bins = np.linspace(lower, upper, 101)
+            centers = (bins[1:] + bins[:-1]) / 2
+            dbin = bins[1] - bins[0]
+            for index in range(6):
+                hist, _ = np.histogram(xnn[:, index], bins=bins, density=True)
+                axes[0, index].bar(centers, hist, width=dbin)
+                hist_scaled, _ = np.histogram(
+                    xnn_scaled[:, index], bins=bins_scaled, density=True
+                    )
+                axes[1, index].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+                if self.data_params['augment']:
+                    hist_augmented, _ = np.histogram(
+                        xnn_augmented[:, index], bins=bins, density=True
+                        )
+                    axes[0, index].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+                    hist_augmented_scaled, _ = np.histogram(
+                        xnn_augmented_scaled[:, index],
+                        bins=bins_scaled, density=True
+                        )
+                    axes[1, index].bar(
+                        centers_scaled, hist_augmented_scaled,
+                        width=dbin_scaled, alpha=0.5
+                        )
+                axes[0, index].set_title(xnn_labels[index])
+
+            axes[0, 0].set_ylabel('Raw data')
+            axes[1, 0].set_ylabel('Standard Scaling')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to["data"]}/xnn_inputs_{split_group}.png')
+            plt.close()
+
         # Covariance
         if self.data_params['lattice_system'] != 'cubic':
             fig, axes = plt.subplots(1, 2, figsize=(8, 4))
@@ -1065,17 +1139,6 @@ class Indexing:
                 plt.close()
 
     def setup_miller_index_templates(self):
-        # Templating use the xnn unit cell representation.
-        # These lines can be deleted once the datasets are regenerated.
-        reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
-        reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-            reindexed_unit_cell, partial_unit_cell=False, radians=True
-            )
-        reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-            reindexed_reciprocal_unit_cell, partial_unit_cell=False, radians=True
-            )
-        self.data['reindexed_xnn'] = list(reindexed_xnn)
-
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             self.miller_index_templator[bravais_lattice] = MITemplates(
@@ -1144,6 +1207,26 @@ class Indexing:
         self.data['reindexed_unit_cell_pred_cov_trees'] = list(reindexed_uc_pred_cov_trees)
         self.data['reindexed_unit_cell_pred_scaled_trees'] = list(reindexed_uc_pred_scaled_trees)
         self.data['reindexed_unit_cell_pred_scaled_cov_trees'] = list(reindexed_uc_pred_scaled_cov_trees)
+
+    def setup_pitf(self):
+        self.pitf_generator = dict.fromkeys(self.data_params['bravais_lattices'])
+        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
+            self.pitf_generator[bravais_lattice] = PhysicsInformedModel(
+                bravais_lattice,
+                self.data_params,
+                self.pitf_params[bravais_lattice],
+                self.save_to['pitf'],
+                self.random_seed,
+                self.q2_scaler,
+                self.xnn_scaler,
+                self.hkl_ref[bravais_lattice]
+                )
+            self.pitf_generator[bravais_lattice].setup()
+            if self.pitf_params[bravais_lattice]['load_from_tag']:
+                self.pitf_generator[bravais_lattice].load_from_tag()
+            else:
+                bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
+                self.pitf_generator[bravais_lattice].train(data=bl_data[~bl_data['augmented']])
 
     def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_cov=None):
         if not uc_pred_scaled is None:
