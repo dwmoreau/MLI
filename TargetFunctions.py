@@ -70,7 +70,7 @@ class LikelihoodLoss:
     def normal_likelihood(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         var = y_pred[:, :, 1]
-        term0 = tf.math.log(var)
+        term0 = 1/2 * tf.math.log(var)
         term1 = 0.5 * (y_true - mean)**2 / var
         # likelihoods: n_batch x n_lattice_params
         likelihoods = self.prefactor + term0 + term1
@@ -266,16 +266,28 @@ class CandidateOptLoss:
 
 
 class IndexingTargetFunction:
-    def __init__(self, likelihood_function, error_fraction, n_points, tuning_param=1):
+    def __init__(self, likelihood, error_fraction, n_points, tuning_param=1):
         self.error_fraction = error_fraction
-        self.tuning_param = tuning_param
-        prefactor0 = gamma((self.tuning_param + 1) / 2) / gamma(self.tuning_param / 2)
-        prefactor1 = 1 / tf.math.sqrt(self.tuning_param * np.pi)
-        self.prefactor = prefactor0 * prefactor1
-        self.exponent = -(self.tuning_param + 1) / 2
         self.n_points = n_points
+        self.likelihood = likelihood
+        if self.likelihood == 't-dist':
+            self.tuning_param = tuning_param
+            prefactor0 = gamma((self.tuning_param + 1) / 2) / gamma(self.tuning_param / 2)
+            prefactor1 = 1 / tf.math.sqrt(self.tuning_param * np.pi)
+            self.prefactor = prefactor0 * prefactor1
+            self.exponent = -(self.tuning_param + 1) / 2
+            self.likelihood_function = self.t_dist_likelihood
+        elif self.likelihood == 'normal':
+            self.prefactor = tf.cast(
+                1 / tf.math.sqrt(2 * np.pi),
+                dtype=tf.float32,
+                )
+            self.likelihood_function = self.normal_likelihood
 
     def __call__(self, q2_true, y_pred):
+        return self.likelihood_function(q2_true, y_pred)
+
+    def t_dist_likelihood(self, q2_true, y_pred):
         # softmaxes: n_batch x n_points x hkl_ref_length
         # q2_ref:    n_batch x hkl_ref_length            <- not transform!!!
         # q2_true:   n_batch x n_points                  <- not transform!!!
@@ -286,7 +298,7 @@ class IndexingTargetFunction:
         
         # differences: n_batch x n_points x hkl_ref_length
         differences = q2_true[:, :, tf.newaxis] - q2_ref[:, tf.newaxis, :]
-        residuals = differences / q2_error[:, :, np.newaxis]
+        residuals = differences / q2_error[:, :, tf.newaxis]
 
         arg = 1 + 1/self.tuning_param * residuals**2
         difference_likelihoods = self.prefactor / q2_error[:, :, tf.newaxis] * arg**self.exponent
@@ -294,5 +306,27 @@ class IndexingTargetFunction:
         all_peaks_likelihoods = difference_likelihoods * softmaxes
         # peak_likelihoods: n_batch x n_points
         peak_log_likelihoods = tf.math.log(tf.math.reduce_sum(all_peaks_likelihoods, axis=2))
+        neg_log_likelihood = -tf.math.reduce_sum(peak_log_likelihoods, axis=1)
+        return neg_log_likelihood
+
+    def normal_likelihood(self, q2_true, y_pred):
+        # softmaxes: n_batch x n_points x hkl_ref_length
+        # q2_ref:    n_batch x hkl_ref_length
+        # q2_true:   n_batch x n_points
+        # q2_error:  n_batch x n_points
+        softmaxes = y_pred[:, :self.n_points, :]
+        q2_ref = y_pred[:, self.n_points, :]
+        q2_var = (q2_true * self.error_fraction[tf.newaxis, :])[:, :, tf.newaxis]
+        
+        # n_batch x n_points x hkl_ref_length
+        arg = -1/2 * (q2_true[:, :, tf.newaxis] - q2_ref[:, tf.newaxis, :])**2 / q2_var
+        difference_likelihoods = self.prefactor / tf.math.sqrt(q2_var) * tf.math.exp(arg)
+        all_peaks_likelihoods = difference_likelihoods * softmaxes
+
+        # peak_likelihoods: n_batch x n_points
+        # sum over all possible Miller index assignments
+        peak_log_likelihoods = tf.math.log(tf.math.reduce_sum(all_peaks_likelihoods, axis=2))
+
+        # Sum over all peaks
         neg_log_likelihood = -tf.math.reduce_sum(peak_log_likelihoods, axis=1)
         return neg_log_likelihood

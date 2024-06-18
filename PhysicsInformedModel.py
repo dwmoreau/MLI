@@ -1,31 +1,32 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 
 from Networks import mlp_model_builder
 from TargetFunctions import IndexingTargetFunction
+from TargetFunctions import LikelihoodLoss
 from Utilities import PairwiseDifferenceCalculator
+from Utilities import vectorized_resampling
+from Utilities import read_params
+from Utilities import write_params
 
 
 class ScalingLayer(tf.keras.layers.Layer):
-    def __init__(self):
-        super().__init__()
-        self.calibration_0 = self.add_weight(
-            shape=(1,),
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calibration = self.add_weight(
+            shape=(3,),
             trainable=True,
             initializer=tf.keras.initializers.RandomNormal(mean=1.0, stddev=0.05, seed=None),
-            name='calibration_0',
-            dtype=tf.float32,
-            )
-        self.calibration_1 = self.add_weight(
-            shape=(1,),
-            trainable=True,
-            initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
-            name='calibration_1',
+            name='calibration',
             dtype=tf.float32,
             )
 
     def call(self, inputs):
-        return self.calibration_0**2 * inputs + self.calibration_1**2 * inputs**2
+        outputs = self.calibration[0] * tf.math.sqrt(inputs)
+        outputs += self.calibration[1] * inputs
+        outputs += self.calibration[2] * inputs**2
+        return outputs
 
 
 class PhysicsInformedModel:
@@ -33,7 +34,8 @@ class PhysicsInformedModel:
         self.bravais_lattice = bravais_lattice
         self.data_params = data_params
         self.model_params = model_params
-        self.model_params['model_params']['n_outputs'] = len(self.data_params['y_indices'])
+        self.model_params['mean_params']['n_outputs'] = len(self.data_params['y_indices'])
+        self.model_params['var_params']['n_outputs'] = len(self.data_params['y_indices'])
         self.n_points = data_params['n_points']
         self.n_outputs = data_params['n_outputs']
         self.y_indices = data_params['y_indices']
@@ -45,8 +47,121 @@ class PhysicsInformedModel:
         self.hkl_ref = hkl_ref
 
     def setup(self):
+        model_params_defaults = {
+            'mean_params': {
+                'layers': [5000, 2000, 1000],
+                'dropout_rate': 0.5,
+                'epsilon': 0.001,
+                'output_activation': 'linear',
+                'kernel_initializer': None,
+                'bias_initializer': None,
+                },
+            'var_params': {
+                'layers': [100, 100, 100],
+                'dropout_rate': 0.5,
+                'epsilon': 0.001,
+                'output_activation': 'exponential',
+                'kernel_initializer': None,
+                'bias_initializer': None,
+                },
+            'epsilon_pds': 0.1,
+            'learning_rate_regression': 0.001,
+            'learning_rate_assignment': 0.001,
+            'learning_rate_index': 0.000001,
+            'cycles_regression': 2,
+            'epochs_regression': 10,
+            'epochs_assignment': 15,
+            'epochs_index': 15,
+            'batch_size': 128,
+            'beta_nll': 0.5,
+            }
+
+        for key in model_params_defaults.keys():
+            if key not in self.model_params.keys():
+                self.model_params[key] = model_params_defaults[key]
+        self.model_params['mean_params']['n_outputs'] = self.n_outputs
+        self.model_params['var_params']['n_outputs'] = self.n_outputs
+
+        for key in model_params_defaults['mean_params'].keys():
+            if key not in self.model_params['mean_params'].keys():
+                self.model_params['mean_params'][key] = model_params_defaults['mean_params'][key]
+        self.model_params['mean_params']['kernel_initializer'] = None
+        self.model_params['mean_params']['bias_initializer'] = None
+
+        for key in model_params_defaults['var_params'].keys():
+            if key not in self.model_params['var_params'].keys():
+                self.model_params['var_params'][key] = model_params_defaults['var_params'][key]
+        self.model_params['var_params']['kernel_initializer'] = None
+        self.model_params['var_params']['bias_initializer'] = None
+
         self.build_model()
         #self.model.summary()
+
+    def save(self):
+        write_params(self.model_params, f'{self.save_to}/{self.bravais_lattice}_pitf_params_{self.model_params["tag"]}.csv')
+        self.model.save_weights(f'{self.save_to}/{self.bravais_lattice}_pitf_weights_{self.model_params["tag"]}.h5')
+
+    def load_from_tag(self):
+        params = read_params(f'{self.save_to}/{self.bravais_lattice}_pitf_params_{self.model_params["tag"]}.csv')
+        params_keys = [
+            'tag',
+            'epsilon_pds',
+            'learning_rate_regression',
+            'learning_rate_assignment',
+            'learning_rate_index',
+            'cycles_regression',
+            'epochs_regression',
+            'epochs_assignment',
+            'epochs_index',
+            'batch_size',
+            'beta_nll',
+            ]
+        self.model_params = dict.fromkeys(params_keys)
+        self.model_params['tag'] = params['tag']
+        self.model_params['beta_nll'] = float(params['beta_nll'])
+        self.model_params['batch_size'] = int(params['batch_size'])
+        self.model_params['learning_rate_regression'] = float(params['learning_rate_regression'])
+        self.model_params['learning_rate_assignment'] = float(params['learning_rate_assignment'])
+        self.model_params['learning_rate_index'] = float(params['learning_rate_index'])
+        self.model_params['cycles_regression'] = int(params['cycles_regression'])
+        self.model_params['epochs_regression'] = int(params['epochs_regression'])
+        self.model_params['epochs_assignment'] = int(params['epochs_assignment'])
+        self.model_params['epochs_index'] = int(params['epochs_index'])
+        self.model_params['epsilon_pds'] = float(params['epsilon_pds'])
+
+        params_keys = [
+            'dropout_rate',
+            'epsilon',
+            'layers',
+            'output_activation',
+            'output_name',
+            'n_outputs',
+            'kernel_initializer',
+            'bias_initializer',
+            ]
+        network_keys = ['mean_params', 'var_params']
+        for network_key in network_keys:
+            self.model_params[network_key] = dict.fromkeys(params_keys)
+            self.model_params[network_key]['n_outputs'] = self.n_outputs
+            for element in params[network_key].split('{')[1].split('}')[0].split(", '"):
+                key = element.replace("'", "").split(':')[0]
+                value = element.replace("'", "").split(':')[1]
+                if key in ['dropout_rate', 'epsilon']:
+                    self.model_params[network_key][key] = float(value)
+                if key == 'layers':
+                    self.model_params[network_key]['layers'] = np.array(
+                        value.split('[')[1].split(']')[0].split(','),
+                        dtype=int
+                        )
+            self.model_params[network_key]['kernel_initializer'] = None
+            self.model_params[network_key]['bias_initializer'] = None
+
+        self.build_model()
+        self.model.load_weights(
+            filepath=f'{self.save_to}/{self.bravais_lattice}_pitf_weights_{self.model_params["tag"]}.h5',
+            by_name=True
+            )
+        self.compile_model(mode='index')
 
     def train(self, data):
         train = data[data['train']]
@@ -65,23 +180,36 @@ class PhysicsInformedModel:
             'indexing_data': np.stack(val['q2']),
             }
 
-        self.fit_history = [None, None, None]
-        self.compile_model('regression')
-        #self.model.summary()
-        print('\nStarting warm-up: Unit cell regression')
-        self.fit_history[0] = self.model.fit(
-            x=train_inputs,
-            y=train_true,
-            epochs=self.model_params['epochs_regression'],
-            shuffle=True,
-            batch_size=self.model_params['batch_size'], 
-            validation_data=(val_inputs, val_true),
-            callbacks=None,
-            )
-        self.compile_model('assignment')
-        #self.model.summary()
+
+        self.fit_history = [None for _ in range(2*self.model_params['cycles_regression'] + 2)]
+        print('\nStarting fitting: Unit cell regression')
+        for cycle_index in range(self.model_params['cycles_regression']):
+            print(f'\n   Regression mean cycle: {cycle_index + 1}')
+            self.compile_model('regression_mean')
+            self.fit_history[2*cycle_index] = self.model.fit(
+                x=train_inputs,
+                y=train_true,
+                epochs=self.model_params['epochs_regression'],
+                shuffle=True,
+                batch_size=self.model_params['batch_size'], 
+                validation_data=(val_inputs, val_true),
+                callbacks=None,
+                )
+            print(f'\n   Regression var cycle: {cycle_index + 1}')
+            self.compile_model('regression_var')
+            self.fit_history[2*cycle_index + 1] = self.model.fit(
+                x=train_inputs,
+                y=train_true,
+                epochs=self.model_params['epochs_regression'],
+                shuffle=True,
+                batch_size=self.model_params['batch_size'], 
+                validation_data=(val_inputs, val_true),
+                callbacks=None,
+                )
+
         print('\nStarting fitting: Miller index assignments calibration')
-        self.fit_history[1] = self.model.fit(
+        self.compile_model('assignment')
+        self.fit_history[2*self.model_params['cycles_regression']] = self.model.fit(
             x=train_inputs,
             y=train_true,
             epochs=self.model_params['epochs_assignment'],
@@ -91,10 +219,9 @@ class PhysicsInformedModel:
             callbacks=None,
             )
         
-        self.compile_model('index')
-        #self.model.summary()
         print('\nStarting indexing: Unit cell & assignment calibration')
-        self.fit_history[2] = self.model.fit(
+        self.compile_model('index')
+        self.fit_history[2*self.model_params['cycles_regression'] + 1] = self.model.fit(
             x=train_inputs,
             y=train_true,
             epochs=self.model_params['epochs_index'],
@@ -103,7 +230,100 @@ class PhysicsInformedModel:
             validation_data=(val_inputs, val_true),
             callbacks=None,
             )
-        #self.plot_training_loss()
+        self.plot_training_loss()
+        self.save()
+
+    def plot_training_loss(self):
+        # 0: Xnn loss & MSE
+        # 1: Loss & accuracy
+        # 2: Loss
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        total_epochs = 2 * self.model_params['cycles_regression'] * self.model_params['epochs_regression']
+        total_epochs += self.model_params['epochs_assignment'] + self.model_params['epochs_index']
+        metrics = np.zeros((total_epochs, 5, 2))
+        start = -self.model_params['epochs_regression']
+        for cycle_index in range(self.model_params['cycles_regression']):
+            start += self.model_params['epochs_regression']
+            stop = start + self.model_params['epochs_regression']
+            metrics[start: stop, 0, 0] = self.fit_history[2*cycle_index].history['xnn_scaled_loss']
+            metrics[start: stop, 1, 0] = self.fit_history[2*cycle_index].history['xnn_scaled_mean_squared_error']
+            metrics[start: stop, 2, 0] = self.fit_history[2*cycle_index].history['hkl_softmax_loss']
+            metrics[start: stop, 3, 0] = self.fit_history[2*cycle_index].history['hkl_softmax_accuracy']
+            metrics[start: stop, 4, 0] = self.fit_history[2*cycle_index].history['indexing_data_loss']
+            metrics[start: stop, 0, 1] = self.fit_history[2*cycle_index].history['val_xnn_scaled_loss']
+            metrics[start: stop, 1, 1] = self.fit_history[2*cycle_index].history['val_xnn_scaled_mean_squared_error']
+            metrics[start: stop, 2, 1] = self.fit_history[2*cycle_index].history['val_hkl_softmax_loss']
+            metrics[start: stop, 3, 1] = self.fit_history[2*cycle_index].history['val_hkl_softmax_accuracy']
+            metrics[start: stop, 4, 1] = self.fit_history[2*cycle_index].history['val_indexing_data_loss']
+
+            start += self.model_params['epochs_regression']
+            stop = start + self.model_params['epochs_regression']
+            metrics[start: stop, 0, 0] = self.fit_history[2*cycle_index + 1].history['xnn_scaled_loss']
+            metrics[start: stop, 1, 0] = self.fit_history[2*cycle_index + 1].history['xnn_scaled_mean_squared_error']
+            metrics[start: stop, 2, 0] = self.fit_history[2*cycle_index + 1].history['hkl_softmax_loss']
+            metrics[start: stop, 3, 0] = self.fit_history[2*cycle_index + 1].history['hkl_softmax_accuracy']
+            metrics[start: stop, 4, 0] = self.fit_history[2*cycle_index + 1].history['indexing_data_loss']
+            metrics[start: stop, 0, 1] = self.fit_history[2*cycle_index + 1].history['val_xnn_scaled_loss']
+            metrics[start: stop, 1, 1] = self.fit_history[2*cycle_index + 1].history['val_xnn_scaled_mean_squared_error']
+            metrics[start: stop, 2, 1] = self.fit_history[2*cycle_index + 1].history['val_hkl_softmax_loss']
+            metrics[start: stop, 3, 1] = self.fit_history[2*cycle_index + 1].history['val_hkl_softmax_accuracy']
+            metrics[start: stop, 4, 1] = self.fit_history[2*cycle_index + 1].history['val_indexing_data_loss']
+
+        start += self.model_params['epochs_regression']
+        stop = start + self.model_params['epochs_assignment']
+        history_index = 2*self.model_params['cycles_regression']
+        metrics[start: stop, 0, 0] = self.fit_history[history_index].history['xnn_scaled_loss']
+        metrics[start: stop, 1, 0] = self.fit_history[history_index].history['xnn_scaled_mean_squared_error']
+        metrics[start: stop, 2, 0] = self.fit_history[history_index].history['hkl_softmax_loss']
+        metrics[start: stop, 3, 0] = self.fit_history[history_index].history['hkl_softmax_accuracy']
+        metrics[start: stop, 4, 0] = self.fit_history[history_index].history['indexing_data_loss']
+        metrics[start: stop, 0, 1] = self.fit_history[history_index].history['val_xnn_scaled_loss']
+        metrics[start: stop, 1, 1] = self.fit_history[history_index].history['val_xnn_scaled_mean_squared_error']
+        metrics[start: stop, 2, 1] = self.fit_history[history_index].history['val_hkl_softmax_loss']
+        metrics[start: stop, 3, 1] = self.fit_history[history_index].history['val_hkl_softmax_accuracy']
+        metrics[start: stop, 4, 1] = self.fit_history[history_index].history['val_indexing_data_loss']
+
+        start += self.model_params['epochs_assignment']
+        stop = start + self.model_params['epochs_index']
+        history_index = 2*self.model_params['cycles_regression'] + 1
+        metrics[start: stop, 0, 0] = self.fit_history[history_index].history['xnn_scaled_loss']
+        metrics[start: stop, 1, 0] = self.fit_history[history_index].history['xnn_scaled_mean_squared_error']
+        metrics[start: stop, 2, 0] = self.fit_history[history_index].history['hkl_softmax_loss']
+        metrics[start: stop, 3, 0] = self.fit_history[history_index].history['hkl_softmax_accuracy']
+        metrics[start: stop, 4, 0] = self.fit_history[history_index].history['indexing_data_loss']
+        metrics[start: stop, 0, 1] = self.fit_history[history_index].history['val_xnn_scaled_loss']
+        metrics[start: stop, 1, 1] = self.fit_history[history_index].history['val_xnn_scaled_mean_squared_error']
+        metrics[start: stop, 2, 1] = self.fit_history[history_index].history['val_hkl_softmax_loss']
+        metrics[start: stop, 3, 1] = self.fit_history[history_index].history['val_hkl_softmax_accuracy']
+        metrics[start: stop, 4, 1] = self.fit_history[history_index].history['val_indexing_data_loss']
+
+        fig, axes = plt.subplots(3, 1, figsize=(8, 8), sharex=True)
+        axes_r = [axes[i].twinx() for i in range(3)]
+        axes[0].plot(metrics[:, 0, 0], label='Training Xnn Loss', color=colors[0], marker='.')
+        axes[0].plot(metrics[:, 0, 1], label='Val Xnn Loss', color=colors[1], marker='x')
+        axes_r[0].plot(metrics[:, 1, 0], label='Training Xnn MSE', color=colors[2], marker='.')
+        axes_r[0].plot(metrics[:, 1, 1], label='Val Xnn MSE', color=colors[3], marker='x')
+        axes[1].plot(metrics[:, 2, 0], label='Training HKL Loss', color=colors[0], marker='.')
+        axes[1].plot(metrics[:, 2, 1], label='Val HKL Loss', color=colors[1], marker='x')
+        axes_r[1].plot(metrics[:, 3, 0], label='Training HKL Accuracy', color=colors[2], marker='.')
+        axes_r[1].plot(metrics[:, 3, 1], label='Val HKL Accuracy', color=colors[3], marker='x')
+        axes[2].plot(metrics[:, 4, 0], label='Training Indexing Loss', color=colors[0], marker='.')
+        axes[2].plot(metrics[:, 4, 1], label='Val Indexing Loss', color=colors[1], marker='x')
+
+        for i in range(2):
+            hl, ll = axes[i].get_legend_handles_labels()
+            hr, lr = axes_r[i].get_legend_handles_labels()
+            axes[i].legend(hl + hr, ll + lr, frameon=False)
+        axes[2].legend(frameon=False)
+        axes[2].set_xlabel('Epoch')
+        axes[0].set_ylabel('Xnn Loss')
+        axes_r[0].set_ylabel('Xnn MSE')
+        axes[1].set_ylabel('HKL Loss')
+        axes_r[1].set_ylabel('HKL Accuracy')
+        axes[2].set_ylabel('Indexing Loss')
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to}/{self.bravais_lattice}_training_loss.png')
+        plt.close()
 
     def transform_pairwise_differences(self, pairwise_differences_scaled, tensorflow):
         if tensorflow:
@@ -128,42 +348,61 @@ class PhysicsInformedModel:
             q2_scaler=self.q2_scaler,
             )
 
-        self.regression_layer_names = []
-        for index in range(len(self.model_params['model_params']['layers'])):
-            self.regression_layer_names.append(f'dense_xnn_scaled_{index}')
-            self.regression_layer_names.append(f'layer_norm_xnn_scaled_' + str(index))
-        self.regression_layer_names.append('xnn_scaled')
+        self.mean_layer_names = []
+        for index in range(len(self.model_params['mean_params']['layers'])):
+            self.mean_layer_names.append(f'dense_xnn_scaled_mean_{index}')
+            self.mean_layer_names.append(f'layer_norm_xnn_scaled_mean_' + str(index))
+        self.mean_layer_names.append('xnn_scaled_mean')
 
-        self.calibration_layer_names = ['calibration_0', 'calibration_1']
+        self.var_layer_names = []
+        for index in range(len(self.model_params['var_params']['layers'])):
+            self.var_layer_names.append(f'dense_xnn_scaled_var_{index}')
+            self.var_layer_names.append(f'layer_norm_xnn_scaled_var_' + str(index))
+        self.var_layer_names.append('xnn_scaled_var')
+
+        self.calibration_layer_names = ['calibration']
 
         self.model = tf.keras.Model(inputs, self.model_builder(inputs))
 
     def model_builder(self, inputs):
-        xnn_scaled = mlp_model_builder(
+        xnn_scaled_mean = mlp_model_builder(
             inputs['q2_scaled'],
-            'xnn_scaled',
-            self.model_params['model_params'],
-            'xnn_scaled'
+            'xnn_scaled_mean',
+            self.model_params['mean_params'],
+            'xnn_scaled_mean'
             )
-        xnn = xnn_scaled * self.xnn_scaler.scale_[0] + self.xnn_scaler.mean_[0]
+        xnn_scaled_var = mlp_model_builder(
+            inputs['q2_scaled'],
+            'xnn_scaled_var',
+            self.model_params['var_params'],
+            'xnn_scaled_var'
+            )
+        xnn_scaled = tf.keras.layers.Concatenate(
+            axis=2,
+            name='xnn_scaled'
+            )((
+                xnn_scaled_mean[:, :, tf.newaxis],
+                xnn_scaled_var[:, :, tf.newaxis],
+                ))
+
+        xnn = xnn_scaled_mean * self.xnn_scaler.scale_[0] + self.xnn_scaler.mean_[0]
         pairwise_differences_scaled, q2_ref = self.pairwise_difference_calculator.get_pairwise_differences(
             xnn, inputs['q2_scaled'], return_q2_ref=True
             )
 
-        pairwise_differences_transformed = self.transform_pairwise_differences(
-            pairwise_differences_scaled, True
-            )
-
-        hkl_logits = ScalingLayer()(pairwise_differences_transformed)
-
         # hkl_logits:               n_batch x n_points x hkl_ref_length
         # pairwise_differences:     n_batch x n_points x hkl_ref_length
         # q2_ref:                   n_batch x hkl_ref_length
+        pairwise_differences_transformed = self.transform_pairwise_differences(
+            pairwise_differences_scaled, True
+            )
+        hkl_logits = ScalingLayer(
+            name='scaling_layer'
+            )(pairwise_differences_transformed)
         hkl_softmax = tf.keras.layers.Softmax(
             name='hkl_softmax',
             axis=2
             )(hkl_logits)
-        
         indexing_data = tf.keras.layers.Concatenate(
             axis=1,
             name='indexing_data'
@@ -175,63 +414,133 @@ class PhysicsInformedModel:
 
     def compile_model(self, mode):
         indexing_loss = IndexingTargetFunction(
-            likelihood_function='cauchy', 
-            error_fraction=np.linspace(0.001, 0.01, self.data_params['n_points']),
+            likelihood='normal', 
+            error_fraction=np.linspace(0.01, 0.1, self.data_params['n_points']),
             n_points=self.data_params['n_points'],
-            tuning_param=1
             )
 
-        if mode == 'regression':
+        if mode.startswith('regression'):
             optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_regression'])
             loss_weights = {
                 'xnn_scaled': 1,
                 'hkl_softmax': 0,
                 'indexing_data': 0,
                 }
-            for layer_name in self.regression_layer_names:
-                self.model.get_layer(layer_name).trainable = True
             self.model.get_layer('scaling_layer').trainable = False
-            loss_metrics = {
-                'xnn_scaled': 'mse',
-                }
+            if mode == 'regression_mean':
+                reg_loss = LikelihoodLoss(
+                    likelihood='normal',
+                    n=self.n_outputs,
+                    beta_nll=self.model_params['beta_nll'],
+                    )
+                for layer_name in self.mean_layer_names:
+                    self.model.get_layer(layer_name).trainable = True
+                for layer_name in self.var_layer_names:
+                    self.model.get_layer(layer_name).trainable = False
+            elif mode == 'regression_var':
+                reg_loss = LikelihoodLoss(
+                    likelihood='normal',
+                    n=self.n_outputs,
+                    beta_nll=None,
+                    )
+                for layer_name in self.mean_layer_names:
+                    self.model.get_layer(layer_name).trainable = False
+                for layer_name in self.var_layer_names:
+                    self.model.get_layer(layer_name).trainable = True
         elif mode == 'assignment':
+            reg_loss = LikelihoodLoss(
+                likelihood='normal',
+                n=self.n_outputs,
+                beta_nll=None,
+                )
             optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_assignment'])
             loss_weights = {
                 'xnn_scaled': 0,
                 'hkl_softmax': 1,
                 'indexing_data': 0,
                 }
-            for layer_name in self.regression_layer_names:
+            for layer_name in self.mean_layer_names:
+                self.model.get_layer(layer_name).trainable = False
+            for layer_name in self.var_layer_names:
                 self.model.get_layer(layer_name).trainable = False
             self.model.get_layer('scaling_layer').trainable = True
-            loss_metrics = {
-                'indexing_data': indexing_loss,
-                }
         elif mode == 'index':
+            reg_loss = LikelihoodLoss(
+                likelihood='normal',
+                n=self.n_outputs,
+                beta_nll=None,
+                )
             optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_index'])
             loss_weights = {
                 'xnn_scaled': 1,
                 'hkl_softmax': 0,
                 'indexing_data': 1,
                 }
-            for layer_name in self.regression_layer_names:
+            for layer_name in self.mean_layer_names:
                 self.model.get_layer(layer_name).trainable = True
+            for layer_name in self.var_layer_names:
+                self.model.get_layer(layer_name).trainable = False
             self.model.get_layer('scaling_layer').trainable = True
-            loss_metrics = {
-                'xnn_scaled': 'mse',
-                'hkl_softmax': 'accuracy',
-                'indexing_data': indexing_loss,
-                }
+
+        loss_metrics = {
+            'xnn_scaled': reg_loss.mean_squared_error,
+            'hkl_softmax': 'accuracy',
+            'indexing_data': indexing_loss,
+            }
         loss_functions = {
-            'xnn_scaled': tf.keras.losses.MSE,
+            'xnn_scaled': reg_loss,
             'hkl_softmax': tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False),
             'indexing_data': indexing_loss,
             }
-        
-        
+
         self.model.compile(
             optimizer=optimizer, 
             loss=loss_functions,
             loss_weights=loss_weights,
             metrics=loss_metrics
             )
+        #self.model.summary()
+
+    def do_predictions(self, data=None, inputs=None, q2_scaled=None, batch_size=None):
+        if not data is None:
+            q2_scaled = np.stack(data['q2_scaled'])
+        elif not inputs is None:
+            q2_scaled = inputs['q2_scaled']
+
+        print(f'\n Regression inferences for {self.bravais_lattice}')
+        if batch_size is None:
+            batch_size = self.model_params['batch_size']
+
+        # predict_on_batch helps with a memory leak...
+        N = len(data)
+        n_batches = N // batch_size
+        left_over = N % batch_size
+        xnn_pred_scaled = np.zeros((N, self.n_outputs))
+        xnn_pred_scaled_var = np.zeros((N, self.n_outputs))
+        hkl_softmax = np.zeros((N, self.n_points, self.data_params['hkl_ref_length']))
+        for batch_index in range(n_batches + 1):
+            start = batch_index * batch_size
+            if batch_index == n_batches:
+                batch_inputs = {'q2_scaled': np.zeros((batch_size, self.n_points))}
+                batch_inputs['q2_scaled'][:left_over] = q2_scaled[start: start + left_over]
+                batch_inputs['q2_scaled'][left_over:] = q2_scaled[0]
+            else:
+                batch_inputs = {'q2_scaled': q2_scaled[start: start + batch_size]}
+
+            outputs = self.model.predict_on_batch(batch_inputs)
+
+            if batch_index == n_batches:
+                xnn_pred_scaled[start:] = outputs[0][:left_over, :, 0]
+                xnn_pred_scaled_var[start:] = outputs[0][:left_over, :, 1]
+                hkl_softmax[start:] = outputs[1][:left_over]
+            else:
+                xnn_pred_scaled[start: start + batch_size] = outputs[0][:, :, 0]
+                xnn_pred_scaled_var[start: start + batch_size] = outputs[0][:, :, 1]
+                hkl_softmax[start: start + batch_size] = outputs[1]
+
+        xnn_pred = xnn_pred_scaled * self.xnn_scaler.scale_[0] + self.xnn_scaler.mean_[0]
+        xnn_pred_var = xnn_pred_scaled_var * self.xnn_scaler.scale_[0]**2
+        return xnn_pred, xnn_pred_var, hkl_softmax
+
+    def generate_candidates(self, data=None, inputs=None, q2_scaled=None, batch_size=None):
+        xnn_pred, xnn_pred_var, hkl_softmax = self.do_predictions(data, inputs, q2_scaled, batch_size)

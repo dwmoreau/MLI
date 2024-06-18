@@ -24,67 +24,6 @@ from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 
 
-def vectorized_subsampling(p, n_picks, rng):
-    n_entries = p.shape[0]
-    n_choices = p.shape[1]
-    choices = np.repeat(np.arange(n_choices)[np.newaxis], repeats=n_entries, axis=0) 
-    chosen = np.zeros((n_entries, n_picks), dtype=int)
-    for index in range(n_picks):
-        # cumsum: n_entries, n_peaks
-        # random_value: n_entries
-        # q: n_entries, n_peaks
-        n_peaks = p.shape[1]
-        cumsum = p.cumsum(axis=1)
-        random_value = rng.random(n_entries)
-        q = cumsum >= random_value[:, np.newaxis]
-        chosen_indices = q.argmax(axis=1)
-        chosen[:, index] = choices[np.arange(n_entries), chosen_indices]
-        p_flat = p.ravel()
-        choices_flat = choices.ravel()
-        delete_indices = np.arange(n_entries) * n_peaks + chosen_indices
-        p = np.delete(p_flat, delete_indices).reshape((n_entries, n_peaks - 1))
-        choices = np.delete(choices_flat, delete_indices).reshape((n_entries, n_peaks - 1))
-    chosen = np.sort(chosen, axis=1)
-    return chosen
-
-
-def best_assign_nocommon_original(softmaxes):
-    n_entries = softmaxes.shape[0]
-    n_peaks = softmaxes.shape[1]
-    hkl_ref_length = softmaxes.shape[2]
-    hkl_assign = np.zeros((n_entries, n_peaks), dtype=int)
-
-    peak_choice = np.argsort(np.max(softmaxes, axis=2), axis=1)
-    for candidate_index in range(n_entries):
-        softmaxes_zeroed = softmaxes[candidate_index].copy()
-        for peak_index in peak_choice[candidate_index]:
-            choice = np.argmax(softmaxes_zeroed[peak_index, :])
-            hkl_assign[candidate_index, peak_index] = choice
-            softmaxes_zeroed[:, hkl_assign[candidate_index, peak_index]] = 0
-
-    softmax_assign = np.take_along_axis(softmaxes, hkl_assign[:, :, np.newaxis], axis=2)
-    return hkl_assign, softmax_assign
-
-
-def best_assign_nocommon(softmaxes):
-    # This is three times faster than the version above.
-    # It picks the first occurance as opposed to the best occurance.
-    n_entries = softmaxes.shape[0]
-    n_peaks = softmaxes.shape[1]
-    hkl_ref_length = softmaxes.shape[2]
-    hkl_assign = np.zeros((n_entries, n_peaks), dtype=int)
-    softmax_assign = np.zeros((n_entries, n_peaks))
-    for peak_index in range(n_peaks):
-        softmaxes_peak = softmaxes[:, peak_index, :]
-        hkl_assign[:, peak_index] = np.argmax(softmaxes_peak, axis=1)
-        softmax_assign[:, peak_index] = np.take_along_axis(
-            softmaxes_peak, hkl_assign[:, peak_index][:, np.newaxis],
-            axis=1
-            )[:, 0]
-        np.put(softmaxes, hkl_assign[:, np.newaxis, :], 0)
-    return hkl_assign, softmax_assign
-
-
 class Candidates:
     def __init__(self, entry, unit_cell, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell, tolerance, epsilon, max_neighbors, radius):
         self.q2_obs = np.array(entry['q2'])

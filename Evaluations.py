@@ -3,7 +3,126 @@ import numpy as np
 import scipy.stats
 
 
-def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, trees):
+def evaluate_regression_pitf(data, n_outputs, save_to_name, y_indices):
+    alpha = 0.1
+    markersize = 0.5
+
+    data = data[~data['augmented']]
+    figsize = (n_outputs*2 + 2, 6)
+    fig, axes = plt.subplots(2, n_outputs, figsize=figsize)
+    if n_outputs == 1:
+        axes = axes[:, np.newaxis]
+
+    unit_cell_true = np.stack(data['reindexed_unit_cell'])[:, y_indices]
+    unit_cell_true_train = np.stack(data[data['train']]['reindexed_unit_cell'])[:, y_indices]
+    unit_cell_true_val = np.stack(data[~data['train']]['reindexed_unit_cell'])[:, y_indices]
+    unit_cell_pred = np.stack(data['reindexed_unit_cell_pred_pitf'])
+    unit_cell_pred_train = np.stack(data[data['train']]['reindexed_unit_cell_pred_pitf'])
+    unit_cell_pred_val = np.stack(data[~data['train']]['reindexed_unit_cell_pred_pitf'])
+    unit_cell_error = np.abs(unit_cell_pred - unit_cell_true)
+    unit_cell_error_train = np.abs(unit_cell_pred_train - unit_cell_true_train)
+    unit_cell_error_val = np.abs(unit_cell_pred_val - unit_cell_true_val)
+    unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
+
+    xnn_true = np.stack(data['reindexed_xnn'])[:, y_indices]
+    xnn_true_train = np.stack(data[data['train']]['reindexed_xnn'])[:, y_indices]
+    xnn_true_val = np.stack(data[~data['train']]['reindexed_xnn'])[:, y_indices]
+    xnn_pred = np.stack(data['reindexed_xnn_pred_pitf'])
+    xnn_pred_train = np.stack(data[data['train']]['reindexed_xnn_pred_pitf'])
+    xnn_pred_val = np.stack(data[~data['train']]['reindexed_xnn_pred_pitf'])
+    xnn_error = np.abs(xnn_pred - xnn_true)
+    xnn_error_train = np.abs(xnn_pred_train - xnn_true_train)
+    xnn_error_val = np.abs(xnn_pred_val - xnn_true_val)
+    xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+
+    for uc_index in range(n_outputs):
+        all_unit_cell = np.sort(np.concatenate((
+            unit_cell_true[:, uc_index], unit_cell_pred[:, uc_index]
+            )))
+        lower_unit_cell = all_unit_cell[int(0.005*all_unit_cell.size)]
+        upper_unit_cell = all_unit_cell[int(0.995*all_unit_cell.size)]
+
+        if upper_unit_cell > lower_unit_cell:
+            axes[0, uc_index].plot(
+                unit_cell_true[:, uc_index], unit_cell_pred[:, uc_index],
+                color=[0, 0, 0], alpha=alpha,
+                linestyle='none', marker='.', markersize=markersize,
+                )
+            axes[0, uc_index].plot(
+                [lower_unit_cell, upper_unit_cell], [lower_unit_cell, upper_unit_cell],
+                color=[0.7, 0, 0], linestyle='dotted'
+                )
+            axes[0, uc_index].set_xlim([lower_unit_cell, upper_unit_cell])
+            axes[0, uc_index].set_ylim([lower_unit_cell, upper_unit_cell])
+
+        error_train = np.sort(unit_cell_error_train[:, uc_index])
+        unit_cell_p25_train = error_train[int(0.25 * error_train.size)]
+        unit_cell_p50_train = error_train[int(0.50 * error_train.size)]
+        unit_cell_p75_train = error_train[int(0.75 * error_train.size)]
+        unit_cell_rmse_train = np.sqrt(1/error_train.size * np.linalg.norm(error_train)**2)
+        error_val = np.sort(unit_cell_error_val[:, uc_index])
+        unit_cell_p25_val = error_val[int(0.25 * error_val.size)]
+        unit_cell_p50_val = error_val[int(0.50 * error_val.size)]
+        unit_cell_p75_val = error_val[int(0.75 * error_val.size)]
+        unit_cell_rmse_val = np.sqrt(1/error_val.size * np.linalg.norm(error_val)**2)
+        unit_cell_error_titles = [
+            unit_cell_titles[uc_index],
+            f'RMSE: {unit_cell_rmse_train:0.2f} / {unit_cell_rmse_val:0.2f}',
+            f'25%: {unit_cell_p25_train:0.2f} / {unit_cell_p25_val:0.2f}',
+            f'50%: {unit_cell_p50_train:0.2f} / {unit_cell_p50_val:0.2f}',
+            f'75%: {unit_cell_p75_train:0.2f} / {unit_cell_p75_val:0.2f}',
+            ]
+        axes[0, uc_index].set_title('\n'.join(unit_cell_error_titles), fontsize=12)
+
+        all_xnn = np.sort(np.concatenate((
+            xnn_true[:, uc_index], xnn_pred[:, uc_index]
+            )))
+        lower_xnn = all_xnn[int(0.005*all_xnn.size)]
+        upper_xnn = all_xnn[int(0.995*all_xnn.size)]
+
+        if upper_xnn > lower_xnn:
+            axes[1, uc_index].plot(
+                xnn_true[:, uc_index], xnn_pred[:, uc_index],
+                color=[0, 0, 0], alpha=alpha,
+                linestyle='none', marker='.', markersize=markersize,
+                )
+            axes[1, uc_index].plot(
+                [lower_xnn, upper_xnn], [lower_xnn, upper_xnn],
+                color=[0.7, 0, 0], linestyle='dotted'
+                )
+            axes[1, uc_index].set_xlim([lower_xnn, upper_xnn])
+            axes[1, uc_index].set_ylim([lower_xnn, upper_xnn])
+
+        error_train = np.sort(xnn_error_train[:, uc_index])
+        xnn_p25_train = error_train[int(0.25 * error_train.size)]
+        xnn_p50_train = error_train[int(0.50 * error_train.size)]
+        xnn_p75_train = error_train[int(0.75 * error_train.size)]
+        xnn_rmse_train = np.sqrt(1/error_train.size * np.linalg.norm(error_train)**2)
+        error_val = np.sort(xnn_error_val[:, uc_index])
+        xnn_p25_val = error_val[int(0.25 * error_val.size)]
+        xnn_p50_val = error_val[int(0.50 * error_val.size)]
+        xnn_p75_val = error_val[int(0.75 * error_val.size)]
+        xnn_rmse_val = np.sqrt(1/error_val.size * np.linalg.norm(error_val)**2)
+        xnn_error_titles = [
+            xnn_titles[uc_index],
+            f'RMSE: {xnn_rmse_train:0.2f} / {xnn_rmse_val:0.2f}',
+            f'25%: {xnn_p25_train:0.2f} / {xnn_p25_val:0.2f}',
+            f'50%: {xnn_p50_train:0.2f} / {xnn_p50_val:0.2f}',
+            f'75%: {xnn_p75_train:0.2f} / {xnn_p75_val:0.2f}',
+            ]
+        axes[1, uc_index].set_title('\n'.join(xnn_error_titles), fontsize=12)
+
+        axes[0, uc_index].set_xlabel('True')
+        axes[1, uc_index].set_xlabel('True')
+    axes[0, 0].set_ylabel('Predicted')
+    axes[1, 0].set_ylabel('Predicted')
+
+    fig.tight_layout()
+    #fig.savefig()
+    fig.savefig(save_to_name)
+    plt.close()
+
+def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, model):
     alpha = 0.1
     markersize = 0.5
 
@@ -15,16 +134,17 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices,
     y_true = np.stack(data[unit_cell_key])[:, y_indices]
     y_true_train = np.stack(data[data['train']][unit_cell_key])[:, y_indices]
     y_true_val = np.stack(data[~data['train']][unit_cell_key])[:, y_indices]
-    if trees:
+    if model == 'trees':
         y_pred = np.stack(data[f'{unit_cell_key}_pred_trees'])
         y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred_trees'])
         y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred_trees'])
         y_cov = np.stack(data[f'{unit_cell_key}_pred_cov_trees'])
-    else:
+    elif model == 'nn':
         y_pred = np.stack(data[f'{unit_cell_key}_pred'])
         y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred'])
         y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred'])
         y_cov = np.stack(data[f'{unit_cell_key}_pred_cov'])
+
     y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
     y_error = np.abs(y_pred - y_true)
     y_error_train = np.abs(y_pred_train - y_true_train)
@@ -121,11 +241,10 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices,
     axes[4, 0].set_ylabel('Distribution')
     axes[4, 0].legend(frameon=False)
     fig.tight_layout()
-    #fig.savefig()
     fig.savefig(save_to_name)
     plt.close()
 
-def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, trees):
+def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, model):
     # calculate residuals / uncertainty
     hist_bins = np.linspace(-4, 4, 101)
     hist_centers = (hist_bins[1:] + hist_bins[:-1]) / 2
@@ -147,10 +266,10 @@ def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices
     ENCE = np.zeros((n_outputs, 2, n_calib_bins))
     for train_index in range(2):
         y_true = np.stack(data[train_index][unit_cell_key])[:, y_indices]
-        if trees:
+        if model == 'trees':
             y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred_trees'])
             y_cov = np.stack(data[train_index][f'{unit_cell_key}_pred_cov_trees'])
-        else:
+        elif model == 'nn':
             y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred'])
             y_cov = np.stack(data[train_index][f'{unit_cell_key}_pred_cov'])
         y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))

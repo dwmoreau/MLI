@@ -44,6 +44,17 @@ mP              | 85%
 aP              | 95 - 98%
 
 
+* Physics informed target function
+    - Evaluations
+        - Assignment accuracy
+        - Assignment calibration
+    - Generative
+        - sampling from predicted Miller indices and updating the unit cell using least squares 
+    - Incorporate into optimization
+    - Make sure the beta-nll for regression is being used correctly
+    - Optimization of uncertainty in the indexing
+    - More general scaling
+
 * Refactoring
     - Rerun all Bravais lattices
         - Redo training with new RF and template code
@@ -104,17 +115,12 @@ aP              | 95 - 98%
 - SWE:
     - Convert all code to be based on Xnn
     - convert angles to radians asap and delete all degree code
+    - Store variance from regression - remove "covariance"
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
 
 - Dominant zone:
     - 2D and 1D optimization
-
-- Physics informed target function
-    - Convert the xnn prediction to a likelihood MVE model
-    - Plot training loss
-    - Evaluations
-    -
 
 - Regression
 - Indexing.py
@@ -133,6 +139,7 @@ from tqdm import tqdm
 from Assigner import Assigner
 from Augmentor import Augmentor
 from Evaluations import evaluate_regression
+from Evaluations import evaluate_regression_pitf
 from Evaluations import calibrate_regression
 from MITemplates import MITemplates
 from MITemplates import MITemplates_binning
@@ -140,6 +147,7 @@ from PhysicsInformedModel import PhysicsInformedModel
 from Regression import Regression_AlphaBeta
 from Utilities import get_hkl_matrix
 from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import get_unit_cell_from_xnn
 from Utilities import Q2Calculator
 from Utilities import read_params
 from Utilities import reciprocal_uc_conversion
@@ -1228,6 +1236,33 @@ class Indexing:
                 bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
                 self.pitf_generator[bravais_lattice].train(data=bl_data[~bl_data['augmented']])
 
+    def inferences_pitf(self):
+        reindexed_xnn_pred = np.zeros((len(self.data), self.data_params['n_outputs']))
+        reindexed_xnn_pred_var = np.zeros((len(self.data), self.data_params['n_outputs']))
+
+        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
+            bl_indices = self.data['bravais_lattice'] == bravais_lattice
+            reindexed_xnn_pred[bl_indices, :], reindexed_xnn_pred_var[bl_indices, :], _ = \
+                self.pitf_generator[bravais_lattice].do_predictions(data=self.data[bl_indices], batch_size=1024)
+
+        self.data['reindexed_xnn_pred_pitf'] = list(reindexed_xnn_pred)
+        self.data['reindexed_xnn_pred_pitf_var'] = list(reindexed_xnn_pred_var)
+        self.data['reindexed_unit_cell_pred_pitf'] = list(get_unit_cell_from_xnn(
+            reindexed_xnn_pred,
+            partial_unit_cell=True, 
+            lattice_system=self.data_params['lattice_system'],
+            radians=True
+            ))
+
+    def evaluate_pitf(self):
+        for bravais_lattice in self.data_params['bravais_lattices']:
+            evaluate_regression_pitf(
+                data=self.data[self.data['bravais_lattice'] == bravais_lattice],
+                n_outputs=self.data_params['n_outputs'],
+                save_to_name=f'{self.save_to["pitf"]}/{bravais_lattice}_reg_pitf.png',
+                y_indices=self.data_params['y_indices'],
+                )
+
     def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_cov=None):
         if not uc_pred_scaled is None:
             uc_pred = np.zeros(uc_pred_scaled.shape)
@@ -1321,7 +1356,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg.png',
                 y_indices=self.data_params['y_indices'],
-                trees=False
+                model='nn'
                 )
             evaluate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
@@ -1329,7 +1364,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_tree.png',
                 y_indices=self.data_params['y_indices'],
-                trees=True
+                model='trees'
                 )
             calibrate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
@@ -1337,7 +1372,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration.png',
                 y_indices=self.data_params['y_indices'],
-                trees=False
+                model='nn'
                 )
             calibrate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
@@ -1345,7 +1380,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration_tree.png',
                 y_indices=self.data_params['y_indices'],
-                trees=True
+                model='trees'
                 )
         for split_group in self.data_params['split_groups']:
             evaluate_regression(
