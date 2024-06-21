@@ -56,7 +56,7 @@ class PeakListCreator:
         self.known_space_group = known_space_group
         self.error = None
 
-    def output_json(self):
+    def output_json(self, note=None, extra_file_name=None):
         output = {
             'primary_peaks': self.q2_primary_picked,
             'secondary_peaks': self.secondary_peaks,
@@ -64,10 +64,13 @@ class PeakListCreator:
             'secondary_hist': np.column_stack((self.secondary_centers_q2, self.secondary_hist_q2_difference)),
             'broadening_params': self.broadening_params,
             'error': self.error,
+            'note': note,
             }
-        pd.Series(output).to_json(os.path.join(
-            self.save_to_directory, f'{self.tag}_info.json'
-            ))
+        if extra_file_name is None:
+            file_name = os.path.join(self.save_to_directory, f'{self.tag}_info.json')
+        else:
+            file_name = os.path.join(self.save_to_directory, f'{self.tag}_info_{extra_file_name}.json')
+        pd.Series(output).to_json(file_name)
 
     def _combine_expt_refl_files(self):
         expt_file_names = []
@@ -290,25 +293,27 @@ class PeakListCreator:
             )
         print(results)
         self.delta = results.x[:2]
-        initial_simplex = np.array([
-            [0.05, 0.025, 0.01, 0.025],
-            [0.025, -0.05, 0.025, -0.01],
-            [0.001, -0.01, 0.001, -0.001],
-            [-0.01, 0.001, -0.001, 0.001],
-            [-0.025, -0.05, -0.025, 0.01],
-            ])
-        results = scipy.optimize.minimize(
-            fun=functional_angle,
-            x0=[0, 0, 0, 0],
-            args=(s1, s0),
-            method='Nelder-Mead',
-            options={'initial_simplex': initial_simplex}
-            )
+        self._parse_refl_file(update=True)
+
+        # This optimizes the detector angle.
+        #initial_simplex = np.array([
+        #    [0.05, 0.025, 0.01, 0.025],
+        #    [0.025, -0.05, 0.025, -0.01],
+        #    [0.001, -0.01, 0.001, -0.001],
+        #    [-0.01, 0.001, -0.001, 0.001],
+        #    [-0.025, -0.05, -0.025, 0.01],
+        #    ])
+        #results = scipy.optimize.minimize(
+        #    fun=functional_angle,
+        #    x0=[0, 0, 0, 0],
+        #    args=(s1, s0),
+        #    method='Nelder-Mead',
+        #    options={'initial_simplex': initial_simplex}
+        #    )
         #self.delta = results.x[:2]
         #self.angle_x = results.x[2]
         #self.angle_y = results.x[3]
-        print(results)
-        self._parse_refl_file(update=True)
+        #print(results)
         return None
 
     def make_primary_histogram(self, n_bins=1000, d_min=60, d_max=3.5):
@@ -362,7 +367,7 @@ class PeakListCreator:
             )
         print(repr(1/np.sqrt(self.q2_primary_picked)))
 
-    def fit_peaks(self, n_max):
+    def fit_peaks(self, n_max, fit_shift=True):
         def get_q2_calc(x, q2_0, q2_centers, mode, jac=False):
             # Fit breadths & amplitudes
             n = q2_0.size
@@ -431,44 +436,49 @@ class PeakListCreator:
             bounds=(lower_bounds, upper_bounds),
             )
         print(results)
-    
-        # Fit breadths, amplitudes, and shift
-        x0 = np.concatenate((
-            results.x[:n_max], 0.000001 * np.ones(n_max), results.x[n_max:]
-            ))
-    
-        lower_bounds = np.concatenate((
-            np.zeros(n_max),
-            -np.inf * np.ones(n_max),
-            [-np.inf, -np.inf]
-            ))
-        upper_bounds = np.concatenate((
-            1 * np.ones(n_max),
-            np.inf * np.ones(n_max),
-            [np.inf, np.inf]
-            ))
-        results = scipy.optimize.least_squares(
-            breadth_fit_loss,
-            x0=x0,
-            jac=breadth_fit_jac,
-            args=(self.q2_primary_picked[:n_max], self.primary_hist_q2, self.primary_centers_q2, 'all'),
-            bounds=(lower_bounds, upper_bounds),
-            )
-        print(results)
-        shift = results.x[n_max: 2*n_max]
-        self.broadening_params = results.x[2*n_max:]
-        q2_calc = get_q2_calc(results.x, self.q2_primary_picked[:n_max], self.primary_centers_q2, 'all', False)
-        self.q2_primary_picked[:n_max] += shift
+        self.broadening_params = results.x[n_max:]
+        q2_calc = get_q2_calc(results.x, self.q2_primary_picked[:n_max], self.primary_centers_q2, 'amplitudes_breadths', False)
+        print(self.broadening_params)
+        if fit_shift:
+            # Fit breadths, amplitudes, and shift
+            x0 = np.concatenate((
+                results.x[:n_max], 0.000001 * np.ones(n_max), results.x[n_max:]
+                ))
+        
+            lower_bounds = np.concatenate((
+                np.zeros(n_max),
+                -np.inf * np.ones(n_max),
+                [-np.inf, -np.inf]
+                ))
+            upper_bounds = np.concatenate((
+                1 * np.ones(n_max),
+                np.inf * np.ones(n_max),
+                [np.inf, np.inf]
+                ))
+            results = scipy.optimize.least_squares(
+                breadth_fit_loss,
+                x0=x0,
+                jac=breadth_fit_jac,
+                args=(self.q2_primary_picked[:n_max], self.primary_hist_q2, self.primary_centers_q2, 'all'),
+                bounds=(lower_bounds, upper_bounds),
+                )
+            print(results)
+            shift = results.x[n_max: 2*n_max]
+            self.broadening_params = results.x[2*n_max:]
+            q2_calc = get_q2_calc(results.x, self.q2_primary_picked[:n_max], self.primary_centers_q2, 'all', False)
+            self.q2_primary_picked[:n_max] += shift        
+        
         fig, axes = plt.subplots(1, 1, figsize=(40,  8), sharex=True)
         axes.plot(self.primary_centers_q2, self.primary_hist_q2)
         axes.plot(self.primary_centers_q2, q2_calc)
         ylim = axes.get_ylim()
-        for i in range(n_max):
-            axes.annotate(
-                f'{shift[i]:0.5f}',
-                xy=(self.q2_primary_picked[i], 0.9 * ylim[1]),
-                rotation=90
-                )
+        if fit_shift:
+            for i in range(n_max):
+                axes.annotate(
+                    f'{shift[i]:0.5f}',
+                    xy=(self.q2_primary_picked[i], 0.9 * ylim[1]),
+                    rotation=90
+                    )
         plt.show()
 
     def create_secondary_peaks(self, q2_max=None, max_difference=None, max_refl_count=None, min_separation=None, n_bins=800):
@@ -541,12 +551,14 @@ class PeakListCreator:
             ylim = axes[0].get_ylim()
             axes[0].plot([max_difference, max_difference], ylim, color=[0, 0, 0])
             axes[0].set_ylim(ylim)
+        axes[0].set_title('Primary Peaks Distance\nfrom a picked peak')
 
         axes[1].bar(np.arange(refl_counts_dist.size), refl_counts_dist, width=1)
         if not max_refl_count is None:
             ylim = axes[1].get_ylim()
             axes[1].plot([max_refl_count, max_refl_count], ylim, color=[0, 0, 0])
             axes[1].set_ylim(ylim)
+        axes[1].set_title('Counts per experiment')
 
         bins = np.linspace(0, 0.005, 1001)
         centers = (bins[1:] + bins[:-1]) / 2
@@ -556,6 +568,7 @@ class PeakListCreator:
             ylim = axes[2].get_ylim()
             axes[2].plot([min_separation, min_separation], ylim, color=[0, 0, 0])
             axes[2].set_ylim(ylim)
+        axes[2].set_title('Closest peaks per experiment')
         fig.tight_layout()
         plt.show
         
@@ -569,13 +582,13 @@ class PeakListCreator:
         axes[1].plot(self.secondary_centers_q2, self.secondary_hist_q2_difference, label='Difference')
 
         ylim0 = axes[0].get_ylim()
-        ylim1 = [-2, self.secondary_hist_q2_difference.max() + 10]
+        ylim1 = [0.1, self.secondary_hist_q2_difference.max() + 10]
         for p_index, p in enumerate(self.q2_primary_picked):
             if p_index == 0:
                 label = 'Primary Picked'
             else:
                 label = None
-            axes[0].plot([p, p], ylim0, linestyle='dotted', linewidth=1.5, color=[0, 0, 0])
+            axes[0].plot([p, p], [0.1, ylim0[1]], linestyle='dotted', linewidth=1.5, color=[0, 0, 0])
             axes[1].plot([p, p], ylim1, linestyle='dotted', linewidth=1.5, color=[0, 0, 0], label=label)
 
         for p_index, p in enumerate(self.secondary_centers_q2[indices[0]]):
@@ -655,12 +668,16 @@ class PeakListCreator:
         axes[1].set_xlim([self.primary_centers_q2[0], self.q2_primary_picked[n_peaks + 1]])
         plt.show()
 
-    def plot_known_unit_cell(self, q2_max=0.5):
-        unit_cell = uctbx.unit_cell(parameters=self.known_unit_cell)
-        sym = symmetry(
-            unit_cell=unit_cell,
-            space_group=sgtbx.space_group(self.known_space_group)
-            )
+    def plot_known_unit_cell(self, q2_max=0.5, unit_cell=None, space_group=None):
+        if unit_cell is None:
+            unit_cell = uctbx.unit_cell(parameters=self.known_unit_cell)
+        else:
+            unit_cell = uctbx.unit_cell(parameters=unit_cell)
+        if space_group is None:
+            sym = symmetry(unit_cell=unit_cell, space_group=self.known_space_group)
+        else:
+            sym = symmetry(unit_cell=unit_cell, space_group=space_group)
+
         hkl_list = cctbx.miller.build_set(sym, False, d_min=1/np.sqrt(q2_max))
         dspacings = unit_cell.d(hkl_list.indices()).as_numpy_array()
         q2_known = 1 / dspacings**2
@@ -672,17 +689,17 @@ class PeakListCreator:
         ylim0 = axes[0].get_ylim()
         ylim1 = axes[1].get_ylim()
         for p in q2_known:
-            axes[0].plot([p, p], ylim0, color=[0.8, 0, 0], linestyle='dotted', linewidth=1.5)
-            axes[1].plot([p, p], ylim1, color=[0.8, 0, 0], linestyle='dotted', linewidth=1.5)
+            axes[0].plot([p, p], ylim0, color=[0.8, 0, 0], linestyle='dotted', linewidth=2)
+            axes[1].plot([p, p], ylim1, color=[0.8, 0, 0], linestyle='dotted', linewidth=2)
         for p_index, p in enumerate(self.q2_primary_picked):
-            axes[0].plot([p, p], ylim0, color=[0, 0, 0], linestyle='dotted', linewidth=1.5)
+            axes[0].plot([p, p], [ylim0[0], 0.75*ylim0[1]], color=[0, 0, 0], linestyle='dotted', linewidth=2)
             axes[0].annotate(
                 f'{self.error[p_index]:0.5f}',
                 xy=(self.q2_primary_picked[p_index], 0.7 * ylim0[1]),
                 rotation=90
                 )
         for p_index, p in enumerate(self.secondary_peaks):
-            axes[1].plot([p, p], ylim1, color=[0, 0, 0], linestyle='dotted', linewidth=1.5)
+            axes[1].plot([p, p], [ylim1[0], 0.75*ylim1[1]], color=[0, 0, 0], linestyle='dotted', linewidth=2)
             axes[1].annotate(
                 f'{self.error[p_index]:0.5f}',
                 xy=(self.q2_primary_picked[p_index], 0.7 * ylim1[1]),
