@@ -9,8 +9,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 import tensorflow as tf
 from tqdm import tqdm
 
-from Utilities import fix_unphysical_rhombohedral
-from Utilities import fix_unphysical_triclinic
+from Utilities import fix_unphysical
 from Utilities import get_hkl_matrix
 from Utilities import get_unit_cell_from_xnn
 from Utilities import read_params
@@ -193,10 +192,10 @@ class MITemplates:
             reindexed_unit_cell = np.stack(training_data['reindexed_unit_cell'])
             ratio_unit_cell = reindexed_unit_cell[:, :3].min(axis=1) / reindexed_unit_cell[:, :3].max(axis=1)
 
-            reindexed_rec_unit_cell = reciprocal_uc_conversion(reindexed_unit_cell, partial_unit_cell=False, radians=True)
+            reindexed_rec_unit_cell = reciprocal_uc_conversion(reindexed_unit_cell, partial_unit_cell=False)
             ratio_rec_unit_cell = reindexed_rec_unit_cell[:, :3].min(axis=1) / reindexed_rec_unit_cell[:, :3].max(axis=1)
 
-            reindexed_hkl = np.stack(training_data['reindexed_hkl'])[:, :, :, 0]
+            reindexed_hkl = np.stack(training_data['reindexed_hkl'])
             hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
             hkl_information_hist = np.bincount(hkl_information, minlength=self.n_points)
 
@@ -367,7 +366,7 @@ class MITemplates:
             xnn += delta_gn
         loss = np.linalg.norm(1 - q2_calc/q2_obs[np.newaxis], axis=1)
         
-        xnn = self.fix_unphysical_xnn(xnn)
+        xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
         return xnn, loss
 
     def generate_xnn(self, q2_obs):
@@ -404,29 +403,8 @@ class MITemplates:
                 i += 1
             xnn[template_index] = xnn_current
             loss[template_index] = np.linalg.norm(1 - q2_calc/q2_obs)
-        xnn = self.fix_unphysical_xnn(xnn)
+        xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
         return xnn, loss
-
-    def fix_unphysical_xnn(self, xnn):
-        if self.lattice_system == 'triclinic':
-            xnn = fix_unphysical_triclinic(xnn=xnn, rng=self.rng)
-        if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
-            # The first three xnn's must be positive
-            xnn[:, :3] = np.abs(xnn[:, :3])
-            # They should also not be zero
-            bad_indices = np.any(xnn[:, :3] == 0, axis=1)
-            if np.sum(bad_indices) > 0:
-                xnn[bad_indices, :3] = xnn[~bad_indices, :3].mean()
-        elif self.lattice_system in ['cubic', 'tetragonal', 'hexagonal']:
-            # The first three xnn's must be positive
-            xnn = np.abs(xnn)
-            # They should also not be zero
-            bad_indices = np.any(xnn == 0, axis=1)
-            if np.sum(bad_indices) > 0:
-                xnn[bad_indices] = xnn[~bad_indices].mean()
-        elif self.lattice_system == 'rhombohedral':
-            xnn = fix_unphysical_rhombohedral(xnn=xnn, rng=self.rng)
-        return xnn
 
     def do_predictions(self, q2_obs, n_templates='all'):
         # This is primary used to generate candidates for the optimizer, which expects that the
@@ -447,7 +425,7 @@ class MITemplates:
             assert False
 
         unit_cell_templates = get_unit_cell_from_xnn(
-            xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system, radians=True
+            xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system
             )
         return unit_cell_templates
 
@@ -470,7 +448,7 @@ class MITemplates:
                     cov=cov,
                     size=n_per_cluster - cluster_size
                     )
-                xnn_cluster_sampled = self.fix_unphysical_xnn(xnn_cluster_sampled)
+                xnn_cluster_sampled = fix_unphysical(xnn=xnn_cluster_sampled, rng=self.rng, lattice_system=self.lattice_system)
                 xnn_templates_clustered[cluster_index, cluster_size:] = xnn_cluster_sampled
             elif cluster_size > n_per_cluster:
                 choice = self.rng.choice(cluster_size, size=n_per_cluster, replace=False)
@@ -491,7 +469,7 @@ class MITemplates:
                 indices = self.rng.choice(n_per_cluster, size=samples_per_cluster, replace=False)
                 xnn_output[start: stop] = xnn_templates_clustered[cluster_index, indices]
         unit_cell_templates = get_unit_cell_from_xnn(
-             xnn_output, partial_unit_cell=True, lattice_system=self.lattice_system, radians=True
+             xnn_output, partial_unit_cell=True, lattice_system=self.lattice_system
             )
         return unit_cell_templates
 
@@ -536,7 +514,7 @@ class MITemplates:
                         cov=cov,
                         size=n_per_cluster - cluster_size[i]
                         )
-                    xnn_cluster_sampled = self.fix_unphysical_xnn(xnn_cluster_sampled)
+                    xnn_cluster_sampled = fix_unphysical(xnn=xnn_cluster_sampled, rng=self.rng, lattice_system=self.lattice_system)
                     for row in [1, 2]:
                         axes[row, 0].plot(
                             xnn_cluster_sampled[:, 0], xnn_cluster_sampled[:, 1],
@@ -600,7 +578,7 @@ class MITemplates:
                         cov=cov,
                         size=n_per_cluster - cluster_size[i]
                         )
-                    xnn_cluster_sampled = self.fix_unphysical_xnn(xnn_cluster_sampled)
+                    xnn_cluster_sampled = fix_unphysical(xnn=xnn_cluster_sampled, rng=self.rng, lattice_system=self.lattice_system)
                     for row in [1, 2]:
                         axes[row, 0].plot(
                             xnn_cluster_sampled[:, 0], xnn_cluster_sampled[:, 1],
@@ -779,7 +757,7 @@ class MITemplates_binning(MITemplates):
                 # Add templates
                 assert False
             unit_cell_templates = get_unit_cell_from_xnn(
-                xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system, radians=False
+                xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system
                 )
             return unit_cell_templates, None
         else:
@@ -816,10 +794,10 @@ class MITemplates_binning(MITemplates):
                 low=-random_range, high=random_range, size=n_samples
                 )
         unit_cell_templates = get_unit_cell_from_xnn(
-            xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system, radians=True
+            xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system
             )
         unit_cell_sampled = get_unit_cell_from_xnn(
-            xnn_sampled, partial_unit_cell=True, lattice_system=self.lattice_system, radians=True
+            xnn_sampled, partial_unit_cell=True, lattice_system=self.lattice_system
             )
         return unit_cell_templates, unit_cell_sampled
 

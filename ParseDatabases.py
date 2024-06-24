@@ -1,5 +1,7 @@
+from ccdc.io import CrystalWriter
 import gemmi
 import numpy as np
+import os
 
 from EntryHelpers import ChemicalFormulaHandler
 from EntryHelpers import get_unit_cell_volume
@@ -13,7 +15,7 @@ from Reindexing import reindex_entry_orthorhombic
 from Reindexing import reindex_entry_triclinic
 from Reindexing import hexagonal_to_rhombohedral_unit_cell
 from Reindexing import hexagonal_to_rhombohedral_hkl
-from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import get_xnn_from_unit_cell
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 
@@ -58,9 +60,9 @@ class ProcessEntry:
         self.status = True
         self.reason = None
 
-        self.hkl_ref_triclinic = np.load('data/hkl_ref_triclinic.npy')[:60]
-        self.hkl_ref_monoclinic = np.load('data/hkl_ref_monoclinic.npy')[:60]
-        hkl_ref_hexagonal = np.load('data/hkl_ref_hexagonal.npy')
+        self.hkl_ref_triclinic = np.load('data/hkl_ref_aP.npy')[:60]
+        self.hkl_ref_monoclinic = np.load('data/hkl_ref_mP.npy')[:60]
+        hkl_ref_hexagonal = np.load('data/hkl_ref_hP.npy')
         check = -hkl_ref_hexagonal[:, 0] + hkl_ref_hexagonal[:, 1] + hkl_ref_hexagonal[:, 2]
         rhombohedral_condition = (check % 3) == 0
         self.hkl_ref_hexagonal = hkl_ref_hexagonal[rhombohedral_condition][:60]
@@ -101,18 +103,14 @@ class ProcessEntry:
 
     def verify_reindexing(self):
         # This gets used for monoclinic and orthorhombic
-        unit_cell = self.unit_cell.copy()
-        unit_cell[3:] *= np.pi/180
         q2_calculator = Q2Calculator(
             lattice_system='triclinic',
             hkl=self.hkl_ref_monoclinic,
             tensorflow=False,
             representation='unit_cell'
             )
-        q2 = q2_calculator.get_q2(unit_cell[np.newaxis])
+        q2 = q2_calculator.get_q2(self.unit_cell[np.newaxis])
 
-        reindexed_unit_cell = self.reindexed_unit_cell.copy()
-        reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = self.hkl_ref_monoclinic @ self.hkl_reindexer
         reindexed_q2_calculator = Q2Calculator(
             lattice_system='triclinic',
@@ -120,24 +118,20 @@ class ProcessEntry:
             tensorflow=False,
             representation='unit_cell'
             )
-        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
+        reindexed_q2 = reindexed_q2_calculator.get_q2(self.reindexed_unit_cell[np.newaxis])
         check = np.isclose(q2, reindexed_q2).all()
         return check
 
     def verify_reindexing_triclinic(self):
         # This gets used for monoclinic and orthorhombic
-        unit_cell = self.unit_cell.copy()
-        unit_cell[3:] *= np.pi/180
         q2_calculator = Q2Calculator(
             lattice_system='triclinic',
             hkl=self.hkl_ref_triclinic,
             tensorflow=False,
             representation='unit_cell'
             )
-        q2 = q2_calculator.get_q2(unit_cell[np.newaxis])
+        q2 = q2_calculator.get_q2(self.unit_cell[np.newaxis])
 
-        reindexed_unit_cell = self.reindexed_unit_cell.copy()
-        reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = self.hkl_ref_triclinic @ self.hkl_reindexer
         reindexed_q2_calculator = Q2Calculator(
             lattice_system='triclinic',
@@ -145,23 +139,19 @@ class ProcessEntry:
             tensorflow=False,
             representation='unit_cell'
             )
-        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis])
+        reindexed_q2 = reindexed_q2_calculator.get_q2(self.reindexed_unit_cell[np.newaxis])
         check = np.isclose(q2, reindexed_q2).all()
         return check
 
     def verify_reindexing_rhombohedral(self):
-        unit_cell = self.unit_cell.copy()
-        unit_cell[3:] *= np.pi/180
         q2_calculator = Q2Calculator(
             lattice_system='hexagonal',
             hkl=self.hkl_ref_hexagonal,
             tensorflow=False,
             representation='unit_cell'
             )
-        q2 = q2_calculator.get_q2(unit_cell[np.newaxis][:, [0, 2]])[0]
+        q2 = q2_calculator.get_q2(self.unit_cell[np.newaxis][:, [0, 2]])[0]
 
-        reindexed_unit_cell = self.reindexed_unit_cell.copy()
-        reindexed_unit_cell[3:] *= np.pi/180
         reindexed_hkl = self.hkl_ref_hexagonal @ self.hkl_reindexer
         reindexed_q2_calculator = Q2Calculator(
             lattice_system='rhombohedral',
@@ -169,7 +159,7 @@ class ProcessEntry:
             tensorflow=False,
             representation='unit_cell'
             )
-        reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell[np.newaxis][:, [0, 3]])[0]
+        reindexed_q2 = reindexed_q2_calculator.get_q2(self.reindexed_unit_cell[np.newaxis][:, [0, 3]])[0]
         check = np.isclose(q2, reindexed_q2).all()
         return check
 
@@ -280,12 +270,12 @@ class ProcessEntry:
                         self.spacegroup_symbol_hm,
                         self.spacegroup_number
                         )
-                self.reindexed_volume = self.volume
-            except:
-                self.reason = 'Could not permute axes'
+            except Exception as error_message:
+                self.reason = 'Failed orthorhombic reindexing'
                 self.status = False
-                print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
+                print(error_message)
                 return None
+            self.reindexed_volume = self.volume
             if not self.verify_reindexing():
                 self.reason = 'Orthorhombic Reindexing Error'
                 self.status = False
@@ -304,18 +294,11 @@ class ProcessEntry:
                 print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm} {self.reindexed_spacegroup_symbol_hm}')
                 return None
         elif self.lattice_system == 'monoclinic':
-            try:
-                self.reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, self.hkl_reindexer = \
-                    reindex_entry_monoclinic(
-                        self.unit_cell,
-                        self.spacegroup_symbol_hm,
-                        radians=False
-                        )
-            except:
-                self.reason = 'Could not reindex monoclinic'
-                self.status = False
-                print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
-                return None
+            self.reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, self.hkl_reindexer = \
+                reindex_entry_monoclinic(
+                    self.unit_cell,
+                    self.spacegroup_symbol_hm
+                    )
             if self.reindexed_unit_cell is None:
                 self.reason = 'Infrequent monoclinic setting that has not been setup for reindexing'
                 self.status = False
@@ -323,10 +306,7 @@ class ProcessEntry:
                 return None
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
             self.reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
-                )[0]
-            self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-                self.reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
+                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
                 )[0]
             if not self.verify_reindexing():
                 self.reason = 'Monoclinic Reindexing Error'
@@ -341,16 +321,11 @@ class ProcessEntry:
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
         elif self.lattice_system == 'triclinic':
-            self.reindexed_unit_cell, self.hkl_reindexer = reindex_entry_triclinic(
-                self.unit_cell, radians=False
-                )
+            self.reindexed_unit_cell, self.hkl_reindexer = reindex_entry_triclinic(self.unit_cell)
 
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
             self.reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
-                )[0]
-            self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-                self.reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False, radians=False
+                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
                 )[0]
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
@@ -360,9 +335,9 @@ class ProcessEntry:
                 print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.spacegroup_symbol_hm}')
                 return None
         elif self.lattice_system == 'rhombohedral':
-            if np.all(self.unit_cell[3:] == [90, 90, 120]):
+            if np.all(self.unit_cell[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
                 self.reindexed_unit_cell, self.hkl_reindexer = hexagonal_to_rhombohedral_unit_cell(
-                    self.unit_cell, radians=False
+                    self.unit_cell
                     )
                 self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
                 if not self.verify_reindexing_rhombohedral():
@@ -383,6 +358,10 @@ class ProcessEntry:
             self.permutation = 'abc'
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
+
+        self.reindexed_xnn = get_xnn_from_unit_cell(
+            self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+            )[0]
 
         if self.lattice_system in ['cubic', 'rhombohedral', 'hexagonal', 'triclinic']:
             self.split = 0
@@ -484,14 +463,15 @@ class ProcessCSDEntry(ProcessEntry):
             self.crystal_system = csd_entry.crystal.crystal_system
 
         # This is to prevent round off errors. Such as a hexagonal angle of 119.999999999999 ...
+        # convert to radians here and be done with degrees forever
         cell_lengths = np.round(csd_entry.crystal.cell_lengths, decimals=6)
-        cell_angles = np.round(csd_entry.crystal.cell_angles, decimals=6)
+        cell_angles = np.pi/180 * np.round(csd_entry.crystal.cell_angles, decimals=6)
         self.unit_cell = np.concatenate((cell_lengths, cell_angles))
         self.volume = np.round(csd_entry.crystal.cell_volume, decimals=6)
 
         try:
             reduced_cell_lengths = np.round(csd_entry.crystal.reduced_cell.cell_lengths, decimals=6)
-            reduced_cell_angles = np.round(csd_entry.crystal.reduced_cell.cell_angles, decimals=6)
+            reduced_cell_angles = np.pi/180 * np.round(csd_entry.crystal.reduced_cell.cell_angles, decimals=6)
             self.reduced_unit_cell = np.concatenate((reduced_cell_lengths, reduced_cell_angles))
             self.reduced_volume = np.round(csd_entry.crystal.reduced_cell.volume, decimals=6)
         except:
@@ -507,6 +487,14 @@ class ProcessCSDEntry(ProcessEntry):
             self.status = False
             #print(f'{self.reason}')
             return None
+
+        # I write cif files so I can load them with cctbx to generate powder patterns
+        self.cif_file_name = os.path.join(
+            '/Users/DWMoreau/csd_cifs', str(self.spacegroup_number), f'{self.identifier}.cif'
+            )
+        if not os.path.exists(self.cif_file_name):
+            with CrystalWriter(self.cif_file_name, append=False) as crystal_writer:
+                crystal_writer.write(csd_entry.crystal)
 
         self.common_verification()
 
@@ -605,11 +593,14 @@ class ProcessCODEntry(ProcessEntry):
 
         # This is to prevent round off errors. Such as a hexagonal angle of 119.999999999999 ...
         self.unit_cell = np.round(self.unit_cell, decimals=6)
+        unit_cell_degrees = self.unit_cell.copy()
+        self.unit_cell[3:] *= np.pi/180
         self.volume = get_unit_cell_volume(self.unit_cell)
 
-        gv = gemmi.GruberVector(gemmi.UnitCell(*self.unit_cell), spacegroup)
+        gv = gemmi.GruberVector(gemmi.UnitCell(*unit_cell_degrees), spacegroup)
         gv.niggli_reduce()
         self.reduced_unit_cell = np.round(gv.cell_parameters(), decimals=6)
+        self.reduced_unit_cell[3:] *= np.pi/180
         self.reduced_volume = get_unit_cell_volume(self.reduced_unit_cell)
 
         try:

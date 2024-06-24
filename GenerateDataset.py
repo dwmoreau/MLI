@@ -1,25 +1,72 @@
-from ccdc.io import CrystalReader
-from ccdc.io import EntryReader
-from ccdc.descriptors import CrystalDescriptors
-from functools import reduce
+import iotbx.cif
+import matplotlib.pyplot as plt
 from mpi4py import MPI
 import numpy as np
 import os
 import pandas as pd
+import scipy.signal
 
 from EntryHelpers import save_identifiers
 from Utilities import Q2Calculator
-from Utilities import get_fwhm_and_overlap_threshold
+from Utilities import get_peak_generation_info
+
+
+def edit_undefined_scatters(cif_file_name):
+    new_cif_file_name = cif_file_name.replace('.cif', '_editted.cif')
+    with open(cif_file_name, 'r') as cif_file, open(new_cif_file_name, 'w') as new_cif_file:
+        in_loop_header = False
+        in_atom_loop = False
+        for line in cif_file:
+            if line.startswith('loop_'):
+                in_loop_header = True
+                in_atom_loop = False
+                count = 0
+                atom_site_type_symbol_index = None
+            elif in_loop_header and line.startswith('_'):
+                if line.startswith('_atom_site_type_symbol'):
+                    atom_site_type_symbol_index = count
+                else:
+                    count += 1
+            elif in_loop_header and not line.startswith('_'):
+                in_loop_header = False
+                if atom_site_type_symbol_index is None:
+                    in_atom_loop = False
+                else:
+                    in_atom_loop = True
+
+            if in_atom_loop:
+                new_elements = []
+                for element_index, element in enumerate(line[:-1].split(' ')):
+                    if element_index == atom_site_type_symbol_index:
+                        element = element.replace('+', '').replace('-', '').replace('.', '')
+                        element = ''.join([i for i in element if not i.isdigit()])
+                    new_elements.append(element)
+                new_line = ' '.join(new_elements) + '\n'
+                if not 'SASH' in new_line:
+                    new_cif_file.write(new_line)
+            else:
+                new_cif_file.write(line)
+    cif_info = iotbx.cif.reader(new_cif_file_name)
+    cif_structure = cif_info.build_crystal_structures()
+    return cif_structure
 
 
 class EntryGenerator:
     def __init__(self):
         self.peak_length = 60
-        self.peak_removal_tags = ['all', 'sa', 'strong', '2der', 'overlaps', 'intersect']
+        peak_generation_info = get_peak_generation_info()
+        broadening_params = peak_generation_info['broadening_params']
+        broadening_muliples = peak_generation_info['broadening_multiples']
+        self.broadening_params = broadening_muliples[np.newaxis] * broadening_params[:, np.newaxis]
+        self.broadening_tags = peak_generation_info['broadening_tags']
+        self.wavelength = peak_generation_info['wavelength']
+        self.d_min = self.wavelength / (2*np.sin(peak_generation_info['theta2_min']/2 * np.pi/180))
+        self.d_max = self.wavelength / (2*np.sin(peak_generation_info['theta2_max']/2 * np.pi/180))
+        self.theta2_pattern = peak_generation_info['theta2_pattern']
+        self.q2_pattern = peak_generation_info['q2_pattern']
         # This is the information to store for each peak
         self.peak_components = {
-            'theta2': 'float64',
-            'd_spacing': 'float64',
+            'q2': 'float64',
             'h': 'int8',
             'k': 'int8',
             'l': 'int8',
@@ -72,215 +119,182 @@ class EntryGenerator:
             'reduced_volume',
             ]
 
-        for tag in self.peak_removal_tags:
+        # sa is for non-systematically absence peaks
+        for tag in self.broadening_tags + ['sa']:
             for component in self.peak_components.keys():
                 self.data_set_components.update({f'{component}_{tag}': self.peak_components[component]})
 
-        fwhm, self.overlap_threshold, wavelength = get_fwhm_and_overlap_threshold()
-        self.dtheta2 = 0.02
-        theta2_min = 0
-        theta2_max = 60
-        self.theta2 = np.arange(theta2_min, theta2_max, self.dtheta2)[:, np.newaxis]
+        # cctbx is not always able to make a structure factor for charged atoms.
+        self.check_strings = ['+', '-', '.', 'SASH']
 
-        self.pattern_generator = CrystalDescriptors.PowderPattern
-        self.pattern_generator.Settings.full_width_at_half_maximum = fwhm
-        self.pattern_generator.Settings.two_theta_minimum = theta2_min
-        self.pattern_generator.Settings.two_theta_maximum = theta2_max - self.dtheta2
-        self.pattern_generator.Settings.two_theta_step = self.dtheta2
+    def get_peak_list(self, data):
+        def pick_peaks(I_pattern, q2_pattern, q2, hkl):
+            I_pattern /= np.trapz(I_pattern, q2_pattern)
+            found_indices_pattern, _ = scipy.signal.find_peaks(I_pattern, prominence=2, distance=5)
+            q2_found = q2_pattern[found_indices_pattern]
+            found_indices_peaks = np.argmin(np.abs(q2_found[:, np.newaxis] - q2[np.newaxis]), axis=1)
+            return I_pattern, q2[found_indices_peaks], hkl[found_indices_peaks]
 
-    def remove_overlaps(self, peaks, I_pattern):
-        # Calculate distance between peaks to find all the peaks closer than
-        # some threshold
-        new_peaks = peaks.copy()
-        peaks = peaks[np.newaxis]
-        diff = peaks - peaks.T
-        indices = np.tril_indices(peaks.size)
-        diff[indices[0], indices[1]] = -1
-        too_close = np.argwhere(np.logical_and(diff >= 0, diff <= self.overlap_threshold))
-        if too_close.shape[0] > 0:
-            I_peaks = np.zeros(peaks.size)
-            unique_all = np.unique(too_close)
-            unique = np.unique(too_close[:, 0])
-            I_peaks[unique_all] = I_pattern[(np.abs(self.theta2 - peaks[:, unique_all])).argmin(axis=0)]
-            for index in unique:
-                if new_peaks[index] != 0:
-                    indices = np.where(too_close[:, 0] == index)[0]
-                    others = too_close[indices[0]: indices[-1] + 1, 1]
-                    cluster_indices = np.concatenate(([index], others))
-                    I_cluster = I_peaks[cluster_indices]
-                    argsort = np.argsort(I_cluster)
-                    smaller_peaks = cluster_indices[argsort][:-1]
-                    new_peaks[smaller_peaks] = 0
-            not_overlapped = new_peaks != 0
-            return not_overlapped
-        else:
-            return np.ones(peaks.size, dtype=bool)
+        cif_file_name = data['cif_file_name']
+        unit_cell = data['unit_cell']
+        reindexed_unit_cell = data['reindexed_unit_cell']
+        hkl_reindexer = np.array(data['hkl_reindexer']).reshape([3, 3])
+        lattice_system = data['lattice_system']
 
-    def get_pattern(self, crystal, unit_cell, reindexed_unit_cell, hkl_reindexer, lattice_system):
-        def reset_peaks(peaks, hkl_order, indices, axes):
-            n = np.count_nonzero(indices)
-            peaks[:n, :, axes] = peaks[indices, :, axes]
-            peaks[n:, :, axes] = 0
-            hkl_order[:n, :, axes] = hkl_order[indices, :, axes]
-            hkl_order[n:, :, axes] = -100
-            return peaks, hkl_order
+        #print(cif_file_name)
+        try:
+            cif_info = iotbx.cif.reader(cif_file_name)
+            cif_structure = cif_info.build_crystal_structures()
+        except Exception as error_message:
+            data['failed'] = True
+            return data
 
-        base = self.pattern_generator.from_crystal(crystal)
+        if len(cif_structure) == 0:
+            data['failed'] = True
+            return data
 
-        I_pattern = np.array(base.intensity)
-        norm = np.linalg.norm(I_pattern)
-        if norm == 0. or len(base.tick_marks) == 0:
-            return None, None
-        I_pattern /= norm
+        key = list(cif_structure.keys())[0]
+        change_scatters_name = False
+        for scattering_type in cif_structure[key].scattering_types():
+            for check in self.check_strings:
+                if check in scattering_type:
+                    change_scatters_name = True
+        if change_scatters_name:
+            cif_structure = edit_undefined_scatters(cif_file_name)
+            data['cif_file_name'] = cif_file_name.replace('.cif', '_editted.cif')
 
-        ticks = base.tick_marks
+        # This looks like a bug, d_min = d_max ...
+        # difference between d_max being largest numerically or largest scattering angle
+        try:
+            miller_indices = cif_structure[key].build_miller_set(
+                d_min=self.d_max, d_max=self.d_min, anomalous_flag=False
+                )
+            structure_factors = miller_indices.structure_factors_from_scatterers(
+                cif_structure[key], algorithm='direct'
+                )
+            intensities = structure_factors.f_calc().as_intensity_array().data().as_numpy_array()
+            hkl_peaks = miller_indices.indices().as_vec3_double().as_numpy_array()
+            theta2_peaks = np.pi/180 * miller_indices.two_theta(self.wavelength, True).data().as_numpy_array()
+        except Exception as error_message:
+            print(cif_file_name)
+            if str(error_message).startswith('gaussian not defined for scattering_type'):
+                print(error_message)
+            data['failed'] = True
+            return data
 
-        peaks = np.zeros((len(ticks), 2, 6))
-        absent = np.ones(len(ticks), dtype=bool)
-        hkl_order = -100 * np.ones((len(ticks), 4, 6), dtype=int)
-        for i in range(len(ticks)):
-            peaks[i, 0, :] = ticks[i].two_theta
-            peaks[i, 1, :] = ticks[i].miller_indices.d_spacing
-            hkl_order[i, :3, :] = np.array(ticks[i].miller_indices.hkl)[:, np.newaxis]
-            hkl_order[i, 3, :] = i
-            absent[i] = ticks[i].is_systematically_absent
-        present = np.invert(absent)
-        peaks, hkl_order = reset_peaks(peaks, hkl_order, present, 1)
+        if intensities.size < 10:
+            data['failed'] = True
+            return data
 
-        locations = np.argmin(np.abs(self.theta2 - peaks[:, 0, 0][np.newaxis]), axis=0)
-        I_peaks = I_pattern[locations]
-        large = I_peaks > 0.005
-        peaks, hkl_order = reset_peaks(peaks, hkl_order, large, 2)
+        
+        q2_peaks = (2 * np.sin(theta2_peaks/2) / self.wavelength)**2
+        # Lorentz-Polarization factor
+        intensities *= (1 + np.cos(theta2_peaks)**2) / (2 * np.sin(theta2_peaks))
 
-        diff2_I = np.gradient(np.gradient(I_pattern)) / (self.dtheta2**2)
-        diff2_peaks = diff2_I[locations]
-        with_2nd_der = diff2_peaks < -1
-        peaks, hkl_order = reset_peaks(peaks, hkl_order, with_2nd_der, 3)
+        sort_indices = np.argsort(q2_peaks)
+        q2_peaks = q2_peaks[sort_indices]
+        hkl_peaks = hkl_peaks[sort_indices]
+        intensities = intensities[sort_indices]
+        redundant_indices = np.where((q2_peaks[1:] - q2_peaks[:-1]) == 0)[0] + 1
 
-        not_overlapped = self.remove_overlaps(peaks[:, 0, 0], I_pattern)
-        n_not_overlapped = np.count_nonzero(not_overlapped)
-        peaks[:n_not_overlapped, :, 4] = peaks[not_overlapped, :, 0]
-        peaks[n_not_overlapped:, :, 4] = 0
-        hkl_order[:n_not_overlapped, :, 4] = hkl_order[not_overlapped, :, 0]
-        hkl_order[n_not_overlapped:, :, 4] = 0
+        breadths_q2_peaks = self.broadening_params[0, :] + self.broadening_params[1, :] * q2_peaks[:, np.newaxis]
+        prefactor = 1/np.sqrt(2*np.pi*breadths_q2_peaks[:, np.newaxis]**2)
+        arg = (self.q2_pattern[np.newaxis, :, np.newaxis] - q2_peaks[:, np.newaxis, np.newaxis]) / breadths_q2_peaks[:, np.newaxis]
+        kernel = prefactor * np.exp(-1/2 * arg**2)
+        I_pattern = np.sum(intensities[:, np.newaxis, np.newaxis] * kernel, axis=0)
 
-        order_all_removed = reduce(
-            np.intersect1d,
-            ((
-                hkl_order[:, 3, 0],
-                hkl_order[:, 3, 1],
-                hkl_order[:, 3, 2],
-                hkl_order[:, 3, 3],
-                hkl_order[:, 3, 4]
-            ))
-            )
-        _, indices, _ = np.intersect1d(hkl_order[:, 3, 0], order_all_removed, return_indices=True)
-        peaks[:indices.size, :, 5] = peaks[indices, :, 0]
-        peaks[indices.size:, :, 5] = 0
-        hkl_order[:indices.size, :, 5] = hkl_order[indices, :, 0]
-        hkl_order[indices.size:, :, 5] = 0
+        peaks_dict = {}
+        #fig, axes = plt.subplots(3, 1, figsize=(40, 10), sharex=True)
+        #for broadening_index in range(3):
+        #    axes[broadening_index].plot(self.q2_pattern, I_pattern[:, broadening_index])
+        for broadening_index, broadening_tag in enumerate(self.broadening_tags):
+            I_norm, q2_found, hkl_found = pick_peaks(
+                I_pattern[:, broadening_index], self.q2_pattern, q2_peaks, hkl_peaks
+                )
+            #ylim = axes[broadening_index].get_ylim()
+            #for i in range(q2_found.size):
+            #    axes[broadening_index].plot([q2_found[i], q2_found[i]], ylim, color=[0,0,0], linewidth=1, linestyle='dotted')
+            #axes[broadening_index].set_ylim(ylim)
+            #if broadening_index == 1:
+            #    for i in range(q2_peaks.size):
+            #        axes[1].plot([q2_peaks[i], q2_peaks[i]], [ylim[0], 0.5*ylim[1]], color=[0.8,0,0], linewidth=1, linestyle='dotted')
 
-        peaks_df = {}
-
-        # I get a "destination is read-only" error without creating new arrays for the unit cell
-        unit_cell_ = np.zeros(6)
-        reindexed_unit_cell_ = np.zeros(6)
-        unit_cell_[:3] = unit_cell[:3]
-        unit_cell_[3:] = np.pi/180 * unit_cell[3:]
-        reindexed_unit_cell_[:3] = reindexed_unit_cell[:3]
-        reindexed_unit_cell_[3:] = np.pi/180 * reindexed_unit_cell[3:]
-        for index, tag in enumerate(self.peak_removal_tags):
-            hkl = hkl_order[:, :3, index]
-            reindexed_hkl = np.matmul(hkl, hkl_reindexer).round(decimals=0).astype(int)
+            reindexed_hkl_found = np.matmul(hkl_found, hkl_reindexer).round(decimals=0).astype(int)
             if lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
-                q2_calculator = Q2Calculator(
+                q2_calc = Q2Calculator(
                     lattice_system='triclinic',
-                    hkl=hkl,
+                    hkl=hkl_found,
                     tensorflow=False,
                     representation='unit_cell'
-                    )
-                q2 = q2_calculator.get_q2(unit_cell_[np.newaxis])
-                reindexed_q2_calculator = Q2Calculator(
+                    ).get_q2(unit_cell[np.newaxis])
+                reindexed_q2_calc = Q2Calculator(
                     lattice_system='triclinic',
-                    hkl=reindexed_hkl,
+                    hkl=reindexed_hkl_found,
                     tensorflow=False,
                     representation='unit_cell'
-                    )
-                reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[np.newaxis])
-                check = np.isclose(q2, reindexed_q2).all()
+                    ).get_q2(reindexed_unit_cell[np.newaxis])
+                check = np.isclose(q2_calc[0], reindexed_q2_calc[0]).all()
                 if not check:
                     print('Reindexing Failure')
-                    print(unit_cell_)
-                    print(reindexed_unit_cell_)
+                    print(unit_cell)
+                    print(reindexed_unit_cell)
                     print()
             elif lattice_system == 'rhombohedral':
-                if np.all(unit_cell_[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
-                    check_indices = np.invert(np.all(hkl == -100, axis=1))
-                    q2_calculator = Q2Calculator(
+                if np.all(unit_cell[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
+                    # If the rhombohedral was initially in the hexagonal setting it was reindexed
+                    q2_calc = Q2Calculator(
                         lattice_system='hexagonal',
-                        hkl=hkl[check_indices],
+                        hkl=hkl_found,
                         tensorflow=False,
                         representation='unit_cell'
-                        )
-                    q2 = q2_calculator.get_q2(unit_cell_[[0, 2]][np.newaxis])
-                    reindexed_q2_calculator = Q2Calculator(
+                        ).get_q2(unit_cell[[0, 2]][np.newaxis])
+                    reindexed_q2_calc = Q2Calculator(
                         lattice_system='rhombohedral',
-                        hkl=reindexed_hkl[check_indices],
+                        hkl=reindexed_hkl_found,
                         tensorflow=False,
                         representation='unit_cell'
-                        )
-                    reindexed_q2 = reindexed_q2_calculator.get_q2(reindexed_unit_cell_[[0, 3]][np.newaxis])
-                    check = np.isclose(q2[0], reindexed_q2[0]).all()
+                        ).get_q2(reindexed_unit_cell[[0, 3]][np.newaxis])
+                    check = np.isclose(q2_calc[0], reindexed_q2_calc[0]).all()
                     if not check:
                         print('Reindexing Failure')
-                        print(unit_cell_)
-                        print(reindexed_unit_cell_)
+                        print(unit_cell)
+                        print(reindexed_unit_cell)
                         print(np.column_stack((q2[0], reindexed_q2[0])).round(decimals=4))
                         print()
-                else:
-                    reindexed_hkl = hkl
-            else:
-                reindexed_hkl = hkl
-            if tag == 'all':
-                check_sa = peaks[:self.peak_length, 1, index]
-            elif tag == 'intersect':
-                check_i = peaks[:self.peak_length, 1, index]
-                n_unique = np.unique(check_i[check_i != 0]).size
-                n = np.count_nonzero(check_i != 0)
-                if n != n_unique:
-                    print('OVERLAPPING PEAK INCLUDED')
-            peaks_df.update({
-                f'theta2_{tag}': peaks[:self.peak_length, 0, index],
-                f'd_spacing_{tag}': peaks[:self.peak_length, 1, index],
-                f'h_{tag}': hkl[:self.peak_length, 0],
-                f'k_{tag}': hkl[:self.peak_length, 1],
-                f'l_{tag}': hkl[:self.peak_length, 2],
-                f'reindexed_h_{tag}': reindexed_hkl[:self.peak_length, 0],
-                f'reindexed_k_{tag}': reindexed_hkl[:self.peak_length, 1],
-                f'reindexed_l_{tag}': reindexed_hkl[:self.peak_length, 2],
+
+            peak_length = min(q2_found.size, self.peak_length)
+            peaks_dict.update({
+                f'q2_{broadening_tag}': q2_found[:peak_length],
+                f'h_{broadening_tag}': hkl_found[:peak_length, 0],
+                f'k_{broadening_tag}': hkl_found[:peak_length, 1],
+                f'l_{broadening_tag}': hkl_found[:peak_length, 2],
+                f'reindexed_h_{broadening_tag}': reindexed_hkl_found[:peak_length, 0],
+                f'reindexed_k_{broadening_tag}': reindexed_hkl_found[:peak_length, 1],
+                f'reindexed_l_{broadening_tag}': reindexed_hkl_found[:peak_length, 2],
                 })
 
-        check_i = check_i[check_i > check_sa.max()]
-        bad_counts = 0
-        for value in check_i:
-            if not value in check_sa:
-                print(value)
-                bad_counts += 1
-        if bad_counts > 0:
-            print(check_sa)
-            print(check_i)
-            print(bad_counts)
-            print()
-        return I_pattern, peaks_df
+        q2_peaks = np.delete(q2_peaks, redundant_indices)
+        hkl_peaks =  np.delete(hkl_peaks, redundant_indices, axis=0)
+        reindexed_hkl_peaks = np.matmul(hkl_peaks, hkl_reindexer).round(decimals=0).astype(int)
+        peak_length = min(q2_peaks.size, self.peak_length)
+        peaks_dict.update({
+            'q2_sa': q2_peaks,
+            'h_sa': hkl_peaks[:peak_length, 0],
+            'k_sa': hkl_peaks[:peak_length, 1],
+            'l_sa': hkl_peaks[:peak_length, 2],
+            'reindexed_h_sa': reindexed_hkl_peaks[:peak_length, 0],
+            'reindexed_k_sa': reindexed_hkl_peaks[:peak_length, 1],
+            'reindexed_l_sa': reindexed_hkl_peaks[:peak_length, 2],
+            })
 
-
-def fill_data_iteration(data_iteration, peaks_df, peak_removal_tags, peak_components):
-    if peaks_df is not None:
-        for tag in peak_removal_tags:
-            for component in peak_components:
-                key = f'{component}_{tag}'
-                data_iteration[key] = peaks_df[key]
-    return data_iteration
+        #fig.tight_layout()
+        #plt.show()
+        data['failed'] = False
+        for broadening_tag in self.broadening_tags + ['sa']:
+            for component in self.peak_components:
+                key = f'{component}_{broadening_tag}'
+                data[key] = peaks_dict[key]
+        return data
 
 
 def copy_info(input_info, output_container, keys):
@@ -313,30 +327,12 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
             COMM.send(data_iteration[rank_index], dest=rank_index)
 
         # rank 0 processes its entry
-        if data_iteration[0]['database'] == 'csd':
-            crystal = csd_entry_reader.entry(data_iteration[0]['identifier']).crystal
-        elif data_iteration[0]['database'] == 'cod':
-            try:
-                crystal = CrystalReader(data_iteration[0]['cif_file_name'])[0]
-            except:
-                crystal = None
-        if crystal is not None:
-            data_iteration[0]['pattern'], peaks_df = entry_generator.get_pattern(
-                crystal,
-                data_iteration[0]['unit_cell'],
-                data_iteration[0]['reindexed_unit_cell'],
-                np.array(data_iteration[0]['hkl_reindexer']).reshape([3, 3]),
-                data_iteration[0]['lattice_system'],
-                )
-            data_iteration[0] = fill_data_iteration(
-                data_iteration[0], peaks_df, entry_generator.peak_removal_tags, entry_generator.peak_components
-                )
-
+        data_iteration[0] = entry_generator.get_peak_list(data_iteration[0])
         # Receive generated patterns and add to dataframe
         for rank_index in range(1, n_ranks):
             data_iteration[rank_index] = COMM.recv(source=rank_index)
         for rank_index in range(n_ranks):
-            if data_iteration[rank_index]['pattern'] is None:
+            if data_iteration[rank_index]['failed']:
                 bad_identifiers.append(data_iteration[rank_index]['identifier'])
             else:
                 group_data_set.loc[pattern_index] = data_iteration[rank_index]
@@ -350,25 +346,8 @@ def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generato
             data_extra,
             entry_generator.data_frame_keys_to_keep
             )
-        if data_extra['database'] == 'csd':
-            crystal = csd_entry_reader.entry(data_extra['identifier']).crystal
-        elif data_extra['database'] == 'cod':
-            try:
-                crystal = CrystalReader(data_extra['cif_file_name'])[0]
-            except:
-                crystal = None
-        if crystal is not None:
-            data_extra['pattern'], peaks_df = entry_generator.get_pattern(
-                crystal,
-                data_extra['unit_cell'],
-                data_extra['reindexed_unit_cell'],
-                np.array(data_extra['hkl_reindexer']).reshape([3, 3]),
-                data_extra['lattice_system'],
-                )
-            data_extra = fill_data_iteration(
-                data_extra, peaks_df, entry_generator.peak_removal_tags, entry_generator.peak_components
-                )
-        if data_extra['pattern'] is None:
+        data_extra = entry_generator.get_peak_list(data_extra)
+        if data_extra['failed']:
             bad_identifiers.append(data_extra['identifier'])
         else:
             group_data_set.loc[pattern_index] = data_extra
@@ -382,11 +361,12 @@ if __name__ == '__main__':
     n_ranks = COMM.Get_size()
 
     entries_per_group = 25000
+    lattice_system = 'rhombohedral'
     bad_identifiers_csd = []
     bad_identifiers_cod = []
-    csd_entry_reader = EntryReader('CSD')
+    rng = np.random.default_rng(seed=1234)
     entry_generator = EntryGenerator()
-    rng = np.random.default_rng(seed=12345)
+
     if rank == 0:
         if not os.path.exists('data/GeneratedDatasets'):
             os.mkdir('data/GeneratedDatasets')
@@ -399,8 +379,8 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == 'triclinic']
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == 'triclinic']
+        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == lattice_system]
+        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == lattice_system]
 
         bl_groups_csd = entries_csd.groupby('bravais_lattice')
         bl_groups_cod = entries_cod.groupby('bravais_lattice')
@@ -465,28 +445,15 @@ if __name__ == '__main__':
         save_identifiers('bad_identifiers_csd.txt', bad_identifiers_csd)
         save_identifiers('bad_identifiers_cod.txt', bad_identifiers_cod)
     else:
+        # These are the worker ranks (rank != 0)
+        # They receive information about the entry, get the peak list,
+        # then return the updated information to rank 0.
         status = True
         while status:
             data_iteration_rank = COMM.recv(source=0)
+            # when rank 0 is finished with the databases, it sends out a None to let the workers know
             if data_iteration_rank is None:
                 status = False
             else:
-                if data_iteration_rank['database'] == 'csd':
-                    crystal = csd_entry_reader.entry(data_iteration_rank['identifier']).crystal
-                elif data_iteration_rank['database'] == 'cod':
-                    try:
-                        crystal = CrystalReader(data_iteration_rank['cif_file_name'])[0]
-                    except:
-                        crystal = None
-                if crystal is not None:
-                    data_iteration_rank['pattern'], peaks_df = entry_generator.get_pattern(
-                        crystal,
-                        data_iteration_rank['unit_cell'],
-                        data_iteration_rank['reindexed_unit_cell'],
-                        np.array(data_iteration_rank['hkl_reindexer']).reshape([3, 3]),
-                        data_iteration_rank['lattice_system']
-                        )
-                    data_iteration_rank = fill_data_iteration(
-                        data_iteration_rank, peaks_df, entry_generator.peak_removal_tags, entry_generator.peak_components
-                        )
+                data_iteration_rank = entry_generator.get_peak_list(data_iteration_rank)
                 COMM.send(data_iteration_rank, dest=0)

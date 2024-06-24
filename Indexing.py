@@ -1,4 +1,9 @@
 """
+NCDist(uc2.parameters(), uc2.niggli_cell().parameters())
+4.931647208670824
+
+NCDIST uses the g6 matrix
+
 Readings:
     - Bergmann 2004: Renewed interest in powder diffraction indexing
         - round robin comparison of existing programs
@@ -44,7 +49,35 @@ mP              | 85%
 aP              | 95 - 98%
 
 
-* Physics informed target function
+* Generalization & SWE
+    * Generate datasets
+        - orthorhombic
+        - monoclinic
+        - triclinic
+    * Training
+        x tetragonal
+        - hexagonal
+        - rhombohedral
+        - orthorhombic
+        - monoclinic
+        - triclinic
+    * Optimization
+        - tetragonal
+        - hexagonal
+        - rhombohedral
+        - orthorhombic
+        - monoclinic
+        - triclinic
+
+- Optimization:
+    - Performance
+        - Find better parameters
+            - Maximum number of explainers. Would 10 work fine?
+            - Number of candidates
+            - Number of exhaustive search cycles
+            - Exhaustive search period
+
+- Physics informed target function
     - Evaluations
         - Assignment accuracy
         - Assignment calibration
@@ -55,72 +88,30 @@ aP              | 95 - 98%
     - Optimization of uncertainty in the indexing
     - More general scaling
 
-* Refactoring
-    - Rerun all Bravais lattices
-        - Redo training with new RF and template code
-        - Redo optimization
-
-* Generalization
-    - Goal:
-        1: Accuracy vs. error type
-            a: Unobserved peaks
-            b: Error in peak position
-            c: a & b
-        2: Implementation on in-house data
-        3: Implementation on RRUFF data
-    Steps:
-        1: Characterize peak lists
-            a: Peak breadth vs q2
-            b: Peak position error vs q2
-        2: Regenerate data with different types of error
-        3: Test model on 
-
-* Documentation
-    * Delete excess
-    * One page summary
+- Documentation
+    - Update after generalization has been implemented
+    - Delete excess
+    - One page summary
     - Add discussion on mixture integer linear programing
+    - Add section on physics informed target function model
     - Read MLIMethods and update for clarity
     - reread papers
-
-- Optimization:
-    - Monoclinic reset
-        - Use different settings
-        - weight the number of observations by the local median
-        - extend to triclinic
-    - Performance
-        - Find better parameters
-            - Maximum number of explainers. Would 10 work fine?
-            - Number of candidates
-            - Number of exhaustive search cycles
-            - Exhaustive search period
 
 - Templating
     - Recalibration of template candidates
 
-- Data
-    - Peak lists
-        - ly65 / SACLA
-        - add sum of vectors to augmentation
-        - plot vector dot products and cross product magnitudes
-    - experimental data from rruff
-        - verify that unit cell is consistent with diffraction
-        - Create new peak list
-        - determine appropriate data generation parameters
-    - redo dataset generation with new parameters based on RRUFF database
-    - Rewrite GenerateDataset.py
-    - Get data from other databases:
-        - Materials project
-        - ICSD
-
 - SWE:
-    - Convert all code to be based on Xnn
-    - convert angles to radians asap and delete all degree code
-    - Store variance from regression - remove "covariance"
     - memory leak during cyclic training
         - Try saving and loading weights with two different models
 
 - Dominant zone:
     - 2D and 1D optimization
+
+- data
+    - peak list
+        - SACLA data
+        - LCLS data
+        - RRUFF
 
 - Regression
 - Indexing.py
@@ -199,7 +190,7 @@ class Indexing:
             'train_fraction': 0.80,
             'n_max': 25000,
             'n_points': 20,
-            'points_tag': 'intersect',
+            'points_tag': '1',
             'hkl_ref_length': 500,
             }
 
@@ -232,7 +223,6 @@ class Indexing:
         self._setup_joint()
 
     def setup_from_tag(self):
-        self.angle_scale = np.load(f'{self.save_to["data"]}/angle_scale.npy')
         self.uc_scaler = joblib.load(f'{self.save_to["data"]}/uc_scaler.bin')
         self.volume_scaler = joblib.load(f'{self.save_to["data"]}/volume_scaler.bin')
         self.q2_scaler = joblib.load(f'{self.save_to["data"]}/q2_scaler.bin')
@@ -335,8 +325,8 @@ class Indexing:
             'reindexed_spacegroup_symbol_hm',
             'unit_cell',
             'reindexed_unit_cell',
-            #'reindexed_xnn',
-            f'd_spacing_{self.data_params["points_tag"]}',
+            'reindexed_xnn',
+            f'q2_{self.data_params["points_tag"]}',
             f'h_{self.data_params["points_tag"]}',
             f'k_{self.data_params["points_tag"]}',
             f'l_{self.data_params["points_tag"]}',
@@ -351,7 +341,7 @@ class Indexing:
             # These are all the non-systematically absent peaks and are used during augmentation
             # to pick new peaks.
             read_columns += [
-                'd_spacing_sa',
+                'q2_sa',
                 'h_sa', 'k_sa', 'l_sa',
                 'reindexed_h_sa', 'reindexed_k_sa', 'reindexed_l_sa',
                 ]
@@ -370,10 +360,10 @@ class Indexing:
         # A total of 60 or so peaks are included in the data set - for all entries
         # If there were less than 60 peaks, those get padded with zeros at the end of the array.
         #   - the 60 number is arbitrary and set in GenerateDataset.py
-        points = self.data[f'd_spacing_{self.data_params["points_tag"]}']
+        points = self.data[f'q2_{self.data_params["points_tag"]}']
         indices = points.apply(len) >= self.data_params['n_points']
         self.data = self.data.loc[indices]
-        points = self.data[f'd_spacing_{self.data_params["points_tag"]}']
+        points = self.data[f'q2_{self.data_params["points_tag"]}']
         enough_peaks = points.apply(np.count_nonzero) >= self.data_params['n_points']
         self.data = self.data.loc[enough_peaks]
         self.data['augmented'] = np.zeros(self.data.shape[0], dtype=bool)
@@ -424,19 +414,11 @@ class Indexing:
                 )
         self.data = pd.concat(data_group, ignore_index=True)
 
-        d_spacing_pd = self.data[f'd_spacing_{self.data_params["points_tag"]}']
-        d_spacing = [np.zeros(self.data_params['n_points']) for _ in range(self.data.shape[0])]
+        q2_pd = self.data[f'q2_{self.data_params["points_tag"]}']
+        q2 = [np.zeros(self.data_params['n_points']) for _ in range(self.data.shape[0])]
         for entry_index in range(self.data.shape[0]):
-            d_spacing[entry_index] = d_spacing_pd.iloc[entry_index][:self.data_params['n_points']]
-        self.data['d_spacing'] = d_spacing
-        # The math is a bit easier logistically when we use q**2
-        self.data['q2'] = 1 / self.data['d_spacing']**2
-        if self.data_params['augment']:
-            # When augmenting, we need all q2 for all the peaks
-            #   *_sa: all nonsystematically absent peaks
-            #   *_points_tag: Should be 'intersect', the tag for peaks dropped in a realistic manner.
-            self.data['q2_sa'] = 1 / self.data['d_spacing_sa']**2
-            self.data[f'q2_{self.data_params["points_tag"]}'] = 1 / self.data[f'd_spacing_{self.data_params["points_tag"]}']**2
+            q2[entry_index] = q2_pd.iloc[entry_index][:self.data_params['n_points']]
+        self.data['q2'] = q2
 
         # This sets up the training / validation tags so that the validation set is taken
         # evenly from the spacegroup symbols.
@@ -493,23 +475,6 @@ class Indexing:
                 'reindexed_h_sa', 'reindexed_k_sa', 'reindexed_l_sa',
                 ]
         self.data.drop(columns=drop_columns, inplace=True)
-
-        # Convert angles to radians
-        unit_cell = np.stack(self.data['unit_cell'])
-        unit_cell[:, 3:] = np.pi/180 * unit_cell[:, 3:]
-        self.data['unit_cell'] = list(unit_cell)
-        reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
-        reindexed_unit_cell[:, 3:] = np.pi/180 * reindexed_unit_cell[:, 3:]
-        self.data['reindexed_unit_cell'] = list(reindexed_unit_cell)
-        # Templating use the xnn unit cell representation.
-        # These lines can be deleted once the datasets are regenerated.
-        reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-            reindexed_unit_cell, partial_unit_cell=False, radians=True
-            )
-        reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-            reindexed_reciprocal_unit_cell, partial_unit_cell=False, radians=True
-            )
-        self.data['reindexed_xnn'] = list(reindexed_xnn)
         self.setup_scalers()
 
         if self.data_params['augment']:
@@ -540,9 +505,9 @@ class Indexing:
         self.data = pd.read_parquet(f'{self.save_to["data"]}/data.parquet')
         if 'h' in self.data.keys():
             hkl = np.stack([
-                np.stack(self.data['h'], axis=0)[:, :, np.newaxis],
-                np.stack(self.data['k'], axis=0)[:, :, np.newaxis],
-                np.stack(self.data['l'], axis=0)[:, :, np.newaxis]
+                np.stack(self.data['h'], axis=0),
+                np.stack(self.data['k'], axis=0),
+                np.stack(self.data['l'], axis=0),
                 ], axis=2
                 )
             self.data['hkl'] = list(hkl)
@@ -552,9 +517,9 @@ class Indexing:
                 )
         if 'reindexed_h' in self.data.keys():
             reindexed_hkl = np.stack([
-                np.stack(self.data['reindexed_h'], axis=0)[:, :, np.newaxis],
-                np.stack(self.data['reindexed_k'], axis=0)[:, :, np.newaxis],
-                np.stack(self.data['reindexed_l'], axis=0)[:, :, np.newaxis]
+                np.stack(self.data['reindexed_h'], axis=0),
+                np.stack(self.data['reindexed_k'], axis=0),
+                np.stack(self.data['reindexed_l'], axis=0),
                 ], axis=2
                 )
             self.data['reindexed_hkl'] = list(reindexed_hkl)
@@ -592,7 +557,6 @@ class Indexing:
                 f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy',
                 self.hkl_ref[bravais_lattice]
                 )
-        np.save(f'{self.save_to["data"]}/angle_scale.npy', self.angle_scale)
         joblib.dump(self.uc_scaler, f'{self.save_to["data"]}/uc_scaler.bin')
         joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
         joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
@@ -688,7 +652,6 @@ class Indexing:
             save_to=self.save_to['augmentor'],
             seed=self.random_seed,
             uc_scaler=self.uc_scaler,
-            angle_scale=self.angle_scale,
             )
         self.augmentor.setup(self.data)
         data_augmented = [None for _ in range(len(self.data_params['split_groups']))]
@@ -749,13 +712,13 @@ class Indexing:
     def y_scale(self, y):
         y_scaled = np.zeros(y.shape)
         y_scaled[:3] = self.uc_scaler.transform(y[:3][:, np.newaxis])[:, 0]
-        y_scaled[3:] = (y[3:] - np.pi/2) / self.angle_scale
+        y_scaled[3:] = np.cos(y[3:])
         return y_scaled
 
     def y_revert(self, y):
         y_reverted = np.zeros(y.shape)
         y_reverted[:3] = self.uc_scaler.inverse_transform(y[:3][:, np.newaxis])[:, 0]
-        y_reverted[3:] = self.angle_scale * y[3:] + np.pi/2
+        y_reverted[3:] = np.arccos(y[3:])
         return y_reverted
 
     def setup_scalers(self):
@@ -772,17 +735,6 @@ class Indexing:
         # lengths
         self.uc_scaler = StandardScaler()
         self.uc_scaler.fit(uc_train[:, :3].ravel()[:, np.newaxis])
-        # angles
-        if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            self.angle_scale = 1
-        else:
-            if self.data_params['lattice_system'] == 'monoclinic':
-                angles = uc_train[:, 4]
-            elif self.data_params['lattice_system'] == 'triclinic':
-                angles = uc_train[:, 3:].ravel()
-            elif self.data_params['lattice_system'] == 'rhombohedral':
-                angles = uc_train[:, 3]
-            self.angle_scale = angles[angles != np.pi/2].std()
 
         self.data['reindexed_unit_cell_scaled'] = self.data['reindexed_unit_cell'].apply(self.y_scale)
         self.data['unit_cell_scaled'] = self.data['unit_cell'].apply(self.y_scale)
@@ -1183,38 +1135,35 @@ class Indexing:
 
     def inferences_regression(self):
         reindexed_uc_pred_scaled = np.zeros((len(self.data), self.data_params['n_outputs']))
-        reindexed_uc_pred_scaled_cov = np.zeros((
-            len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']
-            ))
+        reindexed_uc_pred_scaled_var = np.zeros((len(self.data), self.data_params['n_outputs']))
+
         reindexed_uc_pred_scaled_trees = np.zeros((len(self.data), self.data_params['n_outputs']))
-        reindexed_uc_pred_scaled_cov_trees = np.zeros((
-            len(self.data), self.data_params['n_outputs'], self.data_params['n_outputs']
-            ))
+        reindexed_uc_pred_scaled_var_trees = np.zeros((len(self.data), self.data_params['n_outputs']))
 
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             split_group_indices = self.data['split_group'] == split_group
-            reindexed_uc_pred_scaled[split_group_indices, :], reindexed_uc_pred_scaled_cov[split_group_indices, :, :] = \
+            reindexed_uc_pred_scaled[split_group_indices, :], reindexed_uc_pred_scaled_var[split_group_indices, :] = \
                 self.unit_cell_generator[split_group].do_predictions(data=self.data[split_group_indices], batch_size=1024)
-            reindexed_uc_pred_scaled_trees[split_group_indices, :], reindexed_uc_pred_scaled_cov_trees[split_group_indices, :, :], _ = \
+            reindexed_uc_pred_scaled_trees[split_group_indices, :], reindexed_uc_pred_scaled_var_trees[split_group_indices, :], _ = \
                 self.unit_cell_generator[split_group].do_predictions_trees(data=self.data[split_group_indices])
 
-        reindexed_uc_pred, reindexed_uc_pred_cov = self.revert_predictions(
-            reindexed_uc_pred_scaled, reindexed_uc_pred_scaled_cov
+        reindexed_uc_pred, reindexed_uc_pred_var = self.revert_predictions(
+            reindexed_uc_pred_scaled, reindexed_uc_pred_scaled_var
             )
         self.data['reindexed_volume_pred'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred))
         self.data['reindexed_unit_cell_pred'] = list(reindexed_uc_pred)
-        self.data['reindexed_unit_cell_pred_cov'] = list(reindexed_uc_pred_cov)
+        self.data['reindexed_unit_cell_pred_var'] = list(reindexed_uc_pred_var)
         self.data['reindexed_unit_cell_pred_scaled'] = list(reindexed_uc_pred_scaled)
-        self.data['reindexed_unit_cell_pred_scaled_cov'] = list(reindexed_uc_pred_scaled_cov)
+        self.data['reindexed_unit_cell_pred_scaled_var'] = list(reindexed_uc_pred_scaled_var)
 
-        reindexed_uc_pred_trees, reindexed_uc_pred_cov_trees = self.revert_predictions(
-            reindexed_uc_pred_scaled_trees, reindexed_uc_pred_scaled_cov_trees
+        reindexed_uc_pred_trees, reindexed_uc_pred_var_trees = self.revert_predictions(
+            reindexed_uc_pred_scaled_trees, reindexed_uc_pred_scaled_var_trees
             )
         self.data['reindexed_volume_pred_trees'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred_trees))
         self.data['reindexed_unit_cell_pred_trees'] = list(reindexed_uc_pred_trees)
-        self.data['reindexed_unit_cell_pred_cov_trees'] = list(reindexed_uc_pred_cov_trees)
+        self.data['reindexed_unit_cell_pred_var_trees'] = list(reindexed_uc_pred_var_trees)
         self.data['reindexed_unit_cell_pred_scaled_trees'] = list(reindexed_uc_pred_scaled_trees)
-        self.data['reindexed_unit_cell_pred_scaled_cov_trees'] = list(reindexed_uc_pred_scaled_cov_trees)
+        self.data['reindexed_unit_cell_pred_scaled_var_trees'] = list(reindexed_uc_pred_scaled_var_trees)
 
     def setup_pitf(self):
         self.pitf_generator = dict.fromkeys(self.data_params['bravais_lattices'])
@@ -1251,7 +1200,6 @@ class Indexing:
             reindexed_xnn_pred,
             partial_unit_cell=True, 
             lattice_system=self.data_params['lattice_system'],
-            radians=True
             ))
 
     def evaluate_pitf(self):
@@ -1263,90 +1211,79 @@ class Indexing:
                 y_indices=self.data_params['y_indices'],
                 )
 
-    def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_cov=None):
+    def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_var=None):
         if not uc_pred_scaled is None:
             uc_pred = np.zeros(uc_pred_scaled.shape)
             if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
                 uc_pred = uc_pred_scaled * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
             elif self.data_params['lattice_system'] == 'monoclinic':
                 uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 3] = self.angle_scale * uc_pred_scaled[:, 3] + np.pi/2
+                uc_pred[:, 3] = np.arccos(uc_pred_scaled[:, 3])
             elif self.data_params['lattice_system'] == 'triclinic':
                 uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 3:] = self.angle_scale * uc_pred_scaled[:, 3:] + np.pi/2
+                uc_pred[:, 3:] = np.arccos(uc_pred_scaled[:, 3:])
             elif self.data_params['lattice_system'] == 'rhombohedral':
                 uc_pred[:, 0] = uc_pred_scaled[:, 0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 1] = self.angle_scale * uc_pred_scaled[:, 1] + np.pi/2
+                uc_pred[:, 1] = np.arccos(uc_pred_scaled[:, 1])
 
-        if not uc_pred_scaled_cov is None:
-            uc_pred_cov = np.zeros(uc_pred_scaled_cov.shape)
+        if not uc_pred_scaled_var is None:
+            assert not uc_pred_scaled is None
+            uc_pred_var = np.zeros(uc_pred_scaled_var.shape)
             if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-                uc_pred_cov = uc_pred_scaled_cov * self.uc_scaler.scale_[0]**2
+                uc_pred_var = uc_pred_scaled_var * self.uc_scaler.scale_[0]**2
             elif self.data_params['lattice_system'] == 'monoclinic':
-                uc_pred_cov[:, :3, :3] = uc_pred_scaled_cov[:, :3, :3] * self.uc_scaler.scale_[0]**2
-                uc_pred_cov[:, 3, 3] = uc_pred_scaled_cov[:, 3, 3] * self.angle_scale**2
-                uc_pred_cov[:, :3, 3] = uc_pred_scaled_cov[:, :3, 3] * self.uc_scaler.scale_[0] * self.angle_scale
-                uc_pred_cov[:, 3, :3] = uc_pred_scaled_cov[:, 3, :3] * self.uc_scaler.scale_[0] * self.angle_scale
+                uc_pred_var[:, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 3] = uc_pred_scaled_var[:, 3] / (1 - uc_pred_scaled[:, 3]**2)
             elif self.data_params['lattice_system'] == 'triclinic':
-                uc_pred_cov[:, :3, :3] = uc_pred_scaled_cov[:, :3, :3] * self.uc_scaler.scale_[0]**2
-                uc_pred_cov[:, 3:, 3:] = uc_pred_scaled_cov[:, 3:, 3:] * self.angle_scale**2
-                uc_pred_cov[:, :3, 3:] = uc_pred_scaled_cov[:, :3, 3:] * self.uc_scaler.scale_[0] * self.angle_scale
-                uc_pred_cov[:, 3:, :3] = uc_pred_scaled_cov[:, 3:, :3] * self.uc_scaler.scale_[0] * self.angle_scale
+                uc_pred_var[:, :3, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 3:, 3:] = uc_pred_scaled_var[:, 3:] / (1 - uc_pred_scaled[:, 3:]**2)
             elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred_cov[:, 0, 0] = uc_pred_scaled_cov[:, 0, 0] * self.uc_scaler.scale_[0]**2
-                uc_pred_cov[:, 1, 1] = uc_pred_scaled_cov[:, 1, 1] * self.angle_scale**2
-                uc_pred_cov[:, 0, 1] = uc_pred_scaled_cov[:, 0, 1] * self.uc_scaler.scale_[0] * self.angle_scale
-                uc_pred_cov[:, 1, 0] = uc_pred_scaled_cov[:, 1, 0] * self.uc_scaler.scale_[0] * self.angle_scale
+                uc_pred_var[:, 0, 0] = uc_pred_scaled_var[:, 0] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 1, 1] = uc_pred_scaled_var[:, 1] / (1 - uc_pred_scaled[:, 1]**2)
 
-        if not uc_pred_scaled is None and not uc_pred_scaled_cov is None:
-            return uc_pred, uc_pred_cov
-        elif not uc_pred_scaled is None and uc_pred_scaled_cov is None:
+        if not uc_pred_scaled is None and not uc_pred_scaled_var is None:
+            return uc_pred, uc_pred_var
+        elif not uc_pred_scaled is None and uc_pred_scaled_var is None:
             return uc_pred
-        elif uc_pred_scaled is None and not uc_pred_scaled_cov is None:
-            return uc_pred_cov
+        elif uc_pred_scaled is None and not uc_pred_scaled_var is None:
+            return uc_pred_var
 
-    def scale_predictions(self, uc_pred=None, uc_pred_cov=None):
+    def scale_predictions(self, uc_pred=None, uc_pred_var=None):
         if not uc_pred is None:
             if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
                 uc_pred_scaled = (uc_pred - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
             elif self.data_params['lattice_system'] == 'monoclinic':
                 uc_pred_scaled = np.zeros(uc_pred.shape)
                 uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-                uc_pred_scaled[:, 3] = (uc_pred[:, 3] - np.pi/2) / self.angle_scale
+                uc_pred_scaled[:, 3] = np.cos(uc_pred[:, 3])
             elif self.data_params['lattice_system'] == 'triclinic':
                 uc_pred_scaled = np.zeros(uc_pred.shape)
                 uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-                uc_pred_scaled[:, 3:] = (uc_pred[:, 3:] - np.pi/2) / self.angle_scale
+                uc_pred_scaled[:, 3:] = np.cos(uc_pred[:, 3:])
             elif self.data_params['lattice_system'] == 'rhombohedral':
                 uc_pred_scaled = np.zeros(uc_pred.shape)
                 uc_pred_scaled[:, 0] = (uc_pred[:, 0] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-                uc_pred_scaled[:, 1] = (uc_pred[:, 1] - np.pi/2) / self.angle_scale
-        if not uc_pred_cov is None:
-            uc_pred_scaled_cov = np.zeros(uc_pred_cov.shape)
+                uc_pred_scaled[:, 1] = np.cos(uc_pred[:, 1])
+        if not uc_pred_var is None:
+            uc_pred_scaled_var = np.zeros(uc_pred_var.shape)
             if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-                uc_pred_scaled_cov = uc_pred_cov / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_var = uc_pred_var / self.uc_scaler.scale_[0]**2
             elif self.data_params['lattice_system'] == 'monoclinic':
-                uc_pred_scaled_cov[:, :3, :3] = uc_pred_cov[:, :3, :3] / self.uc_scaler.scale_[0]**2
-                uc_pred_scaled_cov[:, 3, 3] = uc_pred_cov[:, 3, 3] / self.angle_scale**2
-                uc_pred_scaled_cov[:, :3, 3] = uc_pred_cov[:, :3, 3] / (self.uc_scaler.scale_[0] * self.angle_scale)
-                uc_pred_scaled_cov[:, 3, :3] = uc_pred_cov[:, 3, :3] / (self.uc_scaler.scale_[0] * self.angle_scale)
+                uc_pred_scaled_var[:, :3] = uc_pred_var[:, :3] / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_var[:, 3] = uc_pred_var[:, 3] * np.sin(uc_pred[:, 3])**2
             elif self.data_params['lattice_system'] == 'triclinic':
-                uc_pred_scaled_cov[:, :3, :3] = uc_pred_cov[:, :3, :3] / self.uc_scaler.scale_[0]**2
-                uc_pred_scaled_cov[:, 3:, 3:] = uc_pred_cov[:, 3:, 3:] / self.angle_scale**2
-                uc_pred_scaled_cov[:, :3, 3:] = uc_pred_cov[:, :3, 3:] / (self.uc_scaler.scale_[0] * self.angle_scale)
-                uc_pred_scaled_cov[:, 3:, :3] = uc_pred_cov[:, 3:, :3] / (self.uc_scaler.scale_[0] * self.angle_scale)
+                uc_pred_scaled_var[:, :3] = uc_pred_var[:, :3] / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_var[:, 3] = uc_pred_var[:, 3:] * np.sin(uc_pred[:, 3:])**2
             elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred_scaled_cov[:, 0, 0] = uc_pred_cov[:, 0, 0] / self.uc_scaler.scale_[0]**2
-                uc_pred_scaled_cov[:, 1, 1] = uc_pred_cov[:, 1, 1] / self.angle_scale**2
-                uc_pred_scaled_cov[:, 0, 1] = uc_pred_cov[:, 0, 1] / (self.uc_scaler.scale_[0] * self.angle_scale)
-                uc_pred_scaled_cov[:, 1, 0] = uc_pred_cov[:, 1, 0] / (self.uc_scaler.scale_[0] * self.angle_scale)
+                uc_pred_scaled_var[:, 0, 0] = uc_pred_var[:, 0] / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_var[:, 1, 1] = uc_pred_var[:, 1] * np.sin(uc_pred[:, 1])**2
 
-        if not uc_pred is None and not uc_pred_cov is None:
-            return uc_pred_scaled, uc_pred_scaled_cov
-        elif not uc_pred is None and uc_pred_cov is None:
+        if not uc_pred is None and not uc_pred_var is None:
+            return uc_pred_scaled, uc_pred_scaled_var
+        elif not uc_pred is None and uc_pred_var is None:
             return uc_pred_scaled
-        elif uc_pred is None and not uc_pred_cov is None:
-            return uc_pred_scaled_cov
+        elif uc_pred is None and not uc_pred_var is None:
+            return uc_pred_scaled_var
 
     def evaluate_regression(self):
         for bravais_lattice in self.data_params['bravais_lattices']:
@@ -1389,7 +1326,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg.png',
                 y_indices=self.data_params['y_indices'],
-                trees=False
+                model='nn'
                 )
             evaluate_regression(
                 data=self.data[self.data['split_group'] == split_group],
@@ -1397,7 +1334,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_tree.png',
                 y_indices=self.data_params['y_indices'],
-                trees=True
+                model='trees'
                 )
             calibrate_regression(
                 data=self.data[self.data['split_group'] == split_group],
@@ -1405,7 +1342,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration.png',
                 y_indices=self.data_params['y_indices'],
-                trees=False
+                model='nn'
                 )
             calibrate_regression(
                 data=self.data[self.data['split_group'] == split_group],
@@ -1413,7 +1350,7 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration_tree.png',
                 y_indices=self.data_params['y_indices'],
-                trees=True
+                model='trees'
                 )
         evaluate_regression(
             data=self.data,
@@ -1421,7 +1358,7 @@ class Indexing:
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg.png',
             y_indices=self.data_params['y_indices'],
-            trees=False
+            model='nn'
             )
         calibrate_regression(
             data=self.data,
@@ -1429,7 +1366,7 @@ class Indexing:
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg_calibration.png',
             y_indices=self.data_params['y_indices'],
-            trees=False
+            model='nn'
             )
         evaluate_regression(
             data=self.data,
@@ -1437,7 +1374,7 @@ class Indexing:
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg_trees.png',
             y_indices=self.data_params['y_indices'],
-            trees=True
+            model='trees'
             )
         calibrate_regression(
             data=self.data,
@@ -1445,7 +1382,7 @@ class Indexing:
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg_calibration_trees.png',
             y_indices=self.data_params['y_indices'],
-            trees=True
+            model='trees'
             )
 
     def setup_assignment(self):

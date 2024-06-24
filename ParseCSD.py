@@ -27,7 +27,7 @@ if rank == 0:
     for file_index in range(3):
         bad_identifiers += load_identifiers(
             os.path.join('data', f'bad_identifiers_{file_index}.txt')
-        )
+            )
 else:
     bad_identifiers = None
 bad_identifiers = COMM.bcast(bad_identifiers, root=0)

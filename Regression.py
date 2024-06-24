@@ -174,6 +174,7 @@ class RegressionBase:
         N = q2_scaled.shape[0]
         if self.lattice_system == 'cubic':
             uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)[:, np.newaxis]
+            uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
             for tree in range(self.model_params['random_forest']['n_estimators']):
                 uc_pred_scaled_tree[:, :, tree] = \
                     self.random_forest_regressor.estimators_[tree].predict(q2_scaled)[:, np.newaxis]
@@ -187,10 +188,8 @@ class RegressionBase:
                     tree_index += 1
 
         uc_pred_scaled = uc_pred_scaled_tree.mean(axis=2)
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index] = np.cov(uc_pred_scaled_tree[index])
-        return uc_pred_scaled, uc_pred_scaled_cov, uc_pred_scaled_tree
+        uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
+        return uc_pred_scaled, uc_pred_scaled_var, uc_pred_scaled_tree
 
     def fit_model_cycles(self, data):
         self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
@@ -819,8 +818,8 @@ class Regression_AlphaBeta(RegressionBase):
         N = len(data)
         n_batches = N // batch_size
         left_over = N % batch_size
-        pred = np.zeros((N, self.n_outputs))
-        pred_var = np.zeros((N, self.n_outputs))
+        uc_pred_scaled = np.zeros((N, self.n_outputs))
+        uc_pred_scaled_var = np.zeros((N, self.n_outputs))
         for batch_index in range(n_batches + 1):
             start = batch_index * batch_size
             if batch_index == n_batches:
@@ -833,19 +832,14 @@ class Regression_AlphaBeta(RegressionBase):
             outputs = self.model.predict_on_batch(batch_inputs)
 
             if batch_index == n_batches:
-                pred[start:] = outputs[:left_over, :, 0]
+                uc_pred_scaled[start:] = outputs[:left_over, :, 0]
                 pred_alpha = outputs[:left_over, :, 1]
                 pred_beta = outputs[:left_over, :, 2]
-                pred_var[start:] = pred_beta / (pred_alpha - 1)
+                uc_pred_scaled_var[start:] = pred_beta / (pred_alpha - 1)
             else:
-                pred[start: start + batch_size] = outputs[:, :, 0]
+                uc_pred_scaled[start: start + batch_size] = outputs[:, :, 0]
                 pred_alpha = outputs[:, :, 1]
                 pred_beta = outputs[:, :, 2]
-                pred_var[start: start + batch_size] = pred_beta / (pred_alpha - 1)
+                uc_pred_scaled_var[start: start + batch_size] = pred_beta / (pred_alpha - 1)
 
-        uc_pred_scaled = pred
-        diag_indices = np.diag_indices(self.n_outputs, ndim=2)
-        uc_pred_scaled_cov = np.zeros((N, self.n_outputs, self.n_outputs))
-        for index in range(N):
-            uc_pred_scaled_cov[index, diag_indices[0], diag_indices[1]] = pred_var[index]
-        return uc_pred_scaled, uc_pred_scaled_cov
+        return uc_pred_scaled, uc_pred_scaled_var

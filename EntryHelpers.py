@@ -387,7 +387,7 @@ def verify_crystal_system_bravais_lattice_consistency(crystal_system, bravais_la
 
 def verify_unit_cell_consistency_by_bravais_lattice(bravais_lattice, unit_cell):
     def square(alpha, beta, gamma):
-        if alpha == 90 and beta == 90 and gamma == 90:
+        if alpha == np.pi/2 and beta == np.pi/2 and gamma == np.pi/2:
             return True
         else:
             return False
@@ -415,11 +415,11 @@ def verify_unit_cell_consistency_by_bravais_lattice(bravais_lattice, unit_cell):
             if alpha == beta and beta == gamma:
                 check = True
         elif a == b and b != c:
-            if alpha == 90 and beta == 90 and gamma == 120:
+            if alpha == np.pi/2 and beta == np.pi/2 and gamma == 2*np.pi/3:
                 check = True
     elif bravais_lattice == 'hP':
         if a == b and b != c:
-            if alpha == 90 and beta == 90 and gamma == 120:
+            if alpha == np.pi/2 and beta == np.pi/2 and gamma == 2*np.pi/3:
                 check = True
     elif bravais_lattice in ['mC', 'mP']:
         # it is valid for the monoclinic to be set with beta == 90.
@@ -427,7 +427,7 @@ def verify_unit_cell_consistency_by_bravais_lattice(bravais_lattice, unit_cell):
         # entries initially with beta != 90.
         # The beta != 90 setting covers over 99% of the monoclinic entries, which there
         # is no shortage of.
-        if alpha == gamma and alpha == 90 and beta != 90:
+        if alpha == gamma and alpha == np.pi/2 and beta != np.pi/2:
             check = True
     elif bravais_lattice == 'aP':
         check = True
@@ -438,9 +438,9 @@ def verify_volume(unit_cell, expected_volume):
     a = unit_cell[0]
     b = unit_cell[1]
     c = unit_cell[2]
-    calpha = np.cos(np.pi / 180 * unit_cell[3])
-    cbeta = np.cos(np.pi / 180 * unit_cell[4])
-    cgamma = np.cos(np.pi / 180 * unit_cell[5])
+    calpha = np.cos(unit_cell[3])
+    cbeta = np.cos(unit_cell[4])
+    cgamma = np.cos(unit_cell[5])
     volume = a * b * c * np.sqrt(1 - calpha ** 2 - cbeta ** 2 - cgamma ** 2 + 2 * calpha * cbeta * cgamma)
     return np.isclose(volume, expected_volume)
 
@@ -449,9 +449,9 @@ def get_unit_cell_volume(unit_cell):
     a = unit_cell[0]
     b = unit_cell[1]
     c = unit_cell[2]
-    calpha = np.cos(np.pi/180 * unit_cell[3])
-    cbeta = np.cos(np.pi/180 * unit_cell[4])
-    cgamma = np.cos(np.pi/180 * unit_cell[5])
+    calpha = np.cos(unit_cell[3])
+    cbeta = np.cos(unit_cell[4])
+    cgamma = np.cos(unit_cell[5])
     arg = 1 - calpha**2 - cbeta**2 - cgamma**2 + 2*calpha*cbeta*cgamma
     volume = (a*b*c) * np.sqrt(arg)
     return volume

@@ -28,9 +28,10 @@ if rank == 0:
             for dir_2_index in get_next_dirs(dir_1):
                 dir_2 = os.path.join(dir_1, dir_2_index)
                 for cif_file_name in get_next_dirs(dir_2):
-                    cif_file_names.append(os.path.join(dir_2, cif_file_name))
+                    if not cif_file_name.endswith('_editted.cif'):
+                        cif_file_names.append(os.path.join(dir_2, cif_file_name))
 else:
-    cif_file_names = 0
+    cif_file_names = None
 cif_file_names = COMM.bcast(cif_file_names, root=0)
 n_total = len(cif_file_names)
 

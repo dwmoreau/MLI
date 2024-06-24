@@ -9,7 +9,7 @@ from sklearn.metrics import ConfusionMatrixDisplay
 from tqdm import tqdm
 
 from Reindexing import reindex_entry_triclinic
-from Utilities import get_fwhm_and_overlap_threshold
+from Utilities import get_peak_generation_info
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -25,7 +25,6 @@ class Augmentor:
             save_to,
             seed,
             uc_scaler,
-            angle_scale,
             ):
         self.aug_params = aug_params
         self.n_generated_points = n_generated_points
@@ -40,7 +39,6 @@ class Augmentor:
         self.hkl_ref_length = data_params['hkl_ref_length']
         self.rng = np.random.default_rng(seed)
         self.uc_scaler = uc_scaler
-        self.angle_scale = angle_scale
 
     def setup(self, data):
         print(f'\n Setting up augmentation {self.aug_params["tag"]}')
@@ -227,14 +225,14 @@ class Augmentor:
         perturbed_reindexed_unit_cell_scaled = self.perturb_unit_cell_common(reindexed_unit_cell_scaled)
         perturbed_reindexed_unit_cell = np.zeros(6)
         perturbed_reindexed_unit_cell[:3] = perturbed_reindexed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-        perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
+        perturbed_reindexed_unit_cell[3:] = np.arccos(perturbed_reindexed_unit_cell_scaled[3:])
         augmented_entry['reindexed_unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
         augmented_entry['reindexed_unit_cell'] = perturbed_reindexed_unit_cell
         perturbed_reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-            perturbed_reindexed_unit_cell[np.newaxis], partial_unit_cell=False, radians=True
+            perturbed_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
             )[0]
         augmented_entry['reindexed_xnn'] = get_xnn_from_reciprocal_unit_cell(
-            perturbed_reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False, radians=True
+            perturbed_reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False
             )[0]
 
         # calculate new d-spacings
@@ -276,19 +274,13 @@ class Augmentor:
         reindexed_hkl = [reindexed_hkl_sa[first_peak_index]]
 
         previous_kept_index = first_peak_index
-        # overlap_threshold is the minimum separation from allowed during GenerateDataset.py
-        # overlap_threshold = q2(2theta + overlap_threshold_theta2 / 2) - q2(2theta - overlap_threshold_theta2 / 2)
-        # overlap_threshold = dq2_dtheta2 * overlap_threshold_theta2
-        def get_overlap_threshold_q2(q2, fwhm, overlap_threshold_theta2, wavelength):
-            fwhm = 0.1 * np.pi/180 # in radians
-            overlap_threshold_theta2 = fwhm / 1.5
-            theta2 = 2*np.arcsin(np.sqrt(q2)*wavelength/2)
-            dq2_dtheta2 = (2/wavelength)**2 * np.sin(theta2/2) * np.cos(theta2/2)
-            overlap_threshold_q2 = dq2_dtheta2 * overlap_threshold_theta2
-            return overlap_threshold_q2
 
         keep_next = False
-        fwhm, overlap_threshold_theta2, wavelength = get_fwhm_and_overlap_threshold()
+        peak_generation_info = get_peak_generation_info()
+        broadening_params = peak_generation_info['broadening_params']
+        broadening_multiplier = peak_generation_info['broadening_multiples'][
+            peak_generation_info['broadening_tags'].index(self.points_tag)
+            ]
         for index in range(first_peak_index + 1, q2_sa.size):
             # cases:
             # 1) Close to previous_kept: Reject
@@ -298,7 +290,8 @@ class Augmentor:
             # There is a problem with really large q2 values. Like ~100 I believe they are comming from
             # setting the hkl to [-100, -100, -100] for empty peaks in the peak list
             if q2_sa[index] < 1:
-                overlap_threshold_q2 = get_overlap_threshold_q2(q2_sa[index], fwhm, overlap_threshold_theta2, wavelength)
+                peak_breadth_std = broadening_multiplier * (broadening_params[0] + q2_sa[index]*broadening_params[1])
+                overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5
                 distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
                 if index == q2_sa.size - 1:
                     separation = distance_previous
@@ -310,9 +303,9 @@ class Augmentor:
                 if keep_next:
                     keep = True
                     keep_next = False
-                elif distance_previous > overlap_threshold_q2:
+                elif distance_previous > overlap_threshold:
                     keep_next = False
-                    if distance_next > overlap_threshold_q2:
+                    if distance_next > overlap_threshold:
                         if self.rng.random() < self.keep_rate(separation, q2_sa[index], self.keep_rate_params):
                             keep = True
                     else:
@@ -342,23 +335,21 @@ class Augmentor:
 
     def _check_in_range(self, perturbed_unit_cell_scaled):
         if self.lattice_system == 'monoclinic':
-            minimum_angle_scaled = (np.pi/2 - np.pi/2) / self.angle_scale
-            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
-            if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
-                if minimum_angle_scaled < perturbed_unit_cell_scaled[3] < maximum_angle_scaled:
+            if np.all(perturbed_unit_cell_scaled[:3] < self.min_unit_cell_scaled):
+                if -1 < perturbed_unit_cell_scaled[3] < 0:
                     return True
         elif self.lattice_system == 'triclinic':
             #print(perturbed_unit_cell_scaled)
-            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
             if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
-                if np.all(perturbed_unit_cell_scaled[3:] <= maximum_angle_scaled):
-                    return True
+                if np.all(perturbed_unit_cell_scaled[3:] < 1):
+                    if np.all(perturbed_unit_cell_scaled[3:] > -1):
+                        return True
         elif self.lattice_system == 'rhombohedral':
             good_angle = False
             reciprocalable = False
             perturbed_unit_cell = np.zeros(2)
             perturbed_unit_cell[0] = perturbed_unit_cell_scaled[0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            perturbed_unit_cell[1] = perturbed_unit_cell_scaled[1] * self.angle_scale + np.pi/2
+            perturbed_unit_cell[1] = np.arccos(perturbed_unit_cell_scaled[1])
 
             if perturbed_unit_cell_scaled[0] > self.min_unit_cell_scaled:
                 if 0 < perturbed_unit_cell[1]:
@@ -371,7 +362,6 @@ class Augmentor:
                 perturbed_unit_cell[np.newaxis],
                 partial_unit_cell=True,
                 lattice_system='rhombohedral',
-                radians=True
                 )[0]
             reciprocalable = np.invert(np.any(np.isnan(reciprocal_unit_cell)))
             if good_angle and reciprocalable:
@@ -394,10 +384,10 @@ class Augmentor:
         elif self.lattice_system == 'triclinic':
             perturbed_unit_cell = np.zeros(6)
             perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            perturbed_unit_cell[3:] = self.angle_scale * perturbed_unit_cell_scaled[3:] + np.pi/2
-            perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell, radians=True)
+            perturbed_unit_cell[3:] = np.arccos(perturbed_unit_cell_scaled[3:])
+            perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell)
             perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
+            perturbed_unit_cell_scaled[3:] = np.cos(perturbed_unit_cell[3:])
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_common(self, unit_cell_scaled):

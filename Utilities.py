@@ -3,22 +3,32 @@ import numpy as np
 import os
 
 
-def get_fwhm_and_overlap_threshold():
+def get_peak_generation_info():
     # This information gets used in GenerateDataset.py and Augmentor.py
-    # This function removes duplicatation
     # The CCDC API generates diffraction patterns with the wavelength 1.54 (Cu K alpha)
-    # by default.
-    fwhm = 0.1
-    overlap_threshold = fwhm / 1.5
+    # The CCDC powder patterns are generated with 'broadening_fwhm'
+    # The cctbx powder patterns are generated with 'broadening_params'
     wavelength = 1.54
-    return fwhm, overlap_threshold, wavelength
+    dtheta2 = 0.01
+    theta2_min = 2
+    theta2_max = 60
+    theta2_pattern = np.arange(theta2_min, theta2_max, dtheta2)
+    peak_generation_info = {
+        'broadening_fwhm': 0.1,
+        'broadening_params': np.array([0.0001, 0.005]),
+        'broadening_multiples': np.array([0.5, 1, 1.5]),
+        'broadening_tags': ['0.5', '1', '1.5'],
+        'wavelength': wavelength,
+        'dtheta2': dtheta2,
+        'theta2_min': theta2_min,
+        'theta2_max': theta2_max,
+        'theta2_pattern': theta2_pattern,
+        'q2_pattern': (2 * np.sin(theta2_pattern/2 * np.pi/180) / wavelength)**2,
+        }
+    return peak_generation_info
 
 
-def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=None, radians=True):
-    if radians:
-        angle_multiplier = 1
-    else:
-        angle_multiplier = np.pi/180
+def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=None):
     if partial_unit_cell and lattice_system != 'triclinic':
         if lattice_system in ['cubic', 'rhombohedral']:
             a = unit_cell[:, 0]
@@ -41,12 +51,12 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
             beta = np.pi/2
             gamma = 2*np.pi/3
         elif lattice_system == 'rhombohedral':
-            alpha = unit_cell[:, 1] * angle_multiplier
-            beta = unit_cell[:, 1] * angle_multiplier
-            gamma = unit_cell[:, 1] * angle_multiplier
+            alpha = unit_cell[:, 1]
+            beta = unit_cell[:, 1]
+            gamma = unit_cell[:, 1]
         elif lattice_system == 'monoclinic':
             alpha = np.pi/2
-            beta = unit_cell[:, 3] * angle_multiplier
+            beta = unit_cell[:, 3]
             gamma = np.pi/2
         else:
             assert False
@@ -54,9 +64,9 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
         a = unit_cell[:, 0]
         b = unit_cell[:, 1]
         c = unit_cell[:, 2]
-        alpha = unit_cell[:, 3] * angle_multiplier
-        beta = unit_cell[:, 4] * angle_multiplier
-        gamma = unit_cell[:, 5] * angle_multiplier
+        alpha = unit_cell[:, 3]
+        beta = unit_cell[:, 4]
+        gamma = unit_cell[:, 5]
 
     S = np.array([
         [a**2, a*b*np.cos(gamma), a*c*np.cos(beta)],
@@ -69,9 +79,9 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
     b_inv = np.sqrt(S_inv[:, 1, 1])
     c_inv = np.sqrt(S_inv[:, 2, 2])
 
-    alpha_inv = np.arccos(S_inv[:, 1, 2] / (b_inv * c_inv)) /  angle_multiplier
-    beta_inv = np.arccos(S_inv[:, 0, 2] / (a_inv * c_inv)) /  angle_multiplier
-    gamma_inv = np.arccos(S_inv[:, 0, 1] / (a_inv * b_inv)) /  angle_multiplier
+    alpha_inv = np.arccos(S_inv[:, 1, 2] / (b_inv * c_inv))
+    beta_inv = np.arccos(S_inv[:, 0, 2] / (a_inv * c_inv))
+    gamma_inv = np.arccos(S_inv[:, 0, 1] / (a_inv * b_inv))
     
     if partial_unit_cell and lattice_system != 'triclinic':
         if lattice_system == 'cubic':
@@ -89,38 +99,34 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
     return unit_cell_inv
 
 
-def get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell, partial_unit_cell=False, lattice_system=None, radians=True):
-    if radians:
-        angle_multiplier = 1
-    else:
-        angle_multiplier = np.pi/180
+def get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell, partial_unit_cell=False, lattice_system=None):
     if partial_unit_cell and lattice_system != 'triclinic':
         if lattice_system in ['cubic', 'tetragonal', 'hexagonal', 'orthorhombic']:
             xnn = reciprocal_unit_cell**2
         elif lattice_system == 'rhombohedral':
             xnn = np.column_stack([
                 reciprocal_unit_cell[:, 0]**2,
-                2*reciprocal_unit_cell[:, 0]**2 * np.cos(angle_multiplier * reciprocal_unit_cell[:, 1]),
+                2*reciprocal_unit_cell[:, 0]**2 * np.cos(reciprocal_unit_cell[:, 1]),
                 ])
         elif lattice_system == 'monoclinic':
             xnn = np.column_stack([
                 reciprocal_unit_cell[:, 0]**2,
                 reciprocal_unit_cell[:, 1]**2,
                 reciprocal_unit_cell[:, 2]**2,
-                2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 2] * np.cos(angle_multiplier * reciprocal_unit_cell[:, 3]),
+                2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 3]),
                 ])
     elif partial_unit_cell == False or lattice_system == 'triclinic':
         xnn = np.column_stack([
             reciprocal_unit_cell[:, 0]**2,
             reciprocal_unit_cell[:, 1]**2,
             reciprocal_unit_cell[:, 2]**2,
-            2*reciprocal_unit_cell[:, 1] * reciprocal_unit_cell[:, 2] * np.cos(angle_multiplier * reciprocal_unit_cell[:, 3]),
-            2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 2] * np.cos(angle_multiplier * reciprocal_unit_cell[:, 4]),
-            2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 1] * np.cos(angle_multiplier * reciprocal_unit_cell[:, 5]),
+            2*reciprocal_unit_cell[:, 1] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 3]),
+            2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 2] * np.cos(reciprocal_unit_cell[:, 4]),
+            2*reciprocal_unit_cell[:, 0] * reciprocal_unit_cell[:, 1] * np.cos(reciprocal_unit_cell[:, 5]),
             ])
-        xnn[reciprocal_unit_cell[:, 3] == 1/angle_multiplier * np.pi/2, 3] = 0
-        xnn[reciprocal_unit_cell[:, 4] == 1/angle_multiplier * np.pi/2, 4] = 0
-        xnn[reciprocal_unit_cell[:, 5] == 1/angle_multiplier * np.pi/2, 5] = 0
+        xnn[reciprocal_unit_cell[:, 3] == np.pi/2, 3] = 0
+        xnn[reciprocal_unit_cell[:, 4] == np.pi/2, 4] = 0
+        xnn[reciprocal_unit_cell[:, 5] == np.pi/2, 5] = 0
     return xnn
 
 
@@ -150,14 +156,14 @@ def get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=False, lattice_syst
     return reciprocal_unit_cell
 
 
-def get_unit_cell_from_xnn(xnn, partial_unit_cell=False, lattice_system=None, radians=True):
+def get_unit_cell_from_xnn(xnn, partial_unit_cell=False, lattice_system=None):
     reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell, lattice_system)
-    return reciprocal_uc_conversion(reciprocal_unit_cell, partial_unit_cell, lattice_system, radians)
+    return reciprocal_uc_conversion(reciprocal_unit_cell, partial_unit_cell, lattice_system)
 
 
-def get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False, lattice_system=None, radians=True):
-    reciprocal_unit_cell = reciprocal_uc_conversion(unit_cell, partial_unit_cell, lattice_system, radians)
-    return get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell, partial_unit_cell, lattice_system, radians)
+def get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False, lattice_system=None):
+    reciprocal_unit_cell = reciprocal_uc_conversion(unit_cell, partial_unit_cell, lattice_system)
+    return get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell, partial_unit_cell, lattice_system)
 
 
 def fix_unphysical(xnn=None, unit_cell=None, rng=None, lattice_system=None, minimum_unit_cell=2, maximum_unit_cell=500):

@@ -2,14 +2,12 @@ import copy
 import numpy as np
 
 
-def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell, radians):
+def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell):
     a_hexagonal = hexagonal_unit_cell[0]
     c_hexagonal = hexagonal_unit_cell[2]
     a_rhombohedral = 1/3 * np.sqrt(3*a_hexagonal**2 + c_hexagonal**2)
     denom = 2 * np.sqrt(3 + (c_hexagonal/a_hexagonal)**2)
     alpha = 2 * np.arcsin(3 / denom)
-    if radians == False:
-        alpha *= 180/np.pi
     rhombohedral_unit_cell = np.array([
         a_rhombohedral,
         a_rhombohedral,
@@ -290,7 +288,7 @@ def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutat
     return permuted_spacegroup_symbol
 
 
-def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
+def reindex_entry_monoclinic(unit_cell, spacegroup_symbol):
     # This version reindexes the monoclinic entries to nonconventional settings
     #   SG # | Setting
     #      3 | P 1 2 1
@@ -309,17 +307,11 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
     # Useful resources:
     #    http://pd.chem.ucl.ac.uk/pdnn/symm4/practice.htm
     #    https://onlinelibrary.wiley.com/iucr/itc/Ab/ch5o1v0001/sec5o1o3.pdf
-    def reindex_unit_cell(unit_cell, operator, radians):
-        if radians:
-            check = np.pi/2
-            angle_multiplier = 1
-        else:
-            check = 90
-            angle_multiplier = np.pi/180
+    def reindex_unit_cell(unit_cell, operator):
         a = unit_cell[0]
         b = unit_cell[1]
         c = unit_cell[2]
-        beta = angle_multiplier * unit_cell[4]
+        beta = unit_cell[4]
         ucm = np.array([
             [a, 0, c*np.cos(beta)],
             [0, b, 0],
@@ -332,9 +324,9 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
         reindexed_unit_cell[2] = np.linalg.norm(rucm[:, 2])
         dot_product = np.dot(rucm[:, 0], rucm[:, 2])
         mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
-        reindexed_unit_cell[4] = np.arccos(dot_product / mag) / angle_multiplier
-        reindexed_unit_cell[3] = check
-        reindexed_unit_cell[5] = check
+        reindexed_unit_cell[4] = np.arccos(dot_product / mag)
+        reindexed_unit_cell[3] = np.pi/2
+        reindexed_unit_cell[5] = np.pi/2
         return reindexed_unit_cell
 
     A_centered = ['A 1 2 1', 'A 1 m 1', 'A 1 a 1', 'A 1 2/m 1', 'A 1 2/a 1']
@@ -392,7 +384,7 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
         # None of these would reindex to settings with limited entries.
         return None, None, np.eye(3)
 
-    reindexed_unit_cell = reindex_unit_cell(unit_cell, centered_reindexer, radians)
+    reindexed_unit_cell = reindex_unit_cell(unit_cell, centered_reindexer)
     if reindexed_unit_cell[0] > reindexed_unit_cell[2]:
         ac_reindexer = np.array([
             [0, 0, 1],
@@ -400,28 +392,22 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, radians):
             [-1, 0, 0],
             ])
         centered_reindexer = centered_reindexer @ ac_reindexer
-        reindexed_unit_cell = reindex_unit_cell(reindexed_unit_cell, ac_reindexer, radians)
-    
-    if radians:
-        check = np.pi/2
-    else:
-        check = 90
-    if reindexed_unit_cell[4] < check:
+        reindexed_unit_cell = reindex_unit_cell(reindexed_unit_cell, ac_reindexer)
+
+    if reindexed_unit_cell[4] < np.pi/2:
         obtuse_reindexer = np.array([
             [-1, 0, 0],
             [0, -1, 0],
             [0, 0, 1],
             ])
-        reindexed_unit_cell[4] = 2*check - reindexed_unit_cell[4]
+        reindexed_unit_cell[4] = np.pi - reindexed_unit_cell[4]
         hkl_reindexer = centered_reindexer @ obtuse_reindexer
     else:
         hkl_reindexer = centered_reindexer
     return reindexed_unit_cell, reindexed_spacegroup_symbol, hkl_reindexer
 
 
-def get_different_monoclinic_settings(unit_cell, partial_unit_cell=False, radians=True):
-    if radians == False:
-        assert False
+def get_different_monoclinic_settings(unit_cell, partial_unit_cell=False):
     ac_reindexer = [
         np.eye(3),
         np.array([
@@ -926,17 +912,11 @@ def selling_reduction(unit_cell, space='direct'):
     return unit_cell_reduced, hkl_transformation, s6_reduced
 
 
-def reindex_entry_triclinic(unit_cell, radians):
-    unit_cell_ = unit_cell.copy()
-    if radians == False:
-        # self.unit_cell in ParseDatabases.py gets converted to radians without the copy()
-        unit_cell_[3:] *= np.pi/180
+def reindex_entry_triclinic(unit_cell):
     if unit_cell.shape == (6,):
-        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell_[np.newaxis])
+        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell[np.newaxis])
         unit_cell_reduced = unit_cell_reduced[0]
         hkl_transformation = hkl_transformation[0]
     else:
-        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell_)
-    if radians == False:
-        unit_cell_reduced[3:] *= 180/np.pi
+        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell)
     return unit_cell_reduced, hkl_transformation

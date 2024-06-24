@@ -301,9 +301,6 @@ class Candidates:
         # scipy.spatial is considerably better than a pure numpy distance
         # Faster and less memory load
         distance = scipy.spatial.distance.cdist(xnn0, xnn1)
-        #s60 = get_s6_from_unit_cell(get_unit_cell_from_xnn(xnn0))
-        #s61 = get_s6_from_unit_cell(get_unit_cell_from_xnn(xnn1))
-        #distance = scipy.spatial.distance.cdist(s60, s61)
         return distance
 
     def redistribute_and_perturb_xnn(self, xnn, from_indices, to_indices, norm_factor=None):
@@ -340,7 +337,7 @@ class Candidates:
             assert False            
         elif self.lattice_system == 'triclinic':
             unit_cell = get_unit_cell_from_xnn(xnn)
-            unit_cell, _ = reindex_entry_triclinic(unit_cell, radians=True)
+            unit_cell, _ = reindex_entry_triclinic(unit_cell)
             xnn = get_xnn_from_unit_cell(unit_cell)
         return xnn
 
@@ -393,7 +390,7 @@ class Candidates:
 
     def exhaustive_search(self):
         if self.lattice_system == 'triclinic':
-            self.unit_cell, _ = reindex_entry_triclinic(get_unit_cell_from_xnn(self.xnn), radians=True)
+            self.unit_cell, _ = reindex_entry_triclinic(get_unit_cell_from_xnn(self.xnn))
             self.xnn = get_xnn_from_unit_cell(self.unit_cell)
 
         # This get the best candidate during this round for use in monoclinic_reset()
@@ -627,7 +624,7 @@ class Candidates:
                                         off_by_two = True
             return found, off_by_two
         elif self.lattice_system == 'triclinic':
-            reindexed_unit_cell, _ = reindex_entry_triclinic(unit_cell, radians=True)
+            reindexed_unit_cell, _ = reindex_entry_triclinic(unit_cell)
             found = False
             off_by_two = False
             if np.all(np.isclose(self.unit_cell_true, unit_cell, atol=atol)):
@@ -649,7 +646,11 @@ class Candidates:
         found_off_by_two = False
 
         if len(self.explainers) == 0:
-            best_unit_cell = reciprocal_uc_conversion(get_reciprocal_unit_cell_from_xnn(self.best_xnn))
+            best_unit_cell = get_unit_cell_from_xnn(
+                self.best_xnn,
+                partial_unit_cell=True,
+                lattice_system=self.lattice_system
+                )
             indices = np.argsort(self.best_loss)[:20]
             unit_cell = best_unit_cell[indices]
             loss = self.best_loss[indices]
@@ -809,16 +810,16 @@ class Optimizer:
             # 120 degrees is a hard maximum because the reciprocal space conversion fails
             # The numerically stable lower angle limit is 0.5 degrees
             # for the reciprocal space conversion.
-            self.opt_params['minimum_angle_scaled'] = (0.01 - np.pi/2) / self.indexer.angle_scale
-            self.opt_params['maximum_angle_scaled'] = (2*np.pi/3 - np.pi/2) / self.indexer.angle_scale
+            self.opt_params['maximum_angle_scaled'] = np.cos(0.01)
+            self.opt_params['minimum_angle_scaled'] = np.cos(2*np.pi/3)
         elif self.indexer.data_params['lattice_system'] in ['monoclinic', 'triclinic']:
             # Minimum / Maximum angle = 90 / 180 degrees
             # Monoclinic angles are restricted to be above 90 degrees because
             # the same monoclinic unit cell can be represented with either an
             # obtuse or acute angle.
-            # Scaling is (angle - pi/2) / angle_scale
-            self.opt_params['minimum_angle_scaled'] = (np.pi/2 - np.pi/2) / self.indexer.angle_scale
-            self.opt_params['maximum_angle_scaled'] = (np.pi - np.pi/2) / self.indexer.angle_scale
+            # Scaling is np.cos(angle)
+            self.opt_params['maximum_angle_scaled'] = 0
+            self.opt_params['minimum_angle_scaled'] = -1
 
         self.n_groups = len(self.indexer.data_params['split_groups'])
         self.q2_calculator = Q2Calculator(
@@ -833,54 +834,45 @@ class Optimizer:
         uc_scaled_mean_filename = os.path.join(
             f'{self.save_to}', f'{self.bravais_lattice}_{self.data_params["tag"]}_uc_scaled_mean.npy'
             )
-        uc_scaled_cov_filename = os.path.join(
-            f'{self.save_to}', f'{self.bravais_lattice}_{self.data_params["tag"]}_uc_scaled_cov.npy'
+        uc_scaled_var_filename = os.path.join(
+            f'{self.save_to}', f'{self.bravais_lattice}_{self.data_params["tag"]}_uc_scaled_var.npy'
             )
         if self.opt_params['load_predictions']:
             self.uc_scaled_mean = np.load(uc_scaled_mean_filename)
-            self.uc_scaled_cov = np.load(uc_scaled_cov_filename)
+            self.uc_scaled_var = np.load(uc_scaled_var_filename)
         else:
             self.uc_scaled_mean = np.zeros((self.N, self.n_groups, self.indexer.data_params['n_outputs']))
-            self.uc_scaled_cov = np.zeros((
-                self.N,
-                self.n_groups,
-                self.indexer.data_params['n_outputs'],
-                self.indexer.data_params['n_outputs']
-                ))
+            self.uc_scaled_var = np.zeros((self.N, self.n_groups, self.indexer.data_params['n_outputs']))
             for group_index, group in enumerate(self.indexer.data_params['split_groups']):
                 print(f'Performing predictions with {group}')
-                uc_mean_scaled_group, uc_cov_scaled_group = self.indexer.unit_cell_generator[group].do_predictions(
+                uc_mean_scaled_group, uc_var_scaled_group = self.indexer.unit_cell_generator[group].do_predictions(
                     data=self.indexer.data, verbose=0, batch_size=2048
                     )
                 self.uc_scaled_mean[:, group_index, :] = uc_mean_scaled_group
-                self.uc_scaled_cov[:, group_index, :, :] = uc_cov_scaled_group
+                self.uc_scaled_var[:, group_index, :] = uc_var_scaled_group
             np.save(uc_scaled_mean_filename, self.uc_scaled_mean)
-            np.save(uc_scaled_cov_filename, self.uc_scaled_cov)
+            np.save(uc_scaled_var_filename, self.uc_scaled_var)
 
-    def evaluate_regression(self, N_entries):
+    def evaluate_regression(self, N_entries, n_candidates_steps, n_evaluations, threshold):
         candidates_per_model = min(
             len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_nn'],
             len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_rf'],
             self.opt_params['n_candidates_template'],
             )
-        n_candidates_steps = 20
-        n_evaluations = 100
-        #threshold = 1
-        threshold = 0.003
         candidate_steps = np.round(
-            np.linspace(100, candidates_per_model, n_candidates_steps),
+            np.linspace(10, candidates_per_model, n_candidates_steps),
             decimals=0
             ).astype(int)
+
         efficiency = np.zeros((N_entries, n_candidates_steps, 7))
         failure_rate = np.zeros((N_entries, n_candidates_steps, 7))
         print(f'Performing evaluation assuming each group generates {candidates_per_model} candidates')
         for entry_index in tqdm(range(N_entries)):
+            entry = self.indexer.data.iloc[entry_index]
             for group_index, group in enumerate(self.indexer.data_params['split_groups']):
-                entry = self.indexer.data.iloc[entry_index]
-
                 candidate_uc_nn = self.generate_unit_cells(
                     self.uc_scaled_mean[entry_index, group_index, :],
-                    self.uc_scaled_cov[entry_index, group_index, :, :]
+                    self.uc_scaled_var[entry_index, group_index, :]
                     )
 
                 # Get candidates from the random forest model
@@ -900,40 +892,49 @@ class Optimizer:
 
             candidate_uc_tm = self.generate_unit_cells_miller_index_templates(np.array(entry['q2']))
 
+            candidate_uc_nn = fix_unphysical(
+                unit_cell=candidate_uc_nn,
+                rng=self.rng,
+                minimum_unit_cell=self.opt_params['minimum_uc'],
+                maximum_unit_cell=self.opt_params['maximum_uc'],
+                lattice_system=self.indexer.data_params['lattice_system']
+                )
+            candidate_uc_rf = fix_unphysical(
+                unit_cell=candidate_uc_rf,
+                rng=self.rng,
+                minimum_unit_cell=self.opt_params['minimum_uc'],
+                maximum_unit_cell=self.opt_params['maximum_uc'],
+                lattice_system=self.indexer.data_params['lattice_system']
+                )
+            candidate_uc_tm = fix_unphysical(
+                unit_cell=candidate_uc_tm,
+                rng=self.rng,
+                minimum_unit_cell=self.opt_params['minimum_uc'],
+                maximum_unit_cell=self.opt_params['maximum_uc'],
+                lattice_system=self.indexer.data_params['lattice_system']
+                )
             if self.indexer.data_params['lattice_system'] == 'triclinic':
-                candidate_uc_nn = fix_unphysical(
-                    unit_cell=candidate_uc_nn,
-                    rng=self.rng,
-                    minimum_unit_cell=self.opt_params['minimum_uc'],
-                    maximum_unit_cell=self.opt_params['maximum_uc'],
-                    lattice_system=self.indexer.data_params['lattice_system']
-                    )
-                candidate_uc_nn, _ = reindex_entry_triclinic(candidate_uc_nn, radians=True)
-
-                candidate_uc_rf = fix_unphysical(
-                    unit_cell=candidate_uc_rf,
-                    rng=self.rng,
-                    minimum_unit_cell=self.opt_params['minimum_uc'],
-                    maximum_unit_cell=self.opt_params['maximum_uc'],
-                    lattice_system=self.indexer.data_params['lattice_system']
-                    )
-                candidate_uc_rf, _ = reindex_entry_triclinic(candidate_uc_rf, radians=True)
-
-                candidate_uc_tm = fix_unphysical(
-                    unit_cell=candidate_uc_tm,
-                    rng=self.rng,
-                    minimum_unit_cell=self.opt_params['minimum_uc'],
-                    maximum_unit_cell=self.opt_params['maximum_uc'],
-                    lattice_system=self.indexer.data_params['lattice_system']
-                    )
-                candidate_uc_tm, _ = reindex_entry_triclinic(candidate_uc_tm, radians=True)
+                candidate_uc_nn, _ = reindex_entry_triclinic(candidate_uc_nn)
+                candidate_uc_rf, _ = reindex_entry_triclinic(candidate_uc_rf)
+                candidate_uc_tm, _ = reindex_entry_triclinic(candidate_uc_tm)
             
             reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])
             xnn_true = np.array(entry['reindexed_xnn'])
-            candidate_xnn_nn = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(candidate_uc_nn))
-            candidate_xnn_rf = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(candidate_uc_rf))
-            candidate_xnn_tm = get_xnn_from_reciprocal_unit_cell(reciprocal_uc_conversion(candidate_uc_tm))
-  
+            candidate_xnn_nn = get_xnn_from_unit_cell(
+                candidate_uc_nn,
+                partial_unit_cell=True,
+                lattice_system=self.indexer.data_params['lattice_system']
+                )
+            candidate_xnn_rf = get_xnn_from_unit_cell(
+                candidate_uc_rf,
+                partial_unit_cell=True,
+                lattice_system=self.indexer.data_params['lattice_system']
+                )
+            candidate_xnn_tm = get_xnn_from_unit_cell(
+                candidate_uc_tm,
+                partial_unit_cell=True,
+                lattice_system=self.indexer.data_params['lattice_system']
+                )
             distance_nn_all = np.linalg.norm(candidate_xnn_nn - xnn_true[np.newaxis], axis=1)
             distance_rf_all = np.linalg.norm(candidate_xnn_rf - xnn_true[np.newaxis], axis=1)
             distance_tm_all = np.linalg.norm(candidate_xnn_tm - xnn_true[np.newaxis], axis=1)
@@ -953,9 +954,7 @@ class Optimizer:
                     efficiency_step[eval_index, 6] = (np.sum(distance_nn < threshold) + np.sum(distance_rf < threshold) + np.sum(distance_tm < threshold)) / (3*step_size)
 
                 efficiency[entry_index, step_index, :] = efficiency_step.mean(axis=0)
-
                 failure_rate[entry_index, step_index, :] = np.sum(efficiency_step == 0, axis=0) / n_evaluations
-
         color_cycle_indices = [0, 1, 2, 3, 9, 8, 5, 6, 7, 4]
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         fig, axes = plt.subplots(2, 2, figsize=(8, 5), sharex=True)
@@ -1017,7 +1016,7 @@ class Optimizer:
             start = time.time()
             candidates = self.generate_candidates(
                 self.uc_scaled_mean[entry_index],
-                self.uc_scaled_cov[entry_index],
+                self.uc_scaled_var[entry_index],
                 self.indexer.data.iloc[entry_index],
                 entry_index,
                 )
@@ -1035,11 +1034,11 @@ class Optimizer:
             end = time.time()
             print(end - start)
 
-    def generate_unit_cells(self, uc_scaled_mean, uc_scaled_cov):
+    def generate_unit_cells(self, uc_scaled_mean, uc_scaled_var):
         if self.indexer.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            candidates_scaled = self.rng.multivariate_normal(
-                mean=uc_scaled_mean,
-                cov=uc_scaled_cov,
+            candidates_scaled = self.rng.normal(
+                loc=uc_scaled_mean,
+                scale=np.sqrt(uc_scaled_var),
                 size=self.opt_params['n_candidates_nn'],
                 )
         elif self.indexer.data_params['lattice_system'] == 'rhombohedral':
@@ -1052,7 +1051,7 @@ class Optimizer:
                 candidates_scaled = np.zeros((self.opt_params['n_candidates_nn'], 2))
                 candidates_scaled[:, 0] = self.rng.normal(
                     loc=uc_scaled_mean[0],
-                    scale=np.sqrt(uc_scaled_cov[0, 0]),
+                    scale=np.sqrt(uc_scaled_var[0]),
                     size=self.opt_params['n_candidates_nn']
                     )
                 candidates_scaled[:, 1] = self.rng.uniform(
@@ -1061,9 +1060,9 @@ class Optimizer:
                     size=self.opt_params['n_candidates_nn']
                     )
             else:
-                candidates_scaled = self.rng.multivariate_normal(
-                    mean=uc_scaled_mean,
-                    cov=uc_scaled_cov,
+                candidates_scaled = self.rng.normal(
+                    loc=uc_scaled_mean,
+                    scale=np.sqrt(uc_scaled_var),
                     size=self.opt_params['n_candidates_nn'],
                     )
         elif self.indexer.data_params['lattice_system'] == 'monoclinic':
@@ -1074,9 +1073,9 @@ class Optimizer:
                 uniform_angle = True
             if uniform_angle:
                 candidates_scaled = np.zeros((self.opt_params['n_candidates_nn'], 4))
-                candidates_scaled[:, :3] = self.rng.multivariate_normal(
-                    mean=uc_scaled_mean[:3],
-                    cov=uc_scaled_cov[:3, :3],
+                candidates_scaled[:, :3] = self.rng.normal(
+                    loc=uc_scaled_mean[:3],
+                    scale=np.sqrt(uc_scaled_var[:3]),
                     size=self.opt_params['n_candidates_nn'],
                     )
                 candidates_scaled[:, 3] = self.rng.uniform(
@@ -1085,9 +1084,9 @@ class Optimizer:
                     size=self.opt_params['n_candidates_nn']
                     )
             else:
-                candidates_scaled = self.rng.multivariate_normal(
-                    mean=uc_scaled_mean,
-                    cov=uc_scaled_cov,
+                candidates_scaled = self.rng.normal(
+                    loc=uc_scaled_mean,
+                    scale=np.sqrt(uc_scaled_var),
                     size=self.opt_params['n_candidates_nn'],
                     )
         elif self.indexer.data_params['lattice_system'] == 'triclinic':
@@ -1106,9 +1105,9 @@ class Optimizer:
                 uniform_gamma = True
             elif uc_scaled_mean[5] >= self.opt_params['maximum_angle_scaled']:
                 uniform_gamma = True
-            candidates_scaled = self.rng.multivariate_normal(
-                mean=uc_scaled_mean,
-                cov=uc_scaled_cov,
+            candidates_scaled = self.rng.normal(
+                loc=uc_scaled_mean,
+                scale=np.sqrt(uc_scaled_var),
                 size=self.opt_params['n_candidates_nn'],
                 )
             if uniform_alpha:
@@ -1131,6 +1130,8 @@ class Optimizer:
                     )
 
         candidate_unit_cells = self.indexer.revert_predictions(uc_pred_scaled=candidates_scaled)
+        if self.indexer.data_params['lattice_system'] == 'cubic':
+            candidate_unit_cells = candidate_unit_cells[:, np.newaxis]
         return candidate_unit_cells
 
     def generate_unit_cells_miller_index_templates(self, q2_obs):
@@ -1171,7 +1172,7 @@ class Optimizer:
         if self.indexer.data_params['lattice_system'] == 'monoclinic':
             #fig, axes = plt.subplots(3, 4, figsize=(8, 6))
             reindexed_unit_cell_true = get_different_monoclinic_settings(
-                np.array(entry['reindexed_unit_cell']), partial_unit_cell=False, radians=True
+                np.array(entry['reindexed_unit_cell']), partial_unit_cell=False
                 )
             distance_nn = np.linalg.norm(
                 candidates_nn[np.newaxis, :, :3] - reindexed_unit_cell_true[:, np.newaxis, :3],
@@ -1360,7 +1361,7 @@ class Optimizer:
             plt.clf()
             plt.close('all')
 
-    def generate_candidates(self, uc_scaled_mean, uc_scaled_cov, entry, entry_index):
+    def generate_candidates(self, uc_scaled_mean, uc_scaled_var, entry, entry_index):
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
         candidate_unit_cells = np.zeros((
             self.n_groups * n_candidates + self.opt_params['n_candidates_template'],
@@ -1372,7 +1373,7 @@ class Optimizer:
             # Get candidates from the neural network model
             candidate_unit_cells[start: start + self.opt_params['n_candidates_nn'], :] = \
                 self.generate_unit_cells(
-                    uc_scaled_mean[group_index, :], uc_scaled_cov[group_index, :, :]
+                    uc_scaled_mean[group_index, :], uc_scaled_var[group_index, :]
                     )
 
             # Get candidates from the random forest model
@@ -1403,7 +1404,7 @@ class Optimizer:
             lattice_system=self.indexer.data_params['lattice_system']
             )
         if self.indexer.data_params['lattice_system'] == 'triclinic':
-            candidate_unit_cells, _ = reindex_entry_triclinic(candidate_unit_cells, radians=True)
+            candidate_unit_cells, _ = reindex_entry_triclinic(candidate_unit_cells)
 
         #self.plot_candidate_unit_cells(candidate_unit_cells, entry, entry_index)
 

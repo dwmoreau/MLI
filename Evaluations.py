@@ -138,14 +138,13 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices,
         y_pred = np.stack(data[f'{unit_cell_key}_pred_trees'])
         y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred_trees'])
         y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred_trees'])
-        y_cov = np.stack(data[f'{unit_cell_key}_pred_cov_trees'])
+        y_std = np.sqrt(np.stack(data[f'{unit_cell_key}_pred_var_trees']))
     elif model == 'nn':
         y_pred = np.stack(data[f'{unit_cell_key}_pred'])
         y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred'])
         y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred'])
-        y_cov = np.stack(data[f'{unit_cell_key}_pred_cov'])
+        y_std = np.sqrt(np.stack(data[f'{unit_cell_key}_pred_var']))
 
-    y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
     y_error = np.abs(y_pred - y_true)
     y_error_train = np.abs(y_pred_train - y_true_train)
     y_error_val = np.abs(y_pred_val - y_true_val)
@@ -268,11 +267,10 @@ def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices
         y_true = np.stack(data[train_index][unit_cell_key])[:, y_indices]
         if model == 'trees':
             y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred_trees'])
-            y_cov = np.stack(data[train_index][f'{unit_cell_key}_pred_cov_trees'])
+            y_std = np.sqrt(np.stack(data[train_index][f'{unit_cell_key}_pred_var_trees']))
         elif model == 'nn':
             y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred'])
-            y_cov = np.stack(data[train_index][f'{unit_cell_key}_pred_cov'])
-        y_std = np.sqrt(np.diagonal(y_cov, axis1=1, axis2=2))
+            y_std = np.sqrt(np.stack(data[train_index][f'{unit_cell_key}_pred_var']))
         y_error = y_pred - y_true
 
         for index in range(n_outputs):

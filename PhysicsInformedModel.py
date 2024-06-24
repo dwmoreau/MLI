@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.special
 import tensorflow as tf
 
 from Networks import mlp_model_builder
@@ -41,6 +42,7 @@ class PhysicsInformedModel:
         self.y_indices = data_params['y_indices']
         self.save_to = save_to
         self.seed = seed
+        self.rng = np.random.default_rng(self.seed)
 
         self.q2_scaler = q2_scaler
         self.xnn_scaler = xnn_scaler
@@ -542,5 +544,85 @@ class PhysicsInformedModel:
         xnn_pred_var = xnn_pred_scaled_var * self.xnn_scaler.scale_[0]**2
         return xnn_pred, xnn_pred_var, hkl_softmax
 
-    def generate_candidates(self, data=None, inputs=None, q2_scaled=None, batch_size=None):
-        xnn_pred, xnn_pred_var, hkl_softmax = self.do_predictions(data, inputs, q2_scaled, batch_size)
+    def generate_candidates(self, q2_scaled=None, batch_size=None, n_candidates=None):
+        # This is not debuged and 100% will not work
+        pairwise_difference_calculator_numpy = PairwiseDifferenceCalculator(
+            lattice_system=self.data_params['lattice_system'],
+            hkl_ref=self.hkl_ref,
+            tensorflow=False,
+            q2_scaler=self.q2_scaler,
+            )
+        calibration_weights = np.array(self.model.get_weights('calibration'))
+        xnn_pred, xnn_pred_var, hkl_softmax = self.do_predictions(
+            q2_scaled=q2_scaled[np.newaxis], batch_size=batch_size
+            )
+        unit_cell_gen = np.zeros((n_candidates, self.n_outputs))
+        xnn_gen = np.zeros((n_candidates, self.n_outputs))
+        loss = np.zeros(n_candidates)
+        order = np.arange(self.n_points)
+
+        hkl_assign_gen, _ = vectorized_resampling(
+            np.repeat(hkl_softmax, n_candidates, axis=0), self.rng
+            )
+        hkl_assign_gen = np.unique(hkl_assign_gen, axis=0)
+
+        if hkl_assign_gen.shape[0] < n_candidates:
+            status = True
+            while status:
+                xnn_pred_sampled = self.rng.normal(
+                    loc=xnn_pred,
+                    scale=np.sqrt(xnn_pred_var),
+                    size=1
+                    )
+                pairwise_differences_scaled = pairwise_difference_calculator_numpy.get_pairwise_differences(
+                    xnn_pred_sampled, q2_scaled[np.newaxis], return_q2_ref=False
+                    )
+                pairwise_differences_transformed = self.transform_pairwise_differences(
+                    pairwise_differences_scaled, tensorflow=False
+                    )
+                hkl_logits = calibration_weights[0] * np.sqrt(pairwise_differences_transformed) \
+                    + calibration_weights[1] * pairwise_differences_transformed \
+                    + calibration_weights[2] * pairwise_differences_transformed**2
+                hkl_assign_gen_loop, _ = vectorized_resampling(
+                    np.repeat(scipy.special.softmax(hkl_logits, axis=1), n_candidates, axis=0),
+                    self.rng
+                    )
+                hkl_assign_gen = np.stack((hkl_assign_gen, hkl_assign_gen_loop))
+                hkl_assign_gen = np.unique(hkl_assign_gen, axis=0)
+                if hkl_assign_gen.shape[0] >= n_candidates:
+                    status = False
+
+        hkl2_all = get_hkl_matrix(self.hkl_ref[hkl_assign_gen], self.lattice_system)
+        for candidate_index in range(n_candidates):
+            sigma = q2_obs
+            hkl2 = hkl2_all[candidate_index]
+            status = True
+            i = 0
+            xnn_last = np.zeros(self.n_outputs)
+            while status:
+                # Using this is only slightly faster than np.linalg.lstsq
+                xnn_current, r, rank, s = np.linalg.lstsq(
+                    hkl2 / sigma[:, np.newaxis], q2_obs / sigma,
+                    rcond=None
+                    )
+                q2_calc = hkl2 @ xnn_current            
+                if np.all(q2_calc[1:] >= q2_calc[:-1]):
+                    delta_q2 = np.abs(q2_obs - q2_calc)
+                    if np.linalg.norm(xnn_current - xnn_last) < 0.01:
+                        status = False
+                else:
+                    sort_indices = np.argsort(q2_calc)
+                    hkl2 = hkl2[sort_indices]
+                    delta_q2 = np.abs(q2_obs - q2_calc[sort_indices])
+                sigma = np.sqrt(q2_obs * (delta_q2 + 1e-10))
+                xnn_last = xnn_current
+                if i == 10:
+                    status = False
+                i += 1
+            xnn_gen[candidate_index] = xnn_current
+            loss[candidate_index] = np.linalg.norm(1 - q2_calc/q2_obs)
+        xnn_gen = fix_unphysical(xnn=xnn_gen, rng=self.rng, lattice_system=self.lattice_system)
+        unit_cell_gen = get_unit_cell_from_xnn(
+            xnn_gen, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        return unit_cell_gen
