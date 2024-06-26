@@ -468,29 +468,29 @@ def fix_unphysical_monoclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_c
             xnn[unphysical_angle, 3] = cos_rbeta[unphysical_angle] * (2 * np.sqrt(xnn[unphysical_angle, 0]*xnn[unphysical_angle, 2]))
         return xnn
     elif not unit_cell is None:
-        too_small_lengths = unit_cells[:, :3] < minimum_unit_cell
-        too_large_lengths = unit_cells[:, :3] > maximum_unit_cell
+        too_small_lengths = unit_cell[:, :3] < minimum_unit_cell
+        too_large_lengths = unit_cell[:, :3] > maximum_unit_cell
         if np.sum(too_small_lengths) > 0:
             indices = np.argwhere(too_small_lengths)
-            unit_cells[indices[:, 0], indices[:, 1]] = rng.uniform(
+            unit_cell[indices[:, 0], indices[:, 1]] = rng.uniform(
                 low=minimum_unit_cell,
                 high=1.05*minimum_unit_cell,
                 size=np.sum(too_small_lengths)
                 )
         if np.sum(too_large_lengths) > 0:
             indices = np.argwhere(too_large_lengths)
-            unit_cells[indices[:, 0], indices[:, 1]] = rng.uniform(
+            unit_cell[indices[:, 0], indices[:, 1]] = rng.uniform(
                 low=0.95*maximum_unit_cell,
                 high=maximum_unit_cell,
                 size=np.sum(too_large_lengths)
                 )
 
-        too_small_angles = unit_cells[:, 3] < np.pi / 2
-        too_large_angles = unit_cells[:, 3] > np.pi
+        too_small_angles = unit_cell[:, 3] < np.pi / 2
+        too_large_angles = unit_cell[:, 3] > np.pi
         if np.sum(too_small_angles) > 0:
-            unit_cells[too_small_angles, 3] = np.pi - unit_cells[too_small_angles, 3]
+            unit_cell[too_small_angles, 3] = np.pi - unit_cell[too_small_angles, 3]
         if np.sum(too_large_angles) > 0:
-            unit_cells[too_large_angles, 3] = rng.uniform(
+            unit_cell[too_large_angles, 3] = rng.uniform(
                 low=0.95*maximum_angle,
                 high=maximum_angle,
                 size=np.sum(too_large_angles)

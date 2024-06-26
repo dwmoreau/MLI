@@ -77,7 +77,7 @@ class Candidates:
             self.reciprocal_unit_cell_true = reciprocal_unit_cell_true
             self.xnn_true = xnn_true
 
-        self.hkl_true = np.array(entry['reindexed_hkl'])[:, :, 0]
+        self.hkl_true = np.array(entry['reindexed_hkl'])
         self.hkl_labels_true = np.array(entry['hkl_labels'])
         self.bl_true = entry['bravais_lattice']
         self.sg_true = int(entry['spacegroup_number'])
@@ -263,38 +263,6 @@ class Candidates:
             maximum_unit_cell=self.maximum_unit_cell,
             lattice_system=self.lattice_system,
             )
-        """
-        elif self.lattice_system == 'monoclinic':
-            assert False
-            # The fix unphysical equivalent has not been tested
-            too_small_lengths = unit_cells[:, :3] < self.minimum_unit_cell
-            too_large_lengths = unit_cells[:, :3] > self.maximum_unit_cell
-            if np.sum(too_small_lengths) > 0:
-                indices = np.argwhere(too_small_lengths)
-                unit_cells[indices[:, 0], indices[:, 1]] = self.rng.uniform(
-                    low=self.minimum_unit_cell,
-                    high=1.05*self.minimum_unit_cell,
-                    size=np.sum(too_small_lengths)
-                    )
-            if np.sum(too_large_lengths) > 0:
-                indices = np.argwhere(too_large_lengths)
-                unit_cells[indices[:, 0], indices[:, 1]] = self.rng.uniform(
-                    low=0.95*self.maximum_unit_cell,
-                    high=self.maximum_unit_cell,
-                    size=np.sum(too_large_lengths)
-                    )
-
-            too_small_angles = unit_cells[:, 3] < self.minimum_angle
-            too_large_angles = unit_cells[:, 3] > self.maximum_angle
-            if np.sum(too_small_angles) > 0:
-                unit_cells[too_small_angles, 3] = np.pi - unit_cells[too_small_angles, 3]
-            if np.sum(too_large_angles) > 0:
-                unit_cells[too_large_angles, 3] = self.rng.uniform(
-                    low=0.95*self.maximum_angle,
-                    high=self.maximum_angle,
-                    size=np.sum(too_large_angles)
-                    )
-        """
         self.update_unit_cell_from_xnn()
 
     def get_neighbor_distance(self, xnn0, xnn1):
@@ -324,17 +292,28 @@ class Candidates:
         # Enforce the constraints on the unit cells.
         # This is the reindexing task
         if self.lattice_system == 'monoclinic':
-            assert False
+            # a < c can be enforced
             # Order lattice
-            permute_indices = unit_cells[:, 0] > unit_cells[:, 2]
-            unit_cells[permute_indices] = np.column_stack((
-                unit_cells[permute_indices, 2],
-                unit_cells[permute_indices, 1],
-                unit_cells[permute_indices, 0],
-                unit_cells[permute_indices, 3],
+            unit_cell = get_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=self.lattice_system)
+            permute_indices = unit_cell[:, 0] > unit_cell[:, 2]
+            unit_cell[permute_indices] = np.column_stack((
+                unit_cell[permute_indices, 2],
+                unit_cell[permute_indices, 1],
+                unit_cell[permute_indices, 0],
+                unit_cell[permute_indices, 3],
                 ))
+            xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
         elif self.lattice_system == 'orthorhombic':
-            assert False            
+            if self.bravais_lattice in ['oF', 'oI', 'oP']:
+                order = np.argsort(xnn, axis=1)[:, ::-1]
+                xnn = np.take_along_axis(xnn, order, axis=1)
+            elif self.bravais_lattice == 'oC':
+                permute_indices = xnn[:, 0] < xnn[:, 1]
+                xnn[permute_indices] = np.column_stack((
+                    xnn[permute_indices, 1],
+                    xnn[permute_indices, 0],
+                    xnn[permute_indices, 2],
+                    ))
         elif self.lattice_system == 'triclinic':
             unit_cell = get_unit_cell_from_xnn(xnn)
             unit_cell, _ = reindex_entry_triclinic(unit_cell)
@@ -1039,7 +1018,7 @@ class Optimizer:
             candidates_scaled = self.rng.normal(
                 loc=uc_scaled_mean,
                 scale=np.sqrt(uc_scaled_var),
-                size=self.opt_params['n_candidates_nn'],
+                size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs']),
                 )
         elif self.indexer.data_params['lattice_system'] == 'rhombohedral':
             uniform_angle = False
@@ -1063,7 +1042,7 @@ class Optimizer:
                 candidates_scaled = self.rng.normal(
                     loc=uc_scaled_mean,
                     scale=np.sqrt(uc_scaled_var),
-                    size=self.opt_params['n_candidates_nn'],
+                    size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs']),
                     )
         elif self.indexer.data_params['lattice_system'] == 'monoclinic':
             uniform_angle = False
@@ -1076,7 +1055,7 @@ class Optimizer:
                 candidates_scaled[:, :3] = self.rng.normal(
                     loc=uc_scaled_mean[:3],
                     scale=np.sqrt(uc_scaled_var[:3]),
-                    size=self.opt_params['n_candidates_nn'],
+                    size=(self.opt_params['n_candidates_nn'], 3),
                     )
                 candidates_scaled[:, 3] = self.rng.uniform(
                     low=self.opt_params['minimum_angle_scaled'],
@@ -1087,7 +1066,7 @@ class Optimizer:
                 candidates_scaled = self.rng.normal(
                     loc=uc_scaled_mean,
                     scale=np.sqrt(uc_scaled_var),
-                    size=self.opt_params['n_candidates_nn'],
+                    size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs']),
                     )
         elif self.indexer.data_params['lattice_system'] == 'triclinic':
             uniform_alpha = False
@@ -1108,7 +1087,7 @@ class Optimizer:
             candidates_scaled = self.rng.normal(
                 loc=uc_scaled_mean,
                 scale=np.sqrt(uc_scaled_var),
-                size=self.opt_params['n_candidates_nn'],
+                size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs'])
                 )
             if uniform_alpha:
                 candidates_scaled[:, 3] = self.rng.uniform(

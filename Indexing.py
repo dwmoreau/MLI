@@ -1,9 +1,4 @@
 """
-NCDist(uc2.parameters(), uc2.niggli_cell().parameters())
-4.931647208670824
-
-NCDIST uses the g6 matrix
-
 Readings:
     - Bergmann 2004: Renewed interest in powder diffraction indexing
         - round robin comparison of existing programs
@@ -33,13 +28,13 @@ Readings:
 
 Bravais Lattice | accuracy
 --------------------------
-cF              | 99.5%
+cF              | 100.0%
 cI              | 100.0%
-cP              | 99.7%
-tI              | 99.0%
-tP              | 99.5%
-hP              | 99.5%
-hR              | 92 - 99.4%
+cP              | 100.0%
+tI              | 99.2%
+tP              | 99.7%
+hP              | 99.6%
+hR              | 99.9%
 oC              | 98.5%
 oF              | 99.0%
 oI              | 99.0%
@@ -50,24 +45,26 @@ aP              | 95 - 98%
 
 
 * Generalization & SWE
-    * Generate datasets
-        - orthorhombic
-        - monoclinic
-        - triclinic
     * Training
-        x tetragonal
-        - hexagonal
-        - rhombohedral
-        - orthorhombic
-        - monoclinic
         - triclinic
     * Optimization
-        - tetragonal
-        - hexagonal
-        - rhombohedral
-        - orthorhombic
-        - monoclinic
+        x orthorhombic
+        x monoclinic
         - triclinic
+    * Find good redistribution and exhaustive search parameters
+    - Different broadening
+    - Incorporate positional error
+
+- Dataset generation
+    - put test / train split at datset generation
+    - One large communication instead of many small communications
+
+- Documentation
+    - One page summary
+    - Update after generalization has been implemented
+    - Delete excess
+    - Add discussion on mixture integer linear programing
+    - Add section on physics informed target function model
 
 - Optimization:
     - Performance
@@ -88,24 +85,11 @@ aP              | 95 - 98%
     - Optimization of uncertainty in the indexing
     - More general scaling
 
-- Documentation
-    - Update after generalization has been implemented
-    - Delete excess
-    - One page summary
-    - Add discussion on mixture integer linear programing
-    - Add section on physics informed target function model
-    - Read MLIMethods and update for clarity
-    - reread papers
-
 - Templating
-    - Recalibration of template candidates
-
-- SWE:
-    - memory leak during cyclic training
-        - Try saving and loading weights with two different models
-
-- Dominant zone:
-    - 2D and 1D optimization
+    - Use a logistic regression model to predict if a candidate is within the correct neighborhood of the true unit cell
+        - Inputs: 
+            - normalized residuals
+            - ???
 
 - data
     - peak list
@@ -113,6 +97,16 @@ aP              | 95 - 98%
         - LCLS data
         - RRUFF
 
+- Predictions for a single unknown candidate
+    - Make a plan for 
+- Dominant zone:
+    - 2D and 1D optimization
+
+- SWE
+    - put test / train split at datset generation
+    - Change back to a standard scaler for angle
+    - Reduce number of communications in GenerateDataset.py
+    - Use capital communications in GenerateDataset.py
 - Regression
 - Indexing.py
 - Augmentation
@@ -1235,11 +1229,11 @@ class Indexing:
                 uc_pred_var[:, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
                 uc_pred_var[:, 3] = uc_pred_scaled_var[:, 3] / (1 - uc_pred_scaled[:, 3]**2)
             elif self.data_params['lattice_system'] == 'triclinic':
-                uc_pred_var[:, :3, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
-                uc_pred_var[:, 3:, 3:] = uc_pred_scaled_var[:, 3:] / (1 - uc_pred_scaled[:, 3:]**2)
+                uc_pred_var[:, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 3:] = uc_pred_scaled_var[:, 3:] / (1 - uc_pred_scaled[:, 3:]**2)
             elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred_var[:, 0, 0] = uc_pred_scaled_var[:, 0] * self.uc_scaler.scale_[0]**2
-                uc_pred_var[:, 1, 1] = uc_pred_scaled_var[:, 1] / (1 - uc_pred_scaled[:, 1]**2)
+                uc_pred_var[:, 0] = uc_pred_scaled_var[:, 0] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 1] = uc_pred_scaled_var[:, 1] / (1 - uc_pred_scaled[:, 1]**2)
 
         if not uc_pred_scaled is None and not uc_pred_scaled_var is None:
             return uc_pred, uc_pred_var
@@ -1275,8 +1269,8 @@ class Indexing:
                 uc_pred_scaled_var[:, :3] = uc_pred_var[:, :3] / self.uc_scaler.scale_[0]**2
                 uc_pred_scaled_var[:, 3] = uc_pred_var[:, 3:] * np.sin(uc_pred[:, 3:])**2
             elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred_scaled_var[:, 0, 0] = uc_pred_var[:, 0] / self.uc_scaler.scale_[0]**2
-                uc_pred_scaled_var[:, 1, 1] = uc_pred_var[:, 1] * np.sin(uc_pred[:, 1])**2
+                uc_pred_scaled_var[:, 0] = uc_pred_var[:, 0] / self.uc_scaler.scale_[0]**2
+                uc_pred_scaled_var[:, 1] = uc_pred_var[:, 1] * np.sin(uc_pred[:, 1])**2
 
         if not uc_pred is None and not uc_pred_var is None:
             return uc_pred_scaled, uc_pred_scaled_var

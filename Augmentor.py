@@ -101,6 +101,10 @@ class Augmentor:
             q2 = np.array(training_data.iloc[entry_index][f'q2_{self.points_tag}'])
             q2_sa = q2_sa[~np.isinf(q2_sa)]
             q2 = q2[~np.isinf(q2)]
+
+            # This is a time saving measure
+            q2_sa = q2_sa[q2_sa < 0.25]
+            q2 = q2[q2 < 0.25]
             first_peak_index = np.argwhere(q2_sa == q2[0])
             # this catches two cases in oP that are problematic entries
             if len(first_peak_index) > 0:
@@ -335,7 +339,7 @@ class Augmentor:
 
     def _check_in_range(self, perturbed_unit_cell_scaled):
         if self.lattice_system == 'monoclinic':
-            if np.all(perturbed_unit_cell_scaled[:3] < self.min_unit_cell_scaled):
+            if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
                 if -1 < perturbed_unit_cell_scaled[3] < 0:
                     return True
         elif self.lattice_system == 'triclinic':

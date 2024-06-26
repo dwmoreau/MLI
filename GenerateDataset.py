@@ -5,6 +5,7 @@ import numpy as np
 import os
 import pandas as pd
 import scipy.signal
+import time
 
 from EntryHelpers import save_identifiers
 from Utilities import Q2Calculator
@@ -52,7 +53,8 @@ def edit_undefined_scatters(cif_file_name):
 
 
 class EntryGenerator:
-    def __init__(self):
+    def __init__(self, lattice_system):
+        self.lattice_system = lattice_system
         self.peak_length = 60
         peak_generation_info = get_peak_generation_info()
         broadening_params = peak_generation_info['broadening_params']
@@ -139,33 +141,24 @@ class EntryGenerator:
         unit_cell = data['unit_cell']
         reindexed_unit_cell = data['reindexed_unit_cell']
         hkl_reindexer = np.array(data['hkl_reindexer']).reshape([3, 3])
-        lattice_system = data['lattice_system']
 
-        #print(cif_file_name)
         try:
             cif_info = iotbx.cif.reader(cif_file_name)
             cif_structure = cif_info.build_crystal_structures()
-        except Exception as error_message:
-            data['failed'] = True
-            return data
 
-        if len(cif_structure) == 0:
-            data['failed'] = True
-            return data
+            if len(list(cif_structure.keys())) == 0:
+                data['failed'] = True
+                return data
+            key = list(cif_structure.keys())[0]
+            change_scatters_name = False
+            for scattering_type in cif_structure[key].scattering_types():
+                for check in self.check_strings:
+                    if check in scattering_type:
+                        change_scatters_name = True
+            if change_scatters_name:
+                cif_structure = edit_undefined_scatters(cif_file_name)
+                data['cif_file_name'] = cif_file_name.replace('.cif', '_editted.cif')
 
-        key = list(cif_structure.keys())[0]
-        change_scatters_name = False
-        for scattering_type in cif_structure[key].scattering_types():
-            for check in self.check_strings:
-                if check in scattering_type:
-                    change_scatters_name = True
-        if change_scatters_name:
-            cif_structure = edit_undefined_scatters(cif_file_name)
-            data['cif_file_name'] = cif_file_name.replace('.cif', '_editted.cif')
-
-        # This looks like a bug, d_min = d_max ...
-        # difference between d_max being largest numerically or largest scattering angle
-        try:
             miller_indices = cif_structure[key].build_miller_set(
                 d_min=self.d_max, d_max=self.d_min, anomalous_flag=False
                 )
@@ -177,15 +170,17 @@ class EntryGenerator:
             theta2_peaks = np.pi/180 * miller_indices.two_theta(self.wavelength, True).data().as_numpy_array()
         except Exception as error_message:
             print(cif_file_name)
-            if str(error_message).startswith('gaussian not defined for scattering_type'):
-                print(error_message)
+            print(error_message)
+            data['failed'] = True
+            return data
+
+        if len(cif_structure) == 0:
             data['failed'] = True
             return data
 
         if intensities.size < 10:
             data['failed'] = True
             return data
-
         
         q2_peaks = (2 * np.sin(theta2_peaks/2) / self.wavelength)**2
         # Lorentz-Polarization factor
@@ -220,7 +215,7 @@ class EntryGenerator:
             #        axes[1].plot([q2_peaks[i], q2_peaks[i]], [ylim[0], 0.5*ylim[1]], color=[0.8,0,0], linewidth=1, linestyle='dotted')
 
             reindexed_hkl_found = np.matmul(hkl_found, hkl_reindexer).round(decimals=0).astype(int)
-            if lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
+            if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
                 q2_calc = Q2Calculator(
                     lattice_system='triclinic',
                     hkl=hkl_found,
@@ -239,7 +234,7 @@ class EntryGenerator:
                     print(unit_cell)
                     print(reindexed_unit_cell)
                     print()
-            elif lattice_system == 'rhombohedral':
+            elif self.lattice_system == 'rhombohedral':
                 if np.all(unit_cell[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
                     # If the rhombohedral was initially in the hexagonal setting it was reindexed
                     q2_calc = Q2Calculator(
@@ -360,12 +355,12 @@ if __name__ == '__main__':
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    entries_per_group = 25000
-    lattice_system = 'rhombohedral'
+    entries_per_group = 100000
+    lattice_system = 'triclinic'
     bad_identifiers_csd = []
     bad_identifiers_cod = []
     rng = np.random.default_rng(seed=1234)
-    entry_generator = EntryGenerator()
+    entry_generator = EntryGenerator(lattice_system)
 
     if rank == 0:
         if not os.path.exists('data/GeneratedDatasets'):
@@ -402,7 +397,6 @@ if __name__ == '__main__':
                 else:
                     group_entries_cod = None
                     counts_cod = 0
-                print(f'{hm_group_key} {counts_csd} {counts_cod} {counts_csd + counts_cod}')
 
                 # One iteration is when one identifier is sent out to each rank.
                 # There is an extra iteration where the remainder get processed with rank 0
@@ -450,10 +444,19 @@ if __name__ == '__main__':
         # then return the updated information to rank 0.
         status = True
         while status:
+            #start = time.time()
             data_iteration_rank = COMM.recv(source=0)
+            #timepoint_0 = time.time()
             # when rank 0 is finished with the databases, it sends out a None to let the workers know
             if data_iteration_rank is None:
                 status = False
             else:
                 data_iteration_rank = entry_generator.get_peak_list(data_iteration_rank)
+                #timepoint_1 = time.time()
                 COMM.send(data_iteration_rank, dest=0)
+                #timepoint_2 = time.time()
+                #total = timepoint_2 - start
+                #t0 = (timepoint_0 - start) / total
+                #t1 = (timepoint_1 - timepoint_0) / total
+                #t2 = (timepoint_2 - timepoint_1) / total
+                #print(f'{rank}: {t0:0.3f} {t1:0.3f} {t2:0.3f}')
