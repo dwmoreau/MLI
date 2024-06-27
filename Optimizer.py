@@ -98,7 +98,6 @@ class Candidates:
         # Exhaustive search parameters
         self.max_neighbors = max_neighbors
         self.radius = radius
-        self.redistribute_candidates()
         self.starting_xnn = self.xnn.copy()
 
     def fix_bad_conversions(self):
@@ -321,35 +320,40 @@ class Candidates:
         return xnn
 
     def redistribute_candidates(self):
+        # This function is meant to be called only once before optimization starts
+        # exhaustive_search is meant to redistribute candidates during optimization
         redistributed_xnn = self.xnn.copy()
-        largest_neighborhood = self.max_neighbors + 1
         n_redistributed = 0
         iteration = 0
-        while largest_neighborhood > self.max_neighbors and iteration < 10:
+        # Capping the number of iterations is arbitrary.
+        # Just an attempt to prevent an excessively long loop
+        largest_neighborhood = self.max_neighbors + 1
+        while largest_neighborhood > self.max_neighbors and iteration < 20:
             distance = self.get_neighbor_distance(redistributed_xnn, redistributed_xnn)
             neighbor_array = distance < self.radius
             neighbor_count = np.sum(neighbor_array, axis=1)
             largest_neighborhood = neighbor_count.max()
             if largest_neighborhood > self.max_neighbors:
-                from_indices = []
-                high_density_indices = np.where(neighbor_count > self.max_neighbors)[0]
-                for high_density_index in high_density_indices:
-                    neighbor_indices = np.where(neighbor_array[high_density_index])[0]
-                    excess_neighbors = neighbor_indices.size - self.max_neighbors
-                    if excess_neighbors <= neighbor_indices.size:
-                        replace = False
-                    else:
-                        replace = True
-                    from_indices.append(neighbor_indices[
-                        self.rng.choice(neighbor_indices.size, size=excess_neighbors, replace=replace)
-                        ])
-                from_indices = np.unique(np.concatenate(from_indices))
-                excess_neighbors = from_indices.size
+                # This gets the candidate that has the most nearest neighbors and redistributes
+                # a subsample of its neighbors such that it has the correct amount of neighbors
+                highest_density_index = np.argmax(neighbor_count)
+                neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
+                excess_neighbors = neighbor_indices.size - self.max_neighbors
+                from_indices = neighbor_indices[
+                    self.rng.choice(neighbor_indices.size, size=excess_neighbors, replace=False)
+                    ]
                 n_redistributed += excess_neighbors
-        
+                print(iteration, excess_neighbors)
+                # We want to redistribute the excess only to regions where the density is low
+                # Find candidates that have fewer than the number of maximum neighbors and
+                # redistribute excess to neighborhoods near these candidates
                 low_density_indices = np.where(neighbor_count < self.max_neighbors)[0]
                 if low_density_indices.size == 0:
+                    ### !!! FIX THIS CASE
+                    ### !!! What should be done if there are no low density regions
                     break
+                # Bias the redistribution to the lowest density regions by probabalistly sampling
+                # the low density regions.
                 prob = self.max_neighbors - neighbor_count[low_density_indices]
                 prob = prob / prob.sum()
                 if excess_neighbors <= low_density_indices.size:
@@ -365,6 +369,7 @@ class Candidates:
             iteration += 1
         self.xnn = redistributed_xnn
         self.update_unit_cell_from_xnn()
+        self.starting_xnn = self.xnn.copy()
         print(f'Redistributed {n_redistributed} candidates')
 
     def exhaustive_search(self):
@@ -372,50 +377,88 @@ class Candidates:
             self.unit_cell, _ = reindex_entry_triclinic(get_unit_cell_from_xnn(self.xnn))
             self.xnn = get_xnn_from_unit_cell(self.unit_cell)
 
-        # This get the best candidate during this round for use in monoclinic_reset()
+        # This get the best candidates during this round for use in monoclinic_reset()
         if self.xnn_for_reset is None:
             self.xnn_for_reset = self.best_xnn.copy()
         else:
             self.xnn_for_reset = np.row_stack((self.xnn_for_reset, self.best_xnn))
 
-        distance = self.get_neighbor_distance(self.xnn, self.starting_xnn)
-        neighbor_array = distance < self.radius
-        neighbor_count = np.sum(neighbor_array, axis=1)
-        from_indices = np.where(neighbor_count > self.max_neighbors)[0]
-        excess_neighbors = from_indices.size
-        low_density_indices = np.where(neighbor_count < self.max_neighbors)[0]
+        # self.starting_xnn are the initial coordinates for all candidates, from each
+        # exhaustive search period.
+        self.starting_xnn = np.row_stack((self.xnn, self.starting_xnn))
+        iteration = 0
+        # Capping the number of iterations is arbitrary.
+        # Just an attempt to prevent an excessively long loop
+        largest_neighborhood = self.max_neighbors + 1
+        perturb_indices = np.ones(self.n, dtype=bool)
+        n_redistributed = 0
+        while largest_neighborhood > self.max_neighbors and iteration < 20:
+            distance = self.get_neighbor_distance(self.xnn, self.starting_xnn)
+            neighbor_array = distance < self.radius
+            neighbor_count = np.sum(neighbor_array, axis=1)
+            largest_neighborhood = neighbor_count.max()
+            if largest_neighborhood > self.max_neighbors:
+                # This gets the candidate that has the most nearest neighbors and redistributes
+                # a subsample of its neighbors such that it has the correct amount of neighbors
+                highest_density_index = np.argmax(neighbor_count)
+                # the [:self.n] slicing chooses the first self.n starting coordinates
+                #   - the current starting coordinates
+                neighbor_indices = np.where(neighbor_array[highest_density_index][:self.n])[0]
+                # This gets the candidate indices to redistribute
+                # min selects either:
+                #  1: Total number of neighbors in current coordinates
+                #  2: Total number of excess neighbors from all starting coordinates
+                excess_neighbors = min(
+                    neighbor_indices.size,
+                    neighbor_array[highest_density_index].sum() - self.max_neighbors
+                    )
+                from_indices = neighbor_indices[
+                    self.rng.choice(neighbor_indices.size, size=excess_neighbors, replace=False)
+                    ]
+                perturb_indices[from_indices] = False
+                n_redistributed += excess_neighbors
+                print(iteration, excess_neighbors)
 
-        if low_density_indices.size > 0:
-            prob = self.max_neighbors - neighbor_count[low_density_indices]
-            prob = prob / prob.sum()
-            if excess_neighbors <= low_density_indices.size:
-                replace = False
-            else:
-                replace = True
-            choice = self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
-            to_indices = low_density_indices[choice]
-            self.xnn = self.redistribute_and_perturb_xnn(self.xnn, from_indices, to_indices)
+                # We want to redistribute the excess only to regions where the density is low
+                # Find candidates that have fewer than the number of maximum neighbors and
+                # redistribute excess to neighborhoods near these candidates
+                low_density_indices = np.where(neighbor_count < self.max_neighbors)[0]
+                if low_density_indices.size == 0:
+                    ### !!! FIX THIS CASE
+                    ### !!! What should be done if there are no low density regions
+                    break
+                # Bias the redistribution to the lowest density regions by probabalistly sampling
+                # the low density regions.
+                prob = self.max_neighbors - neighbor_count[low_density_indices]
+                prob = prob / prob.sum()
+                if excess_neighbors <= low_density_indices.size:
+                    replace = False
+                else:
+                    replace = True
+                to_indices = low_density_indices[
+                    self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
+                    ]
+                self.xnn = self.redistribute_and_perturb_xnn(self.xnn, from_indices, to_indices)
+                # self.starting_xnn is the initial starting coordinates which are updated each
+                # iteration. These need to be updated for the next distance calculation.
+                self.starting_xnn[:self.n] = self.xnn.copy()
 
-            not_chosen = np.delete(np.arange(low_density_indices.size), choice)
-            not_chosen_indices = low_density_indices[not_chosen]
-            
+            iteration += 1
+        # This takes the candidates that were not redistributed and perturbs them within the
+        # neighborhood radius
+        perturb_indices = np.where(perturb_indices)[0]
+        if perturb_indices.size > 0:
             self.xnn = self.redistribute_and_perturb_xnn(
-                self.xnn, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
+                self.xnn, perturb_indices, perturb_indices, norm_factor=[0.25, 0.75]
                 )
-        else:
-            not_chosen_indices = np.ones(self.xnn.shape[0], dtype=bool)
-            self.xnn = self.redistribute_and_perturb_xnn(
-                self.xnn, not_chosen_indices, not_chosen_indices, norm_factor=[0.25, 0.75]
-                )
+            self.starting_xnn[:self.n] = self.xnn.copy()
 
-        print(f'Exhaustive search redistributed {excess_neighbors} candidates')
-        self.starting_xnn = np.row_stack((self.starting_xnn, self.xnn))
-        self.update_unit_cell_from_xnn()
+        print(f'Exhaustive search redistributed {n_redistributed} candidates')
+        self.fix_out_of_range_candidates()
         self.best_xnn = self.xnn.copy()
         self.best_loss = np.zeros(self.xnn.shape[0])
         start = self.candidate_index.max() + 1
         self.candidate_index = np.arange(start, start + self.n)
-        self.fix_out_of_range_candidates()
 
     def pick_explainers(self):
         found = self.loss < self.tolerance*self.min_loss
@@ -847,9 +890,19 @@ class Optimizer:
         failure_rate = np.zeros((N_entries, n_candidates_steps, 7))
         print(f'Performing evaluation assuming each group generates {candidates_per_model} candidates')
         for entry_index in tqdm(range(N_entries)):
+            candidate_uc_nn = np.zeros((
+                len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_nn'],
+                self.indexer.data_params['n_outputs']
+                ))
+            candidate_uc_rf = np.zeros((
+                len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_rf'],
+                self.indexer.data_params['n_outputs']
+                ))
             entry = self.indexer.data.iloc[entry_index]
             for group_index, group in enumerate(self.indexer.data_params['split_groups']):
-                candidate_uc_nn = self.generate_unit_cells(
+                start = group_index * self.opt_params['n_candidates_nn']
+                stop = (group_index + 1) * self.opt_params['n_candidates_nn']
+                candidate_uc_nn[start: stop] = self.generate_unit_cells(
                     self.uc_scaled_mean[entry_index, group_index, :],
                     self.uc_scaled_var[entry_index, group_index, :]
                     )
@@ -865,7 +918,9 @@ class Optimizer:
                     size=self.opt_params['n_candidates_rf'],
                     replace=False
                     )
-                candidate_uc_rf = self.indexer.revert_predictions(
+                start = group_index * self.opt_params['n_candidates_rf']
+                stop = (group_index + 1) * self.opt_params['n_candidates_rf']
+                candidate_uc_rf[start: stop] = self.indexer.revert_predictions(
                     uc_pred_scaled=candidates_scaled_tree[0, :, tree_indices]
                     )
 
@@ -898,7 +953,7 @@ class Optimizer:
                 candidate_uc_tm, _ = reindex_entry_triclinic(candidate_uc_tm)
             
             reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])
-            xnn_true = np.array(entry['reindexed_xnn'])
+            xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['y_indices']]
             candidate_xnn_nn = get_xnn_from_unit_cell(
                 candidate_uc_nn,
                 partial_unit_cell=True,
@@ -1414,6 +1469,8 @@ class Optimizer:
         return candidates
 
     def optimize_entry(self, candidates, entry_index):
+        if self.opt_params['redistribute_candidates']:
+            candidates.redistribute_candidates()
         diagnostic_df_entry = candidates.diagnostics(self.indexer.data_params['hkl_ref_length'])
         for iteration_info in self.opt_params['iteration_info']:
             if iteration_info['worker'] == 'monoclinic_reset':
