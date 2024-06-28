@@ -22,6 +22,7 @@ from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_xnn_from_unit_cell
 from Utilities import get_unit_cell_from_xnn
+from Utilities import get_unit_cell_volume
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 
@@ -697,6 +698,61 @@ class Candidates:
             return found, off_by_two
         return False, False
 
+    def remove_duplicates(self):
+        # This meant to be run at the end of optimization to remove very similar candidates
+        # If this isn't run, the results will be spammed with many candidates that are nearly
+        # identical.
+        # This method takes pairwise differences in Xnn space and combines candidates that are 
+        # closer than some given radius
+        # If this were performed with all the entries combined, it would be slow and memory intensive.
+        # Instead the candidates are sorted by reciprocal unit cell volume and filtering is
+        # performed in chunks.
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        reciprocal_volume = get_unit_cell_volume(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        sort_indices = np.argsort(reciprocal_volume)
+        xnn = self.best_xnn[sort_indices]
+        M20 = self.best_M20[sort_indices]
+
+        chunk_size = 1000
+        n_chunks = xnn.shape[0] // chunk_size
+        radius = self.radius / 20 # This is arbitrary. I'm not sure what the best value would be
+        xnn_averaged = []
+        M20_averaged = []
+        for chunk_index in range(n_chunks):
+            xnn_chunk = xnn[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+            M20_chunk = M20[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+            status = True
+            while status:
+                distance = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk)
+                neighbor_array = distance < radius
+                neighbor_count = np.sum(neighbor_array, axis=1)
+                if neighbor_count.max() > 1:
+                    highest_density_index = np.argmax(neighbor_count)
+                    neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
+                    best_neighbor = np.argmax(M20_chunk[neighbor_indices])
+                    xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
+                    M20_best_neighbor = M20_chunk[neighbor_indices][best_neighbor]
+                    xnn_chunk = np.row_stack((
+                        np.delete(xnn_chunk, neighbor_indices, axis=0), 
+                        xnn_best_neighbor
+                        ))
+                    M20_chunk = np.concatenate((
+                        np.delete(M20_chunk, neighbor_indices), 
+                        [M20_best_neighbor]
+                        ))
+                else:
+                    status = False
+            xnn_averaged.append(xnn_chunk)
+            M20_averaged.append(M20_chunk)
+            #print(chunk_index, xnn_chunk.shape)
+        xnn_averaged = np.row_stack(xnn_averaged)
+        M20_averaged = np.concatenate(M20_averaged)
+        return xnn_averaged, M20_averaged
+
     def get_best_candidates(self, report_counts):
         found = False
         found_best = False
@@ -724,19 +780,17 @@ class Candidates:
                 ),
                 axis=1))
         else:
-            best_unit_cell = get_unit_cell_from_xnn(
-                self.best_xnn,
-                partial_unit_cell=True,
-                lattice_system=self.lattice_system
+            xnn_averaged, M20_averaged = self.remove_duplicates()
+            unit_cell_averaged = get_unit_cell_from_xnn(
+                xnn_averaged, partial_unit_cell=True, lattice_system=self.lattice_system
                 )
-            sort_indices = np.argsort(self.best_M20)[::-1]
-            unit_cell = best_unit_cell[sort_indices][:20]
-            M20 = self.best_M20[sort_indices][:20]
+            sort_indices = np.argsort(M20_averaged)[::-1]
+            unit_cell = unit_cell_averaged[sort_indices][:20]
+            M20 = M20_averaged[sort_indices][:20]
             print(np.concatenate((
-                unit_cell.round(decimals=3), M20.round(decimals=2)[:, np.newaxis]
+                unit_cell.round(decimals=4), M20.round(decimals=4)[:, np.newaxis]
                 ),
                 axis=1))
-
         for index in range(unit_cell.shape[0]):
             correct, off_by_two = self.validate_candidate(unit_cell[index])
             if correct and index == 0:

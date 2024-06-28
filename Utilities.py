@@ -566,6 +566,34 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
     return M20
 
 
+def get_unit_cell_volume(unit_cell, partial_unit_cell=False, lattice_system=None):
+    if partial_unit_cell:
+        if lattice_system == 'cubic':
+            volume = unit_cell[:, 0]**3
+        elif lattice_system == 'tetragonal':
+            volume = unit_cell[:, 0]**2 * unit_cell[:, 1]
+        elif lattice_system == 'hexagonal':
+            assert False
+        elif lattice_system == 'rhombohedral':
+            assert False
+        elif lattice_system == 'orthorhombic':
+            volume = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
+        elif lattice_system == 'monoclinic':
+            abc = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
+            volume = abc * np.sqrt(1 - np.cos(unit_cell[:, 3])**2)
+
+    elif partial_unit_cell == False or lattice_system == 'triclinic':
+        a = unit_cell[:, 0]
+        b = unit_cell[:, 1]
+        c = unit_cell[:, 2]
+        calpha = np.cos(unit_cell[:, 3])
+        cbeta = np.cos(unit_cell[:, 4])
+        cgamma = np.cos(unit_cell[:, 5])
+        arg = 1 - calpha**2 - cbeta**2 - cgamma**2 + 2*calpha*cbeta*cgamma
+        volume = (a*b*c) * np.sqrt(arg)
+    return volume
+
+
 class Q2Calculator:
     def __init__(self, lattice_system, hkl, tensorflow, representation):
         self.lattice_system = lattice_system
@@ -786,6 +814,7 @@ def write_params(params, filename):
         writer = csv.DictWriter(output_file, fieldnames=params.keys())
         writer.writeheader()
         writer.writerow(params)
+
 
 def read_params(filename):
     with open(filename, 'r') as params_file:
