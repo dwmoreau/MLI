@@ -63,12 +63,6 @@ aP              | 86 - 92%
     - Add section on physics informed target function model
 
 - Optimization:
-    - Performance
-        - Find better parameters
-            - Maximum number of explainers. Would 10 work fine?
-            - Number of candidates
-            - Number of exhaustive search cycles
-            - Exhaustive search period
 
 - Physics informed target function
     - Evaluations
@@ -83,8 +77,11 @@ aP              | 86 - 92%
 
 - Templating
     - Use a logistic regression model to predict if a candidate is within the correct neighborhood of the true unit cell
-        - Inputs: 
-            - normalized residuals
+        - Debug M20 scores
+        - Add more metrics. 
+        - Evaluations
+            - plot entries xnn scatter plot colored by M20 and probability, draw xnn_true
+            - Plot M20 for neighbors & not neighbors
 
 - data
     - peak list
@@ -118,7 +115,7 @@ from Evaluations import evaluate_regression
 from Evaluations import evaluate_regression_pitf
 from Evaluations import calibrate_regression
 from MITemplates import MITemplates
-from MITemplates import MITemplates_binning
+from MITemplates import MITemplates_calibrated
 from PhysicsInformedModel import PhysicsInformedModel
 from Regression import Regression_AlphaBeta
 from Utilities import get_hkl_matrix
@@ -1098,6 +1095,27 @@ class Indexing:
                 self.miller_index_templator[bravais_lattice].load_from_tag()
             else:
                 self.miller_index_templator[bravais_lattice].setup(
+                    self.data[self.data['bravais_lattice'] == bravais_lattice]
+                    )
+
+    def setup_miller_index_templates_calibrated(self):
+        self.miller_index_templator_calibrated = dict.fromkeys(self.data_params['bravais_lattices'])
+        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
+            self.miller_index_templator_calibrated[bravais_lattice] = MITemplates_calibrated(
+                group=bravais_lattice,
+                data_params=self.data_params,
+                template_params=self.template_params[bravais_lattice],
+                hkl_ref=self.hkl_ref[bravais_lattice],
+                save_to=self.save_to['template'],
+                seed=self.random_seed
+                )
+            if self.template_params[bravais_lattice]['load_from_tag']:
+                self.miller_index_templator_calibrated[bravais_lattice].load_from_tag()
+            else:
+                self.miller_index_templator_calibrated[bravais_lattice].setup_templates(
+                    self.data[self.data['bravais_lattice'] == bravais_lattice]
+                    )
+                self.miller_index_templator_calibrated[bravais_lattice].fit_model(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
                     )
 

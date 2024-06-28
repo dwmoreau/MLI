@@ -554,6 +554,7 @@ def get_M20_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system):
     q2_ref_calc = np.sum(hkl2_ref * xnn[:, np.newaxis, :], axis=2)
     return get_M20(q2_obs, q2_calc, q2_ref_calc)
 
+
 def get_M20(q2_obs, q2_calc, q2_ref_calc):
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
     smaller_ref_peaks = q2_ref_calc < q2_calc[:, -1][:, np.newaxis]
