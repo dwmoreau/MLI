@@ -35,29 +35,25 @@ tI              | 99.2%
 tP              | 99.7%
 hP              | 99.6%
 hR              | 99.9%
-oC              | 98.5%
-oF              | 99.0%
-oI              | 99.0%
-oP              | 99.5%
-mC              | 81 - 92%
-mP              | 85%
-aP              | 95 - 98%
+oC              | 99.3%
+oF              | 99.3%
+oI              | 98.5%
+oP              | 99.8%
+mC              | 97.5%
+mP              | 96.5%
+aP              | 86 - 92%
 
 
 * Generalization & SWE
-    * Training
-        - triclinic
-    * Optimization
-        x orthorhombic
-        x monoclinic
-        - triclinic
-    * Find good redistribution and exhaustive search parameters
-    - Different broadening
-    - Incorporate positional error
+    - Run monoclinic indexing with different error levels
 
 - Dataset generation
     - put test / train split at datset generation
+    - Check broadening against calculated smSFX data
+    - Dan said the high resolution peaks seemed too broad and the low resolution peaks seemed too narrow.
     - One large communication instead of many small communications
+
+- Predictions for a single unknown candidate
 
 - Documentation
     - One page summary
@@ -89,7 +85,6 @@ aP              | 95 - 98%
     - Use a logistic regression model to predict if a candidate is within the correct neighborhood of the true unit cell
         - Inputs: 
             - normalized residuals
-            - ???
 
 - data
     - peak list
@@ -97,16 +92,12 @@ aP              | 95 - 98%
         - LCLS data
         - RRUFF
 
-- Predictions for a single unknown candidate
-    - Make a plan for 
 - Dominant zone:
     - 2D and 1D optimization
 
 - SWE
-    - put test / train split at datset generation
     - Change back to a standard scaler for angle
-    - Reduce number of communications in GenerateDataset.py
-    - Use capital communications in GenerateDataset.py
+
 - Regression
 - Indexing.py
 - Augmentation

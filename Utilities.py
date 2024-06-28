@@ -547,6 +547,24 @@ def get_hkl_matrix(hkl, lattice_system):
     return hkl_matrix
 
 
+def get_M20_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system):
+    hkl2 = get_hkl_matrix(hkl, lattice_system)
+    q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
+    hkl2_ref = get_hkl_matrix(hkl_ref, lattice_system)
+    q2_ref_calc = np.sum(hkl2_ref * xnn[:, np.newaxis, :], axis=2)
+    return get_M20(q2_obs, q2_calc, q2_ref_calc)
+
+def get_M20(q2_obs, q2_calc, q2_ref_calc):
+    discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
+    smaller_ref_peaks = q2_ref_calc < q2_calc[:, -1][:, np.newaxis]
+    np.putmask(q2_ref_calc, ~smaller_ref_peaks, 0)
+    last_smaller_ref_peak = np.max(q2_ref_calc, axis=1)
+    N = np.sum(smaller_ref_peaks, axis=1)
+    expected_discrepancy = last_smaller_ref_peak / (2*N)
+    M20 = expected_discrepancy / discrepancy
+    return M20
+
+
 class Q2Calculator:
     def __init__(self, lattice_system, hkl, tensorflow, representation):
         self.lattice_system = lattice_system
