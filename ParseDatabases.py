@@ -363,9 +363,9 @@ class ProcessEntry:
             self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
             )[0]
 
-        if self.lattice_system in ['cubic', 'rhombohedral', 'hexagonal', 'triclinic']:
+        if self.lattice_system in ['cubic', 'rhombohedral', 'triclinic']:
             self.split = 0
-        elif self.lattice_system == 'tetragonal':
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
             if self.unit_cell[0] < self.unit_cell[2]:
                 self.split = 0
             else:

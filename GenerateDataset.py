@@ -5,7 +5,7 @@ import numpy as np
 import os
 import pandas as pd
 import scipy.signal
-import time
+import shutil
 
 from EntryHelpers import save_identifiers
 from Utilities import Q2Calculator
@@ -50,6 +50,21 @@ def edit_undefined_scatters(cif_file_name):
     cif_info = iotbx.cif.reader(new_cif_file_name)
     cif_structure = cif_info.build_crystal_structures()
     return cif_structure
+
+
+def test_train_split(data_set, rng, train_fraction):
+    # This sets up the training / validation tags so that the validation set is taken
+    # evenly from the spacegroup symbols.
+    # This should be updated to reflect that entries with the same spacegroup symbol
+    # could be in different groups
+    train_label = np.ones(data_set.shape[0], dtype=bool)
+    for symbol_index, symbol in enumerate(data_set['reindexed_spacegroup_symbol_hm'].unique()):
+        indices = np.where(data_set['reindexed_spacegroup_symbol_hm'] == symbol)[0]
+        n_val = int(indices.size * (1 - 0.8))
+        val_indices = rng.choice(indices, size=n_val, replace=False)
+        train_label[val_indices] = False
+    data_set['train'] = train_label
+    return data_set
 
 
 class EntryGenerator:
@@ -290,82 +305,31 @@ class EntryGenerator:
                 key = f'{component}_{broadening_tag}'
                 data[key] = peaks_dict[key]
         return data
-
-
-def copy_info(input_info, output_container, keys):
-    for key in keys:
-        output_container[key] = input_info[key]
-    return output_container
-
-
-def generate_group_dataset(n_group_entries, n_ranks, counts, rng, entry_generator, group_entries, pattern_index, group_data_set):
-    n_iterations = n_group_entries // n_ranks
-    n_extra = n_group_entries % n_ranks
-
-    # Randomness is because I am only using a subset of the entries. This prevents using just the first
-    # group of entries that might have a lot of similar entries.
-    indices = np.arange(counts)
-    rng.shuffle(indices)
-    bad_identifiers = []
-    for iteration in range(n_iterations):
-        iteration_indices = indices[iteration*n_ranks: (iteration + 1) * n_ranks]
-        data_iteration = [dict.fromkeys(entry_generator.data_set_components) for _ in range(n_ranks)]
-
-        # rank 0 gets the identifiers and sends them to the other ranks
-        for rank_index in range(n_ranks):
-            data_iteration[rank_index] = copy_info(
-                group_entries.iloc[iteration_indices[rank_index]],
-                data_iteration[rank_index],
-                entry_generator.data_frame_keys_to_keep
-                )
-        for rank_index in range(1, n_ranks):
-            COMM.send(data_iteration[rank_index], dest=rank_index)
-
-        # rank 0 processes its entry
-        data_iteration[0] = entry_generator.get_peak_list(data_iteration[0])
-        # Receive generated patterns and add to dataframe
-        for rank_index in range(1, n_ranks):
-            data_iteration[rank_index] = COMM.recv(source=rank_index)
-        for rank_index in range(n_ranks):
-            if data_iteration[rank_index]['failed']:
-                bad_identifiers.append(data_iteration[rank_index]['identifier'])
-            else:
-                group_data_set.loc[pattern_index] = data_iteration[rank_index]
-                pattern_index += 1
-
-    # do the extra entries
-    for extra_index in range(n_extra):
-        data_extra = dict.fromkeys(entry_generator.data_set_components)
-        data_extra = copy_info(
-            group_entries.iloc[indices[n_iterations*n_ranks + extra_index]],
-            data_extra,
-            entry_generator.data_frame_keys_to_keep
-            )
-        data_extra = entry_generator.get_peak_list(data_extra)
-        if data_extra['failed']:
-            bad_identifiers.append(data_extra['identifier'])
-        else:
-            group_data_set.loc[pattern_index] = data_extra
-            pattern_index += 1
-    return bad_identifiers, group_data_set, pattern_index
-
+    
 
 if __name__ == '__main__':
     COMM = MPI.COMM_WORLD
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    entries_per_group = 100000
+    train_fraction = 0.8
+    #entries_per_group = 100
+    entries_per_group = 'all'
+    entries_per_chunk = 1000
     lattice_system = 'triclinic'
     bad_identifiers_csd = []
     bad_identifiers_cod = []
-    rng = np.random.default_rng(seed=1234)
+    rng = np.random.default_rng(seed=12345)
     entry_generator = EntryGenerator(lattice_system)
 
     if rank == 0:
         if not os.path.exists('data/GeneratedDatasets'):
             os.mkdir('data/GeneratedDatasets')
+        if os.path.exists('data/GeneratedDatasets/tmp'):
+            shutil.rmtree('data/GeneratedDatasets/tmp')
+        os.mkdir('data/GeneratedDatasets/tmp')
         # opening and accessing the giant data frame is only done on rank 0
+        entries = []
         entries_csd = pd.read_parquet(
             'data/unique_entries_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
@@ -377,86 +341,78 @@ if __name__ == '__main__':
         entries_csd = entries_csd.loc[entries_csd['lattice_system'] == lattice_system]
         entries_cod = entries_cod.loc[entries_cod['lattice_system'] == lattice_system]
 
-        bl_groups_csd = entries_csd.groupby('bravais_lattice')
-        bl_groups_cod = entries_cod.groupby('bravais_lattice')
-        for bravais_lattice in bl_groups_csd.groups.keys():
-            bl_data_set = pd.DataFrame(columns=entry_generator.data_set_components.keys())
-            bl_data_set = bl_data_set.astype(entry_generator.data_set_components)
-            pattern_index = 0
-            bl_group_csd = bl_groups_csd.get_group(bravais_lattice)
-            bl_group_cod = bl_groups_cod.get_group(bravais_lattice)
+        if entries_per_group == 'all':
+            entries = pd.concat([entries_csd, entries_cod], ignore_index=True)
+        else:
+            bl_groups_csd = entries_csd.groupby('bravais_lattice')
+            bl_groups_cod = entries_cod.groupby('bravais_lattice')
+            for bravais_lattice in bl_groups_csd.groups.keys():
+                bl_data_set = pd.DataFrame(columns=entry_generator.data_set_components.keys())
+                bl_data_set = bl_data_set.astype(entry_generator.data_set_components)
+                pattern_index = 0
+                bl_group_csd = bl_groups_csd.get_group(bravais_lattice)
+                bl_group_cod = bl_groups_cod.get_group(bravais_lattice)
 
-            hm_groups_csd = bl_group_csd.groupby('reindexed_spacegroup_symbol_hm')
-            hm_groups_cod = bl_group_cod.groupby('reindexed_spacegroup_symbol_hm')
-            for hm_group_key in hm_groups_csd.groups.keys():
-                group_entries_csd = hm_groups_csd.get_group(hm_group_key)
-                counts_csd = int(len(group_entries_csd))
-                if hm_group_key in hm_groups_cod.groups.keys():
-                    group_entries_cod = hm_groups_cod.get_group(hm_group_key)
-                    counts_cod = int(len(group_entries_cod))
-                else:
-                    group_entries_cod = None
-                    counts_cod = 0
+                hm_groups_csd = bl_group_csd.groupby('reindexed_spacegroup_symbol_hm')
+                hm_groups_cod = bl_group_cod.groupby('reindexed_spacegroup_symbol_hm')
+                for hm_group_key in hm_groups_csd.groups.keys():
+                    final_group_csd = hm_groups_csd.get_group(hm_group_key)
+                    counts_csd = int(len(final_group_csd))
+                    if hm_group_key in hm_groups_cod.groups.keys():
+                        final_group_cod = hm_groups_cod.get_group(hm_group_key)
+                        counts_cod = int(len(final_group_cod))
+                    else:
+                        group_entries_cod = None
+                        counts_cod = 0
 
-                # One iteration is when one identifier is sent out to each rank.
-                # There is an extra iteration where the remainder get processed with rank 0
-                if counts_csd >= entries_per_group:
-                    n_group_entries_csd = entries_per_group
-                    n_group_entries_cod = 0
-                else:
-                    n_group_entries_csd = counts_csd
-                    n_group_entries_cod = min(entries_per_group - n_group_entries_csd, counts_cod)
+                    if counts_csd >= entries_per_group:
+                        indices_csd = rng.choice(counts_csd, entries_per_group, replace=False)
+                        entries.append(final_group_csd.iloc[indices_csd])
+                    else:
+                        n_group_entries_cod = entries_per_group - counts_csd
+                        if n_group_entries_cod >= counts_cod:
+                            entries.append(pd.concat([final_group_csd, final_group_cod], ignore_index=True))
+                        else:
+                            indices_cod = rng.choice(counts_cod, n_group_entries_cod, replace=False)
+                            entries.append(pd.concat([final_group_csd, final_group_cod.iloc[indices_cod]], ignore_index=True))
+            entries = pd.concat(entries, ignore_index=True)
+        entries['rank'] = np.arange(len(entries)) % n_ranks
 
-                # CSD
-                bad_identifiers, bl_data_set, pattern_index = generate_group_dataset(
-                    n_group_entries_csd,
-                    n_ranks,
-                    counts_csd,
-                    rng,
-                    entry_generator,
-                    group_entries_csd,
-                    pattern_index,
-                    bl_data_set
-                    )
-                bad_identifiers_csd += bad_identifiers
-
-                # COD
-                bad_identifiers, bl_data_set, pattern_index = generate_group_dataset(
-                    n_group_entries_cod,
-                    n_ranks,
-                    counts_cod,
-                    rng,
-                    entry_generator,
-                    group_entries_cod,
-                    pattern_index,
-                    bl_data_set
-                    )
-                bad_identifiers_cod += bad_identifiers
-            bl_data_set.to_parquet(f'data/GeneratedDatasets/dataset_{bravais_lattice}.parquet')
-
+        entries_rank = entries[entries['rank'] == 0]
         for rank_index in range(1, n_ranks):
-            COMM.send(None, dest=rank_index)
-        save_identifiers('bad_identifiers_csd.txt', bad_identifiers_csd)
-        save_identifiers('bad_identifiers_cod.txt', bad_identifiers_cod)
+            COMM.send(entries[entries['rank'] == rank_index], dest=rank_index)
     else:
-        # These are the worker ranks (rank != 0)
-        # They receive information about the entry, get the peak list,
-        # then return the updated information to rank 0.
-        status = True
-        while status:
-            #start = time.time()
-            data_iteration_rank = COMM.recv(source=0)
-            #timepoint_0 = time.time()
-            # when rank 0 is finished with the databases, it sends out a None to let the workers know
-            if data_iteration_rank is None:
-                status = False
-            else:
-                data_iteration_rank = entry_generator.get_peak_list(data_iteration_rank)
-                #timepoint_1 = time.time()
-                COMM.send(data_iteration_rank, dest=0)
-                #timepoint_2 = time.time()
-                #total = timepoint_2 - start
-                #t0 = (timepoint_0 - start) / total
-                #t1 = (timepoint_1 - timepoint_0) / total
-                #t2 = (timepoint_2 - timepoint_1) / total
-                #print(f'{rank}: {t0:0.3f} {t1:0.3f} {t2:0.3f}')
+        entries_rank = COMM.recv(source=0)
+
+    n_chunks = entries_rank.shape[0] // entries_per_chunk
+    n_extra = entries_rank.shape[0] - n_chunks * entries_per_chunk
+    for chunk_index in range(n_chunks + 1):
+        start = chunk_index * entries_per_chunk
+        if chunk_index < n_chunks:
+            stop = (chunk_index + 1) * entries_per_chunk
+        else:
+            stop = start + n_extra
+        new_entries_chunk = []
+        for entry_index in range(start, stop):
+            new_entry_chunk = entry_generator.get_peak_list(entries_rank.iloc[entry_index].copy())
+            if new_entry_chunk['failed'] == False:
+                new_entries_chunk.append(new_entry_chunk)
+        pd.DataFrame(new_entries_chunk).to_parquet(
+            f'data/GeneratedDatasets/tmp/chunk_{rank:02d}_{chunk_index:03d}.parquet'
+            )
+    COMM.Barrier()
+    if rank == 0:
+        chunks = []
+        for file_name in os.listdir('data/GeneratedDatasets/tmp'):
+            if file_name.startswith('chunk'):
+                chunks.append(pd.read_parquet('data/GeneratedDatasets/tmp/' + file_name))
+        chunks = pd.concat(chunks, ignore_index=True)
+        chunks = test_train_split(chunks, rng, train_fraction)
+        bl_chunks = chunks.groupby('bravais_lattice')
+        for bravais_lattice in bl_chunks.groups.keys():
+            bl_chunks.get_group(bravais_lattice).to_parquet(
+                f'data/GeneratedDatasets/dataset_{bravais_lattice}.parquet'
+                )
+        shutil.rmtree('data/GeneratedDatasets/tmp')
+    else:
+        MPI.Finalize()

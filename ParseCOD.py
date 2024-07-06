@@ -3,6 +3,7 @@ import os
 import pandas as pd
 
 from ParseDatabases import ProcessCODEntry
+from RemoveDuplicates import remove_duplicates
 
 
 def get_next_dirs(dir):
@@ -59,3 +60,8 @@ entries_rank.to_parquet(os.path.join('data', f'cod_{rank:02d}.parquet'))
 
 failed_read = pd.DataFrame(failed_dicts)
 failed_read.to_parquet(os.path.join('data', f'failed_read_cod_{rank:02d}.parquet'))
+
+if rank == 0:
+    remove_duplicates('cod', n_ranks)
+else:
+    MPI.Finalize()

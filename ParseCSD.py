@@ -5,6 +5,7 @@ import pandas as pd
 
 from EntryHelpers import load_identifiers
 from ParseDatabases import ProcessCSDEntry
+from RemoveDuplicates import remove_duplicates
 
 
 COMM = MPI.COMM_WORLD
@@ -51,3 +52,8 @@ entries_rank.to_parquet(os.path.join('data', f'csd_{rank:02d}.parquet'))
 
 failed_read = pd.DataFrame(failed_dicts)
 failed_read.to_parquet(os.path.join('data', f'failed_read_csd_{rank:02d}.parquet'))
+
+if rank == 0:
+    remove_duplicates('csd', n_ranks)
+else:
+    MPI.Finalize()
