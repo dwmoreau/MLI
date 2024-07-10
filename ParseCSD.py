@@ -3,7 +3,6 @@ from mpi4py import MPI
 import os
 import pandas as pd
 
-from EntryHelpers import load_identifiers
 from ParseDatabases import ProcessCSDEntry
 from RemoveDuplicates import remove_duplicates
 
@@ -21,22 +20,11 @@ failed_dicts = []
 output_dicts = []
 in_numeric_tag = False
 duplicate_base = ''
-if rank == 0:
-    # The entries in these 'bad_identifiers' lists failed to generate a
-    # data set during GenerateDataset.py.
-    bad_identifiers = []
-    for file_index in range(3):
-        bad_identifiers += load_identifiers(
-            os.path.join('data', f'bad_identifiers_{file_index}.txt')
-            )
-else:
-    bad_identifiers = None
-bad_identifiers = COMM.bcast(bad_identifiers, root=0)
 
 for index in range(rank, n_total, n_ranks):
     csd_entry = csd_entry_reader[index]
     entry = ProcessCSDEntry()
-    entry.verify_entry(csd_entry, bad_identifiers=bad_identifiers)
+    entry.verify_entry(csd_entry)
     entry.make_output_dict()
 
     if entry.status:

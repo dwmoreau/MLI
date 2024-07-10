@@ -1,11 +1,19 @@
+"""
+There are issues with memory management in this code.
+I am not able to run monoclinic and triclinic for all entries on my laptop (16 GB)
+I am at the point where moving to a larger capacity machine is the next logical step.
+"""
 import iotbx.cif
+import gc
 import matplotlib.pyplot as plt
 from mpi4py import MPI
 import numpy as np
 import os
 import pandas as pd
+pd.options.mode.copy_on_write = True
 import scipy.signal
 import shutil
+import sys
 
 from EntryHelpers import save_identifiers
 from Utilities import Q2Calculator
@@ -82,15 +90,23 @@ class EntryGenerator:
         self.theta2_pattern = peak_generation_info['theta2_pattern']
         self.q2_pattern = peak_generation_info['q2_pattern']
         # This is the information to store for each peak
-        self.peak_components = {
-            'q2': 'float64',
-            'h': 'int8',
-            'k': 'int8',
-            'l': 'int8',
-            'reindexed_h': 'int8',
-            'reindexed_k': 'int8',
-            'reindexed_l': 'int8',
-            }
+        if self.lattice_system in ['monoclinic', 'triclinic']:
+            self.peak_components = {
+                'q2': 'float64',
+                'reindexed_h': 'int8',
+                'reindexed_k': 'int8',
+                'reindexed_l': 'int8',
+                'reciprocal_reindexed_h': 'int8',
+                'reciprocal_reindexed_k': 'int8',
+                'reciprocal_reindexed_l': 'int8',
+                }
+        else:
+            self.peak_components = {
+                'q2': 'float64',
+                'reindexed_h': 'int8',
+                'reindexed_k': 'int8',
+                'reindexed_l': 'int8',
+                }
         self.data_set_components = {
             'database': 'string',
             'identifier': 'string',
@@ -98,19 +114,17 @@ class EntryGenerator:
             'spacegroup_number': 'int8',
             'bravais_lattice': 'string',
             'lattice_system': 'string',
-            'spacegroup_symbol_hm': 'string',
-            'volume': 'float64',
-            'unit_cell': 'float64',
             'reindexed_spacegroup_symbol_hm': 'string',
             'reindexed_unit_cell': 'float64',
-            'reindexed_xnn': 'float64',
             'reindexed_volume': 'float64',
             'hkl_reindexer': 'float64',
+            'reciprocal_reindexed_unit_cell': 'float64',
+            'reciprocal_reindexed_volume': 'float64',
+            'reciprocal_hkl_reindexer': 'float64',
+            'reindexed_xnn': 'float64',
             'permutation': 'string',
             'split': 'int8',
-            'reduced_unit_cell': 'float64',
-            'reduced_volume': 'float64',
-            'pattern': 'float64',
+            'reciprocal_split': 'int8',
             }
 
         # These are the keys to load from the unique_entries.parquet file and directly copy into
@@ -127,13 +141,14 @@ class EntryGenerator:
             'unit_cell',
             'reindexed_spacegroup_symbol_hm',
             'reindexed_unit_cell',
-            'reindexed_xnn',
             'reindexed_volume',
+            'reciprocal_reindexed_unit_cell',
+            'reciprocal_hkl_reindexer',
+            'reindexed_xnn',
             'permutation',
             'hkl_reindexer',
             'split',
-            'reduced_unit_cell',
-            'reduced_volume',
+            'reciprocal_split',
             ]
 
         # sa is for non-systematically absence peaks
@@ -142,28 +157,28 @@ class EntryGenerator:
                 self.data_set_components.update({f'{component}_{tag}': self.peak_components[component]})
 
         # cctbx is not always able to make a structure factor for charged atoms.
-        self.check_strings = ['+', '-', '.', 'SASH']
+        self.check_strings = ['+', '-', '.']
 
     def get_peak_list(self, data):
-        def pick_peaks(I_pattern, q2_pattern, q2, hkl):
+        def pick_peaks(I_pattern, q2_pattern, q2_peaks, hkl, peak_length):
             I_pattern /= np.trapz(I_pattern, q2_pattern)
             found_indices_pattern, _ = scipy.signal.find_peaks(I_pattern, prominence=2, distance=5)
-            q2_found = q2_pattern[found_indices_pattern]
-            found_indices_peaks = np.argmin(np.abs(q2_found[:, np.newaxis] - q2[np.newaxis]), axis=1)
-            return I_pattern, q2[found_indices_peaks], hkl[found_indices_peaks]
+            q2_found = q2_pattern[found_indices_pattern[:peak_length]]
+            found_indices_peaks = np.argmin(np.abs(q2_found[:, np.newaxis] - q2_peaks[np.newaxis]), axis=1)
+            return I_pattern, q2_peaks[found_indices_peaks], hkl[found_indices_peaks]
 
         cif_file_name = data['cif_file_name']
         unit_cell = data['unit_cell']
-        reindexed_unit_cell = data['reindexed_unit_cell']
-        hkl_reindexer = np.array(data['hkl_reindexer']).reshape([3, 3])
-
+        hkl_reindexer = np.array(data['hkl_reindexer']).reshape((3, 3))
+        lattice_system = data['lattice_system']
+        if lattice_system in ['monoclinic', 'triclinic']:
+            reciprocal_hkl_reindexer = np.array(data['reciprocal_hkl_reindexer']).reshape((3, 3))
         try:
             cif_info = iotbx.cif.reader(cif_file_name)
             cif_structure = cif_info.build_crystal_structures()
 
             if len(list(cif_structure.keys())) == 0:
-                data['failed'] = True
-                return data
+                return False, None
             key = list(cif_structure.keys())[0]
             change_scatters_name = False
             for scattering_type in cif_structure[key].scattering_types():
@@ -184,18 +199,12 @@ class EntryGenerator:
             hkl_peaks = miller_indices.indices().as_vec3_double().as_numpy_array()
             theta2_peaks = np.pi/180 * miller_indices.two_theta(self.wavelength, True).data().as_numpy_array()
         except Exception as error_message:
-            print(cif_file_name)
-            print(error_message)
-            data['failed'] = True
-            return data
+            #print(cif_file_name)
+            #print(error_message)
+            return False, None
 
-        if len(cif_structure) == 0:
-            data['failed'] = True
-            return data
-
-        if intensities.size < 10:
-            data['failed'] = True
-            return data
+        if len(cif_structure) == 0 or intensities.size < 10:
+            return False, None
         
         q2_peaks = (2 * np.sin(theta2_peaks/2) / self.wavelength)**2
         # Lorentz-Polarization factor
@@ -206,6 +215,8 @@ class EntryGenerator:
         hkl_peaks = hkl_peaks[sort_indices]
         intensities = intensities[sort_indices]
         redundant_indices = np.where((q2_peaks[1:] - q2_peaks[:-1]) == 0)[0] + 1
+        q2_peaks_unique = np.delete(q2_peaks, redundant_indices)
+        hkl_peaks_unique =  np.delete(hkl_peaks, redundant_indices, axis=0)
 
         breadths_q2_peaks = self.broadening_params[0, :] + self.broadening_params[1, :] * q2_peaks[:, np.newaxis]
         prefactor = 1/np.sqrt(2*np.pi*breadths_q2_peaks[:, np.newaxis]**2)
@@ -214,112 +225,95 @@ class EntryGenerator:
         I_pattern = np.sum(intensities[:, np.newaxis, np.newaxis] * kernel, axis=0)
 
         peaks_dict = {}
-        #fig, axes = plt.subplots(3, 1, figsize=(40, 10), sharex=True)
-        #for broadening_index in range(3):
-        #    axes[broadening_index].plot(self.q2_pattern, I_pattern[:, broadening_index])
         for broadening_index, broadening_tag in enumerate(self.broadening_tags):
             I_norm, q2_found, hkl_found = pick_peaks(
-                I_pattern[:, broadening_index], self.q2_pattern, q2_peaks, hkl_peaks
+                I_pattern[:, broadening_index], self.q2_pattern, q2_peaks_unique, hkl_peaks_unique, self.peak_length
                 )
-            #ylim = axes[broadening_index].get_ylim()
-            #for i in range(q2_found.size):
-            #    axes[broadening_index].plot([q2_found[i], q2_found[i]], ylim, color=[0,0,0], linewidth=1, linestyle='dotted')
-            #axes[broadening_index].set_ylim(ylim)
-            #if broadening_index == 1:
-            #    for i in range(q2_peaks.size):
-            #        axes[1].plot([q2_peaks[i], q2_peaks[i]], [ylim[0], 0.5*ylim[1]], color=[0.8,0,0], linewidth=1, linestyle='dotted')
-
-            reindexed_hkl_found = np.matmul(hkl_found, hkl_reindexer).round(decimals=0).astype(int)
-            if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
-                q2_calc = Q2Calculator(
-                    lattice_system='triclinic',
-                    hkl=hkl_found,
-                    tensorflow=False,
-                    representation='unit_cell'
-                    ).get_q2(unit_cell[np.newaxis])
-                reindexed_q2_calc = Q2Calculator(
-                    lattice_system='triclinic',
-                    hkl=reindexed_hkl_found,
-                    tensorflow=False,
-                    representation='unit_cell'
-                    ).get_q2(reindexed_unit_cell[np.newaxis])
-                check = np.isclose(q2_calc[0], reindexed_q2_calc[0]).all()
-                if not check:
-                    print('Reindexing Failure')
-                    print(unit_cell)
-                    print(reindexed_unit_cell)
-                    print()
-            elif self.lattice_system == 'rhombohedral':
-                if np.all(unit_cell[3:] == [np.pi/2, np.pi/2, 2*np.pi/3]):
-                    # If the rhombohedral was initially in the hexagonal setting it was reindexed
-                    q2_calc = Q2Calculator(
-                        lattice_system='hexagonal',
-                        hkl=hkl_found,
-                        tensorflow=False,
-                        representation='unit_cell'
-                        ).get_q2(unit_cell[[0, 2]][np.newaxis])
-                    reindexed_q2_calc = Q2Calculator(
-                        lattice_system='rhombohedral',
-                        hkl=reindexed_hkl_found,
-                        tensorflow=False,
-                        representation='unit_cell'
-                        ).get_q2(reindexed_unit_cell[[0, 3]][np.newaxis])
-                    check = np.isclose(q2_calc[0], reindexed_q2_calc[0]).all()
-                    if not check:
-                        print('Reindexing Failure')
-                        print(unit_cell)
-                        print(reindexed_unit_cell)
-                        print(np.column_stack((q2[0], reindexed_q2[0])).round(decimals=4))
-                        print()
-
+            reindexed_hkl_found = np.matmul(hkl_found, hkl_reindexer).round(decimals=0).astype(np.int8)
             peak_length = min(q2_found.size, self.peak_length)
+            if lattice_system in ['monoclinic', 'triclinic']:
+                reciprocal_reindexed_hkl_found = np.matmul(hkl_found, reciprocal_hkl_reindexer).round(decimals=0).astype(np.int8)
+
+                """
+                q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl_found, tensorflow=False, representation='unit_cell')
+                q2 = q2_calculator.get_q2(unit_cell[np.newaxis])[0]
+
+                reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl_found, tensorflow=False, representation='unit_cell')
+                reindexed_q2 = reindexed_q2_calculator.get_q2(np.array(data['reindexed_unit_cell'])[np.newaxis])[0]
+
+                reciprocal_reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reciprocal_reindexed_hkl_found, tensorflow=False, representation='reciprocal_unit_cell')
+                reciprocal_reindexed_q2 = reciprocal_reindexed_q2_calculator.get_q2(np.array(data['reciprocal_reindexed_unit_cell'])[np.newaxis])[0]
+
+                check0 = np.all(np.isclose(q2, reindexed_q2))
+                check1 = np.all(np.isclose(q2, reciprocal_reindexed_q2))
+                print(check0, check1)
+                """
+                peaks_dict.update({
+                    f'q2_{broadening_tag}': q2_found[:peak_length],
+                    f'reindexed_h_{broadening_tag}': reindexed_hkl_found[:peak_length, 0],
+                    f'reindexed_k_{broadening_tag}': reindexed_hkl_found[:peak_length, 1],
+                    f'reindexed_l_{broadening_tag}': reindexed_hkl_found[:peak_length, 2],
+                    f'reciprocal_reindexed_h_{broadening_tag}': reciprocal_reindexed_hkl_found[:peak_length, 0],
+                    f'reciprocal_reindexed_k_{broadening_tag}': reciprocal_reindexed_hkl_found[:peak_length, 1],
+                    f'reciprocal_reindexed_l_{broadening_tag}': reciprocal_reindexed_hkl_found[:peak_length, 2],
+                    })
+            else:
+                peaks_dict.update({
+                    f'q2_{broadening_tag}': q2_found[:peak_length],
+                    f'reindexed_h_{broadening_tag}': reindexed_hkl_found[:peak_length, 0],
+                    f'reindexed_k_{broadening_tag}': reindexed_hkl_found[:peak_length, 1],
+                    f'reindexed_l_{broadening_tag}': reindexed_hkl_found[:peak_length, 2],
+                    })
+
+        
+        peak_length = min(q2_peaks_unique.size, self.peak_length)
+        reindexed_hkl_peaks_unique = np.matmul(
+            hkl_peaks_unique, hkl_reindexer
+            ).round(decimals=0).astype(np.int8)
+        if lattice_system in ['monoclinic', 'triclinic']:
+            reciprocal_reindexed_hkl_peaks_unique = np.matmul(
+                hkl_peaks_unique, reciprocal_hkl_reindexer
+                ).round(decimals=0).astype(np.int8)
             peaks_dict.update({
-                f'q2_{broadening_tag}': q2_found[:peak_length],
-                f'h_{broadening_tag}': hkl_found[:peak_length, 0],
-                f'k_{broadening_tag}': hkl_found[:peak_length, 1],
-                f'l_{broadening_tag}': hkl_found[:peak_length, 2],
-                f'reindexed_h_{broadening_tag}': reindexed_hkl_found[:peak_length, 0],
-                f'reindexed_k_{broadening_tag}': reindexed_hkl_found[:peak_length, 1],
-                f'reindexed_l_{broadening_tag}': reindexed_hkl_found[:peak_length, 2],
+                'q2_sa': q2_peaks_unique,
+                'reindexed_h_sa': reindexed_hkl_peaks_unique[:peak_length, 0],
+                'reindexed_k_sa': reindexed_hkl_peaks_unique[:peak_length, 1],
+                'reindexed_l_sa': reindexed_hkl_peaks_unique[:peak_length, 2],
+                'reciprocal_reindexed_h_sa': reciprocal_reindexed_hkl_peaks_unique[:peak_length, 0],
+                'reciprocal_reindexed_k_sa': reciprocal_reindexed_hkl_peaks_unique[:peak_length, 1],
+                'reciprocal_reindexed_l_sa': reciprocal_reindexed_hkl_peaks_unique[:peak_length, 2],
+                })
+        else:
+            peaks_dict.update({
+                'q2_sa': q2_peaks_unique,
+                'reindexed_h_sa': reindexed_hkl_peaks_unique[:peak_length, 0],
+                'reindexed_k_sa': reindexed_hkl_peaks_unique[:peak_length, 1],
+                'reindexed_l_sa': reindexed_hkl_peaks_unique[:peak_length, 2],
                 })
 
-        q2_peaks = np.delete(q2_peaks, redundant_indices)
-        hkl_peaks =  np.delete(hkl_peaks, redundant_indices, axis=0)
-        reindexed_hkl_peaks = np.matmul(hkl_peaks, hkl_reindexer).round(decimals=0).astype(int)
-        peak_length = min(q2_peaks.size, self.peak_length)
-        peaks_dict.update({
-            'q2_sa': q2_peaks,
-            'h_sa': hkl_peaks[:peak_length, 0],
-            'k_sa': hkl_peaks[:peak_length, 1],
-            'l_sa': hkl_peaks[:peak_length, 2],
-            'reindexed_h_sa': reindexed_hkl_peaks[:peak_length, 0],
-            'reindexed_k_sa': reindexed_hkl_peaks[:peak_length, 1],
-            'reindexed_l_sa': reindexed_hkl_peaks[:peak_length, 2],
-            })
+        return True, peaks_dict
 
-        #fig.tight_layout()
-        #plt.show()
-        data['failed'] = False
-        for broadening_tag in self.broadening_tags + ['sa']:
-            for component in self.peak_components:
-                key = f'{component}_{broadening_tag}'
-                data[key] = peaks_dict[key]
-        return data
-    
 
-if __name__ == '__main__':
+def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12345):
     COMM = MPI.COMM_WORLD
     rank = COMM.Get_rank()
     n_ranks = COMM.Get_size()
 
-    train_fraction = 0.8
-    #entries_per_group = 100
-    entries_per_group = 'all'
-    entries_per_chunk = 1000
-    lattice_system = 'triclinic'
-    bad_identifiers_csd = []
-    bad_identifiers_cod = []
-    rng = np.random.default_rng(seed=12345)
+    if bravais_lattice in ['cP', 'cI', 'cF']:
+        lattice_system = 'cubic'
+    elif bravais_lattice in ['hP']:
+        lattice_system = 'hexagonal'
+    elif bravais_lattice in ['hR']:
+        lattice_system = 'rhombohedral'
+    elif bravais_lattice in ['tI', 'tP']:
+        lattice_system = 'tetragonal'
+    elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
+        lattice_system = 'orthorhombic'
+    elif bravais_lattice in ['mC', 'mP']:
+        lattice_system = 'monoclinic'
+    elif bravais_lattice in ['aP']:
+        lattice_system = 'triclinic'
+    rng = np.random.default_rng(seed=seed)
     entry_generator = EntryGenerator(lattice_system)
 
     if rank == 0:
@@ -338,68 +332,90 @@ if __name__ == '__main__':
             'data/unique_cod_entries_not_in_csd.parquet',
             columns=entry_generator.data_frame_keys_to_keep
             )
-        entries_csd = entries_csd.loc[entries_csd['lattice_system'] == lattice_system]
-        entries_cod = entries_cod.loc[entries_cod['lattice_system'] == lattice_system]
+        entries_csd = entries_csd.loc[entries_csd['bravais_lattice'] == bravais_lattice]
+        entries_cod = entries_cod.loc[entries_cod['bravais_lattice'] == bravais_lattice]
 
         if entries_per_group == 'all':
             entries = pd.concat([entries_csd, entries_cod], ignore_index=True)
         else:
-            bl_groups_csd = entries_csd.groupby('bravais_lattice')
-            bl_groups_cod = entries_cod.groupby('bravais_lattice')
-            for bravais_lattice in bl_groups_csd.groups.keys():
-                bl_data_set = pd.DataFrame(columns=entry_generator.data_set_components.keys())
-                bl_data_set = bl_data_set.astype(entry_generator.data_set_components)
-                pattern_index = 0
-                bl_group_csd = bl_groups_csd.get_group(bravais_lattice)
-                bl_group_cod = bl_groups_cod.get_group(bravais_lattice)
+            entries = []
+            hm_groups_csd = entries_csd.groupby('reindexed_spacegroup_symbol_hm')
+            hm_groups_cod = entries_cod.groupby('reindexed_spacegroup_symbol_hm')
+            for hm_group_key in hm_groups_csd.groups.keys():
+                final_group_csd = hm_groups_csd.get_group(hm_group_key)
+                counts_csd = int(len(final_group_csd))
+                if hm_group_key in hm_groups_cod.groups.keys():
+                    final_group_cod = hm_groups_cod.get_group(hm_group_key)
+                    counts_cod = int(len(final_group_cod))
+                else:
+                    group_entries_cod = None
+                    counts_cod = 0
 
-                hm_groups_csd = bl_group_csd.groupby('reindexed_spacegroup_symbol_hm')
-                hm_groups_cod = bl_group_cod.groupby('reindexed_spacegroup_symbol_hm')
-                for hm_group_key in hm_groups_csd.groups.keys():
-                    final_group_csd = hm_groups_csd.get_group(hm_group_key)
-                    counts_csd = int(len(final_group_csd))
-                    if hm_group_key in hm_groups_cod.groups.keys():
-                        final_group_cod = hm_groups_cod.get_group(hm_group_key)
-                        counts_cod = int(len(final_group_cod))
+                if counts_csd >= entries_per_group:
+                    indices_csd = rng.choice(counts_csd, entries_per_group, replace=False)
+                    entries.append(final_group_csd.iloc[indices_csd])
+                else:
+                    n_group_entries_cod = entries_per_group - counts_csd
+                    if n_group_entries_cod >= counts_cod:
+                        entries.append(pd.concat([final_group_csd, final_group_cod], ignore_index=True))
                     else:
-                        group_entries_cod = None
-                        counts_cod = 0
-
-                    if counts_csd >= entries_per_group:
-                        indices_csd = rng.choice(counts_csd, entries_per_group, replace=False)
-                        entries.append(final_group_csd.iloc[indices_csd])
-                    else:
-                        n_group_entries_cod = entries_per_group - counts_csd
-                        if n_group_entries_cod >= counts_cod:
-                            entries.append(pd.concat([final_group_csd, final_group_cod], ignore_index=True))
-                        else:
-                            indices_cod = rng.choice(counts_cod, n_group_entries_cod, replace=False)
-                            entries.append(pd.concat([final_group_csd, final_group_cod.iloc[indices_cod]], ignore_index=True))
+                        indices_cod = rng.choice(counts_cod, n_group_entries_cod, replace=False)
+                        entries.append(pd.concat([final_group_csd, final_group_cod.iloc[indices_cod]], ignore_index=True))
             entries = pd.concat(entries, ignore_index=True)
         entries['rank'] = np.arange(len(entries)) % n_ranks
-
         entries_rank = entries[entries['rank'] == 0]
         for rank_index in range(1, n_ranks):
-            COMM.send(entries[entries['rank'] == rank_index], dest=rank_index)
+            COMM.send(entries[entries['rank'] == rank_index].copy(), dest=rank_index)
     else:
         entries_rank = COMM.recv(source=0)
 
-    n_chunks = entries_rank.shape[0] // entries_per_chunk
-    n_extra = entries_rank.shape[0] - n_chunks * entries_per_chunk
-    for chunk_index in range(n_chunks + 1):
-        start = chunk_index * entries_per_chunk
-        if chunk_index < n_chunks:
-            stop = (chunk_index + 1) * entries_per_chunk
-        else:
-            stop = start + n_extra
-        new_entries_chunk = []
-        for entry_index in range(start, stop):
-            new_entry_chunk = entry_generator.get_peak_list(entries_rank.iloc[entry_index].copy())
-            if new_entry_chunk['failed'] == False:
-                new_entries_chunk.append(new_entry_chunk)
-        pd.DataFrame(new_entries_chunk).to_parquet(
-            f'data/GeneratedDatasets/tmp/chunk_{rank:02d}_{chunk_index:03d}.parquet'
-            )
+    entries_rank.reset_index(inplace=True)
+    success = np.zeros(entries_rank.shape[0], dtype=bool)
+    keys = entry_generator.broadening_tags + ['sa']
+    q2 = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
+    reindexed_h = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
+    reindexed_k = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
+    reindexed_l = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
+    for broadening_tag in entry_generator.broadening_tags + ['sa']:
+        q2[broadening_tag] = []
+        reindexed_h[broadening_tag] = []
+        reindexed_k[broadening_tag] = []
+        reindexed_l[broadening_tag] = []
+    if lattice_system in ['monoclinic', 'triclinic']:
+        reciprocal_reindexed_h = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
+        reciprocal_reindexed_k = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
+        reciprocal_reindexed_l = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
+        for broadening_tag in entry_generator.broadening_tags + ['sa']:
+            reciprocal_reindexed_h[broadening_tag] = []
+            reciprocal_reindexed_k[broadening_tag] = []
+            reciprocal_reindexed_l[broadening_tag] = []
+
+    for entry_index in range(entries_rank.shape[0]):
+        success[entry_index], peaks_dict = entry_generator.get_peak_list(entries_rank.iloc[entry_index])
+        if success[entry_index]:
+            for broadening_tag in entry_generator.broadening_tags + ['sa']:
+                q2[broadening_tag].append(peaks_dict[f'q2_{broadening_tag}'])
+                reindexed_h[broadening_tag].append(peaks_dict[f'reindexed_h_{broadening_tag}'])
+                reindexed_k[broadening_tag].append(peaks_dict[f'reindexed_k_{broadening_tag}'])
+                reindexed_l[broadening_tag].append(peaks_dict[f'reindexed_l_{broadening_tag}'])
+                if lattice_system in ['monoclinic', 'triclinic']:
+                    reciprocal_reindexed_h[broadening_tag].append(peaks_dict[f'reciprocal_reindexed_h_{broadening_tag}'])
+                    reciprocal_reindexed_k[broadening_tag].append(peaks_dict[f'reciprocal_reindexed_k_{broadening_tag}'])
+                    reciprocal_reindexed_l[broadening_tag].append(peaks_dict[f'reciprocal_reindexed_l_{broadening_tag}'])
+
+    entries_rank = entries_rank.iloc[success]
+    for broadening_tag in entry_generator.broadening_tags + ['sa']:
+        entries_rank[f'q2_{broadening_tag}'] = q2[broadening_tag]
+        entries_rank[f'reindexed_h_{broadening_tag}'] = reindexed_h[broadening_tag]
+        entries_rank[f'reindexed_k_{broadening_tag}'] = reindexed_k[broadening_tag]
+        entries_rank[f'reindexed_l_{broadening_tag}'] = reindexed_l[broadening_tag]
+        if lattice_system in ['monoclinic', 'triclinic']:
+            entries_rank[f'reciprocal_reindexed_h_{broadening_tag}'] = reciprocal_reindexed_h[broadening_tag]
+            entries_rank[f'reciprocal_reindexed_k_{broadening_tag}'] = reciprocal_reindexed_k[broadening_tag]
+            entries_rank[f'reciprocal_reindexed_l_{broadening_tag}'] = reciprocal_reindexed_l[broadening_tag]
+
+    entries_rank.to_parquet(f'data/GeneratedDatasets/tmp/chunk_{rank:02d}.parquet')
+
     COMM.Barrier()
     if rank == 0:
         chunks = []
@@ -408,11 +424,20 @@ if __name__ == '__main__':
                 chunks.append(pd.read_parquet('data/GeneratedDatasets/tmp/' + file_name))
         chunks = pd.concat(chunks, ignore_index=True)
         chunks = test_train_split(chunks, rng, train_fraction)
-        bl_chunks = chunks.groupby('bravais_lattice')
-        for bravais_lattice in bl_chunks.groups.keys():
-            bl_chunks.get_group(bravais_lattice).to_parquet(
-                f'data/GeneratedDatasets/dataset_{bravais_lattice}.parquet'
-                )
+        chunks.to_parquet(
+            f'data/GeneratedDatasets/dataset_{bravais_lattice}.parquet'
+            )
         shutil.rmtree('data/GeneratedDatasets/tmp')
     else:
         MPI.Finalize()
+
+if __name__ == '__main__':
+    if sys.argv[2] == 'all':
+        entries_per_group = 'all'
+    else:
+        entries_per_group = int(sys.argv[2])
+    generate_dataset(
+        bravais_lattice=sys.argv[1],
+        train_fraction=0.8,
+        entries_per_group=entries_per_group
+        )

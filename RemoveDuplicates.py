@@ -10,17 +10,17 @@ def remove_duplicates(source, n_ranks):
 
     all_unique_entries = []
     all_duplicated_entries = []
-    groups = entries.groupby('bravais_lattice')
-    for key in groups.groups.keys():
+    bl_groups = entries.groupby('bravais_lattice')
+    for key in bl_groups.groups.keys():
         duplicated_entries = []
-        group_entries = groups.get_group(key)
-        print(f'Group {key} has {len(group_entries)} entries')
+        bl_group_entries = bl_groups.get_group(key)
+        print(f'Group {key} has {len(bl_group_entries)} entries')
 
         # chemical_composition_string: All elements and counts in the unit cell
         # chemical_composition_string_string: remove hydrogrens & deuteriums and elements 
         # that make up less than 5% of the total atoms.
         unique_entries_composition = []
-        compositions_group = group_entries.groupby('chemical_composition_string_strict')
+        compositions_group = bl_group_entries.groupby('chemical_composition_string_strict')
         for composition in compositions_group.groups.keys():
             common_composition = compositions_group.get_group(composition)
             if len(common_composition) == 1:
@@ -52,9 +52,9 @@ def remove_duplicates(source, n_ranks):
         # I am trying to find entries with the same unit cell, so a,b,c, alpha, beta, gamma are 
         # exactly the same. Unit cell is a numpy array and unhashable, so it cannot be used in groupby
         if len(unique_entries_composition) > 0:
-            group_entries = pd.concat(unique_entries_composition)
+            unique_entries_composition = pd.concat(unique_entries_composition)
             unique_entries_unit_cell = []
-            unit_cell_group = group_entries.groupby('reindexed_volume')
+            unit_cell_group = unique_entries_composition.groupby('reindexed_volume')
             for unit_cell in unit_cell_group.groups.keys():
                 common_unit_cell = unit_cell_group.get_group(unit_cell)
                 if len(common_unit_cell) == 1:
@@ -81,4 +81,4 @@ def remove_duplicates(source, n_ranks):
     all_duplicated_entries.to_parquet(f'data/duplicate_entries_{source}.parquet')
 
 if __name__ == '__main__':
-    remove_duplicates('csd', 8)
+    remove_duplicates(source='cod', n_ranks=8)
