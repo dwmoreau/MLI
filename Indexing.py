@@ -12,7 +12,7 @@ Readings:
         - Idea is to assume the Miller index of the first line is known, then try different
             miller indices for the rest of the pattern.
     - Werner 1964:
-        - q2 error should be less than 0.0005 for all lines is CuKalpha radiation is used. Citing R. Hesse
+        - q2 error should be less than 0.0005 for all lines if CuKalpha radiation is used. Citing R. Hesse
         - Crazy flow diagram
     - Shirley 2003: Easy if all peaks are known
     - Altomare 2008: Precision and accuracy in determining peak positions is critical
@@ -44,17 +44,18 @@ mP              | 96.5%
 aP              | 86 - 92%
 
 
-* Generalization & SWE
-    - Run monoclinic indexing with different error levels
-
-- Dataset generation
-    - put test / train split at datset generation
-    - Check broadening against calculated smSFX data
-    - Dan said the high resolution peaks seemed too broad and the low resolution peaks seemed too narrow.
-    - One large communication instead of many small communications
-
-- Predictions for a single unknown candidate
-
+*******************
+* Big refactoring *
+*******************
+    - mpi parallelization for ground truth optimization
+        - Get running with known unit cell and error
+            - Verify that we can get the correct unit cell at expected rates
+        - Add in no error case
+            - Verify that we can get the correct unit cell at expected rates
+        - Add in regression evaluations
+            - Consider which generators to remove
+    - Predictions for a single unknown candidate
+    
 - Documentation
     - One page summary
     - Update after generalization has been implemented
@@ -62,42 +63,43 @@ aP              | 86 - 92%
     - Add discussion on mixture integer linear programing
     - Add section on physics informed target function model
 
-- Optimization:
-
 - Physics informed target function
-    - Evaluations
-        - Assignment accuracy
-        - Assignment calibration
-    - Generative
-        - sampling from predicted Miller indices and updating the unit cell using least squares 
-    - Incorporate into optimization
-    - Make sure the beta-nll for regression is being used correctly
-    - Optimization of uncertainty in the indexing
-    - More general scaling
+    - attention based initial layer
 
-- Templating
-    - Use a logistic regression model to predict if a candidate is within the correct neighborhood of the true unit cell
-        - Debug M20 scores
-        - Add more metrics. 
-        - Evaluations
-            - plot entries xnn scatter plot colored by M20 and probability, draw xnn_true
-            - Plot M20 for neighbors & not neighbors
+- Optimization
+    - Track the position of the first correct candidate
+    - Track whether or not the correct unit cell is anywhere in the candidate list
 
 - data
+    - Statistics plots / tables
     - peak list
         - SACLA data
         - LCLS data
         - RRUFF
+    - More training data
+        - Materials project
+        - ICSD
+        - www.oqmd.org
 
 - Dominant zone:
     - 2D and 1D optimization
 
-- SWE
-    - Change back to a standard scaler for angle
+- SWE:
+    https://ideas-productivity.org/resources/series/hpc-best-practices-webinars/
+
 
 - Regression
-- Indexing.py
+    - predict reciprocal space unit cell parameters
+    - non-dimensionalize the q2 and Xnn parameters
+    - Attention based network
+        - Nadaraya–Watson estimator
+    - https://dmol.pub/dl/attention.html
+    - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
+
+- Random unit cell generator
 - Augmentation
+- Templating
+- Indexing.py
 - Assignments
 """
 import joblib
@@ -114,13 +116,16 @@ from Augmentor import Augmentor
 from Evaluations import evaluate_regression
 from Evaluations import evaluate_regression_pitf
 from Evaluations import calibrate_regression
+from Evaluations import calibrate_regression_pitf
 from MITemplates import MITemplates
 from MITemplates import MITemplates_calibrated
 from PhysicsInformedModel import PhysicsInformedModel
-from Regression import Regression_AlphaBeta
+from RandomGenerator import RandomGenerator
+from Regression import Regression
 from Utilities import get_hkl_matrix
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_unit_cell_from_xnn
+from Utilities import get_unit_cell_volume
 from Utilities import Q2Calculator
 from Utilities import read_params
 from Utilities import reciprocal_uc_conversion
@@ -128,7 +133,7 @@ from Utilities import write_params
 
 
 class Indexing:
-    def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, template_params=None, pitf_params=None, seed=12345):
+    def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, template_params=None, pitf_params=None, random_params=None, seed=12345, load_bravais_lattice='all'):
         self.random_seed = seed
         self.rng = np.random.default_rng(self.random_seed)
         self.n_generated_points = 60  # This is the peak length of the generated dataset.
@@ -136,6 +141,7 @@ class Indexing:
         self.assign_params = assign_params
         self.aug_params = aug_params
         self.data_params = data_params
+        self.random_params = random_params
         self.reg_params = reg_params
         self.template_params = template_params
         self.pitf_params = pitf_params
@@ -146,21 +152,26 @@ class Indexing:
             'assigner': os.path.join(results_directory, 'assigner'),
             'augmentor': os.path.join(results_directory, 'augmentor'),
             'data': os.path.join(results_directory, 'data'),
+            'random': os.path.join(results_directory, 'random'),
             'regression': os.path.join(results_directory, 'regression'),
             'template': os.path.join(results_directory, 'template'),
             'pitf': os.path.join(results_directory, 'pitf'),
             }
+
         if not os.path.exists(self.save_to['results']):
             os.mkdir(self.save_to['results'])
             os.mkdir(self.save_to['assigner'])
             os.mkdir(self.save_to['augmentor'])
             os.mkdir(self.save_to['data'])
+            os.mkdir(self.save_to['random'])
             os.mkdir(self.save_to['regression'])
             os.mkdir(self.save_to['template'])
             os.mkdir(self.save_to['pitf'])
+        if not os.path.exists(self.save_to['random']):
+            os.mkdir(self.save_to['random'])
 
         if self.data_params['load_from_tag']:
-            self.setup_from_tag()
+            self.setup_from_tag(load_bravais_lattice)
         else:
             self.setup()
 
@@ -169,10 +180,9 @@ class Indexing:
             'lattice_system': None,
             'data_dir': os.path.join(self.data_params['base_directory'], 'data'),
             'augment': False,
-            'train_fraction': 0.80,
-            'n_max': 25000,
-            'n_points': 20,
-            'points_tag': '1',
+            'n_max_group': 25000,
+            'n_peaks': 20,
+            'broadening_tag': '1',
             'hkl_ref_length': 500,
             }
 
@@ -182,29 +192,84 @@ class Indexing:
                     self.data_params[key] = data_params_defaults[key]
 
         if self.data_params['lattice_system'] == 'cubic':
-            self.data_params['y_indices'] = [0]
+            self.data_params['unit_cell_indices'] = [0]
             self.data_params['bravais_lattices'] = ['cF', 'cI', 'cP']
         elif self.data_params['lattice_system'] == 'tetragonal':
-            self.data_params['y_indices'] = [0, 2]
+            self.data_params['unit_cell_indices'] = [0, 2]
             self.data_params['bravais_lattices'] = ['tI', 'tP']
         elif self.data_params['lattice_system'] == 'orthorhombic':
-            self.data_params['y_indices'] = [0, 1, 2]
+            self.data_params['unit_cell_indices'] = [0, 1, 2]
             self.data_params['bravais_lattices'] = ['oC', 'oF', 'oI', 'oP']
         elif self.data_params['lattice_system'] == 'monoclinic':
-            self.data_params['y_indices'] = [0, 1, 2, 4]
+            self.data_params['unit_cell_indices'] = [0, 1, 2, 4]
             self.data_params['bravais_lattices'] = ['mC', 'mP']
         elif self.data_params['lattice_system'] == 'triclinic':
-            self.data_params['y_indices'] = [0, 1, 2, 3, 4, 5]
+            self.data_params['unit_cell_indices'] = [0, 1, 2, 3, 4, 5]
             self.data_params['bravais_lattices'] = ['aP']
         elif self.data_params['lattice_system'] == 'rhombohedral':
-            self.data_params['y_indices'] = [0, 3]
+            self.data_params['unit_cell_indices'] = [0, 3]
             self.data_params['bravais_lattices'] = ['hR']
         elif self.data_params['lattice_system'] == 'hexagonal':
-            self.data_params['y_indices'] = [0, 2]
+            self.data_params['unit_cell_indices'] = [0, 2]
             self.data_params['bravais_lattices'] = ['hP']
-        self._setup_joint()
+        self.data_params['unit_cell_length'] = len(self.data_params['unit_cell_indices'])
+        all_labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
+        self.uc_labels = [all_labels[index] for index in self.data_params['unit_cell_indices']]
 
-    def setup_from_tag(self):
+        group_spec = pd.read_excel(
+            os.path.join(self.data_params['data_dir'], self.data_params['groupspec_file_name']),
+            sheet_name=self.data_params['groupspec_sheet'],
+            )
+        group_spec = group_spec.loc[group_spec['group'].notna()]
+        group_spec['hm symbol'] = group_spec['hm symbol'].str.strip()
+        self.data_params['groups'] = group_spec['group'].unique()
+        self.data_params['split_groups'] = []
+        if self.data_params['lattice_system'] == 'tetragonal':
+            for group in self.data_params['groups']:
+                if group.startswith('tP'):
+                    self.data_params['split_groups'].append(group.replace('tP_', 'tP_0_'))
+                    self.data_params['split_groups'].append(group.replace('tP_', 'tP_1_'))
+                elif group.startswith('tI'):
+                    self.data_params['split_groups'].append(group.replace('tI_', 'tI_0_'))
+                    self.data_params['split_groups'].append(group.replace('tI_', 'tI_1_'))
+        elif self.data_params['lattice_system'] == 'hexagonal':
+            for group in self.data_params['groups']:
+                self.data_params['split_groups'].append(group.replace('hP_', 'hP_0_'))
+                self.data_params['split_groups'].append(group.replace('hP_', 'hP_1_'))
+        elif self.data_params['lattice_system'] == 'monoclinic':
+            for group in self.data_params['groups']:
+                if group.startswith('mP'):
+                    self.data_params['split_groups'].append(group.replace('mP_', 'mP_0_'))
+                    self.data_params['split_groups'].append(group.replace('mP_', 'mP_1_'))
+                    self.data_params['split_groups'].append(group.replace('mP_', 'mP_4_'))
+                elif group.startswith('mC'):
+                    self.data_params['split_groups'].append(group.replace('mC_', 'mC_0_'))
+                    self.data_params['split_groups'].append(group.replace('mC_', 'mC_1_'))
+                    self.data_params['split_groups'].append(group.replace('mC_', 'mC_4_'))
+        elif self.data_params['lattice_system'] == 'triclinic':
+            self.data_params['split_groups'] = self.data_params['groups']
+        elif self.data_params['lattice_system'] == 'orthorhombic':
+            for group in self.data_params['groups']:
+                if group.startswith('oC'):
+                    self.data_params['split_groups'].append(group.replace('oC_', 'oC_0_'))
+                    self.data_params['split_groups'].append(group.replace('oC_', 'oC_1_'))
+                    self.data_params['split_groups'].append(group.replace('oC_', 'oC_2_'))
+                elif group.startswith('oF'):
+                    self.data_params['split_groups'].append(group.replace('oF_', 'oF_0_'))
+                elif group.startswith('oI'):
+                    self.data_params['split_groups'].append(group.replace('oI_', 'oI_0_'))
+                elif group.startswith('oP'):
+                    self.data_params['split_groups'].append(group.replace('oP_', 'oP_0_'))
+        else:
+            self.data_params['split_groups'] = self.data_params['groups']
+        self.group_mappings = dict.fromkeys(group_spec['hm symbol'].unique())
+        for index in range(len(group_spec)):
+            self.group_mappings[group_spec.iloc[index]['hm symbol']] = group_spec.iloc[index]['group']
+        #for key in self.group_mappings.keys():
+        #    print(f'{key} -> {self.group_mappings[key]}')
+
+    def setup_from_tag(self, load_bravais_lattice='all'):
+        self.angle_scale = np.load(f'{self.save_to["data"]}/angle_scale.npy')
         self.uc_scaler = joblib.load(f'{self.save_to["data"]}/uc_scaler.bin')
         self.volume_scaler = joblib.load(f'{self.save_to["data"]}/volume_scaler.bin')
         self.q2_scaler = joblib.load(f'{self.save_to["data"]}/q2_scaler.bin')
@@ -213,15 +278,15 @@ class Indexing:
         params = read_params(f'{self.save_to["data"]}/data_params.csv')
         data_params_keys = [
             'augment',
-            'bravais_lattices'
+            'bravais_lattices',
+            'split_groups',
             'lattice_system',
             'data_dir',
-            'train_fraction',
-            'n_max',
-            'y_indices',
-            'n_points',
-            'points_tag',
-            'n_outputs',
+            'n_max_group',
+            'unit_cell_indices',
+            'n_peaks',
+            'broadening_tag',
+            'unit_cell_length',
             'hkl_ref_length',
             'groupspec_file_name',
             'groupspec_sheet',
@@ -231,102 +296,87 @@ class Indexing:
         self.data_params['load_from_tag'] = True
         bravais_lattices = params['bravais_lattices'].replace(' ', '').replace("'", '')
         self.data_params['bravais_lattices'] = bravais_lattices.split('[')[1].split(']')[0].split(',')
+        split_groups = params['split_groups'].replace(' ', '').replace("'", '')
+        self.data_params['split_groups'] = split_groups.split('[')[1].split(']')[0].split(',')
         self.data_params['lattice_system'] = params['lattice_system']
         if params['augment'] == 'True':
             self.data_params['augment'] = True
         elif params['augment'] == 'False':
             self.data_params['augment'] = False
         self.data_params['data_dir'] = params['data_dir']
-        self.data_params['y_indices'] = np.array(params['y_indices'].split('[')[1].split(']')[0].split(','), dtype=int)
-        self.data_params['train_fraction'] = float(params['train_fraction'])
-        self.data_params['n_max'] = int(params['n_max'])
-        self.data_params['n_points'] = int(params['n_points'])
-        self.data_params['points_tag'] = params['points_tag']
+        self.data_params['unit_cell_indices'] = np.array(params['unit_cell_indices'].split('[')[1].split(']')[0].split(','), dtype=int)
+        all_labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
+        self.uc_labels = [all_labels[index] for index in self.data_params['unit_cell_indices']]
+
+        self.data_params['n_max_group'] = int(params['n_max_group'])
+        self.data_params['n_peaks'] = int(params['n_peaks'])
+        self.data_params['broadening_tag'] = params['broadening_tag']
         self.data_params['hkl_ref_length'] = int(params['hkl_ref_length'])
-        self.data_params['n_outputs'] = int(params['n_outputs'])
+        self.data_params['unit_cell_length'] = int(params['unit_cell_length'])
         self.data_params['groupspec_file_name'] = params['groupspec_file_name']
         self.data_params['groupspec_sheet'] = params['groupspec_sheet']
-        self._setup_joint()
+        self.reg_params['unit_cell_length'] = self.data_params['unit_cell_length']
 
-    def _setup_joint(self):
-        # This is here because during optimization, not all bravais lattices are used for the
-        # assignment model
-        for bravais_lattice in self.assign_params.keys():
-            for key in self.assign_params[bravais_lattice].keys():
-                self.assign_params[bravais_lattice][key]['n_outputs'] = self.data_params['hkl_ref_length']
-        self.data_params['n_outputs'] = len(self.data_params['y_indices'])
-        self.reg_params['n_outputs'] = self.data_params['n_outputs']
-
-        all_labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
-        self.uc_labels = [all_labels[index] for index in self.data_params['y_indices']]
-
-        group_spec = pd.read_excel(
-            os.path.join(self.data_params['data_dir'], self.data_params['groupspec_file_name']),
-            sheet_name=self.data_params['groupspec_sheet'],
-            )
-        group_spec = group_spec.loc[group_spec['group'].notna()]
-        group_spec['hm symbol'] = group_spec['hm symbol'].str.strip()
-
-        self.data_params['groups'] = group_spec['group'].unique()
-        
-        if self.data_params['lattice_system'] == 'tetragonal':
-            self.data_params['split_groups'] = []
-            for group in self.data_params['groups']:
-                self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_0_'))
-                self.data_params['split_groups'].append(group.replace('tetragonal_', 'tetragonal_1_'))
-        elif self.data_params['lattice_system'] == 'monoclinic':
-            self.data_params['split_groups'] = []
-            for group in self.data_params['groups']:
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_0_'))
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_1_'))
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_2_'))
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_3_'))
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_4_'))
-                self.data_params['split_groups'].append(group.replace('monoclinic_', 'monoclinic_5_'))
-        elif self.data_params['lattice_system'] == 'orthorhombic':
-            self.data_params['split_groups'] = []
-            for group in self.data_params['groups']:
-                self.data_params['split_groups'].append(group.replace('orthorhombic_', 'orthorhombic_0_'))
-                self.data_params['split_groups'].append(group.replace('orthorhombic_', 'orthorhombic_1_'))
-                self.data_params['split_groups'].append(group.replace('orthorhombic_', 'orthorhombic_2_'))
+        if load_bravais_lattice != 'all':
+            self.data_params['bravais_lattices'] = load_bravais_lattice
+            self.hkl_ref = dict.fromkeys([load_bravais_lattice])
+            self.hkl_ref[load_bravais_lattice] = np.load(
+                f'{self.save_to["data"]}/hkl_ref_{load_bravais_lattice}.npy'
+                )
+            split_groups = []
+            for split_group in self.data_params['split_groups']:
+                if split_group.startswith(load_bravais_lattice):
+                    split_groups.append(split_group)
+            self.data_params['split_groups'] = split_groups
         else:
-            self.data_params['split_groups'] = self.data_params['groups']
-        self.group_mappings = dict.fromkeys(group_spec['hm symbol'].unique())
-        for index in range(len(group_spec)):
-            self.group_mappings[group_spec.iloc[index]['hm symbol']] = group_spec.iloc[index]['group']
-        #for key in self.group_mappings.keys():
-        #    print(f'{key} -> {self.group_mappings[key]}')
+            self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
+            for bravais_lattice in self.data_params['bravais_lattices']:
+                self.hkl_ref[bravais_lattice] = np.load(
+                    f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy'
+                    )
+
+    def save(self):
+        reindexed_hkl = np.stack(self.data['reindexed_hkl'])
+        save_to_data = self.data.copy()
+        save_to_data['reindexed_h'] = list(reindexed_hkl[:, :, 0])
+        save_to_data['reindexed_k'] = list(reindexed_hkl[:, :, 1])
+        save_to_data['reindexed_l'] = list(reindexed_hkl[:, :, 2])
+        save_to_data.drop(columns=['reindexed_hkl'], inplace=True)
+        save_to_data.to_parquet(f'{self.save_to["data"]}/data.parquet')
+
+        for bravais_lattice in self.data_params['bravais_lattices']:
+            np.save(
+                f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy',
+                self.hkl_ref[bravais_lattice]
+                )
+        np.save(f'{self.save_to["data"]}/angle_scale.npy', self.angle_scale)
+        joblib.dump(self.uc_scaler, f'{self.save_to["data"]}/uc_scaler.bin')
+        joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
+        joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
+        joblib.dump(self.xnn_scaler, f'{self.save_to["data"]}/xnn_scaler.bin')
+        write_params(self.data_params, f'{self.save_to["data"]}/data_params.csv')
 
     def load_data(self):
         read_columns = [
             'lattice_system',
             'bravais_lattice',
-            'spacegroup_number',
-            'reindexed_volume',
-            'spacegroup_symbol_hm',
+            'train',
+            f'q2_{self.data_params["broadening_tag"]}',
+            f'reindexed_h_{self.data_params["broadening_tag"]}',
+            f'reindexed_k_{self.data_params["broadening_tag"]}',
+            f'reindexed_l_{self.data_params["broadening_tag"]}',
             'reindexed_spacegroup_symbol_hm',
-            'unit_cell',
             'reindexed_unit_cell',
+            'reindexed_volume',
             'reindexed_xnn',
-            f'q2_{self.data_params["points_tag"]}',
-            f'h_{self.data_params["points_tag"]}',
-            f'k_{self.data_params["points_tag"]}',
-            f'l_{self.data_params["points_tag"]}',
-            f'reindexed_h_{self.data_params["points_tag"]}',
-            f'reindexed_k_{self.data_params["points_tag"]}',
-            f'reindexed_l_{self.data_params["points_tag"]}',
-            'permutation',
-            'split'
+            'reciprocal_reindexed_unit_cell',
+            'split',
             ]
 
         if self.data_params['augment']:
             # These are all the non-systematically absent peaks and are used during augmentation
             # to pick new peaks.
-            read_columns += [
-                'q2_sa',
-                'h_sa', 'k_sa', 'l_sa',
-                'reindexed_h_sa', 'reindexed_k_sa', 'reindexed_l_sa',
-                ]
+            read_columns += ['q2_sa', 'reindexed_h_sa', 'reindexed_k_sa', 'reindexed_l_sa']
 
         data = []
         for index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
@@ -342,11 +392,11 @@ class Indexing:
         # A total of 60 or so peaks are included in the data set - for all entries
         # If there were less than 60 peaks, those get padded with zeros at the end of the array.
         #   - the 60 number is arbitrary and set in GenerateDataset.py
-        points = self.data[f'q2_{self.data_params["points_tag"]}']
-        indices = points.apply(len) >= self.data_params['n_points']
+        points = self.data[f'q2_{self.data_params["broadening_tag"]}']
+        indices = points.apply(len) >= self.data_params['n_peaks']
         self.data = self.data.loc[indices]
-        points = self.data[f'q2_{self.data_params["points_tag"]}']
-        enough_peaks = points.apply(np.count_nonzero) >= self.data_params['n_points']
+        points = self.data[f'q2_{self.data_params["broadening_tag"]}']
+        enough_peaks = points.apply(np.count_nonzero) >= self.data_params['n_peaks']
         self.data = self.data.loc[enough_peaks]
         self.data['augmented'] = np.zeros(self.data.shape[0], dtype=bool)
 
@@ -354,20 +404,22 @@ class Indexing:
         self.data['group'] = self.data['reindexed_spacegroup_symbol_hm'].map(
             lambda x: self.group_mappings[x]
             )
-        if self.data_params['lattice_system'] in ['cubic', 'hexagonal', 'rhombohedral', 'triclinic']:
+        if self.data_params['lattice_system'] in ['cubic', 'rhombohedral']:
             self.data['split_group'] = self.data['group']
-        elif self.data_params['lattice_system'] == 'tetragonal':
+        elif self.data_params['lattice_system'] == 'triclinic':
+            self.data['split_group'] = self.data['group']
+        elif self.data_params['lattice_system'] in ['tetragonal', 'hexagonal']:
             # split_0: a < c
             # split_1: a > c
             unit_cell = np.stack(self.data['reindexed_unit_cell'])[:, [0, 2]]
             split_1 = unit_cell[:, 0] > unit_cell[:, 1]
             self.data['split_group'] = self.data['group'].map(
-                lambda x: x.replace('tetragonal_', 'tetragonal_0_')
+                lambda x: x.replace('_', '_0_')
                 )
             self.data.loc[split_1, 'split_group'] = self.data.loc[split_1, 'split_group'].map(
-                lambda x: x.replace('tetragonal_0_', 'tetragonal_1_')
+                lambda x: x.replace('_0_', '_1_')
                 )
-        elif self.data_params['lattice_system'] in ['monoclinic', 'orthorhombic']:
+        elif self.data_params['lattice_system'] == 'monoclinic':
             # Orthorhombic & Monoclinic groups are split into different permutations of abc
             # For Orthorhombic, this is only the case for C-centered. 
             # I, F, & P centered have unit cells ordered as a < b < c
@@ -375,96 +427,84 @@ class Indexing:
             group = list(self.data['group'])
             split = np.array(self.data['split']).astype(int)
             for entry_index in range(len(self.data)):
-                split_group.append(group[entry_index].replace(
-                    f'{self.data_params["lattice_system"]}_',
-                    f'{self.data_params["lattice_system"]}_{split[entry_index]}_')
-                    )
+                split_group.append(group[entry_index].replace(f'_', f'_{split[entry_index]}_'))
             self.data['split_group'] = split_group
             # Spacegroups where a & c have no symmetry elements are reindexed so a < c
             # These groups won't have entries, so this just pulls out the groups with entries.
             self.data_params['split_groups'] = sorted(list(self.data['split_group'].unique()))
-
+        elif self.data_params['lattice_system'] == 'orthorhombic':
+            # Orthorhombic & Monoclinic groups are split into different permutations of abc
+            # For Orthorhombic, this is only the case for C-centered. 
+            # I, F, & P centered have unit cells ordered as a < b < c
+            split_group = []
+            group = list(self.data['group'])
+            split = np.array(self.data['split']).astype(int)
+            for entry_index in range(len(self.data)):
+                split_group.append(group[entry_index].replace(f'_', f'_{split[entry_index]}_'))
+            self.data['split_group'] = split_group
+            # Spacegroups where a & c have no symmetry elements are reindexed so a < c
+            # These groups won't have entries, so this just pulls out the groups with entries.
+            self.data_params['split_groups'] = sorted(list(self.data['split_group'].unique()))
         data_grouped = self.data.groupby('split_group')
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]
         for index, group in enumerate(data_grouped.groups.keys()):
             data_group[index] = data_grouped.get_group(group)
             data_group[index].insert(loc=0, column='split_group_label', value=index * np.ones(len(data_group[index])))
             data_group[index] = data_group[index].sample(
-                n=min(len(data_group[index]), self.data_params['n_max']),
+                n=min(len(data_group[index]), self.data_params['n_max_group']),
                 replace=False,
                 random_state=self.random_seed
                 )
         self.data = pd.concat(data_group, ignore_index=True)
 
-        q2_pd = self.data[f'q2_{self.data_params["points_tag"]}']
-        q2 = [np.zeros(self.data_params['n_points']) for _ in range(self.data.shape[0])]
+        q2_pd = self.data[f'q2_{self.data_params["broadening_tag"]}']
+        q2 = [np.zeros(self.data_params['n_peaks']) for _ in range(self.data.shape[0])]
         for entry_index in range(self.data.shape[0]):
-            q2[entry_index] = q2_pd.iloc[entry_index][:self.data_params['n_points']]
+            q2[entry_index] = q2_pd.iloc[entry_index][:self.data_params['n_peaks']]
         self.data['q2'] = q2
-
-        # This sets up the training / validation tags so that the validation set is taken
-        # evenly from the spacegroup symbols.
-        # This should be updated to reflect that entries with the same spacegroup symbol
-        # could be in different groups
-        train_label = np.ones(self.data.shape[0], dtype=bool)
-        for symbol_index, symbol in enumerate(self.data['reindexed_spacegroup_symbol_hm'].unique()):
-            indices = np.where(self.data['reindexed_spacegroup_symbol_hm'] == symbol)[0]
-            n_val = int(indices.size * (1 - self.data_params['train_fraction']))
-            val_indices = self.rng.choice(indices, size=n_val, replace=False)
-            train_label[val_indices] = False
-        self.data['train'] = train_label
 
         # put the hkl's together
         # I am saving the data into parquet format. It does not allow saving 2D arrays, so like hkl (20 x 3).
         # Converting to hdf5 would be very helpful here.
-        hkl = np.zeros((len(self.data), self.data_params['n_points'], 3), dtype=int)
-        reindexed_hkl = np.zeros((len(self.data), self.data_params['n_points'], 3), dtype=int)
+        reindexed_hkl = np.zeros((len(self.data), self.data_params['n_peaks'], 3), dtype=int)
         if self.data_params['augment']:
-            hkl_sa = np.zeros((len(self.data), self.n_generated_points, 3), dtype=int)
             reindexed_hkl_sa = np.zeros((len(self.data), self.n_generated_points, 3), dtype=int)
+        if self.data_params['lattice_system'] in ['monoclinic', 'triclinic']:
+            reciprocal_reindexed_hkl = np.zeros((len(self.data), self.data_params['n_peaks'], 3), dtype=int)
+            if self.data_params['augment']:
+                reciprocal_reindexed_hkl_sa = np.zeros((len(self.data), self.n_generated_points, 3), dtype=int)
         for entry_index in range(len(self.data)):
             entry = self.data.iloc[entry_index]
-            hkl[entry_index, :, 0] = entry[f'h_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
-            hkl[entry_index, :, 1] = entry[f'k_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
-            hkl[entry_index, :, 2] = entry[f'l_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
-            reindexed_hkl[entry_index, :, 0] = entry[f'reindexed_h_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
-            reindexed_hkl[entry_index, :, 1] = entry[f'reindexed_k_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
-            reindexed_hkl[entry_index, :, 2] = entry[f'reindexed_l_{self.data_params["points_tag"]}'][:self.data_params['n_points']]
+            reindexed_hkl[entry_index, :, 0] = entry[f'reindexed_h_{self.data_params["broadening_tag"]}'][:self.data_params['n_peaks']]
+            reindexed_hkl[entry_index, :, 1] = entry[f'reindexed_k_{self.data_params["broadening_tag"]}'][:self.data_params['n_peaks']]
+            reindexed_hkl[entry_index, :, 2] = entry[f'reindexed_l_{self.data_params["broadening_tag"]}'][:self.data_params['n_peaks']]
             if self.data_params['augment']:
-                n_peaks_sa = entry[f'h_sa'].size
-                hkl_sa[entry_index, :n_peaks_sa, 0] = entry['h_sa']
-                hkl_sa[entry_index, :n_peaks_sa, 1] = entry['k_sa']
-                hkl_sa[entry_index, :n_peaks_sa, 2] = entry['l_sa']
+                n_peaks_sa = entry[f'reindexed_h_sa'].size
                 reindexed_hkl_sa[entry_index, :n_peaks_sa, 0] = entry['reindexed_h_sa']
                 reindexed_hkl_sa[entry_index, :n_peaks_sa, 1] = entry['reindexed_k_sa']
                 reindexed_hkl_sa[entry_index, :n_peaks_sa, 2] = entry['reindexed_l_sa']
-        self.data['hkl'] = list(hkl)
         self.data['reindexed_hkl'] = list(reindexed_hkl)
         if self.data_params['augment']:
-            self.data['hkl_sa'] = list(hkl_sa)
             self.data['reindexed_hkl_sa'] = list(reindexed_hkl_sa)
+
         drop_columns = [
-            f'h_{self.data_params["points_tag"]}',
-            f'k_{self.data_params["points_tag"]}',
-            f'l_{self.data_params["points_tag"]}',
-            f'reindexed_h_{self.data_params["points_tag"]}',
-            f'reindexed_k_{self.data_params["points_tag"]}',
-            f'reindexed_l_{self.data_params["points_tag"]}',
+            f'reindexed_h_{self.data_params["broadening_tag"]}',
+            f'reindexed_k_{self.data_params["broadening_tag"]}',
+            f'reindexed_l_{self.data_params["broadening_tag"]}',
             ]
         if self.data_params['augment']:
             drop_columns += [
-                'h_sa', 'k_sa', 'l_sa',
                 'reindexed_h_sa', 'reindexed_k_sa', 'reindexed_l_sa',
                 ]
+
         self.data.drop(columns=drop_columns, inplace=True)
         self.setup_scalers()
 
         if self.data_params['augment']:
             self.augment_data()
             drop_columns = [
-                f'q2_{self.data_params["points_tag"]}',
+                f'q2_{self.data_params["broadening_tag"]}',
                 'q2_sa',
-                'hkl_sa',
                 'reindexed_hkl_sa',
                 ]
             self.data.drop(columns=drop_columns, inplace=True)
@@ -477,26 +517,7 @@ class Indexing:
         self.save()
 
     def load_data_from_tag(self, load_augmented, load_train, load_bravais_lattice='all'):
-        self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
-        for bravais_lattice in self.data_params['bravais_lattices']:
-            self.hkl_ref[bravais_lattice] = np.load(
-                f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy'
-                )
-        if os.path.exists(f'{self.save_to["data"]}/miller_index_templates.npy'):
-            self.miller_index_templates = np.load(f'{self.save_to["data"]}/miller_index_templates.npy')
         self.data = pd.read_parquet(f'{self.save_to["data"]}/data.parquet')
-        if 'h' in self.data.keys():
-            hkl = np.stack([
-                np.stack(self.data['h'], axis=0),
-                np.stack(self.data['k'], axis=0),
-                np.stack(self.data['l'], axis=0),
-                ], axis=2
-                )
-            self.data['hkl'] = list(hkl)
-            self.data.drop(
-                columns=['h', 'k', 'l'],
-                inplace=True
-                )
         if 'reindexed_h' in self.data.keys():
             reindexed_hkl = np.stack([
                 np.stack(self.data['reindexed_h'], axis=0),
@@ -513,6 +534,7 @@ class Indexing:
             self.data = self.data[~self.data['augmented']]
         if not load_train:
             self.data = self.data[~self.data['train']]
+
         if load_bravais_lattice != 'all':
             # This should be used during optimization when only one bravais lattice is
             # considered at a time
@@ -521,36 +543,12 @@ class Indexing:
 
         self.data_params['split_groups'] = sorted(list(self.data['split_group'].unique()))
 
-    def save(self):
-        hkl = np.stack(self.data['hkl'])
-        reindexed_hkl = np.stack(self.data['reindexed_hkl'])
-        save_to_data = self.data.copy()
-        save_to_data['h'] = list(hkl[:, :, 0])
-        save_to_data['k'] = list(hkl[:, :, 1])
-        save_to_data['l'] = list(hkl[:, :, 2])
-        save_to_data['reindexed_h'] = list(reindexed_hkl[:, :, 0])
-        save_to_data['reindexed_k'] = list(reindexed_hkl[:, :, 1])
-        save_to_data['reindexed_l'] = list(reindexed_hkl[:, :, 2])
-        save_to_data.drop(columns=['hkl', 'reindexed_hkl'], inplace=True)
-        save_to_data.to_parquet(f'{self.save_to["data"]}/data.parquet')
-
-        for bravais_lattice in self.data_params['bravais_lattices']:
-            np.save(
-                f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy',
-                self.hkl_ref[bravais_lattice]
-                )
-        joblib.dump(self.uc_scaler, f'{self.save_to["data"]}/uc_scaler.bin')
-        joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
-        joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
-        joblib.dump(self.xnn_scaler, f'{self.save_to["data"]}/xnn_scaler.bin')
-        write_params(self.data_params, f'{self.save_to["data"]}/data_params.csv')
-
     def setup_hkl(self):
         print('Setting up the hkl labels')
         indices = np.logical_and(self.data['train'], ~self.data['augmented'])
         self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
         hkl_labels = (self.data_params['hkl_ref_length'] - 1) * np.ones((
-            len(self.data), self.data_params['n_points']),
+            len(self.data), self.data_params['n_peaks']),
             dtype=int
             )
         for bravais_lattice in self.data_params['bravais_lattices']:
@@ -566,7 +564,7 @@ class Indexing:
                 )
             bl_train_data = bl_data[indices]
 
-            unit_cell = np.stack(bl_train_data['reindexed_unit_cell'])[:, self.data_params['y_indices']]
+            unit_cell = np.stack(bl_train_data['reindexed_unit_cell'])[:, self.data_params['unit_cell_indices']]
             q2_ref_calculator = Q2Calculator(
                 self.data_params['lattice_system'],
                 self.hkl_ref[bravais_lattice],
@@ -601,14 +599,14 @@ class Indexing:
             check_data = get_hkl_matrix(np.stack(bl_data['reindexed_hkl']), self.data_params['lattice_system'])
 
             hkl_labels_bl = (self.data_params['hkl_ref_length'] - 1) * np.ones((
-                len(bl_data), self.data_params['n_points']),
+                len(bl_data), self.data_params['n_peaks']),
                 dtype=int
                 )
 
             n_missing = 0
             for entry_index in tqdm(range(len(bl_data))):
                 missing = False
-                for point_index in range(self.data_params['n_points']):
+                for point_index in range(self.data_params['n_peaks']):
                     hkl_ref_index = np.argwhere(np.all(
                         check_ref[:, :] == check_data[entry_index, point_index, :],
                         axis=1
@@ -630,10 +628,14 @@ class Indexing:
             aug_params=self.aug_params,
             data_params=self.data_params,
             min_unit_cell_scaled=self.min_unit_cell_scaled,
+            max_unit_cell_scaled=self.max_unit_cell_scaled,
             n_generated_points=self.n_generated_points,
             save_to=self.save_to['augmentor'],
             seed=self.random_seed,
             uc_scaler=self.uc_scaler,
+            angle_scale=self.angle_scale,
+            xnn_scaler=self.xnn_scaler,
+            q2_scaler=self.q2_scaler,
             )
         self.augmentor.setup(self.data)
         data_augmented = [None for _ in range(len(self.data_params['split_groups']))]
@@ -647,31 +649,6 @@ class Indexing:
         data_augmented = pd.concat(data_augmented, ignore_index=True)
         self.data = pd.concat((self.data, data_augmented), ignore_index=True)
         print('Finished Augmenting')
-
-    def infer_unit_cell_volume_from_predictions(self, unit_cell):
-        if self.data_params['lattice_system'] == 'cubic':
-            volume = unit_cell**3
-        elif self.data_params['lattice_system'] == 'tetragonal':
-            volume = unit_cell[:, 0]**2 * unit_cell[:, 1]
-        elif self.data_params['lattice_system'] == 'orthorhombic':
-            volume = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
-        elif self.data_params['lattice_system'] == 'hexagonal':
-            volume = unit_cell[:, 0]**2 * unit_cell[:, 1] * np.sin(np.pi/3)
-        elif self.data_params['lattice_system'] == 'rhombohedral':
-            calpha = np.cos(unit_cell[:, 1])
-            volume = unit_cell[:, 0]**3 * np.sqrt(1 - 3*calpha**2 + 2*calpha**3)
-        elif self.data_params['lattice_system'] == 'monoclinic':
-            volume = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2] * np.sin(unit_cell[:, 3])
-        elif self.data_params['lattice_system'] == 'triclinic':
-            a = unit_cell[:, 0]
-            b = unit_cell[:, 1]
-            c = unit_cell[:, 2]
-            calpha = np.cos(unit_cell[:, 3])
-            cbeta = np.cos(unit_cell[:, 4])
-            cgamma = np.cos(unit_cell[:, 5])
-            arg = 1 - calpha**2 - cbeta**2 - cgamma**2 + 2*calpha*cbeta*cgamma
-            volume = (a*b*c) * np.sqrt(arg)
-        return volume
 
     def q2_scale(self, q2):
         return self.q2_scaler.transform(q2.ravel()[:, np.newaxis]).reshape(q2.shape)
@@ -694,13 +671,13 @@ class Indexing:
     def y_scale(self, y):
         y_scaled = np.zeros(y.shape)
         y_scaled[:3] = self.uc_scaler.transform(y[:3][:, np.newaxis])[:, 0]
-        y_scaled[3:] = np.cos(y[3:])
+        y_scaled[3:] = (y[3:] - np.pi/2) / self.angle_scale
         return y_scaled
 
     def y_revert(self, y):
         y_reverted = np.zeros(y.shape)
         y_reverted[:3] = self.uc_scaler.inverse_transform(y[:3][:, np.newaxis])[:, 0]
-        y_reverted[3:] = np.arccos(y[3:])
+        y_reverted[3:] = self.angle_scale * y[3:] + np.pi/2
         return y_reverted
 
     def setup_scalers(self):
@@ -717,11 +694,33 @@ class Indexing:
         # lengths
         self.uc_scaler = StandardScaler()
         self.uc_scaler.fit(uc_train[:, :3].ravel()[:, np.newaxis])
-
+        # angles
+        if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
+            self.angle_scale = 1
+        else:
+            if self.data_params['lattice_system'] == 'monoclinic':
+                angles = uc_train[:, 4]
+            elif self.data_params['lattice_system'] == 'triclinic':
+                angles = uc_train[:, 3:].ravel()
+            elif self.data_params['lattice_system'] == 'rhombohedral':
+                angles = uc_train[:, 3]
+            self.angle_scale = angles[angles != np.pi/2].std()
         self.data['reindexed_unit_cell_scaled'] = self.data['reindexed_unit_cell'].apply(self.y_scale)
-        self.data['unit_cell_scaled'] = self.data['unit_cell'].apply(self.y_scale)
-        # this hard codes the minimum allowed unit cell in augmented data to 1 A
-        self.min_unit_cell_scaled = (1 - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+
+        # This hard codes the minimum allowed unit cell in augmented data to 2.25 A
+        # The smallest unit cell found in the unique csd entries is 2.45A. 2.25A is about 90%.
+        # This minimum is primarily used for augmentation. Because the augmented unit cells
+        # are randomly generated, the smallest augmented unit cell will be very close to
+        # this value.
+        # This is important for performing regression in Xnn coordinates.
+        # Setting this to a minimum of 1A for example will have a maximum Xnn of 1 1/A^2.
+        # For monoclinic this led to a maximum scaled Xnn of 115 which gave an unreasonably
+        # large training loss.
+
+        # The maximum unit cell in the unique csd entries is 225A. The maximum unit cell
+        # is set to 250.
+        self.min_unit_cell_scaled = (2.25 - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
+        self.max_unit_cell_scaled = (250 - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
 
         # xnn scaling
         self.xnn_scaler = StandardScaler()
@@ -738,17 +737,17 @@ class Indexing:
         self.data['reindexed_volume_scaled'] = list(self.volume_scale(np.array(self.data['reindexed_volume'])))
 
     def plot_input(self):
-        def make_hkl_plot(data, n_points, hkl_ref_length, save_to):
-            fig, axes = plt.subplots(n_points, 1, figsize=(6, 10), sharex=True)
-            hkl_labels = np.stack(data['hkl_labels'])  # n_data x n_points
+        def make_hkl_plot(data, n_peaks, hkl_ref_length, save_to):
+            fig, axes = plt.subplots(n_peaks, 1, figsize=(6, 10), sharex=True)
+            hkl_labels = np.stack(data['hkl_labels'])  # n_data x n_peaks
             bins = np.arange(0, hkl_ref_length + 1) - 0.5
             centers = (bins[1:] + bins[:-1]) / 2
             width = bins[1] - bins[0]
-            for index in range(n_points):
+            for index in range(n_peaks):
                 hist, _ = np.histogram(hkl_labels[:, index], bins=bins, density=True)
                 axes[index].bar(centers, hist, width=width)
                 axes[index].set_ylabel(f'Peak {index}')
-            axes[n_points - 1].set_xlabel('HKL label')
+            axes[n_peaks - 1].set_xlabel('HKL label')
             fig.tight_layout()
             fig.savefig(save_to)
             plt.close()
@@ -802,7 +801,7 @@ class Indexing:
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             make_hkl_plot(
                 data=unaugmented_data[unaugmented_data['bravais_lattice'] == bravais_lattice],
-                n_points=self.data_params['n_points'],
+                n_peaks=self.data_params['n_peaks'],
                 hkl_ref_length=self.data_params['hkl_ref_length'],
                 save_to=f'{self.save_to["data"]}/hkl_labels_unaugmented_{bravais_lattice}.png',
                 )
@@ -811,7 +810,7 @@ class Indexing:
                 if len(bl_augmented_data) > 0:
                     make_hkl_plot(
                         data=bl_augmented_data,
-                        n_points=self.data_params['n_points'],
+                        n_peaks=self.data_params['n_peaks'],
                         hkl_ref_length=self.data_params['hkl_ref_length'],
                         save_to=f'{self.save_to["data"]}/hkl_labels_augmented_{bravais_lattice}.png',
                         )
@@ -1020,8 +1019,8 @@ class Indexing:
         # Covariance
         if self.data_params['lattice_system'] != 'cubic':
             fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-            unit_cell_cov = np.cov(unit_cell[:, self.data_params['y_indices']].T)
-            unit_cell_scaled_cov = np.cov(unit_cell_scaled[:, self.data_params['y_indices']].T)
+            unit_cell_cov = np.cov(unit_cell[:, self.data_params['unit_cell_indices']].T)
+            unit_cell_scaled_cov = np.cov(unit_cell_scaled[:, self.data_params['unit_cell_indices']].T)
             cov_display = ConfusionMatrixDisplay(
                 confusion_matrix=unit_cell_cov,
                 display_labels=self.uc_labels,
@@ -1043,15 +1042,21 @@ class Indexing:
             plt.close()
 
         # what is the order of the unit cell lengths
-        if self.data_params['lattice_system'] in ['orthorhombic', 'monoclinic', 'triclinic']:
+        if self.data_params['lattice_system'] in ['orthorhombic', 'monoclinic', 'triclinic', 'hexagonal', 'tetragonal']:
             for split_group in self.data_params['split_groups']:
                 data = self.data.loc[self.data['split_group'] == split_group]
-                unit_cell = np.stack(data.loc[~data['augmented']]['reindexed_unit_cell'])
+                if self.data_params['lattice_system'] in ['monoclinic', 'triclinic']:
+                    unit_cell = np.stack(data.loc[~data['augmented']]['reciprocal_reindexed_unit_cell'])
+                else:
+                    unit_cell = np.stack(data.loc[~data['augmented']]['reindexed_unit_cell'])
                 order = np.argsort(unit_cell[:, :3], axis=1)
                 # order: [[shortest index, middle index, longest index], ... ]
                 proportions = np.zeros((3, 3))
                 if self.data_params['augment']:
-                    unit_cell_aug = np.stack(data.loc[data['augmented']]['reindexed_unit_cell'])
+                    if self.data_params['lattice_system'] in ['monoclinic', 'triclinic']:
+                        unit_cell_aug = np.stack(data.loc[data['augmented']]['reciprocal_reindexed_unit_cell'])
+                    else:
+                        unit_cell_aug = np.stack(data.loc[data['augmented']]['reindexed_unit_cell'])
                     order_aug = np.argsort(unit_cell_aug[:, :3], axis=1)
                     proportions_aug = np.zeros((3, 3))
                 for length_index in range(3):
@@ -1079,6 +1084,23 @@ class Indexing:
                 fig.tight_layout()
                 fig.savefig(f'{self.save_to["data"]}/axis_order_{split_group}.png')
                 plt.close()
+
+    def setup_random(self):
+        self.random_unit_cell_generator = dict.fromkeys(self.data_params['bravais_lattices'])
+        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
+            self.random_unit_cell_generator[bravais_lattice] = RandomGenerator(
+                bravais_lattice=bravais_lattice,
+                data_params=self.data_params,
+                model_params=self.random_params[bravais_lattice],
+                save_to=self.save_to['random'],
+                )
+            if self.random_params[bravais_lattice]['load_from_tag']:
+                self.random_unit_cell_generator[bravais_lattice].load_from_tag()
+            else:
+                bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
+                bl_data = bl_data[~bl_data['augmented']]
+                self.random_unit_cell_generator[bravais_lattice].setup()
+                self.random_unit_cell_generator[bravais_lattice].train(bl_data)
 
     def setup_miller_index_templates(self):
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
@@ -1122,11 +1144,13 @@ class Indexing:
     def setup_regression(self):
         self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
-            self.unit_cell_generator[split_group] = Regression_AlphaBeta(
+            self.unit_cell_generator[split_group] = Regression(
                 split_group,
                 self.data_params,
                 self.reg_params[split_group],
                 self.save_to['regression'],
+                self.uc_scaler,
+                self.angle_scale,
                 self.random_seed,
                 )
             self.unit_cell_generator[split_group].setup()
@@ -1137,270 +1161,215 @@ class Indexing:
                 self.unit_cell_generator[split_group].train_regression(data=self.data[split_group_indices])
 
     def inferences_regression(self):
-        reindexed_uc_pred_scaled = np.zeros((len(self.data), self.data_params['n_outputs']))
-        reindexed_uc_pred_scaled_var = np.zeros((len(self.data), self.data_params['n_outputs']))
+        reindexed_uc_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))
+        reindexed_uc_pred_var = np.zeros((len(self.data), self.data_params['unit_cell_length']))
 
-        reindexed_uc_pred_scaled_trees = np.zeros((len(self.data), self.data_params['n_outputs']))
-        reindexed_uc_pred_scaled_var_trees = np.zeros((len(self.data), self.data_params['n_outputs']))
+        reindexed_uc_pred_trees = np.zeros((len(self.data), self.data_params['unit_cell_length']))
+        reindexed_uc_pred_var_trees = np.zeros((len(self.data), self.data_params['unit_cell_length']))
 
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             split_group_indices = self.data['split_group'] == split_group
-            reindexed_uc_pred_scaled[split_group_indices, :], reindexed_uc_pred_scaled_var[split_group_indices, :] = \
-                self.unit_cell_generator[split_group].do_predictions(data=self.data[split_group_indices], batch_size=1024)
-            reindexed_uc_pred_scaled_trees[split_group_indices, :], reindexed_uc_pred_scaled_var_trees[split_group_indices, :], _ = \
-                self.unit_cell_generator[split_group].do_predictions_trees(data=self.data[split_group_indices])
+            reindexed_uc_pred[split_group_indices, :], reindexed_uc_pred_var[split_group_indices, :] = \
+                self.unit_cell_generator[split_group].predict(data=self.data[split_group_indices], batch_size=1024, model='nn')
+            reindexed_uc_pred_trees[split_group_indices, :], reindexed_uc_pred_var_trees[split_group_indices, :], _ = \
+                self.unit_cell_generator[split_group].predict(data=self.data[split_group_indices], model='trees')
 
-        reindexed_uc_pred, reindexed_uc_pred_var = self.revert_predictions(
-            reindexed_uc_pred_scaled, reindexed_uc_pred_scaled_var
+        reindexed_unit_cell_volume = get_unit_cell_volume(
+            reindexed_uc_pred, partial_unit_cell=True, lattice_system=self.data_params['lattice_system']
             )
-        self.data['reindexed_volume_pred'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred))
+        self.data['reindexed_volume_pred'] = list(reindexed_unit_cell_volume)
         self.data['reindexed_unit_cell_pred'] = list(reindexed_uc_pred)
         self.data['reindexed_unit_cell_pred_var'] = list(reindexed_uc_pred_var)
-        self.data['reindexed_unit_cell_pred_scaled'] = list(reindexed_uc_pred_scaled)
-        self.data['reindexed_unit_cell_pred_scaled_var'] = list(reindexed_uc_pred_scaled_var)
 
-        reindexed_uc_pred_trees, reindexed_uc_pred_var_trees = self.revert_predictions(
-            reindexed_uc_pred_scaled_trees, reindexed_uc_pred_scaled_var_trees
+        reindexed_unit_cell_volume_trees = get_unit_cell_volume(
+            reindexed_uc_pred_trees, partial_unit_cell=True, lattice_system=self.data_params['lattice_system']
             )
-        self.data['reindexed_volume_pred_trees'] = list(self.infer_unit_cell_volume_from_predictions(reindexed_uc_pred_trees))
+        self.data['reindexed_volume_pred_trees'] = list(reindexed_unit_cell_volume_trees)
         self.data['reindexed_unit_cell_pred_trees'] = list(reindexed_uc_pred_trees)
         self.data['reindexed_unit_cell_pred_var_trees'] = list(reindexed_uc_pred_var_trees)
-        self.data['reindexed_unit_cell_pred_scaled_trees'] = list(reindexed_uc_pred_scaled_trees)
-        self.data['reindexed_unit_cell_pred_scaled_var_trees'] = list(reindexed_uc_pred_scaled_var_trees)
 
     def setup_pitf(self):
-        self.pitf_generator = dict.fromkeys(self.data_params['bravais_lattices'])
-        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
-            self.pitf_generator[bravais_lattice] = PhysicsInformedModel(
-                bravais_lattice,
+        self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
+        print(self.data_params['split_groups'])
+        for split_group_index, split_group in enumerate(self.data_params['split_groups']):
+            bravais_lattice = split_group[:2]
+            self.pitf_generator[split_group] = PhysicsInformedModel(
+                split_group,
                 self.data_params,
-                self.pitf_params[bravais_lattice],
+                self.pitf_params[split_group],
                 self.save_to['pitf'],
                 self.random_seed,
                 self.q2_scaler,
                 self.xnn_scaler,
                 self.hkl_ref[bravais_lattice]
                 )
-            self.pitf_generator[bravais_lattice].setup()
-            if self.pitf_params[bravais_lattice]['load_from_tag']:
-                self.pitf_generator[bravais_lattice].load_from_tag()
+            self.pitf_generator[split_group].setup()
+            if self.pitf_params[split_group]['load_from_tag']:
+                self.pitf_generator[split_group].load_from_tag()
             else:
-                bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
-                self.pitf_generator[bravais_lattice].train(data=bl_data[~bl_data['augmented']])
+                split_group_data = self.data[self.data['split_group'] == split_group]
+                self.pitf_generator[split_group].train(data=split_group_data)
 
     def inferences_pitf(self):
-        reindexed_xnn_pred = np.zeros((len(self.data), self.data_params['n_outputs']))
-        reindexed_xnn_pred_var = np.zeros((len(self.data), self.data_params['n_outputs']))
+        reindexed_xnn_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))
+        reindexed_xnn_pred_var = np.zeros((len(self.data), self.data_params['unit_cell_length']))
+        hkl_softmax_pred = np.zeros((len(self.data), self.data_params['n_peaks'], self.data_params['hkl_ref_length']))
 
-        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
-            bl_indices = self.data['bravais_lattice'] == bravais_lattice
-            reindexed_xnn_pred[bl_indices, :], reindexed_xnn_pred_var[bl_indices, :], _ = \
-                self.pitf_generator[bravais_lattice].do_predictions(data=self.data[bl_indices], batch_size=1024)
+        for split_group_index, split_group in enumerate(self.data_params['split_groups']):
+            bravais_lattice = split_group[:2]
+            split_group_data = self.data[self.data['split_group'] == split_group]
+            unaugmented_split_group_data = split_group_data[~split_group_data['augmented']].copy()
 
-        self.data['reindexed_xnn_pred_pitf'] = list(reindexed_xnn_pred)
-        self.data['reindexed_xnn_pred_pitf_var'] = list(reindexed_xnn_pred_var)
-        self.data['reindexed_unit_cell_pred_pitf'] = list(get_unit_cell_from_xnn(
-            reindexed_xnn_pred,
-            partial_unit_cell=True, 
-            lattice_system=self.data_params['lattice_system'],
-            ))
+            reindexed_xnn_pred, reindexed_xnn_pred_var, hkl_softmax_pred = \
+                self.pitf_generator[split_group].predict(data=unaugmented_split_group_data, batch_size=1024)
 
-    def evaluate_pitf(self):
-        for bravais_lattice in self.data_params['bravais_lattices']:
+            hkl_pred = self.convert_softmax_to_assignments(
+                hkl_softmax_pred, self.hkl_ref[bravais_lattice]
+                )
+            hkl_assign = hkl_softmax_pred.argmax(axis=2)
+            unaugmented_split_group_data['hkl_labels_pred'] = list(hkl_assign)
+            unaugmented_split_group_data['hkl_pred'] = list(hkl_pred)
+            unaugmented_split_group_data['hkl_softmaxes'] = list(hkl_softmax_pred)
+            unaugmented_split_group_data['reindexed_xnn_pred_pitf'] = list(reindexed_xnn_pred)
+            unaugmented_split_group_data['reindexed_xnn_pred_pitf_var'] = list(reindexed_xnn_pred_var)
+
+            unaugmented_split_group_data['reindexed_unit_cell_pred_pitf'] = list(get_unit_cell_from_xnn(
+                reindexed_xnn_pred,
+                partial_unit_cell=True, 
+                lattice_system=self.data_params['lattice_system'],
+                ))
+
             evaluate_regression_pitf(
-                data=self.data[self.data['bravais_lattice'] == bravais_lattice],
-                n_outputs=self.data_params['n_outputs'],
-                save_to_name=f'{self.save_to["pitf"]}/{bravais_lattice}_reg_pitf.png',
-                y_indices=self.data_params['y_indices'],
+                data=unaugmented_split_group_data,
+                unit_cell_length=self.data_params['unit_cell_length'],
+                save_to_name=f'{self.save_to["pitf"]}/{split_group}_reg_pitf.png',
+                unit_cell_indices=self.data_params['unit_cell_indices'],
+                )
+            calibrate_regression_pitf(
+                data=unaugmented_split_group_data,
+                unit_cell_length=self.data_params['unit_cell_length'],
+                unit_cell_key='reindexed_unit_cell',
+                save_to_name=f'{self.save_to["pitf"]}/{split_group}_reg_calibration_pitf.png',
+                unit_cell_indices=self.data_params['unit_cell_indices']
+                )
+            self.pitf_generator[split_group].evaluate_indexing(
+                unaugmented_split_group_data,
+                xnn_key='reindexed_xnn',
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 )
 
-    def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_var=None):
-        if not uc_pred_scaled is None:
-            uc_pred = np.zeros(uc_pred_scaled.shape)
-            if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-                uc_pred = uc_pred_scaled * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            elif self.data_params['lattice_system'] == 'monoclinic':
-                uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 3] = np.arccos(uc_pred_scaled[:, 3])
-            elif self.data_params['lattice_system'] == 'triclinic':
-                uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 3:] = np.arccos(uc_pred_scaled[:, 3:])
-            elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred[:, 0] = uc_pred_scaled[:, 0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-                uc_pred[:, 1] = np.arccos(uc_pred_scaled[:, 1])
-
-        if not uc_pred_scaled_var is None:
-            assert not uc_pred_scaled is None
-            uc_pred_var = np.zeros(uc_pred_scaled_var.shape)
-            if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-                uc_pred_var = uc_pred_scaled_var * self.uc_scaler.scale_[0]**2
-            elif self.data_params['lattice_system'] == 'monoclinic':
-                uc_pred_var[:, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
-                uc_pred_var[:, 3] = uc_pred_scaled_var[:, 3] / (1 - uc_pred_scaled[:, 3]**2)
-            elif self.data_params['lattice_system'] == 'triclinic':
-                uc_pred_var[:, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
-                uc_pred_var[:, 3:] = uc_pred_scaled_var[:, 3:] / (1 - uc_pred_scaled[:, 3:]**2)
-            elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred_var[:, 0] = uc_pred_scaled_var[:, 0] * self.uc_scaler.scale_[0]**2
-                uc_pred_var[:, 1] = uc_pred_scaled_var[:, 1] / (1 - uc_pred_scaled[:, 1]**2)
-
-        if not uc_pred_scaled is None and not uc_pred_scaled_var is None:
-            return uc_pred, uc_pred_var
-        elif not uc_pred_scaled is None and uc_pred_scaled_var is None:
-            return uc_pred
-        elif uc_pred_scaled is None and not uc_pred_scaled_var is None:
-            return uc_pred_var
-
-    def scale_predictions(self, uc_pred=None, uc_pred_var=None):
-        if not uc_pred is None:
-            if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-                uc_pred_scaled = (uc_pred - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            elif self.data_params['lattice_system'] == 'monoclinic':
-                uc_pred_scaled = np.zeros(uc_pred.shape)
-                uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-                uc_pred_scaled[:, 3] = np.cos(uc_pred[:, 3])
-            elif self.data_params['lattice_system'] == 'triclinic':
-                uc_pred_scaled = np.zeros(uc_pred.shape)
-                uc_pred_scaled[:, :3] = (uc_pred[:, :3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-                uc_pred_scaled[:, 3:] = np.cos(uc_pred[:, 3:])
-            elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred_scaled = np.zeros(uc_pred.shape)
-                uc_pred_scaled[:, 0] = (uc_pred[:, 0] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-                uc_pred_scaled[:, 1] = np.cos(uc_pred[:, 1])
-        if not uc_pred_var is None:
-            uc_pred_scaled_var = np.zeros(uc_pred_var.shape)
-            if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-                uc_pred_scaled_var = uc_pred_var / self.uc_scaler.scale_[0]**2
-            elif self.data_params['lattice_system'] == 'monoclinic':
-                uc_pred_scaled_var[:, :3] = uc_pred_var[:, :3] / self.uc_scaler.scale_[0]**2
-                uc_pred_scaled_var[:, 3] = uc_pred_var[:, 3] * np.sin(uc_pred[:, 3])**2
-            elif self.data_params['lattice_system'] == 'triclinic':
-                uc_pred_scaled_var[:, :3] = uc_pred_var[:, :3] / self.uc_scaler.scale_[0]**2
-                uc_pred_scaled_var[:, 3] = uc_pred_var[:, 3:] * np.sin(uc_pred[:, 3:])**2
-            elif self.data_params['lattice_system'] == 'rhombohedral':
-                uc_pred_scaled_var[:, 0] = uc_pred_var[:, 0] / self.uc_scaler.scale_[0]**2
-                uc_pred_scaled_var[:, 1] = uc_pred_var[:, 1] * np.sin(uc_pred[:, 1])**2
-
-        if not uc_pred is None and not uc_pred_var is None:
-            return uc_pred_scaled, uc_pred_scaled_var
-        elif not uc_pred is None and uc_pred_var is None:
-            return uc_pred_scaled
-        elif uc_pred is None and not uc_pred_var is None:
-            return uc_pred_scaled_var
+            self.pitf_generator[split_group].calibrate_indexing(unaugmented_split_group_data)
 
     def evaluate_regression(self):
         for bravais_lattice in self.data_params['bravais_lattices']:
             evaluate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
             evaluate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_tree.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
             calibrate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
             calibrate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration_tree.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
         for split_group in self.data_params['split_groups']:
             evaluate_regression(
                 data=self.data[self.data['split_group'] == split_group],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
             evaluate_regression(
                 data=self.data[self.data['split_group'] == split_group],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_tree.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
             calibrate_regression(
                 data=self.data[self.data['split_group'] == split_group],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
             calibrate_regression(
                 data=self.data[self.data['split_group'] == split_group],
-                n_outputs=self.data_params['n_outputs'],
+                unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration_tree.png',
-                y_indices=self.data_params['y_indices'],
+                unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
         evaluate_regression(
             data=self.data,
-            n_outputs=self.data_params['n_outputs'],
+            unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg.png',
-            y_indices=self.data_params['y_indices'],
+            unit_cell_indices=self.data_params['unit_cell_indices'],
             model='nn'
             )
         calibrate_regression(
             data=self.data,
-            n_outputs=self.data_params['n_outputs'],
+            unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg_calibration.png',
-            y_indices=self.data_params['y_indices'],
+            unit_cell_indices=self.data_params['unit_cell_indices'],
             model='nn'
             )
         evaluate_regression(
             data=self.data,
-            n_outputs=self.data_params['n_outputs'],
+            unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg_trees.png',
-            y_indices=self.data_params['y_indices'],
+            unit_cell_indices=self.data_params['unit_cell_indices'],
             model='trees'
             )
         calibrate_regression(
             data=self.data,
-            n_outputs=self.data_params['n_outputs'],
+            unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
             save_to_name=f'{self.save_to["regression"]}/All_reg_calibration_trees.png',
-            y_indices=self.data_params['y_indices'],
+            unit_cell_indices=self.data_params['unit_cell_indices'],
             model='trees'
             )
 
     def setup_assignment(self):
-        # Assignments use the xnn unit cell representation.
-        # This should be updated in the ParseDatabases.py file then these lines can be deleted
-        # once the datasets are regenerated.
-        reindexed_unit_cell = np.stack(self.data['reindexed_unit_cell'])
-        reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-            reindexed_unit_cell, partial_unit_cell=False,
-            )
-        reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-            reindexed_reciprocal_unit_cell, partial_unit_cell=False
-            )
-        self.data['reindexed_xnn'] = list(reindexed_xnn)
+        # This is here because during optimization, not all bravais lattices are used for the
+        # assignment model
+        for bravais_lattice in self.assign_params.keys():
+            for key in self.assign_params[bravais_lattice].keys():
+                self.assign_params[bravais_lattice][key]['unit_cell_length'] = self.data_params['hkl_ref_length']
+
         self.assigner = dict.fromkeys(self.data_params['bravais_lattices'])
+        augmented_entries = self.data[self.data['augmented']]
+
         for bravais_lattice in self.data_params['bravais_lattices']:
             self.assigner[bravais_lattice] = dict.fromkeys(self.assign_params[bravais_lattice].keys())
             bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
@@ -1419,9 +1388,9 @@ class Indexing:
                         )
                 else:
                     self.assigner[bravais_lattice][key].fit_model(
-                        data=bl_data[~bl_data['augmented']],
+                        data=bl_data,
                         xnn_key='reindexed_xnn',
-                        y_indices=self.data_params['y_indices'],
+                        unit_cell_indices=self.data_params['unit_cell_indices'],
                         )
 
     def inferences_assignment(self, keys):
@@ -1432,7 +1401,7 @@ class Indexing:
                 softmaxes = self.assigner[bravais_lattice][key].do_predictions(
                     unaugmented_bl_data,
                     xnn_key='reindexed_xnn',
-                    y_indices=self.data_params['y_indices'],
+                    unit_cell_indices=self.data_params['unit_cell_indices'],
                     reload_model=False,
                     batch_size=1024,
                     )
@@ -1448,7 +1417,7 @@ class Indexing:
                     unaugmented_bl_data,
                     bravais_lattice,
                     xnn_key='reindexed_xnn',
-                    y_indices=self.data_params['y_indices'],
+                    unit_cell_indices=self.data_params['unit_cell_indices'],
                     perturb_std=self.assign_params[bravais_lattice][key]['perturb_std']
                     )
 
@@ -1457,7 +1426,7 @@ class Indexing:
     def convert_softmax_to_assignments(self, softmaxes, hkl_ref):
         n_entries = softmaxes.shape[0]
         hkl_assign = softmaxes.argmax(axis=2)
-        hkl_pred = np.zeros((n_entries, self.data_params['n_points'], 3))
+        hkl_pred = np.zeros((n_entries, self.data_params['n_peaks'], 3))
         for entry_index in range(n_entries):
             hkl_pred[entry_index] = hkl_ref[hkl_assign[entry_index]]
         return hkl_pred

@@ -1,7 +1,6 @@
 import copy
 import gc
 import joblib
-from keras_self_attention import SeqSelfAttention
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
@@ -14,15 +13,17 @@ from Utilities import read_params
 from Utilities import write_params
 
 
-class RegressionBase:
-    def __init__(self, group, data_params, model_params, save_to, seed):
+class Regression:
+    def __init__(self, group, data_params, model_params, save_to, uc_scaler, angle_scale, seed=12345):
         self.model_params = model_params
-        self.n_points = data_params['n_points']
-        self.n_outputs = data_params['n_outputs']
-        self.y_indices = data_params['y_indices']
+        self.n_peaks = data_params['n_peaks']
+        self.unit_cell_length = data_params['unit_cell_length']
+        self.unit_cell_indices = data_params['unit_cell_indices']
         self.lattice_system = data_params['lattice_system']
         self.group = group
         self.save_to = save_to
+        self.uc_scaler = uc_scaler
+        self.angle_scale = angle_scale
         self.seed = seed
 
     def train_regression(self, data):
@@ -37,17 +38,12 @@ class RegressionBase:
     def build_model(self):
         inputs = {
             'q2_scaled': tf.keras.Input(
-                shape=self.n_points,
+                shape=self.n_peaks,
                 name='input_points',
                 dtype=tf.float32,
                 )
             }
-        if self.model_params['nn_type'] == 'mlp':
-            self.model = tf.keras.Model(inputs, self.model_builder_mlp(inputs))
-        elif self.model_params['nn_type'] == 'mlp_head':
-            self.model = tf.keras.Model(inputs, self.model_builder_mlp_head(inputs))
-        elif self.model_params['nn_type'] == 'rnn_head':
-            self.model = tf.keras.Model(inputs, self.model_builder_rnn_head(inputs))
+        self.model = tf.keras.Model(inputs, self.model_builder(inputs))
         #self.model.summary()
         self.get_layer_names()
 
@@ -82,10 +78,10 @@ class RegressionBase:
         train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])}
         val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])}
         train_true = {
-            f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.y_indices],
+            f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
             }
         val_true = {
-            f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.y_indices],
+            f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
             }
 
         volume_train = np.stack(train['reindexed_volume'])
@@ -165,31 +161,6 @@ class RegressionBase:
                     train_true[f'uc_pred_scaled_{self.group}'][indices_train],
                     sample_weight=train_weights[indices_train]
                     )
-
-    def do_predictions_trees(self, data=None, inputs=None, q2_scaled=None):
-        if not data is None:
-            q2_scaled = np.stack(data['q2_scaled'])
-        elif not inputs is None:
-            q2_scaled = inputs['q2_scaled']
-        N = q2_scaled.shape[0]
-        if self.lattice_system == 'cubic':
-            uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)[:, np.newaxis]
-            uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
-            for tree in range(self.model_params['random_forest']['n_estimators']):
-                uc_pred_scaled_tree[:, :, tree] = \
-                    self.random_forest_regressor.estimators_[tree].predict(q2_scaled)[:, np.newaxis]
-        else:
-            uc_pred_scaled_tree = np.zeros((N, self.n_outputs, self.model_params['random_forest']['n_estimators']))
-            tree_index = 0
-            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
-                for tree in range(len(self.random_forest_regressor[ratio_index].estimators_)):
-                    uc_pred_scaled_tree[:, :, tree_index] = \
-                        self.random_forest_regressor[ratio_index].estimators_[tree].predict(q2_scaled)
-                    tree_index += 1
-
-        uc_pred_scaled = uc_pred_scaled_tree.mean(axis=2)
-        uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
-        return uc_pred_scaled, uc_pred_scaled_var, uc_pred_scaled_tree
 
     def fit_model_cycles(self, data):
         self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
@@ -404,14 +375,8 @@ class RegressionBase:
         fig.savefig(f'{self.save_to}/{self.group}_reg_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
-
-class Regression_AlphaBeta(RegressionBase):
-    def __init__(self, group, data_params, model_params, save_to, seed=12345):
-        super().__init__(group, data_params, model_params, save_to, seed)
-
     def setup(self):
         model_params_defaults = {
-            'nn_type': 'mlp',
             'fit_strategy': 'cycles',
             'epochs': 10,
             'cycles': 5,
@@ -439,14 +404,6 @@ class Regression_AlphaBeta(RegressionBase):
                 'output_activation': 'softplus',
                 'output_name': 'uc_beta_scaled',
                 },
-            'head_params': {
-                'layers': [100],
-                'dropout_rate': 0.25,
-                'epsilon': 0.001,
-                'layers': [60],
-                'output_activation': 'linear',
-                'output_name': 'head',
-                },
             'random_forest': {
                 'random_state': 0,
                 'n_estimators': 80,
@@ -459,9 +416,9 @@ class Regression_AlphaBeta(RegressionBase):
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
                 self.model_params[key] = model_params_defaults[key]
-        self.model_params['mean_params']['n_outputs'] = self.n_outputs
-        self.model_params['alpha_params']['n_outputs'] = self.n_outputs
-        self.model_params['beta_params']['n_outputs'] = self.n_outputs
+        self.model_params['mean_params']['unit_cell_length'] = self.unit_cell_length
+        self.model_params['alpha_params']['unit_cell_length'] = self.unit_cell_length
+        self.model_params['beta_params']['unit_cell_length'] = self.unit_cell_length
         if self.model_params['fit_strategy'] == 'cycles':
             if not 'epochs' in self.model_params.keys():
                 self.model_params['epochs'] = 5
@@ -472,13 +429,6 @@ class Regression_AlphaBeta(RegressionBase):
                 self.model_params['epochs'] = [10, 10, 80]
 
         self.optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
-
-        if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
-            for key in model_params_defaults['head_params'].keys():
-                if key not in self.model_params['head_params'].keys():
-                    self.model_params['head_params'][key] = model_params_defaults['head_params'][key]
-        self.model_params['head_params']['kernel_initializer'] = None
-        self.model_params['head_params']['bias_initializer'] = None
 
         for key in model_params_defaults['mean_params'].keys():
             if key not in self.model_params['mean_params'].keys():
@@ -504,7 +454,7 @@ class Regression_AlphaBeta(RegressionBase):
             if key not in self.model_params['random_forest'].keys():
                 self.model_params['random_forest'][key] = model_params_defaults['random_forest'][key]
 
-        self.reg_loss = LikelihoodLoss('alpha_beta', n=self.n_outputs, beta_nll=self.model_params['beta_nll'])
+        self.reg_loss = LikelihoodLoss('alpha_beta', n=self.unit_cell_length, beta_nll=self.model_params['beta_nll'])
         self.loss_weights = {
             f'uc_pred_scaled_{self.group}': 1
             }
@@ -535,7 +485,6 @@ class Regression_AlphaBeta(RegressionBase):
         params = read_params(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         params_keys = [
             'tag',
-            'nn_type'
             'mean_params',
             'alpha_params',
             'beta_params',
@@ -548,7 +497,6 @@ class Regression_AlphaBeta(RegressionBase):
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
-        self.model_params['nn_type'] = params['nn_type']
         self.model_params['beta_nll'] = float(params['beta_nll'])
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['learning_rate'] = float(params['learning_rate'])
@@ -592,16 +540,14 @@ class Regression_AlphaBeta(RegressionBase):
             'layers',
             'output_activation',
             'output_name',
-            'n_outputs',
+            'unit_cell_length',
             'kernel_initializer',
             'bias_initializer',
             ]
         network_keys = ['mean_params', 'alpha_params', 'beta_params']
-        if self.model_params['nn_type'] in ['mlp_head', 'rnn_head']:
-            network_keys += ['head_params']
         for network_key in network_keys:
             self.model_params[network_key] = dict.fromkeys(params_keys)
-            self.model_params[network_key]['n_outputs'] = self.n_outputs
+            self.model_params[network_key]['unit_cell_length'] = self.unit_cell_length
             for element in params[network_key].split('{')[1].split('}')[0].split(", '"):
                 key = element.replace("'", "").split(':')[0]
                 value = element.replace("'", "").split(':')[1]
@@ -612,9 +558,8 @@ class Regression_AlphaBeta(RegressionBase):
                         value.split('[')[1].split(']')[0].split(','),
                         dtype=int
                         )
-                if network_key != 'head_params':
-                    if key in ['output_activation', 'output_name']:
-                        self.model_params[network_key][key] = value.replace(' ', '')
+                if key in ['output_activation', 'output_name']:
+                    self.model_params[network_key][key] = value.replace(' ', '')
             self.model_params[network_key]['kernel_initializer'] = None
             self.model_params[network_key]['bias_initializer'] = None
 
@@ -625,131 +570,7 @@ class Regression_AlphaBeta(RegressionBase):
             )
         self.compile_model(mode='both')
 
-    def model_builder_rnn_head(self, inputs):
-        head_outputs = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(
-            self.model_params['head_params']['layers'][0],
-            return_sequences=True
-            ),
-            name=f'head_{self.group}',
-            )(inputs['q2_scaled'][:, :, tf.newaxis])
-        head_outputs = SeqSelfAttention(
-            return_attention=True,
-            name=f'head_{self.group}_attn'
-            )(head_outputs)
-        head_outputs = tf.keras.layers.concatenate(head_outputs)
-        head_outputs = tf.keras.layers.Flatten()(head_outputs)
-
-        uc_pred_mean_scaled = mlp_model_builder(
-            head_outputs,
-            tag=f'uc_pred_mean_scaled_{self.group}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}',
-            )
-        uc_pred_alpha_scaled = 1 + mlp_model_builder(
-            head_outputs,
-            tag=f'uc_pred_alpha_scaled_{self.group}',
-            model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}',
-            )
-        uc_pred_beta_scaled = mlp_model_builder(
-            head_outputs,
-            tag=f'uc_pred_beta_scaled_{self.group}',
-            model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}',
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.group}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_alpha_scaled[:, :, tf.newaxis],
-                uc_pred_beta_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
-    def model_builder_mlp_head(self, inputs):
-        x_head = inputs['q2_scaled']
-        for layer_index in range(len(self.model_params['head_params']['layers'])):
-            x_head = tf.keras.layers.Dense(
-                self.model_params['head_params']['layers'][layer_index],
-                activation='linear',
-                name=f'dense_head_{layer_index}',
-                )(x_head)
-            x_head = tf.keras.layers.LayerNormalization(
-                epsilon=self.model_params['head_params']['epsilon'], 
-                name=f'layer_norm_head_{layer_index}'
-                )(x_head)
-            x_head = tf.keras.activations.gelu(x_head)
-            x_head = tf.keras.layers.Dropout(
-                rate=self.model_params['head_params']['dropout_rate'],
-                name=f'dropout_head_{layer_index}',
-                )(x_head)
-
-        uc_pred_mean_scaled = mlp_model_builder(
-            x_head,
-            tag=f'uc_pred_mean_scaled_{self.group}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}',
-            )
-        uc_pred_alpha_scaled = 1 + mlp_model_builder(
-            x_head,
-            tag=f'uc_pred_alpha_scaled_{self.group}',
-            model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}',
-            )
-        uc_pred_beta_scaled = mlp_model_builder(
-            x_head,
-            tag=f'uc_pred_beta_scaled_{self.group}',
-            model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}',
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.group}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_alpha_scaled[:, :, tf.newaxis],
-                uc_pred_beta_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
-    def model_builder_mlp_noise(self, inputs):
-        q2_scaled = tf.keras.layers.GaussianNoise(0.005)(inputs['q2_scaled'])
-        uc_pred_mean_scaled = mlp_model_builder(
-            q2_scaled,
-            tag=f'uc_pred_mean_scaled_{self.group}',
-            model_params=self.model_params['mean_params'],
-            output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}'
-            )
-        uc_pred_alpha_scaled = 1 + mlp_model_builder(
-            q2_scaled,
-            tag=f'uc_pred_alpha_scaled_{self.group}',
-            model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}'
-            )
-        uc_pred_beta_scaled = mlp_model_builder(
-            q2_scaled,
-            tag=f'uc_pred_beta_scaled_{self.group}',
-            model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}'
-            )
-
-        # uc_pred_mean_scaled: n_batch x n_outputs
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.group}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_alpha_scaled[:, :, tf.newaxis],
-                uc_pred_beta_scaled[:, :, tf.newaxis],
-                ))
-        return uc_pred_scaled
-
-    def model_builder_mlp(self, inputs):
+    def model_builder(self, inputs):
         uc_pred_mean_scaled = mlp_model_builder(
             inputs['q2_scaled'],
             tag=f'uc_pred_mean_scaled_{self.group}',
@@ -769,7 +590,7 @@ class Regression_AlphaBeta(RegressionBase):
             output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}'
             )
 
-        # uc_pred_mean_scaled: n_batch x n_outputs
+        # uc_pred_mean_scaled: n_batch x unit_cell_length
         uc_pred_scaled = tf.keras.layers.Concatenate(
             axis=2,
             name=f'uc_pred_scaled_{self.group}'
@@ -786,13 +607,6 @@ class Regression_AlphaBeta(RegressionBase):
             self.mean_layer_names.append(f'dense_uc_pred_mean_scaled_{self.group}_{layer_index}')
             self.mean_layer_names.append(f'layer_norm_uc_pred_mean_scaled_{self.group}_{layer_index}')
         self.mean_layer_names.append(f'{self.model_params["mean_params"]["output_name"]}_{self.group}')
-        if self.model_params['nn_type'] in ['mlp_head']:
-            for layer_index in range(len(self.model_params['head_params']['layers'])):
-                self.mean_layer_names.append(f'dense_head_{layer_index}')
-                self.mean_layer_names.append(f'layer_norm_head_{layer_index}')
-        if self.model_params['nn_type'] in ['rnn_head']:
-            self.mean_layer_names.append(f'head_{self.group}')
-            self.mean_layer_names.append(f'head_{self.group}_attn')
 
         self.var_layer_names = []
         for layer_index in range(len(self.model_params['alpha_params']['layers'])):
@@ -804,26 +618,124 @@ class Regression_AlphaBeta(RegressionBase):
             self.var_layer_names.append(f'layer_norm_uc_pred_beta_scaled_{self.group}_{layer_index}')
         self.var_layer_names.append(f'{self.model_params["beta_params"]["output_name"]}_{self.group}')
 
-    def do_predictions(self, data=None, inputs=None, verbose=1, batch_size=None):
+    def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_var=None):
+        if not uc_pred_scaled is None:
+            uc_pred = np.zeros(uc_pred_scaled.shape)
+            if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
+                uc_pred = uc_pred_scaled * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+            elif self.lattice_system == 'monoclinic':
+                uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+                uc_pred[:, 3] = self.angle_scale * uc_pred_scaled[:, 3] + np.pi/2
+            elif self.lattice_system == 'triclinic':
+                uc_pred[:, :3] = uc_pred_scaled[:, :3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+                uc_pred[:, 3:] = self.angle_scale * uc_pred_scaled[:, 3:] + np.pi/2
+            elif self.lattice_system == 'rhombohedral':
+                uc_pred[:, 0] = uc_pred_scaled[:, 0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
+                uc_pred[:, 1] = self.angle_scale * uc_pred_scaled[:, 1] + np.pi/2
+
+        if not uc_pred_scaled_var is None:
+            assert not uc_pred_scaled is None
+            uc_pred_var = np.zeros(uc_pred_scaled_var.shape)
+            if self.lattice_system in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
+                uc_pred_var = uc_pred_scaled_var * self.uc_scaler.scale_[0]**2
+            elif self.lattice_system == 'monoclinic':
+                uc_pred_var[:, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 3] = uc_pred_scaled_var[:, 3] * self.angle_scale**2
+            elif self.lattice_system == 'triclinic':
+                uc_pred_var[:, :3] = uc_pred_scaled_var[:, :3] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 3:] = uc_pred_scaled_var[:, 3:] * self.angle_scale**2
+            elif self.lattice_system == 'rhombohedral':
+                uc_pred_var[:, 0] = uc_pred_scaled_var[:, 0] * self.uc_scaler.scale_[0]**2
+                uc_pred_var[:, 1] = uc_pred_scaled_var[:, 1] * self.angle_scale**2
+
+        if not uc_pred_scaled is None and not uc_pred_scaled_var is None:
+            return uc_pred, uc_pred_var
+        elif not uc_pred_scaled is None and uc_pred_scaled_var is None:
+            return uc_pred
+        elif uc_pred_scaled is None and not uc_pred_scaled_var is None:
+            return uc_pred_var
+
+    def generate(self, n_unit_cells, rng, q2_obs, batch_size=None, model=None, q2_scaler=None):
+        if model == 'nn':
+            return self.generate_nn(n_unit_cells, rng, q2_obs[np.newaxis], batch_size, q2_scaler)
+        elif model == 'trees':
+            return self.generate_trees(n_unit_cells, rng, q2_obs[np.newaxis], q2_scaler)
+
+    def generate_nn(self, n_unit_cells, rng, q2_obs, batch_size=None, q2_scaler=None):
+        q2_scaled = (q2_obs - q2_scaler.mean_[0]) / q2_scaler.scale_[0]
+        uc_pred, uc_pred_var = self.predict(q2_scaled=q2_scaled, batch_size=batch_size, model='nn')
+        generated_unit_cells = rng.normal(
+            loc=uc_pred,
+            scale=np.sqrt(uc_pred_var),
+            size=(n_unit_cells, self.unit_cell_length),
+            )
+        return generated_unit_cells
+
+    def generate_trees(self, n_unit_cells, rng, q2_obs, q2_scaler=None):
+        q2_scaled = (q2_obs - q2_scaler.mean_[0]) / q2_scaler.scale_[0]
+        _, _, generated_unit_cells = self.predict(q2_scaled=q2_scaled, model='trees')
+        if n_unit_cells <= generated_unit_cells.shape[2]:
+            indices = rng.choice(generated_unit_cells.shape[2], size=n_unit_cells, replace=False)
+            generated_unit_cells = generated_unit_cells[:, :, indices]
+        else:
+            print(f'Requested {n_unit_cells} when only {generated_unit_cells.shape[0]} are available')
+            assert False
+        return generated_unit_cells
+
+    def predict(self, data=None, inputs=None, q2_scaled=None, batch_size=None, model=None):
         if not data is None:
             q2_scaled = np.stack(data['q2_scaled'])
-        else:
+        elif not inputs is None:
             q2_scaled = inputs['q2_scaled']
-        if verbose == 1:
-            print(f'\n Regression inferences for {self.group}')
+
+        if model == 'nn':
+            uc_pred_scaled, uc_pred_scaled_var = self.predict_nn(q2_scaled, batch_size=None)
+        elif model == 'trees':
+            uc_pred_scaled, uc_pred_scaled_var, uc_pred_scaled_trees = self.predict_trees(q2_scaled)
+            uc_pred_trees = self.revert_predictions(uc_pred_scaled=uc_pred_scaled_trees)
+        uc_pred, uc_pred_var = self.revert_predictions(
+            uc_pred_scaled=uc_pred_scaled, uc_pred_scaled_var=uc_pred_scaled_var
+            )
+        if model == 'nn':
+            return uc_pred, uc_pred_var
+        elif model == 'trees':
+            return uc_pred, uc_pred_var, uc_pred_scaled_trees
+
+    def predict_trees(self, q2_scaled):
+        N = q2_scaled.shape[0]
+        if self.lattice_system == 'cubic':
+            uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)[:, np.newaxis]
+            uc_pred_scaled_tree = np.zeros((N, self.unit_cell_length, self.model_params['random_forest']['n_estimators']))
+            for tree in range(self.model_params['random_forest']['n_estimators']):
+                uc_pred_scaled_tree[:, :, tree] = \
+                    self.random_forest_regressor.estimators_[tree].predict(q2_scaled)[:, np.newaxis]
+        else:
+            uc_pred_scaled_tree = np.zeros((N, self.unit_cell_length, self.model_params['random_forest']['n_estimators']))
+            tree_index = 0
+            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                for tree in range(len(self.random_forest_regressor[ratio_index].estimators_)):
+                    uc_pred_scaled_tree[:, :, tree_index] = \
+                        self.random_forest_regressor[ratio_index].estimators_[tree].predict(q2_scaled)
+                    tree_index += 1
+
+        uc_pred_scaled = uc_pred_scaled_tree.mean(axis=2)
+        uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
+        return uc_pred_scaled, uc_pred_scaled_var, uc_pred_scaled_tree
+
+    def predict_nn(self, q2_scaled, batch_size=None):
         if batch_size is None:
             batch_size = self.model_params['batch_size']
 
         # predict_on_batch helps with a memory leak...
-        N = len(data)
+        N = q2_scaled.shape[0]
         n_batches = N // batch_size
         left_over = N % batch_size
-        uc_pred_scaled = np.zeros((N, self.n_outputs))
-        uc_pred_scaled_var = np.zeros((N, self.n_outputs))
+        uc_pred_scaled = np.zeros((N, self.unit_cell_length))
+        uc_pred_scaled_var = np.zeros((N, self.unit_cell_length))
         for batch_index in range(n_batches + 1):
             start = batch_index * batch_size
             if batch_index == n_batches:
-                batch_inputs = {'q2_scaled': np.zeros((batch_size, self.n_points))}
+                batch_inputs = {'q2_scaled': np.zeros((batch_size, self.n_peaks))}
                 batch_inputs['q2_scaled'][:left_over] = q2_scaled[start: start + left_over]
                 batch_inputs['q2_scaled'][left_over:] = q2_scaled[0]
             else:

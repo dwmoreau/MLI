@@ -1,8 +1,3 @@
-"""
-There are issues with memory management in this code.
-I am not able to run monoclinic and triclinic for all entries on my laptop (16 GB)
-I am at the point where moving to a larger capacity machine is the next logical step.
-"""
 import iotbx.cif
 import gc
 import matplotlib.pyplot as plt
@@ -93,25 +88,22 @@ class EntryGenerator:
         if self.lattice_system in ['monoclinic', 'triclinic']:
             self.peak_components = {
                 'q2': 'float64',
-                'reindexed_h': 'int8',
-                'reindexed_k': 'int8',
-                'reindexed_l': 'int8',
-                'reciprocal_reindexed_h': 'int8',
-                'reciprocal_reindexed_k': 'int8',
-                'reciprocal_reindexed_l': 'int8',
+                'reindexed_h': 'int',
+                'reindexed_k': 'int',
+                'reindexed_l': 'int',
                 }
         else:
             self.peak_components = {
                 'q2': 'float64',
-                'reindexed_h': 'int8',
-                'reindexed_k': 'int8',
-                'reindexed_l': 'int8',
+                'reindexed_h': 'int',
+                'reindexed_k': 'int',
+                'reindexed_l': 'int',
                 }
         self.data_set_components = {
             'database': 'string',
             'identifier': 'string',
             'cif_file_name': 'string',
-            'spacegroup_number': 'int8',
+            'spacegroup_number': 'int',
             'bravais_lattice': 'string',
             'lattice_system': 'string',
             'reindexed_spacegroup_symbol_hm': 'string',
@@ -120,11 +112,9 @@ class EntryGenerator:
             'hkl_reindexer': 'float64',
             'reciprocal_reindexed_unit_cell': 'float64',
             'reciprocal_reindexed_volume': 'float64',
-            'reciprocal_hkl_reindexer': 'float64',
             'reindexed_xnn': 'float64',
             'permutation': 'string',
-            'split': 'int8',
-            'reciprocal_split': 'int8',
+            'split': 'int',
             }
 
         # These are the keys to load from the unique_entries.parquet file and directly copy into
@@ -143,12 +133,10 @@ class EntryGenerator:
             'reindexed_unit_cell',
             'reindexed_volume',
             'reciprocal_reindexed_unit_cell',
-            'reciprocal_hkl_reindexer',
             'reindexed_xnn',
             'permutation',
             'hkl_reindexer',
             'split',
-            'reciprocal_split',
             ]
 
         # sa is for non-systematically absence peaks
@@ -171,8 +159,7 @@ class EntryGenerator:
         unit_cell = data['unit_cell']
         hkl_reindexer = np.array(data['hkl_reindexer']).reshape((3, 3))
         lattice_system = data['lattice_system']
-        if lattice_system in ['monoclinic', 'triclinic']:
-            reciprocal_hkl_reindexer = np.array(data['reciprocal_hkl_reindexer']).reshape((3, 3))
+
         try:
             cif_info = iotbx.cif.reader(cif_file_name)
             cif_structure = cif_info.build_crystal_structures()
@@ -229,68 +216,42 @@ class EntryGenerator:
             I_norm, q2_found, hkl_found = pick_peaks(
                 I_pattern[:, broadening_index], self.q2_pattern, q2_peaks_unique, hkl_peaks_unique, self.peak_length
                 )
-            reindexed_hkl_found = np.matmul(hkl_found, hkl_reindexer).round(decimals=0).astype(np.int8)
+            reindexed_hkl_found = np.matmul(hkl_found, hkl_reindexer).round(decimals=0).astype(int)
             peak_length = min(q2_found.size, self.peak_length)
-            if lattice_system in ['monoclinic', 'triclinic']:
-                reciprocal_reindexed_hkl_found = np.matmul(hkl_found, reciprocal_hkl_reindexer).round(decimals=0).astype(np.int8)
+            peaks_dict.update({
+                f'q2_{broadening_tag}': q2_found[:peak_length],
+                f'reindexed_h_{broadening_tag}': reindexed_hkl_found[:peak_length, 0],
+                f'reindexed_k_{broadening_tag}': reindexed_hkl_found[:peak_length, 1],
+                f'reindexed_l_{broadening_tag}': reindexed_hkl_found[:peak_length, 2],
+                })
 
-                """
-                q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl_found, tensorflow=False, representation='unit_cell')
-                q2 = q2_calculator.get_q2(unit_cell[np.newaxis])[0]
+            """
+            q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=hkl_found, tensorflow=False, representation='unit_cell')
+            q2 = q2_calculator.get_q2(unit_cell[np.newaxis])[0]
 
-                reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl_found, tensorflow=False, representation='unit_cell')
-                reindexed_q2 = reindexed_q2_calculator.get_q2(np.array(data['reindexed_unit_cell'])[np.newaxis])[0]
+            reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl_found, tensorflow=False, representation='unit_cell')
+            reindexed_q2 = reindexed_q2_calculator.get_q2(np.array(data['reindexed_unit_cell'])[np.newaxis])[0]
 
-                reciprocal_reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reciprocal_reindexed_hkl_found, tensorflow=False, representation='reciprocal_unit_cell')
-                reciprocal_reindexed_q2 = reciprocal_reindexed_q2_calculator.get_q2(np.array(data['reciprocal_reindexed_unit_cell'])[np.newaxis])[0]
+            reciprocal_reindexed_q2_calculator = Q2Calculator(lattice_system='triclinic', hkl=reindexed_hkl_found, tensorflow=False, representation='reciprocal_unit_cell')
+            reciprocal_reindexed_q2 = reciprocal_reindexed_q2_calculator.get_q2(np.array(data['reciprocal_reindexed_unit_cell'])[np.newaxis])[0]
 
-                check0 = np.all(np.isclose(q2, reindexed_q2))
-                check1 = np.all(np.isclose(q2, reciprocal_reindexed_q2))
-                print(check0, check1)
-                """
-                peaks_dict.update({
-                    f'q2_{broadening_tag}': q2_found[:peak_length],
-                    f'reindexed_h_{broadening_tag}': reindexed_hkl_found[:peak_length, 0],
-                    f'reindexed_k_{broadening_tag}': reindexed_hkl_found[:peak_length, 1],
-                    f'reindexed_l_{broadening_tag}': reindexed_hkl_found[:peak_length, 2],
-                    f'reciprocal_reindexed_h_{broadening_tag}': reciprocal_reindexed_hkl_found[:peak_length, 0],
-                    f'reciprocal_reindexed_k_{broadening_tag}': reciprocal_reindexed_hkl_found[:peak_length, 1],
-                    f'reciprocal_reindexed_l_{broadening_tag}': reciprocal_reindexed_hkl_found[:peak_length, 2],
-                    })
-            else:
-                peaks_dict.update({
-                    f'q2_{broadening_tag}': q2_found[:peak_length],
-                    f'reindexed_h_{broadening_tag}': reindexed_hkl_found[:peak_length, 0],
-                    f'reindexed_k_{broadening_tag}': reindexed_hkl_found[:peak_length, 1],
-                    f'reindexed_l_{broadening_tag}': reindexed_hkl_found[:peak_length, 2],
-                    })
-
-        
+            check0 = np.all(np.isclose(q2, reindexed_q2))
+            check1 = np.all(np.isclose(q2, reciprocal_reindexed_q2))
+            print(check0, check1)
+            if not check0:
+                print()
+                print(np.round(np.column_stack((q2, reindexed_q2, reciprocal_reindexed_q2)), decimals=4))
+            """
         peak_length = min(q2_peaks_unique.size, self.peak_length)
         reindexed_hkl_peaks_unique = np.matmul(
             hkl_peaks_unique, hkl_reindexer
-            ).round(decimals=0).astype(np.int8)
-        if lattice_system in ['monoclinic', 'triclinic']:
-            reciprocal_reindexed_hkl_peaks_unique = np.matmul(
-                hkl_peaks_unique, reciprocal_hkl_reindexer
-                ).round(decimals=0).astype(np.int8)
-            peaks_dict.update({
-                'q2_sa': q2_peaks_unique,
-                'reindexed_h_sa': reindexed_hkl_peaks_unique[:peak_length, 0],
-                'reindexed_k_sa': reindexed_hkl_peaks_unique[:peak_length, 1],
-                'reindexed_l_sa': reindexed_hkl_peaks_unique[:peak_length, 2],
-                'reciprocal_reindexed_h_sa': reciprocal_reindexed_hkl_peaks_unique[:peak_length, 0],
-                'reciprocal_reindexed_k_sa': reciprocal_reindexed_hkl_peaks_unique[:peak_length, 1],
-                'reciprocal_reindexed_l_sa': reciprocal_reindexed_hkl_peaks_unique[:peak_length, 2],
-                })
-        else:
-            peaks_dict.update({
-                'q2_sa': q2_peaks_unique,
-                'reindexed_h_sa': reindexed_hkl_peaks_unique[:peak_length, 0],
-                'reindexed_k_sa': reindexed_hkl_peaks_unique[:peak_length, 1],
-                'reindexed_l_sa': reindexed_hkl_peaks_unique[:peak_length, 2],
-                })
-
+            ).round(decimals=0).astype(int)
+        peaks_dict.update({
+            'q2_sa': q2_peaks_unique,
+            'reindexed_h_sa': reindexed_hkl_peaks_unique[:peak_length, 0],
+            'reindexed_k_sa': reindexed_hkl_peaks_unique[:peak_length, 1],
+            'reindexed_l_sa': reindexed_hkl_peaks_unique[:peak_length, 2],
+            })
         return True, peaks_dict
 
 
@@ -381,14 +342,6 @@ def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12
         reindexed_h[broadening_tag] = []
         reindexed_k[broadening_tag] = []
         reindexed_l[broadening_tag] = []
-    if lattice_system in ['monoclinic', 'triclinic']:
-        reciprocal_reindexed_h = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
-        reciprocal_reindexed_k = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
-        reciprocal_reindexed_l = dict.fromkeys(entry_generator.broadening_tags + ['sa'])
-        for broadening_tag in entry_generator.broadening_tags + ['sa']:
-            reciprocal_reindexed_h[broadening_tag] = []
-            reciprocal_reindexed_k[broadening_tag] = []
-            reciprocal_reindexed_l[broadening_tag] = []
 
     for entry_index in range(entries_rank.shape[0]):
         success[entry_index], peaks_dict = entry_generator.get_peak_list(entries_rank.iloc[entry_index])
@@ -398,10 +351,6 @@ def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12
                 reindexed_h[broadening_tag].append(peaks_dict[f'reindexed_h_{broadening_tag}'])
                 reindexed_k[broadening_tag].append(peaks_dict[f'reindexed_k_{broadening_tag}'])
                 reindexed_l[broadening_tag].append(peaks_dict[f'reindexed_l_{broadening_tag}'])
-                if lattice_system in ['monoclinic', 'triclinic']:
-                    reciprocal_reindexed_h[broadening_tag].append(peaks_dict[f'reciprocal_reindexed_h_{broadening_tag}'])
-                    reciprocal_reindexed_k[broadening_tag].append(peaks_dict[f'reciprocal_reindexed_k_{broadening_tag}'])
-                    reciprocal_reindexed_l[broadening_tag].append(peaks_dict[f'reciprocal_reindexed_l_{broadening_tag}'])
 
     entries_rank = entries_rank.iloc[success]
     for broadening_tag in entry_generator.broadening_tags + ['sa']:
@@ -409,10 +358,6 @@ def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12
         entries_rank[f'reindexed_h_{broadening_tag}'] = reindexed_h[broadening_tag]
         entries_rank[f'reindexed_k_{broadening_tag}'] = reindexed_k[broadening_tag]
         entries_rank[f'reindexed_l_{broadening_tag}'] = reindexed_l[broadening_tag]
-        if lattice_system in ['monoclinic', 'triclinic']:
-            entries_rank[f'reciprocal_reindexed_h_{broadening_tag}'] = reciprocal_reindexed_h[broadening_tag]
-            entries_rank[f'reciprocal_reindexed_k_{broadening_tag}'] = reciprocal_reindexed_k[broadening_tag]
-            entries_rank[f'reciprocal_reindexed_l_{broadening_tag}'] = reciprocal_reindexed_l[broadening_tag]
 
     entries_rank.to_parquet(f'data/GeneratedDatasets/tmp/chunk_{rank:02d}.parquet')
 

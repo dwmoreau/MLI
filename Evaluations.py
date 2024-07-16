@@ -3,19 +3,19 @@ import numpy as np
 import scipy.stats
 
 
-def evaluate_regression_pitf(data, n_outputs, save_to_name, y_indices):
+def evaluate_regression_pitf(data, unit_cell_length, save_to_name, unit_cell_indices):
     alpha = 0.1
     markersize = 0.5
 
     data = data[~data['augmented']]
-    figsize = (n_outputs*2 + 2, 6)
-    fig, axes = plt.subplots(2, n_outputs, figsize=figsize)
-    if n_outputs == 1:
+    figsize = (unit_cell_length*2 + 2, 6)
+    fig, axes = plt.subplots(2, unit_cell_length, figsize=figsize)
+    if unit_cell_length == 1:
         axes = axes[:, np.newaxis]
 
-    unit_cell_true = np.stack(data['reindexed_unit_cell'])[:, y_indices]
-    unit_cell_true_train = np.stack(data[data['train']]['reindexed_unit_cell'])[:, y_indices]
-    unit_cell_true_val = np.stack(data[~data['train']]['reindexed_unit_cell'])[:, y_indices]
+    unit_cell_true = np.stack(data['reindexed_unit_cell'])[:, unit_cell_indices]
+    unit_cell_true_train = np.stack(data[data['train']]['reindexed_unit_cell'])[:, unit_cell_indices]
+    unit_cell_true_val = np.stack(data[~data['train']]['reindexed_unit_cell'])[:, unit_cell_indices]
     unit_cell_pred = np.stack(data['reindexed_unit_cell_pred_pitf'])
     unit_cell_pred_train = np.stack(data[data['train']]['reindexed_unit_cell_pred_pitf'])
     unit_cell_pred_val = np.stack(data[~data['train']]['reindexed_unit_cell_pred_pitf'])
@@ -24,9 +24,9 @@ def evaluate_regression_pitf(data, n_outputs, save_to_name, y_indices):
     unit_cell_error_val = np.abs(unit_cell_pred_val - unit_cell_true_val)
     unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
 
-    xnn_true = np.stack(data['reindexed_xnn'])[:, y_indices]
-    xnn_true_train = np.stack(data[data['train']]['reindexed_xnn'])[:, y_indices]
-    xnn_true_val = np.stack(data[~data['train']]['reindexed_xnn'])[:, y_indices]
+    xnn_true = np.stack(data['reindexed_xnn'])[:, unit_cell_indices]
+    xnn_true_train = np.stack(data[data['train']]['reindexed_xnn'])[:, unit_cell_indices]
+    xnn_true_val = np.stack(data[~data['train']]['reindexed_xnn'])[:, unit_cell_indices]
     xnn_pred = np.stack(data['reindexed_xnn_pred_pitf'])
     xnn_pred_train = np.stack(data[data['train']]['reindexed_xnn_pred_pitf'])
     xnn_pred_val = np.stack(data[~data['train']]['reindexed_xnn_pred_pitf'])
@@ -35,13 +35,12 @@ def evaluate_regression_pitf(data, n_outputs, save_to_name, y_indices):
     xnn_error_val = np.abs(xnn_pred_val - xnn_true_val)
     xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
 
-    for uc_index in range(n_outputs):
+    for uc_index in range(unit_cell_length):
         all_unit_cell = np.sort(np.concatenate((
             unit_cell_true[:, uc_index], unit_cell_pred[:, uc_index]
             )))
         lower_unit_cell = all_unit_cell[int(0.005*all_unit_cell.size)]
         upper_unit_cell = all_unit_cell[int(0.995*all_unit_cell.size)]
-
         if upper_unit_cell > lower_unit_cell:
             axes[0, uc_index].plot(
                 unit_cell_true[:, uc_index], unit_cell_pred[:, uc_index],
@@ -122,18 +121,142 @@ def evaluate_regression_pitf(data, n_outputs, save_to_name, y_indices):
     fig.savefig(save_to_name)
     plt.close()
 
-def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, model):
+
+def calibrate_regression_pitf(data, unit_cell_length, unit_cell_key, save_to_name, unit_cell_indices):
+    # calculate residuals / uncertainty
+    hist_bins = np.linspace(-4, 4, 101)
+    hist_centers = (hist_bins[1:] + hist_bins[:-1]) / 2
+    n_calib_bins = 25
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    alphas = [1, 0.5]
+    labels = ['Training', 'Validation']
+
+    data = data[~data['augmented']]
+    data = [
+        data[data['train']],
+        data[~data['train']]
+        ]
+    figsize=(10, 2 * (unit_cell_length + 1))
+    fig, axes = plt.subplots(unit_cell_length, 3, figsize=figsize)
+    if unit_cell_length == 1:
+        axes = axes[np.newaxis, :]
+    cv = np.zeros((unit_cell_length, 2))
+    ENCE = np.zeros((unit_cell_length, 2, n_calib_bins))
+    for train_index in range(2):
+        y_true = np.stack(data[train_index]['reindexed_xnn'])[:, unit_cell_indices]
+        y_pred = np.stack(data[train_index]['reindexed_xnn_pred_pitf'])
+        y_std = np.sqrt(np.stack(data[train_index]['reindexed_xnn_pred_pitf_var']))
+        y_error = y_pred - y_true
+
+        for index in range(unit_cell_length):
+            z = y_error[:, index] / y_std[:, index]
+            hist, _ = np.histogram(z, bins=hist_bins, density=True)
+            axes[index, 0].bar(
+                hist_centers, hist, width=(hist_bins[1] - hist_bins[0]),
+                color=colors[train_index], alpha=alphas[train_index], label=labels[train_index]
+                )
+
+            sorted_std = np.sort(y_std[:, index])
+            lower_std = sorted_std[int(0.01*sorted_std.size)]
+            upper_std = sorted_std[int(0.98*sorted_std.size)]
+            bins_std = np.linspace(lower_std, upper_std, n_calib_bins + 1)
+            centers_std = (bins_std[1:] + bins_std[:-1]) / 2
+            y_error_binned = np.zeros((n_calib_bins, 2))
+            for bin_index in range(n_calib_bins):
+                indices = np.logical_and(
+                    y_std[:, index] >= bins_std[bin_index],
+                    y_std[:, index] < bins_std[bin_index + 1]
+                    )
+                if np.sum(indices) > 0:
+                    y_error_binned[bin_index, 0] = np.abs(y_error[indices, index]).mean()
+                    y_error_binned[bin_index, 1] = np.abs(y_error[indices, index]).std()
+                    RMV = np.sqrt(np.mean(y_std[indices, index]**2))
+                    RMSE = np.sqrt(np.mean(y_error[indices, index]**2))
+                    ENCE[index, train_index, bin_index] = np.abs(RMV - RMSE) / RMV
+            mean_sigma = y_std[:, index].mean()
+            numerator = np.sum((y_std[:, index] - mean_sigma)**2) / (y_std[:, index].size - 1)
+            cv[index, train_index] = np.sqrt(numerator) / mean_sigma
+
+            axes[index, 1].errorbar(
+                centers_std, y_error_binned[:, 0], y_error_binned[:, 1],
+                marker='.', color=colors[train_index], label=labels[train_index]
+                )
+
+            sorted_error = np.sort(np.abs(y_error[:, index]))
+            lower_error = sorted_error[int(0.01*sorted_error.size)]
+            upper_error = sorted_error[int(0.98*sorted_error.size)]
+            bins_error = np.linspace(lower_error, upper_error, n_calib_bins + 1)
+            centers_error = (bins_error[1:] + bins_error[:-1]) / 2
+            y_std_binned = np.zeros((n_calib_bins, 2))
+            for bin_index in range(n_calib_bins):
+                indices = np.logical_and(
+                    y_error[:, index] >= bins_error[bin_index],
+                    y_error[:, index] < bins_error[bin_index + 1]
+                    )
+                y_std_binned[bin_index, 0] = np.abs(y_std[indices, index]).mean()
+                y_std_binned[bin_index, 1] = np.abs(y_std[indices, index]).std()
+
+            axes[index, 2].errorbar(
+                centers_error, y_std_binned[:, 0], y_std_binned[:, 1],
+                marker='.', color=colors[train_index], label=labels[train_index]
+                )
+
+    for index in range(unit_cell_length):
+        axes[index, 1].annotate(
+            '\n'.join((
+                f'ENCE: {np.mean(ENCE[index, 0]):0.3f} / {np.mean(ENCE[index, 1]):0.3f}',
+                f'Cv: {cv[index, 0]:0.3f} / {cv[index, 1]:0.3f}'
+                )),
+            xy=(0.05, 0.85), xycoords='axes fraction'
+            )
+        axes[index, 0].plot(
+            hist_centers,
+            scipy.stats.norm.pdf(hist_centers),
+            color=[0, 0, 0],
+            linestyle='dotted'
+            )
+        axes[index, 2].set_ylabel('Mean STD Estimate')
+        axes[index, 0].set_ylabel('Distribution')
+        axes[index, 1].set_ylabel('Mean Error')
+
+        xlim = axes[index, 1].get_xlim()
+        ylim = axes[index, 1].get_ylim()
+        axes[index, 1].plot(
+            xlim, xlim,
+            color=[0, 0, 0], linestyle='dotted'
+            )
+        axes[index, 1].set_xlim(xlim)
+        axes[index, 1].set_ylim(ylim)
+
+        xlim = axes[index, 2].get_xlim()
+        ylim = axes[index, 2].get_ylim()
+        axes[index, 2].plot(
+            xlim, xlim,
+            color=[0, 0, 0], linestyle='dotted'
+            )
+        axes[index, 2].set_xlim(xlim)
+        axes[index, 2].set_ylim(ylim)
+    axes[0, 0].legend(frameon=False)
+    axes[unit_cell_length - 1, 0].set_xlabel('Normalized Residuals')
+    axes[unit_cell_length - 1, 1].set_xlabel('Uncertainty Estimate')
+    axes[unit_cell_length - 1, 2].set_xlabel('Error')
+    fig.tight_layout()
+    fig.savefig(save_to_name)
+    plt.close()
+
+
+def evaluate_regression(data, unit_cell_length, unit_cell_key, save_to_name, unit_cell_indices, model):
     alpha = 0.1
     markersize = 0.5
 
     data = data[~data['augmented']]
-    figsize = (n_outputs*2 + 2, 10)
-    fig, axes = plt.subplots(5, n_outputs, figsize=figsize)
-    if n_outputs == 1:
+    figsize = (unit_cell_length*2 + 2, 10)
+    fig, axes = plt.subplots(5, unit_cell_length, figsize=figsize)
+    if unit_cell_length == 1:
         axes = axes[:, np.newaxis]
-    y_true = np.stack(data[unit_cell_key])[:, y_indices]
-    y_true_train = np.stack(data[data['train']][unit_cell_key])[:, y_indices]
-    y_true_val = np.stack(data[~data['train']][unit_cell_key])[:, y_indices]
+    y_true = np.stack(data[unit_cell_key])[:, unit_cell_indices]
+    y_true_train = np.stack(data[data['train']][unit_cell_key])[:, unit_cell_indices]
+    y_true_val = np.stack(data[~data['train']][unit_cell_key])[:, unit_cell_indices]
     if model == 'trees':
         y_pred = np.stack(data[f'{unit_cell_key}_pred_trees'])
         y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred_trees'])
@@ -150,7 +273,7 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices,
     y_error_val = np.abs(y_pred_val - y_true_val)
     titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
 
-    for uc_index in range(n_outputs):
+    for uc_index in range(unit_cell_length):
         all_info = np.sort(np.concatenate((y_true[:, uc_index], y_pred[:, uc_index])))
         lower = all_info[int(0.005*all_info.size)]
         upper = all_info[int(0.995*all_info.size)]
@@ -243,7 +366,8 @@ def evaluate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices,
     fig.savefig(save_to_name)
     plt.close()
 
-def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices, model):
+
+def calibrate_regression(data, unit_cell_length, unit_cell_key, save_to_name, unit_cell_indices, model):
     # calculate residuals / uncertainty
     hist_bins = np.linspace(-4, 4, 101)
     hist_centers = (hist_bins[1:] + hist_bins[:-1]) / 2
@@ -257,14 +381,14 @@ def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices
         data[data['train']],
         data[~data['train']]
         ]
-    figsize=(10, 2 * (n_outputs + 1))
-    fig, axes = plt.subplots(n_outputs, 3, figsize=figsize)
-    if n_outputs == 1:
+    figsize=(10, 2 * (unit_cell_length + 1))
+    fig, axes = plt.subplots(unit_cell_length, 3, figsize=figsize)
+    if unit_cell_length == 1:
         axes = axes[np.newaxis, :]
-    cv = np.zeros((n_outputs, 2))
-    ENCE = np.zeros((n_outputs, 2, n_calib_bins))
+    cv = np.zeros((unit_cell_length, 2))
+    ENCE = np.zeros((unit_cell_length, 2, n_calib_bins))
     for train_index in range(2):
-        y_true = np.stack(data[train_index][unit_cell_key])[:, y_indices]
+        y_true = np.stack(data[train_index][unit_cell_key])[:, unit_cell_indices]
         if model == 'trees':
             y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred_trees'])
             y_std = np.sqrt(np.stack(data[train_index][f'{unit_cell_key}_pred_var_trees']))
@@ -273,7 +397,7 @@ def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices
             y_std = np.sqrt(np.stack(data[train_index][f'{unit_cell_key}_pred_var']))
         y_error = y_pred - y_true
 
-        for index in range(n_outputs):
+        for index in range(unit_cell_length):
             z = y_error[:, index] / y_std[:, index]
             hist, _ = np.histogram(z, bins=hist_bins, density=True)
             axes[index, 0].bar(
@@ -326,7 +450,7 @@ def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices
                 marker='.', color=colors[train_index], label=labels[train_index]
                 )
 
-    for index in range(n_outputs):
+    for index in range(unit_cell_length):
         axes[index, 1].annotate(
             '\n'.join((
                 f'ENCE: {np.mean(ENCE[index, 0]):0.3f} / {np.mean(ENCE[index, 1]):0.3f}',
@@ -362,21 +486,22 @@ def calibrate_regression(data, n_outputs, unit_cell_key, save_to_name, y_indices
         axes[index, 2].set_xlim(xlim)
         axes[index, 2].set_ylim(ylim)
     axes[0, 0].legend(frameon=False)
-    axes[n_outputs - 1, 0].set_xlabel('Normalized Residuals')
-    axes[n_outputs - 1, 1].set_xlabel('Uncertainty Estimate')
-    axes[n_outputs - 1, 2].set_xlabel('Error')
+    axes[unit_cell_length - 1, 0].set_xlabel('Normalized Residuals')
+    axes[unit_cell_length - 1, 1].set_xlabel('Uncertainty Estimate')
+    axes[unit_cell_length - 1, 2].set_xlabel('Error')
     fig.tight_layout()
     fig.savefig(save_to_name)
     plt.close()
+
 
 def evaluate_tetragonal_large_errors(data):
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     plot_volume_scale = 1000
 
     data = data[~data['augmented']]
-    unit_cell_true = np.stack(data[self.unit_cell_key])[:, self.data_params['y_indices']]
+    unit_cell_true = np.stack(data[self.unit_cell_key])[:, self.data_params['unit_cell_indices']]
     unit_cell_pred = np.stack(data[f'{self.unit_cell_key}_pred'])
-    unit_cell_mse = 1/self.data_params['n_outputs'] * np.linalg.norm(unit_cell_pred - unit_cell_true, axis=1)**2
+    unit_cell_mse = 1/self.data_params['unit_cell_length'] * np.linalg.norm(unit_cell_pred - unit_cell_true, axis=1)**2
     large_errors = unit_cell_mse > np.sort(unit_cell_mse)[int(0.75 * data.shape[0])]
     N_small = np.sum(~large_errors)
     N_large = np.sum(large_errors)
@@ -469,13 +594,14 @@ def evaluate_tetragonal_large_errors(data):
     fig.savefig(self.save_to['results'] + '_tetragonal_error_eval.png')
     plt.close()
 
+
 def evaluate_orthorhombic_large_errors(self):
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     plot_volume_scale = 1000
     data = self.data[~self.data['augmented']]
-    unit_cell_true = np.stack(data[self.unit_cell_key])[:, self.data_params['y_indices']]
+    unit_cell_true = np.stack(data[self.unit_cell_key])[:, self.data_params['unit_cell_indices']]
     unit_cell_pred = np.stack(data[f'{self.unit_cell_key}_pred'])
-    unit_cell_mse = 1/self.data_params['n_outputs'] * np.linalg.norm(unit_cell_pred - unit_cell_true, axis=1)**2
+    unit_cell_mse = 1/self.data_params['unit_cell_length'] * np.linalg.norm(unit_cell_pred - unit_cell_true, axis=1)**2
     large_errors = unit_cell_mse > np.sort(unit_cell_mse)[int(0.75 * data.shape[0])]
     N_small = np.sum(~large_errors)
     N_large = np.sum(large_errors)

@@ -10,6 +10,7 @@ from EntryHelpers import spacegroup_to_symmetry
 from EntryHelpers import verify_crystal_system_bravais_lattice_consistency
 from EntryHelpers import verify_unit_cell_consistency_by_bravais_lattice
 from EntryHelpers import verify_volume
+from Reindexing import get_split_group
 from Reindexing import reindex_entry_monoclinic
 from Reindexing import reindex_entry_orthorhombic
 from Reindexing import reindex_entry_triclinic
@@ -52,10 +53,7 @@ class ProcessEntry:
         self.split = None
 
         self.reciprocal_reindexed_unit_cell = np.zeros(6)
-        self.reciprocal_reindexed_volume = None
-        self.reciprocal_hkl_reindexer = np.eye(3)
         self.reindexed_xnn = np.zeros(6)
-        self.reciprocal_split = None 
 
         self.permutation = None
 
@@ -99,10 +97,7 @@ class ProcessEntry:
             'hkl_reindexer': self.hkl_reindexer.ravel(),
             'split': self.split,
             'reciprocal_reindexed_unit_cell': self.reciprocal_reindexed_unit_cell,
-            'reciprocal_reindexed_volume': self.reciprocal_reindexed_volume,
             'reindexed_xnn': self.reindexed_xnn,
-            'reciprocal_hkl_reindexer': self.reciprocal_hkl_reindexer.ravel(),
-            'reciprocal_split': self.reciprocal_split,
             'permutation': self.permutation,
             'reduced_unit_cell': self.reduced_unit_cell,
             'reduced_volume': self.reduced_volume,
@@ -154,16 +149,16 @@ class ProcessEntry:
         # Check the reciprocal space reindexing
         # Reindexing in reciprocal space starts with the direct space reindexed unit cell
         # so self.reciprocal_unit_cell = reciprocal_uc_conversion(self.reindexed_unit_cell)
-        reciprocal_reindexed_hkl = self.hkl_ref_monoclinic @ self.reciprocal_hkl_reindexer
         reciprocal_reindexed_q2_calculator = Q2Calculator(
             lattice_system='triclinic',
-            hkl=reciprocal_reindexed_hkl,
+            hkl=reindexed_hkl,
             tensorflow=False,
             representation='reciprocal_unit_cell'
             )
         reciprocal_reindexed_q2 = reciprocal_reindexed_q2_calculator.get_q2(self.reciprocal_reindexed_unit_cell[np.newaxis])[0]
         check_reciprocal = np.isclose(q2, reciprocal_reindexed_q2).all()
         check = check_direct & check_reciprocal
+        #print('monoclinic ', check_direct, check_reciprocal)
         #print(check, check_direct, check_reciprocal)
         #print(self.reciprocal_reindexed_unit_cell)
         #print(self.reciprocal_hkl_reindexer)
@@ -191,16 +186,16 @@ class ProcessEntry:
         reindexed_q2 = reindexed_q2_calculator.get_q2(self.reindexed_unit_cell[np.newaxis])[0]
         check_direct = np.isclose(q2, reindexed_q2).all()
 
-        reciprocal_reindexed_hkl = self.hkl_ref_triclinic @ self.reciprocal_hkl_reindexer
         reciprocal_reindexed_q2_calculator = Q2Calculator(
             lattice_system='triclinic',
-            hkl=reciprocal_reindexed_hkl,
+            hkl=reindexed_hkl,
             tensorflow=False,
             representation='reciprocal_unit_cell'
             )
         reciprocal_reindexed_q2 = reciprocal_reindexed_q2_calculator.get_q2(self.reciprocal_reindexed_unit_cell[np.newaxis])[0]
         check_reciprocal = np.isclose(q2, reciprocal_reindexed_q2).all()
         check = check_direct & check_reciprocal
+        #print('triclinic ', check_direct, check_reciprocal)
         #print(check, check_direct, check_reciprocal)
         #print(self.reciprocal_reindexed_unit_cell)
         #print(self.reciprocal_hkl_reindexer)
@@ -360,13 +355,27 @@ class ProcessEntry:
                 return None
         elif self.lattice_system == 'monoclinic':
             # Perform reindexing in direct space
-            self.reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, self.hkl_reindexer = \
+            reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, hkl_reindexer = \
                 reindex_entry_monoclinic(self.unit_cell, self.spacegroup_symbol_hm, space='direct')
-            if self.reindexed_unit_cell is None:
+            if reindexed_unit_cell is None:
                 self.reason = 'Infrequent monoclinic setting that has not been setup for reindexing'
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_number} {self.spacegroup_symbol_hm}')
                 return None
+            # Perform reindexing in reciprocal space
+            # This is not the same as the direct space operation because I am enforcing order to the unit cells
+            # The reindex unit cell will have a* > c* if a < c. However, the position of b/b* will vary.
+            # A quick check suggest this will affect 8% of entries. This will impact the training of the 
+            # Physics Informed Model because the predictions are performed in reciprocal space.
+            reciprocal_unit_cell = reciprocal_uc_conversion(
+                reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+                )[0]
+            self.reciprocal_reindexed_unit_cell, _, direct_to_reciprocal_hkl_reindexer = \
+                reindex_entry_monoclinic(reciprocal_unit_cell, self.reindexed_spacegroup_symbol_hm, space='reciprocal')
+            self.reindexed_unit_cell = reciprocal_uc_conversion(
+                self.reciprocal_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+                )[0]
+            self.hkl_reindexer = hkl_reindexer @ direct_to_reciprocal_hkl_reindexer
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
 
             try:
@@ -377,41 +386,26 @@ class ProcessEntry:
                 print(f'{self.reason} {self.spacegroup_number}   {self.spacegroup_symbol_hm}   {self.reindexed_spacegroup_symbol_hm}')
                 return None
 
-            # Perform reindexing in reciprocal space
-            # This is not the same as the direct space operation because I am enforcing order to the unit cells
-            # The reindex unit cell will have a* > c* if a < c. However, the position of b/b* will vary.
-            # A quick check suggest this will affect 8% of entries. This will impact the training of the 
-            # Physics Informed Model because the predictions are performed in reciprocal space.
-            self.reciprocal_unit_cell = reciprocal_uc_conversion(
-                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
-                )[0]
-            self.reciprocal_reindexed_unit_cell, _, direct_to_reciprocal_hkl_reindexer = \
-                reindex_entry_monoclinic(self.reciprocal_unit_cell, self.reindexed_spacegroup_symbol_hm, space='reciprocal')
-            self.reciprocal_hkl_reindexer = self.hkl_reindexer @ direct_to_reciprocal_hkl_reindexer
-            self.reciprocal_reindexed_volume = get_unit_cell_volume(self.reciprocal_reindexed_unit_cell)
-            print(self.hkl_reindexer, self.reciprocal_hkl_reindexer)
             if not self.verify_reindexing_monoclinic():
                 self.reason = 'Monoclinic Reindexing Error'
                 self.status = False
                 print(f'{self.reason} {self.spacegroup_symbol_hm}\n    {self.unit_cell}\n    {self.reindexed_unit_cell} ')
                 return None
-            else:
-                print('Success')
 
         elif self.lattice_system == 'triclinic':
-            self.reindexed_unit_cell, self.hkl_reindexer = reindex_entry_triclinic(self.unit_cell, space='direct')
+            # Same explaination for reindexing in reciprocal space as monoclinic
+            # For triclinic, skipping this results 20% incorrectly ordered xnn 
+            reciprocal_unit_cell = reciprocal_uc_conversion(
+                self.unit_cell[np.newaxis], partial_unit_cell=False
+                )[0]
+            self.reciprocal_reindexed_unit_cell, self.hkl_reindexer = \
+                reindex_entry_triclinic(reciprocal_unit_cell, space='reciprocal')
+            self.reindexed_unit_cell = reciprocal_uc_conversion(
+                self.reciprocal_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+                )[0]
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
-
-            # Same explaination for reindexing in reciprocal space as monoclinic
-            # For triclinic, skipping this results 20% incorrectly ordered xnn 
-            self.reciprocal_unit_cell = reciprocal_uc_conversion(
-                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
-                )[0]
-            self.reciprocal_reindexed_unit_cell, direct_to_reciprocal_hkl_reindexer = \
-                reindex_entry_triclinic(self.reciprocal_unit_cell, space='reciprocal')
-            self.reciprocal_hkl_reindexer = self.hkl_reindexer @ direct_to_reciprocal_hkl_reindexer
 
             if not self.verify_reindexing_triclinic():
                 self.reason = 'Triclinic Reindexing Error'
@@ -443,75 +437,29 @@ class ProcessEntry:
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
 
-        if self.lattice_system in ['monoclinic', 'triclinic']:
-            self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
-                self.reciprocal_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+        if not self.lattice_system in ['monoclinic', 'triclinic']:
+            self.reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(
+                self.reindexed_unit_cell[np.newaxis]
                 )[0]
-        else:
-            self.reindexed_xnn = get_xnn_from_unit_cell(
-                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
-                )[0]
+        self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
+            self.reciprocal_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+            )[0]
 
-        if self.lattice_system in ['cubic', 'rhombohedral', 'triclinic']:
-            self.split = 0
-        elif self.lattice_system in ['tetragonal', 'hexagonal']:
-            if self.unit_cell[0] < self.unit_cell[2]:
-                self.split = 0
-            else:
-                self.split = 1
-        elif self.lattice_system == 'monoclinic':
-            # splitting based on direct space
-            if self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[1]:
-                if self.reindexed_unit_cell[1] <= self.reindexed_unit_cell[2]:
-                    self.split = 0 # abc
-                elif self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[2]:
-                    self.split = 1 # acb
-                else:
-                    self.split = 2 # cab
-            else:
-                if self.reindexed_unit_cell[1] > self.reindexed_unit_cell[2]:
-                    self.split = 3 # cba
-                elif self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[2]:
-                    self.split = 4 # bac
-                else:
-                    self.split = 5 # bca
+        self.split = get_split_group(
+            self.lattice_system,
+            unit_cell=self.unit_cell,
+            reciprocal_reindexed_unit_cell=self.reciprocal_reindexed_unit_cell,
+            reindexed_spacegroup_symbol_hm=self.reindexed_spacegroup_symbol_hm
+            )
 
-            # splitting based on reciprocal space
-            if self.reciprocal_reindexed_unit_cell[0] > self.reciprocal_reindexed_unit_cell[1]:
-                # a* > b*
-                if self.reciprocal_reindexed_unit_cell[1] > self.reciprocal_reindexed_unit_cell[2]:
-                    self.reciprocal_split = 0 # cba* (abc)
-                elif self.reciprocal_reindexed_unit_cell[0] > self.reciprocal_reindexed_unit_cell[2]:
-                    self.reciprocal_split = 1 # bca* (acb)
-                else:
-                    self.reciprocal_split = 2 # bac* (cab)
-            else:
-                # a* < b*
-                if self.reciprocal_reindexed_unit_cell[1] < self.reciprocal_reindexed_unit_cell[2]:
-                    self.reciprocal_split = 3 # abc* (cba)
-                elif self.reciprocal_reindexed_unit_cell[0] > self.reciprocal_reindexed_unit_cell[2]:
-                    self.reciprocal_split = 4 # cab* (bac)
-                else:
-                    self.reciprocal_split = 5 # acb* (bca)
-
+        if self.lattice_system == 'monoclinic':
             if self.reindexed_spacegroup_symbol_hm in ['P 1 2 1', 'P 1 m 1', 'P 1 2/m 1', 'P 1 21 1', 'P 1 21/m 1']:
                 # These cases should all be reindexed so a < c or a* > c*
-                if self.split in [2, 3, 5] or self.reciprocal_split in [2, 3, 5]:
+                if self.split in [2, 3, 5]:
                     self.reason = 'Monoclinic Reindexing Error - unit cell did not get reordered'
                     self.status = False
                     print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.spacegroup_symbol_hm}')
                     return None
-        elif self.lattice_system == 'orthorhombic':
-            if self.reindexed_spacegroup_symbol_hm[0] in ['P', 'I', 'F']:
-                self.split = 0
-            else:
-                if self.reindexed_unit_cell[0] <= self.reindexed_unit_cell[2]:
-                    if self.reindexed_unit_cell[1] <= self.reindexed_unit_cell[2]:
-                        self.split = 0 # abc
-                    else:
-                        self.split = 1 # acb
-                else:
-                    self.split = 2 # cab
 
 
 class ProcessCSDEntry(ProcessEntry):

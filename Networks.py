@@ -19,7 +19,7 @@ def mlp_model_builder(x, tag, model_params, output_name):
             name=f'dropout_{tag}_{index}',
             )(x)
     output = tf.keras.layers.Dense(
-        model_params['n_outputs'],
+        model_params['unit_cell_length'],
         activation=model_params['output_activation'],
         name=output_name,
         kernel_initializer=model_params['kernel_initializer'],

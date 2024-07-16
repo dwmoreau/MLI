@@ -1,5 +1,6 @@
 import joblib
 import matplotlib.pyplot as plt
+import multiprocessing
 import numpy as np
 import os
 import scipy.spatial
@@ -8,7 +9,7 @@ from tqdm import tqdm
 
 from Utilities import fix_unphysical
 from Utilities import get_hkl_matrix
-from Utilities import get_M20
+from Utilities import get_M20_sym_reversed
 from Utilities import get_unit_cell_from_xnn
 from Utilities import read_params
 from Utilities import write_params
@@ -28,9 +29,9 @@ class MITemplates:
                 self.template_params[key] = template_params_defaults[key]
 
         self.lattice_system = data_params['lattice_system']
-        self.n_points = data_params['n_points']
-        self.n_outputs = data_params['n_outputs']
-        self.y_indices = data_params['y_indices']
+        self.n_peaks = data_params['n_peaks']
+        self.unit_cell_length = data_params['unit_cell_length']
+        self.unit_cell_indices = data_params['unit_cell_indices']
         self.hkl_ref_length = data_params['hkl_ref_length']
         self.hkl_ref = hkl_ref
         self.group = group
@@ -104,7 +105,7 @@ class MITemplates:
             # Cubic and rhombohedral do not have dominant zones
             miller_index_templates = make_sets(
                 self.template_params['templates_per_dominant_zone_bin'],
-                self.n_points,
+                self.n_peaks,
                 hkl_labels_all,
                 self.hkl_ref_length,
                 self.rng
@@ -151,7 +152,7 @@ class MITemplates:
                             )
                         mi_sets.append(make_sets(
                             self.template_params['templates_per_dominant_zone_bin'],
-                            self.n_points,
+                            self.n_peaks,
                             hkl_labels_bin,
                             self.hkl_ref_length,
                             self.rng
@@ -175,7 +176,7 @@ class MITemplates:
                             )
                         mi_sets.append(make_sets(
                             self.template_params['templates_per_dominant_zone_bin'],
-                            self.n_points,
+                            self.n_peaks,
                             hkl_labels_bin,
                             self.hkl_ref_length,
                             self.rng
@@ -194,7 +195,7 @@ class MITemplates:
 
             reindexed_hkl = np.stack(training_data['reindexed_hkl'])
             hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
-            hkl_information_hist = np.bincount(hkl_information, minlength=self.n_points)
+            hkl_information_hist = np.bincount(hkl_information, minlength=self.n_peaks)
 
             unit_cell_volume = np.array(training_data['reindexed_volume'])
             sorted_unit_cell_volume = np.sort(unit_cell_volume)
@@ -204,23 +205,23 @@ class MITemplates:
                 11
                 )
 
-            mean_ratio = np.zeros((self.n_points, 2, 2))
-            for i in range(self.n_points):
+            mean_ratio = np.zeros((self.n_peaks, 2, 2))
+            for i in range(self.n_peaks):
                 mean_ratio[i, 0, 0] = np.mean(ratio_xnn[hkl_information == i])
                 mean_ratio[i, 1, 0] = np.std(ratio_xnn[hkl_information == i])
                 mean_ratio[i, 0, 1] = np.mean(ratio_unit_cell[hkl_information == i])
                 mean_ratio[i, 1, 1] = np.std(ratio_unit_cell[hkl_information == i])
 
             fig, axes = plt.subplots(1, 5, figsize=(12, 3))
-            axes[0].hist(ratio_xnn, bins=np.linspace(0, 1, self.n_points + 1))
-            axes[1].hist(ratio_unit_cell, bins=np.linspace(0, 1, self.n_points + 1))
-            axes[2].hist(ratio_rec_unit_cell, bins=np.linspace(0, 1, self.n_points + 1))
-            axes[3].bar(np.arange(self.n_points), hkl_information_hist, width=1)
+            axes[0].hist(ratio_xnn, bins=np.linspace(0, 1, self.n_peaks + 1))
+            axes[1].hist(ratio_unit_cell, bins=np.linspace(0, 1, self.n_peaks + 1))
+            axes[2].hist(ratio_rec_unit_cell, bins=np.linspace(0, 1, self.n_peaks + 1))
+            axes[3].bar(np.arange(self.n_peaks), hkl_information_hist, width=1)
             axes[4].plot(
                 hkl_information, ratio_unit_cell,
                 marker='.', linestyle='none', markersize=0.25, alpha=0.5
                 )
-            axes[4].errorbar(np.arange(self.n_points), mean_ratio[:, 0, 1], mean_ratio[:, 1, 1])
+            axes[4].errorbar(np.arange(self.n_peaks), mean_ratio[:, 0, 1], mean_ratio[:, 1, 1])
 
             axes[0].set_xlabel('Dominant zone ratio\n(Min/Max Xnn)')
             axes[1].set_xlabel('Dominant zone ratio\n(Min/Max Unit Cell)')
@@ -244,7 +245,7 @@ class MITemplates:
             ratio_bins = np.linspace(0, 1, n_ratio_bins + 1)
             templates_per_information_bin = self.template_params['templates_per_dominant_zone_bin']
             templates_per_dominant_zone_bin = int(self.template_params['templates_per_dominant_zone_bin'] / n_ratio_bins)
-            for i in range(self.n_points):
+            for i in range(self.n_peaks):
                 indices = hkl_information == i
                 if np.sum(indices) > 0:
                     hkl_labels_bin = hkl_labels_all[indices]
@@ -275,7 +276,7 @@ class MITemplates:
                                         )
                                     mi_sets.append(make_sets(
                                         templates_per_dominant_zone_bin,
-                                        self.n_points,
+                                        self.n_peaks,
                                         hkl_labels_bin,
                                         self.hkl_ref_length,
                                         self.rng
@@ -300,7 +301,7 @@ class MITemplates:
                             )
                         mi_sets.append(make_sets(
                             self.template_params['templates_per_dominant_zone_bin'],
-                            self.n_points,
+                            self.n_peaks,
                             hkl_labels_bin,
                             self.hkl_ref_length,
                             self.rng
@@ -337,9 +338,9 @@ class MITemplates:
         hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
 
         # Calculate initial values for xnn using linear least squares methods
-        xnn = np.zeros((self.template_params['n_templates'], self.n_outputs))
+        xnn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
         A = hkl2 / q2_obs[np.newaxis, :, np.newaxis]
-        b = np.ones(self.n_points)
+        b = np.ones(self.n_peaks)
         for template_index in range(self.template_params['n_templates']):
             xnn[template_index], r, rank, s = np.linalg.lstsq(
                 A[template_index], b, rcond=None
@@ -358,8 +359,8 @@ class MITemplates:
             dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * hkl2, axis=1)
             term0 = np.matmul(hkl2[:, :, :, np.newaxis], hkl2[:, :, np.newaxis, :])
             H = np.sum(hessian_prefactor * term0, axis=1)
-            good = np.linalg.matrix_rank(H, hermitian=True) == self.n_outputs
-            delta_gn = np.zeros((self.template_params['n_templates'], self.n_outputs))
+            good = np.linalg.matrix_rank(H, hermitian=True) == self.unit_cell_length
+            delta_gn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
             delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
         loss = np.linalg.norm(1 - q2_calc/q2_obs[np.newaxis], axis=1)
@@ -369,18 +370,17 @@ class MITemplates:
 
     def generate_xnn(self, q2_obs):
         # This is slower
-        xnn = np.zeros((self.template_params['n_templates'], self.n_outputs))
+        xnn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
         loss = np.zeros(self.template_params['n_templates'])
-        order = np.arange(self.n_points)
+        order = np.arange(self.n_peaks)
         hkl2_all = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
         for template_index in range(self.template_params['n_templates']):
             sigma = q2_obs
             hkl2 = hkl2_all[template_index]
             status = True
             i = 0
-            xnn_last = np.zeros(self.n_outputs)
+            xnn_last = np.zeros(self.unit_cell_length)
             while status:
-                # Using this is only slightly faster than np.linalg.lstsq
                 xnn_current, r, rank, s = np.linalg.lstsq(
                     hkl2 / sigma[:, np.newaxis], q2_obs / sigma,
                     rcond=None
@@ -404,7 +404,7 @@ class MITemplates:
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
         return xnn, loss
 
-    def do_predictions(self, q2_obs, n_templates='all'):
+    def generate(self, n_templates, rng, q2_obs):
         # This is primary used to generate candidates for the optimizer, which expects that the
         # sum of the template and sampled candidates to be the same. This is why n_samples gets
         # changed
@@ -448,23 +448,18 @@ class MITemplates_calibrated(MITemplates):
     def __init__(self, group, data_params, template_params, hkl_ref, save_to, seed):
         super().__init__(group, data_params, template_params, hkl_ref, save_to, seed)
         template_params_defaults = {
-            'parallelization': None,
-            'n_processes': None,
+            'parallelization': 'multiprocessing',
+            'n_processes': 4,
             'inverse_regularization_strength': 1,
             'radius': 0.003,
             'q2_error_params': [0.0001, 0.001],
             'n_train': 100,
-            'M20_evals': 10,
+            'M20_evals': 3,
             }
 
         for key in template_params_defaults.keys():
             if key not in self.template_params.keys():
                 self.template_params[key] = template_params_defaults[key]
-
-        if self.template_params['parallelization'] == 'multiprocessing':
-            import multiprocessing
-        elif self.template_params['parallelization'] == 'message_passing':
-            assert False
 
     def save(self):
         self._save_common()
@@ -490,17 +485,15 @@ class MITemplates_calibrated(MITemplates):
             )
 
     def generate_xnn_M20(self, q2_obs):
-        xnn = np.zeros((self.template_params['n_templates'], self.n_outputs))
-        loss = np.zeros(self.template_params['n_templates'])
-        q2_calc_all = np.zeros((self.template_params['n_templates'], self.n_points))
-        order = np.arange(self.n_points)
+        xnn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
+        order = np.arange(self.n_peaks)
         hkl2_all = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
         for template_index in range(self.template_params['n_templates']):
             sigma = q2_obs
             hkl2 = hkl2_all[template_index]
             status = True
             i = 0
-            xnn_last = np.zeros(self.n_outputs)
+            xnn_last = np.zeros(self.unit_cell_length)
             while status:
                 # Using this is only slightly faster than np.linalg.lstsq
                 xnn_current, r, rank, s = np.linalg.lstsq(
@@ -522,39 +515,57 @@ class MITemplates_calibrated(MITemplates):
                     status = False
                 i += 1
             xnn[template_index] = xnn_current
-            loss[template_index] = np.linalg.norm(1 - q2_calc/q2_obs)
-            q2_calc_all[template_index] = q2_calc
 
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
+
         hkl2_ref = get_hkl_matrix(self.hkl_ref, self.lattice_system)
-        q2_ref_calc_all = xnn @ hkl2_ref.T
+        q2_ref_calc = xnn @ hkl2_ref.T
+        pairwise_differences = scipy.spatial.distance.cdist(
+            q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
+            ).reshape((self.n_peaks, xnn.shape[0], self.hkl_ref_length))
+        hkl_assign = pairwise_differences.argmin(axis=2).T
+        hkl_pred = np.take(self.hkl_ref, hkl_assign, axis=0)
+        hkl2_pred = get_hkl_matrix(hkl_pred, self.lattice_system)
+        q2_calc = np.sum(xnn[:, np.newaxis, :] * hkl2_pred, axis=2)
+        delta_q2 = np.abs(q2_obs - q2_calc)
+        sigma = np.sqrt(q2_obs * (delta_q2 + 1e-10))
+        for template_index in range(self.template_params['n_templates']):
+            xnn[template_index], r, rank, s = np.linalg.lstsq(
+                hkl2_pred[template_index] / sigma[template_index, :, np.newaxis],
+                q2_obs / sigma[template_index],
+                rcond=None
+                )
+
+        q2_ref_calc = xnn @ hkl2_ref.T
+        q2_calc = np.sum(xnn[:, np.newaxis, :] * hkl2_pred, axis=2)
+
         # Need to add some error to the peak positions to calculate M20.
         # Otherwise the observed discrepancy (M20 denominator) can be zero.
-        M20 = np.zeros((self.template_params['n_templates'], self.template_params['M20_evals']))
+        M20 = np.zeros((self.template_params['n_templates'], 3, self.template_params['M20_evals']))
         scale = self.template_params['q2_error_params'][0] + q2_obs*self.template_params['q2_error_params'][1]
         for M20_iteration in range(self.template_params['M20_evals']):
             q2_obs_err = q2_obs + self.rng.normal(loc=0, scale=scale)
-            print(np.mean(np.abs(q2_obs_err - q2_obs)), M20_iteration)
-            M20[:, M20_iteration] = get_M20(q2_obs_err, q2_calc_all, q2_ref_calc_all)
-        return xnn, loss, M20.mean(axis=1)
+            M20[:, 0, M20_iteration], M20[:, 1, M20_iteration], M20[:, 2, M20_iteration] = \
+                get_M20_sym_reversed(q2_obs_err, xnn, hkl_pred, self.hkl_ref, self.lattice_system)
+        M20 = M20.mean(axis=2)
+        return xnn, M20
 
-    def _get_inputs_worker(self, q2_obs, xnn_true):
-        xnn, loss, M20 = self.generate_xnn_M20(q2_obs)
-        print(M20.mean(), M20.max(), M20.min())
-        normalized_loss = loss.min()/loss
-        normalized_M20 = M20 / M20.max()
+    def _get_inputs_worker(self, inputs):
+        q2_obs = inputs[0]
+        xnn_true = inputs[1]
+        xnn, M20 = self.generate_xnn_M20(q2_obs)
+        normalized_M20 = M20# / M20.max(axis=1)[:, np.newaxis]
         distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])
         neighbor = (distance < self.template_params['radius']).astype(int)[:, 0]
-        return normalized_loss, normalized_M20, neighbor
+        return normalized_M20, neighbor
 
     def get_inputs(self, data):
-        training_data = data[data['train']]
+        unaugmented_data = data[~data['augmented']]
+        training_data = unaugmented_data[unaugmented_data['train']]
         n_entries = len(training_data)
-        metrics = np.zeros((n_entries, 2))
         q2_obs = np.stack(training_data['q2'])
-        xnn_true = np.stack(training_data['reindexed_xnn'])[:, self.y_indices]
+        xnn_true = np.stack(training_data['reindexed_xnn'])[:, self.unit_cell_indices]
 
-        normalized_loss = []
         normalized_M20 = []
         neighbor = []
         if self.template_params['n_train'] is None:
@@ -565,28 +576,51 @@ class MITemplates_calibrated(MITemplates):
         if self.template_params['parallelization'] is None:
             print(f'Setting up {n_train} entries serially')
             for i in tqdm(range(n_train)):
-                normalized_loss_entry, normalized_M20_entry, neighbor_entry = \
-                    self._get_inputs_worker(q2_obs[i], xnn_true[i])
-                normalized_loss.append(normalized_loss_entry)
+                normalized_M20_entry, neighbor_entry = \
+                    self._get_inputs_worker([q2_obs[i], xnn_true[i]])
                 normalized_M20.append(normalized_M20_entry)
                 neighbor.append(neighbor_entry)
         elif self.template_params['parallelization'] == 'multiprocessing':
             print(f'Setting up {n_train} entries using multiprocessing')
-            assert False
-        elif self.template_params['parallelization'] == 'message_passing':
-            assert False
+            with multiprocessing.Pool(self.template_params['n_processes']) as p:
+                outputs = p.map(self._get_inputs_worker, zip(q2_obs[:n_train], xnn_true[:n_train]))
+            for i in range(n_train):
+                normalized_M20.append(outputs[i][0])
+                neighbor.append(outputs[i][1])
 
-        features = np.column_stack((
-            np.concatenate(normalized_loss),
-            np.concatenate(normalized_M20)
-            ))
+        normalized_M20 = np.row_stack(normalized_M20)
         neighbor = np.concatenate(neighbor)
-        return features, neighbor
+        return normalized_M20, neighbor
 
     def fit_model(self, data):
-        features, neighbor = self.get_inputs(data)
+        normalized_M20, neighbor = self.get_inputs(data)        
         self.logistic_regression = sklearn.linear_model.LogisticRegression(
-            C=self.template_params['inverse_regularization_strength'], verbose=1
+            C=self.template_params['inverse_regularization_strength'], verbose=0
             )
-        self.logistic_regression.fit(features, neighbor)
+        self.logistic_regression.fit(normalized_M20, neighbor)
+        probability = self.logistic_regression.predict_proba(normalized_M20)
+        score = self.logistic_regression.score(normalized_M20, neighbor)
+        print(score)
+
+        normalized_M20_close = normalized_M20[neighbor.astype(bool)]
+        normalized_M20_far = normalized_M20[~neighbor.astype(bool)]
+        probability_close = probability[neighbor.astype(bool)]
+        probability_far = probability[~neighbor.astype(bool)]
+        fig, axes = plt.subplots(1, 2, figsize=(5, 3))
+        axes[0].boxplot(normalized_M20_close, positions=[0, 1, 2])
+        axes[0].boxplot(normalized_M20_far, positions=[0.25, 1.25, 2.25])
+        axes[0].set_xticks([0, 0.25, 1, 1.25, 2, 2.25])
+        axes[0].set_xticklabels([
+            'M20 - close', 'M20 - far',
+            'M20 sym - close', 'M20 sym - far',
+            'M20 rev - close', 'M20 rev - far',
+            ], rotation=90)
+        axes[1].boxplot(probability_close[:, 1], positions=[0])
+        axes[1].boxplot(probability_far[:, 1], positions=[0.25])
+        axes[1].set_xticks([0, 0.25])
+        axes[1].set_xticklabels([ 'Prob - close', 'Prob - far'], rotation=90)
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to}/{self.group}_features_neighbors_{self.template_params["tag"]}.png')
+        #plt.show()
+        plt.close()
         self.save()

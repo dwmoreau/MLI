@@ -166,6 +166,34 @@ def get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False, lattice_system=No
     return get_xnn_from_reciprocal_unit_cell(reciprocal_unit_cell, partial_unit_cell, lattice_system)
 
 
+def get_unit_cell_volume(unit_cell, partial_unit_cell=False, lattice_system=None):
+    if partial_unit_cell and lattice_system != 'triclinic':
+        if lattice_system == 'cubic':
+            volume = unit_cell[:, 0]**3
+        elif lattice_system == 'tetragonal':
+            volume = unit_cell[:, 0]**2 * unit_cell[:, 1]
+        elif lattice_system == 'hexagonal':
+            volume = unit_cell[:, 0]**2 * unit_cell[:, 1] * np.sin(np.pi/3)
+        elif lattice_system == 'rhombohedral':
+            volume = unit_cell[:, 0]**3 * np.sqrt(1 - 3*np.cos(unit_cell[:, 1])**2 + 2*np.cos(unit_cell[:, 1])**3)
+        elif lattice_system == 'orthorhombic':
+            volume = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
+        elif lattice_system == 'monoclinic':
+            abc = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
+            volume = abc * np.sin(unit_cell[:, 3])
+
+    elif partial_unit_cell == False or lattice_system == 'triclinic':
+        a = unit_cell[:, 0]
+        b = unit_cell[:, 1]
+        c = unit_cell[:, 2]
+        calpha = np.cos(unit_cell[:, 3])
+        cbeta = np.cos(unit_cell[:, 4])
+        cgamma = np.cos(unit_cell[:, 5])
+        arg = 1 - calpha**2 - cbeta**2 - cgamma**2 + 2*calpha*cbeta*cgamma
+        volume = (a*b*c) * np.sqrt(arg)
+    return volume
+
+
 def fix_unphysical(xnn=None, unit_cell=None, rng=None, lattice_system=None, minimum_unit_cell=2, maximum_unit_cell=500):
     if rng is None:
         rng = np.random.default_rng()
@@ -566,32 +594,69 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
     return M20
 
 
-def get_unit_cell_volume(unit_cell, partial_unit_cell=False, lattice_system=None):
-    if partial_unit_cell:
-        if lattice_system == 'cubic':
-            volume = unit_cell[:, 0]**3
-        elif lattice_system == 'tetragonal':
-            volume = unit_cell[:, 0]**2 * unit_cell[:, 1]
-        elif lattice_system == 'hexagonal':
-            assert False
-        elif lattice_system == 'rhombohedral':
-            assert False
-        elif lattice_system == 'orthorhombic':
-            volume = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
-        elif lattice_system == 'monoclinic':
-            abc = unit_cell[:, 0] * unit_cell[:, 1] * unit_cell[:, 2]
-            volume = abc * np.sqrt(1 - np.cos(unit_cell[:, 3])**2)
+def get_multiplicity(hkl, lattice_system):
+    if lattice_system == 'triclinic':
+        multiplicity = 2*np.ones(hkl.shape[0])
+    elif lattice_system == 'monoclinic':
+        multiplicity = 4*np.ones(hkl.shape[0])
+        m2 = np.logical_or(
+            hkl[:, 1] == 0,
+            np.logical_and(
+                hkl[:, 0] == 0,
+                hkl[:, 2] == 0,
+                )
+            )
+        multiplicity[m2] = 2
+    elif lattice_system == 'orthorhombic':
+        multiplicity = 8*np.ones(hkl.shape[0])
+        m4 = np.any(np.stack((
+            hkl[:, 0] == 0,
+            hkl[:, 1] == 0,
+            hkl[:, 2] == 0,
+            ), axis=1), axis=1)
+        m2 = np.any(np.stack((
+            np.logical_and(hkl[:, 0] == 0, hkl[:, 1] == 0),
+            np.logical_and(hkl[:, 0] == 0, hkl[:, 2] == 0),
+            np.logical_and(hkl[:, 1] == 0, hkl[:, 2] == 0),
+            ), axis=2), axis=2)
+        multiplicity[m4] = 4
+        multiplicity[m2] = 2
+    else:
+        assert False
+    return multiplicity
 
-    elif partial_unit_cell == False or lattice_system == 'triclinic':
-        a = unit_cell[:, 0]
-        b = unit_cell[:, 1]
-        c = unit_cell[:, 2]
-        calpha = np.cos(unit_cell[:, 3])
-        cbeta = np.cos(unit_cell[:, 4])
-        cgamma = np.cos(unit_cell[:, 5])
-        arg = 1 - calpha**2 - cbeta**2 - cgamma**2 + 2*calpha*cbeta*cgamma
-        volume = (a*b*c) * np.sqrt(arg)
-    return volume
+
+def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
+    hkl2 = get_hkl_matrix(hkl, lattice_system)
+    q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
+    hkl2_ref = get_hkl_matrix(hkl_ref, lattice_system)
+    q2_ref_calc = np.sum(hkl2_ref * xnn[:, np.newaxis, :], axis=2)
+    multiplicity = get_multiplicity(hkl.reshape((hkl.shape[0]*hkl.shape[1], hkl.shape[2])), lattice_system).reshape(hkl.shape[:2])
+    multiplicity_ref = get_multiplicity(hkl_ref, 'monoclinic')
+
+    discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
+    smaller_ref_peaks = q2_ref_calc < q2_calc[:, -1][:, np.newaxis]
+    last_smaller_ref_peak = np.zeros(q2_calc.shape[0])
+    expected_discrepancy_reversed = (q2_obs[-1] - q2_obs[0]) / (2*20)
+    discrepancy_reversed = np.zeros(q2_calc.shape[0])
+    for i in range(q2_calc.shape[0]):
+        q2_ref_smaller = q2_ref_calc[i, smaller_ref_peaks[i]]
+        multiplicities_ref_smaller = multiplicity_ref[smaller_ref_peaks[i]]
+        sort_indices = np.argsort(q2_ref_smaller)
+        q2_ref_smaller = q2_ref_smaller[sort_indices]
+        multiplicities_ref_smaller = multiplicities_ref_smaller[sort_indices]
+        last_smaller_ref_peak[i] = q2_ref_smaller[-1]
+    
+        N_calc = np.sum(1/multiplicities_ref_smaller)
+        differences = np.min(np.abs(q2_ref_smaller[np.newaxis] - q2_obs[:, np.newaxis]), axis=0)
+        discrepancy_reversed[i] = np.sum(differences/multiplicities_ref_smaller) / N_calc
+    
+    N = np.sum(smaller_ref_peaks, axis=1)
+    expected_discrepancy = last_smaller_ref_peak / (2*N)
+    M20 = expected_discrepancy / discrepancy
+    M20_reversed = expected_discrepancy_reversed / discrepancy_reversed
+    M20_sym = M20 * M20_reversed
+    return M20, M20_sym, M20_reversed
 
 
 class Q2Calculator:

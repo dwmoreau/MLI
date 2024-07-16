@@ -288,7 +288,47 @@ def map_spacegroup_symbol(spacegroup_map_table, key, spacegroup_symbol, permutat
     return permuted_spacegroup_symbol
 
 
-def reindex_entry_monoclinic(unit_cell, spacegroup_symbol):
+def get_split_group(lattice_system, unit_cell=None, reciprocal_reindexed_unit_cell=None, reindexed_spacegroup_symbol_hm=None):
+    if lattice_system in ['cubic', 'rhombohedral', 'triclinic']:
+        split = 0
+    elif lattice_system in ['tetragonal', 'hexagonal']:
+        if unit_cell[0] < unit_cell[2]:
+            split = 0
+        else:
+            split = 1
+    elif lattice_system == 'monoclinic':
+        # splitting based on reciprocal space
+        if reciprocal_reindexed_unit_cell[0] >= reciprocal_reindexed_unit_cell[1]:
+            # a* > b*
+            if reciprocal_reindexed_unit_cell[1] >= reciprocal_reindexed_unit_cell[2]:
+                split = 0 # cba* (abc)
+            elif reciprocal_reindexed_unit_cell[0] >= reciprocal_reindexed_unit_cell[2]:
+                split = 1 # bca* (acb)
+            else:
+                split = 2 # bac* (cab)
+        else:
+            # a* < b*
+            if reciprocal_reindexed_unit_cell[1] <= reciprocal_reindexed_unit_cell[2]:
+                split = 3 # abc* (cba)
+            elif reciprocal_reindexed_unit_cell[0] >= reciprocal_reindexed_unit_cell[2]:
+                split = 4 # cab* (bac)
+            else:
+                split = 5 # acb* (bca)
+    elif lattice_system == 'orthorhombic':
+        if reindexed_spacegroup_symbol_hm[0] in ['P', 'I', 'F']:
+            split = 0
+        else:
+            if reindexed_unit_cell[0] <= reindexed_unit_cell[2]:
+                if reindexed_unit_cell[1] <= reindexed_unit_cell[2]:
+                    split = 0 # abc
+                else:
+                    split = 1 # acb
+            else:
+                split = 2 # cab
+    return split
+
+
+def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, space='direct'):
     # This version reindexes the monoclinic entries to nonconventional settings
     #   SG # | Setting
     #      3 | P 1 2 1
@@ -385,7 +425,12 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol):
         return None, None, np.eye(3)
 
     reindexed_unit_cell = reindex_unit_cell(unit_cell, centered_reindexer)
-    if reindexed_unit_cell[0] > reindexed_unit_cell[2]:
+    swap_ac = False
+    if space == 'direct' and reindexed_unit_cell[0] > reindexed_unit_cell[2]:
+        swap_ac = True
+    if space == 'reciprocal' and reindexed_unit_cell[0] < reindexed_unit_cell[2]:
+        swap_ac = True
+    if swap_ac:
         ac_reindexer = np.array([
             [0, 0, 1],
             [0, 1, 0],
@@ -394,7 +439,13 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol):
         centered_reindexer = centered_reindexer @ ac_reindexer
         reindexed_unit_cell = reindex_unit_cell(reindexed_unit_cell, ac_reindexer)
 
-    if reindexed_unit_cell[4] < np.pi/2:
+    reindex_angle = False
+    if space == 'direct' and reindexed_unit_cell[4] < np.pi/2:
+        reindex_angle = True
+    if space == 'reciprocal' and reindexed_unit_cell[4] > np.pi/2:
+        reindex_angle = True
+
+    if reindex_angle:
         obtuse_reindexer = np.array([
             [-1, 0, 0],
             [0, -1, 0],
@@ -912,11 +963,11 @@ def selling_reduction(unit_cell, space='direct'):
     return unit_cell_reduced, hkl_transformation, s6_reduced
 
 
-def reindex_entry_triclinic(unit_cell):
+def reindex_entry_triclinic(unit_cell, space='direct'):
     if unit_cell.shape == (6,):
-        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell[np.newaxis])
+        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell[np.newaxis], space)
         unit_cell_reduced = unit_cell_reduced[0]
         hkl_transformation = hkl_transformation[0]
     else:
-        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell)
+        unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell, space)
     return unit_cell_reduced, hkl_transformation

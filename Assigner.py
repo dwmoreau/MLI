@@ -12,8 +12,8 @@ from Utilities import write_params
 class Assigner:
     def __init__(self, data_params, model_params, hkl_ref, q2_scaler, save_to):
         self.model_params = model_params
-        self.model_params['n_uc_params'] = len(data_params['y_indices'])
-        self.model_params['n_points'] = data_params['n_points']
+        self.model_params['n_uc_params'] = len(data_params['unit_cell_indices'])
+        self.model_params['n_peaks'] = data_params['n_peaks']
         self.model_params['hkl_ref_length'] = data_params['hkl_ref_length']
         model_params_defaults = {
             'layers': [100],
@@ -62,7 +62,7 @@ class Assigner:
             'dropout_rate',
             'output_activation',
             'hkl_ref_length',
-            'n_points',
+            'n_peaks',
             'n_uc_params',
             'L2_kernel_reg',
             'L2_bias_reg',
@@ -70,7 +70,7 @@ class Assigner:
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
-        self.model_params['n_points'] = int(params['n_points'])
+        self.model_params['n_peaks'] = int(params['n_peaks'])
         if params['perturb_std'] == '':
             self.model_params['perturb_std'] = None
         else:
@@ -114,7 +114,7 @@ class Assigner:
                 dtype=tf.float32,
                 ),
             'q2_scaled': tf.keras.Input(
-                shape=(self.model_params['n_points']),
+                shape=(self.model_params['n_peaks']),
                 name='q2_scaled',
                 dtype=tf.float32,
                 ),
@@ -162,7 +162,7 @@ class Assigner:
         epsilon = self.model_params['epsilon_pds']
         return epsilon / (abs_func(pairwise_differences_scaled) + epsilon)
 
-    def fit_model(self, data, xnn_key, y_indices):
+    def fit_model(self, data, xnn_key, unit_cell_indices):
         self.build_model(mode='training', data=data)
         self.compile_model()
 
@@ -170,21 +170,15 @@ class Assigner:
         val_data = data[~data['train']]
 
         train_inputs = {
-            'xnn': np.stack(train_data[xnn_key])[:, y_indices],
+            'xnn': np.stack(train_data[xnn_key])[:, unit_cell_indices],
             'q2_scaled': np.stack(train_data['q2_scaled']),
             }
         val_inputs = {
-            'xnn': np.stack(val_data[xnn_key])[:, y_indices],
+            'xnn': np.stack(val_data[xnn_key])[:, unit_cell_indices],
             'q2_scaled': np.stack(val_data['q2_scaled']),
             }
         train_true = {'hkl_softmaxes': np.stack(train_data['hkl_labels'])}
         val_true = {'hkl_softmaxes': np.stack(val_data['hkl_labels'])}
-
-        # This increases the weighting for samples with dominant zone issues
-        #reindexed_hkl = np.stack(train_data['reindexed_hkl'])[:, :, :, 0]
-        #hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
-        #scale = 1 / (self.model_params['n_points'] + 1)
-        #sample_weight = scale * (self.model_params['n_points'] + 1 - hkl_information) + 1
 
         print(f'\n Starting assign model training: {self.model_params["tag"]} {self.model_params["perturb_std"]}')
         self.fit_history = self.model.fit(
@@ -231,7 +225,7 @@ class Assigner:
         fig.savefig(f'{self.save_to}/assignment_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
-    def do_predictions(self, data, xnn_key, y_indices, reload_model=True, batch_size=256):
+    def do_predictions(self, data, xnn_key, unit_cell_indices, reload_model=True, batch_size=256):
         if reload_model:
             self.build_model(mode='evaluate')
             self.model.load_weights(
@@ -240,7 +234,7 @@ class Assigner:
                 )
             self.compile_model()
         inputs = {
-            'xnn': np.stack(data[xnn_key])[:, y_indices],
+            'xnn': np.stack(data[xnn_key])[:, unit_cell_indices],
             'q2_scaled': np.stack(data['q2_scaled'])
             }
         print(f'\n Inference for Miller Index Assignments')
@@ -249,14 +243,14 @@ class Assigner:
 
         softmaxes = np.zeros((
             len(data),
-            self.model_params['n_points'],
+            self.model_params['n_peaks'],
             self.model_params['hkl_ref_length']
             ))
         for batch_index in range(n_batchs + 1):
             start = batch_index * batch_size
             if batch_index == n_batchs:
                 batch_unit_cell_scaled = np.zeros((batch_size, self.model_params['n_uc_params']))
-                batch_q2_scaled = np.zeros((batch_size, self.model_params['n_points']))
+                batch_q2_scaled = np.zeros((batch_size, self.model_params['n_peaks']))
                 batch_unit_cell_scaled[:left_over] = inputs['xnn'][start: start + left_over]
                 batch_unit_cell_scaled[left_over:] = inputs['xnn'][0]
                 batch_q2_scaled[:left_over] = inputs['q2_scaled'][start: start + left_over]
@@ -276,8 +270,8 @@ class Assigner:
                 softmaxes[start: end] = softmaxes_batch
         return softmaxes
 
-    def evaluate(self, data, bravais_lattice, xnn_key, y_indices, perturb_std):
-        xnn = np.stack(data[xnn_key])[:, y_indices]
+    def evaluate(self, data, bravais_lattice, xnn_key, unit_cell_indices, perturb_std):
+        xnn = np.stack(data[xnn_key])[:, unit_cell_indices]
 
         if perturb_std is not None:
             noise = np.random.normal(loc=1, scale=perturb_std, size=xnn.shape)
@@ -301,16 +295,16 @@ class Assigner:
         accuracy_pred_val = correct_pred_val.sum() / correct_pred_val.size
         accuracy_closest = correct_closest.sum() / correct_closest.size
         # accuracy for each entry
-        accuracy_entry_train = correct_pred_train.sum(axis=1) / self.model_params['n_points']
-        accuracy_entry_val = correct_pred_val.sum(axis=1) / self.model_params['n_points']
-        accuracy_entry_closest = correct_closest.sum(axis=1) / self.model_params['n_points']
+        accuracy_entry_train = correct_pred_train.sum(axis=1) / self.model_params['n_peaks']
+        accuracy_entry_val = correct_pred_val.sum(axis=1) / self.model_params['n_peaks']
+        accuracy_entry_closest = correct_closest.sum(axis=1) / self.model_params['n_peaks']
         # accuracy per peak position
         accuracy_peak_position_train = correct_pred_train.sum(axis=0) / correct_pred_train.shape[0]
         accuracy_peak_position_val = correct_pred_val.sum(axis=0) / correct_pred_val.shape[0]
         accuracy_peak_position_closest = correct_closest.sum(axis=0) / data.shape[0]
 
         fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-        bins = (np.arange(self.model_params['n_points'] + 2) - 0.5) / self.model_params['n_points']
+        bins = (np.arange(self.model_params['n_peaks'] + 2) - 0.5) / self.model_params['n_peaks']
         centers = (bins[1:] + bins[:-1]) / 2
         dbin = bins[1] - bins[0]
         hist_train, _ = np.histogram(accuracy_entry_train, bins=bins, density=True)
@@ -320,15 +314,15 @@ class Assigner:
         axes[0].bar(centers, hist_val, width=dbin, alpha=0.5, label='Predicted: Validation')
         axes[0].bar(centers, hist_closest, width=dbin, alpha=0.5, label='Closest')
         axes[1].bar(
-            np.arange(self.model_params['n_points']), accuracy_peak_position_train,
+            np.arange(self.model_params['n_peaks']), accuracy_peak_position_train,
             width=1, label='Predicted: Training'
             )
         axes[1].bar(
-            np.arange(self.model_params['n_points']), accuracy_peak_position_val,
+            np.arange(self.model_params['n_peaks']), accuracy_peak_position_val,
             width=1, alpha=0.5, label='Predicted: Validation'
             )
         axes[1].bar(
-            np.arange(self.model_params['n_points']), accuracy_peak_position_closest,
+            np.arange(self.model_params['n_peaks']), accuracy_peak_position_closest,
             width=1, alpha=0.5, label='Closest'
             )
 
@@ -345,14 +339,14 @@ class Assigner:
         plt.close()    
 
     def calibrate(self, data):
-        def calibration_plots(softmaxes, n_points, n_bins=25):
+        def calibration_plots(softmaxes, n_peaks, n_bins=25):
             N = softmaxes.shape[0]
             y_pred = softmaxes.argmax(axis=2)
-            p_pred = np.zeros((N, n_points))
+            p_pred = np.zeros((N, n_peaks))
             metrics = np.zeros((n_bins, 4))
             ece = 0
             for entry_index in range(N):
-                for point_index in range(n_points):
+                for point_index in range(n_peaks):
                     p_pred[entry_index, point_index] = softmaxes[
                         entry_index,
                         point_index,
@@ -381,7 +375,7 @@ class Assigner:
         softmaxes = np.stack(data['hkl_softmaxes'])
         y_true = np.stack(data['hkl_labels'])
 
-        metrics, ece = calibration_plots(softmaxes, self.model_params['n_points'])
+        metrics, ece = calibration_plots(softmaxes, self.model_params['n_peaks'])
         fig, axes = plt.subplots(1, 1, figsize=(5, 3))
         axes.plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])
         axes.set_xlabel('Confidence')

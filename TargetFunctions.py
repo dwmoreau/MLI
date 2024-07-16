@@ -112,11 +112,11 @@ class LikelihoodLoss:
 
 
 class CandidateOptLoss:
-    def __init__(self, q2_obs, lattice_system, epsilon):
+    def __init__(self, q2_obs, lattice_system):
         self.q2_obs = q2_obs
         self.lattice_system = lattice_system
-        self.delta_q_eps = epsilon
-        self.n_points = self.q2_obs.shape[1]
+        self.delta_q_eps = 1e-10
+        self.n_peaks = self.q2_obs.shape[1]
         self.n_entries = self.q2_obs.shape[0]
 
         if lattice_system == 'cubic':
@@ -182,10 +182,10 @@ class CandidateOptLoss:
         self.hessian_prefactor = (1 / self.sigma**2)[:, :, np.newaxis, np.newaxis]
 
     def get_q2_pred(self, xnn, jac=True):
-        # self.hkl2:     n_entries, n_points, xnn_length
+        # self.hkl2:     n_entries, n_peaks, xnn_length
         # xnn:           n_entries, xnn_length
-        # q2_pred:       n_entries, n_points
-        # dq2_pred_dxnn: n_entries, n_points, xnn_length
+        # q2_pred:       n_entries, n_peaks
+        # dq2_pred_dxnn: n_entries, n_peaks, xnn_length
         arg = self.hkl2 * xnn[:, np.newaxis, :]
         q2_pred = np.sum(arg, axis=2)
         if jac:
@@ -195,9 +195,9 @@ class CandidateOptLoss:
             return q2_pred
 
     def gauss_newton_step(self, xnn):
-        # q2_pred:       n_entries, n_points
-        # dq2_pred_dxnn: n_entries, n_points, xnn_length
-        # self.q2_obs:   n_points
+        # q2_pred:       n_entries, n_peaks
+        # dq2_pred_dxnn: n_entries, n_peaks, xnn_length
+        # self.q2_obs:   n_peaks
         q2_pred, dq2_pred_dxnn = self.get_q2_pred(xnn, jac=True)
         residuals = (q2_pred - self.q2_obs) / self.sigma
         dlikelihood_dq2_pred = residuals / self.sigma
@@ -224,9 +224,9 @@ class CandidateOptLoss:
         return xnn
 
     def _get_hessian_inverse(self, xnn):
-        # q2_pred:       n_entries, n_points
-        # dq2_pred_dxnn: n_entries, n_points, xnn_length
-        # self.q2_obs:   n_points
+        # q2_pred:       n_entries, n_peaks
+        # dq2_pred_dxnn: n_entries, n_peaks, xnn_length
+        # self.q2_obs:   n_peaks
         q2_pred, dq2_pred_dxnn = self.get_q2_pred(xnn, jac=True)
         residuals = (q2_pred - self.q2_obs) / self.sigma
         dlikelihood_dq2_pred = residuals / self.sigma
@@ -266,9 +266,9 @@ class CandidateOptLoss:
 
 
 class IndexingTargetFunction:
-    def __init__(self, likelihood, error_fraction, n_points, tuning_param=1):
+    def __init__(self, likelihood, error_fraction, n_peaks, tuning_param=1):
         self.error_fraction = error_fraction
-        self.n_points = n_points
+        self.n_peaks = n_peaks
         self.likelihood = likelihood
         if self.likelihood == 't-dist':
             self.tuning_param = tuning_param
@@ -288,42 +288,42 @@ class IndexingTargetFunction:
         return self.likelihood_function(q2_true, y_pred)
 
     def t_dist_likelihood(self, q2_true, y_pred):
-        # softmaxes: n_batch x n_points x hkl_ref_length
+        # softmaxes: n_batch x n_peaks x hkl_ref_length
         # q2_ref:    n_batch x hkl_ref_length            <- not transform!!!
-        # q2_true:   n_batch x n_points                  <- not transform!!!
-        # q2_error:  n_batch x n_points
-        softmaxes = y_pred[:, :self.n_points, :]
-        q2_ref = y_pred[:, self.n_points, :]
+        # q2_true:   n_batch x n_peaks                  <- not transform!!!
+        # q2_error:  n_batch x n_peaks
+        softmaxes = y_pred[:, :self.n_peaks, :]
+        q2_ref = y_pred[:, self.n_peaks, :]
         q2_error = q2_true * self.error_fraction[tf.newaxis, :]
         
-        # differences: n_batch x n_points x hkl_ref_length
+        # differences: n_batch x n_peaks x hkl_ref_length
         differences = q2_true[:, :, tf.newaxis] - q2_ref[:, tf.newaxis, :]
         residuals = differences / q2_error[:, :, tf.newaxis]
 
         arg = 1 + 1/self.tuning_param * residuals**2
         difference_likelihoods = self.prefactor / q2_error[:, :, tf.newaxis] * arg**self.exponent
-        # peak_likelihoods: n_batch x n_points x hkl_ref_length
+        # peak_likelihoods: n_batch x n_peaks x hkl_ref_length
         all_peaks_likelihoods = difference_likelihoods * softmaxes
-        # peak_likelihoods: n_batch x n_points
+        # peak_likelihoods: n_batch x n_peaks
         peak_log_likelihoods = tf.math.log(tf.math.reduce_sum(all_peaks_likelihoods, axis=2))
         neg_log_likelihood = -tf.math.reduce_sum(peak_log_likelihoods, axis=1)
         return neg_log_likelihood
 
     def normal_likelihood(self, q2_true, y_pred):
-        # softmaxes: n_batch x n_points x hkl_ref_length
+        # softmaxes: n_batch x n_peaks x hkl_ref_length
         # q2_ref:    n_batch x hkl_ref_length
-        # q2_true:   n_batch x n_points
-        # q2_error:  n_batch x n_points
-        softmaxes = y_pred[:, :self.n_points, :]
-        q2_ref = y_pred[:, self.n_points, :]
+        # q2_true:   n_batch x n_peaks
+        # q2_error:  n_batch x n_peaks
+        softmaxes = y_pred[:, :self.n_peaks, :]
+        q2_ref = y_pred[:, self.n_peaks, :]
         q2_var = (q2_true * self.error_fraction[tf.newaxis, :])[:, :, tf.newaxis]
         
-        # n_batch x n_points x hkl_ref_length
+        # n_batch x n_peaks x hkl_ref_length
         arg = -1/2 * (q2_true[:, :, tf.newaxis] - q2_ref[:, tf.newaxis, :])**2 / q2_var
         difference_likelihoods = self.prefactor / tf.math.sqrt(q2_var) * tf.math.exp(arg)
         all_peaks_likelihoods = difference_likelihoods * softmaxes
 
-        # peak_likelihoods: n_batch x n_points
+        # peak_likelihoods: n_batch x n_peaks
         # sum over all possible Miller index assignments
         peak_log_likelihoods = tf.math.log(tf.math.reduce_sum(all_peaks_likelihoods, axis=2))
 

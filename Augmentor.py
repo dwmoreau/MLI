@@ -8,11 +8,14 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import ConfusionMatrixDisplay
 from tqdm import tqdm
 
+from Reindexing import get_split_group
 from Reindexing import reindex_entry_triclinic
+from Reindexing import reindex_entry_monoclinic
 from Utilities import get_peak_generation_info
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import get_xnn_from_unit_cell
 
 
 class Augmentor:
@@ -21,30 +24,38 @@ class Augmentor:
             aug_params,
             data_params,
             min_unit_cell_scaled,
+            max_unit_cell_scaled,
             n_generated_points,
             save_to,
             seed,
             uc_scaler,
+            angle_scale,
+            xnn_scaler,
+            q2_scaler
             ):
         self.aug_params = aug_params
         self.n_generated_points = n_generated_points
         self.min_unit_cell_scaled = min_unit_cell_scaled
+        self.max_unit_cell_scaled = max_unit_cell_scaled
         self.save_to = save_to
-        self.n_points = data_params['n_points']
-        self.y_indices = data_params['y_indices']
-        self.n_outputs = data_params['n_outputs']
-        self.points_tag = data_params['points_tag']
+        self.n_peaks = data_params['n_peaks']
+        self.unit_cell_indices = data_params['unit_cell_indices']
+        self.unit_cell_length = data_params['unit_cell_length']
+        self.broadening_tag = data_params['broadening_tag']
         self.lattice_system = data_params['lattice_system']
-        self.n_max = data_params['n_max']
+        self.n_max_group = data_params['n_max_group']
         self.hkl_ref_length = data_params['hkl_ref_length']
         self.rng = np.random.default_rng(seed)
         self.uc_scaler = uc_scaler
+        self.xnn_scaler = xnn_scaler
+        self.angle_scale = angle_scale
+        self.q2_scaler = q2_scaler
 
     def setup(self, data):
         print(f'\n Setting up augmentation {self.aug_params["tag"]}')
         # Calculate the number of times each entry is to be augmented
         training_data = data[data['train']]
-        unit_cell_scaled = np.stack(training_data['reindexed_unit_cell_scaled'])[:, self.y_indices]
+        unit_cell_scaled = np.stack(training_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
         if self.aug_params['augment_method'] == 'random':
             self.perturb_unit_cell = self.perturb_unit_cell_std
 
@@ -63,7 +74,7 @@ class Augmentor:
 
         elif self.aug_params['augment_method'] == 'pca':
             self.perturb_unit_cell = self.perturb_unit_cell_pca
-            self.pca = PCA(n_components=self.n_outputs).fit(unit_cell_scaled)
+            self.pca = PCA(n_components=self.unit_cell_length).fit(unit_cell_scaled)
             unit_cell_scaled_transformed = self.pca.transform(unit_cell_scaled)
             self.stddev = np.std(unit_cell_scaled_transformed, axis=0)
             fig, axes = plt.subplots(2, 1, figsize=(6, 6))
@@ -81,16 +92,16 @@ class Augmentor:
         # calculate the order of the peak in the list of sa peaks
         if self.lattice_system == 'cubic':
             n_bins = 20
-            n_bins_q2 = 4
+            n_bins_q2 = 10
             difference_bins = np.logspace(-3, -2, n_bins + 1)
         else:
             n_bins = 50
-            n_bins_q2 = 5
+            n_bins_q2 = 15
             difference_bins = np.logspace(-4, -2, n_bins + 1)
-        difference_centers = (difference_bins[1:] + difference_bins[:-1]) / 2
+        self.difference_centers = (difference_bins[1:] + difference_bins[:-1]) / 2
 
-        q2_bins = np.linspace(0, 0.2, n_bins_q2 + 1)
-        q2_centers = (q2_bins[1:] + q2_bins[:-1]) / 2
+        q2_bins = np.linspace(0, 0.25, n_bins_q2 + 1)
+        self.q2_centers = (q2_bins[1:] + q2_bins[:-1]) / 2
         keep_sum = np.zeros((n_bins, n_bins_q2))
         drop_sum = np.zeros((n_bins, n_bins_q2))
         first_peak = np.zeros(len(training_data))
@@ -98,7 +109,7 @@ class Augmentor:
         for entry_index in range(len(training_data)):
             p = False
             q2_sa = np.array(training_data.iloc[entry_index]['q2_sa'])
-            q2 = np.array(training_data.iloc[entry_index][f'q2_{self.points_tag}'])
+            q2 = np.array(training_data.iloc[entry_index][f'q2_{self.broadening_tag}'])
             q2_sa = q2_sa[~np.isinf(q2_sa)]
             q2 = q2[~np.isinf(q2)]
 
@@ -126,7 +137,6 @@ class Augmentor:
                                 drop_sum[insert_index, insert_index_q2] += 1
 
         total_sum = keep_sum + drop_sum
-
         centers = np.arange(self.n_generated_points)
         bins = np.append(centers - 0.5, self.n_generated_points + 0.5)
         hist, _ = np.histogram(first_peak, bins=bins, density=True)
@@ -141,13 +151,12 @@ class Augmentor:
 
         y = keep_sum / total_sum
         y[total_sum == 0] = 0.5
-        results = scipy.optimize.minimize(
-            fun=lambda x, y, difference, q2 : np.linalg.norm(self.keep_rate(difference, q2, x) - y)**2,
-            method='L-BFGS-B',
-            x0=(100, 0.5, 0.5, 0),
-            args=(y, difference_centers, q2_centers),
+        self.interpolator = scipy.interpolate.RegularGridInterpolator(
+            points=(self.difference_centers, self.q2_centers),
+            values=y,
+            bounds_error=False,
+            fill_value=np.nan,
             )
-        self.keep_rate_params = results.x
 
         difference_hist, _ = np.histogram(np.concatenate(differences), bins=difference_bins, density=True)
         fig, axes = plt.subplots(2, 2, figsize=(8, 4), sharex='col')
@@ -159,35 +168,26 @@ class Augmentor:
         axes[1, 0].set_xlabel('Peak index')
         
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        for index in range(n_bins_q2):        
-            axes[0, 1].plot(difference_centers, y[:, index], color=colors[index], linestyle='none', marker='.')
-            curve = self.keep_rate(difference_centers, q2_centers[index], self.keep_rate_params)
-            axes[0, 1].plot(difference_centers, curve, color=colors[index], label=f'{q2_centers[index]:0.3f}')
+
+        skip = int(n_bins_q2 / 5)
+        for color_index, index in enumerate(range(0, n_bins_q2, skip)):
+            axes[0, 1].plot(self.difference_centers, y[:, index], color=colors[color_index], linestyle='none', marker='.')
+            curve = self.interpolator((self.difference_centers, self.q2_centers[index]))
+            axes[0, 1].plot(self.difference_centers, curve, color=colors[color_index], label=f'{self.q2_centers[index]:0.3f}')
         axes[0, 1].legend(frameon=False, title='$q^2$', labelspacing=0.1)
         axes[0, 1].set_ylabel('Keep Rate')
 
-        axes[1, 1].bar(difference_centers, difference_hist, width=difference_bins[1:] - difference_bins[:-1])
+        axes[1, 1].bar(self.difference_centers, difference_hist, width=difference_bins[1:] - difference_bins[:-1])
         axes[1, 1].set_ylabel('Distribution')
         axes[1, 1].set_xlabel('$q^2$ spacing')
         fig.tight_layout()
         fig.savefig(f'{self.save_to}/aug_setup_{self.aug_params["tag"]}.png')
         plt.close()
 
-    def keep_rate(self, difference, q2, x):
-        r0 = x[0]
-        r1 = x[1]
-        c = x[2] + x[3] * q2
-        if q2.size == 1:
-            prob = c*(1 - r0**(-r1 * difference))
-            return prob
-        else:
-            curve = c[np.newaxis]*(1 - r0**(-r1 * difference))[:, np.newaxis]
-            return curve
-
     def augment(self, data, subgroup_label):
         sub_groups = data[subgroup_label].unique()
         n_subgroups = len(sub_groups)
-        n_target_entries = self.n_max // n_subgroups
+        n_target_entries = self.n_max_group // n_subgroups
         n_augment = dict.fromkeys(sub_groups)
         for sub_group in sub_groups:
             n_subgroup_entries = np.sum(data[subgroup_label] == sub_group)
@@ -220,7 +220,49 @@ class Augmentor:
                             break
                     if augmented_entry is not None:
                         augmented_entries.append(augmented_entry)
-        return pd.DataFrame(augmented_entries)
+        augmented_entries = pd.DataFrame(augmented_entries)
+
+        # Reindexing for triclinic and monoclinic is performed in reciprocal space
+        #   For these lattice systems update:
+        #       reindexed_unit_cell
+        #       reindexed_hkl
+        reindexed_unit_cell = np.stack(augmented_entries['reindexed_unit_cell'])
+        if self.lattice_system in ['triclinic', 'monoclinic']:
+            reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(reindexed_unit_cell)
+            if self.lattice_system == 'triclinic':
+                reciprocal_reindexed_unit_cell, hkl_reindexer = \
+                    reindex_entry_triclinic(reciprocal_reindexed_unit_cell, space='reciprocal')
+            elif self.lattice_system == 'monoclinic':
+                hkl_reindexer = np.zeros((reindexed_unit_cell.shape[0], 3, 3))
+                reindexed_spacegroup_symbol_hm = list(augmented_entries['reindexed_spacegroup_symbol_hm'])
+                split_group = [None for i in range(reindexed_unit_cell.shape[0])]
+                group = list(augmented_entries['group'])
+                for entry_index in range(reindexed_unit_cell.shape[0]):
+                    reciprocal_reindexed_unit_cell[entry_index], _, hkl_reindexer[entry_index] = \
+                        reindex_entry_monoclinic(
+                            reciprocal_reindexed_unit_cell[entry_index],
+                            spacegroup_symbol=reindexed_spacegroup_symbol_hm[entry_index],
+                            space='reciprocal'
+                            )
+                    split = get_split_group(
+                        'monoclinic',
+                        reciprocal_reindexed_unit_cell=reciprocal_reindexed_unit_cell[entry_index],
+                        )
+                    split_group[entry_index] = group[entry_index].replace(f'_', f'_{split}_')
+                augmented_entries['split_group'] = split_group
+            reindexed_unit_cell = reciprocal_uc_conversion(reciprocal_reindexed_unit_cell)
+            augmented_entries['reindexed_unit_cell'] = list(reindexed_unit_cell)
+            reindexed_hkl = np.stack(augmented_entries['reindexed_hkl'])
+            for entry_index in range(reindexed_unit_cell.shape[0]):
+                reindexed_hkl[entry_index] = reindexed_hkl[entry_index] @ hkl_reindexer[entry_index]
+            augmented_entries['reindexed_hkl'] = list(reindexed_hkl)
+
+        augmented_entries['reciprocal_reindexed_unit_cell'] = list(reciprocal_uc_conversion(reindexed_unit_cell))
+        reindexed_xnn = get_xnn_from_unit_cell(reindexed_unit_cell, partial_unit_cell=False)
+        reindexed_xnn_scaled = (reindexed_xnn - self.xnn_scaler.mean_[0]) / self.xnn_scaler.scale_[0]
+        augmented_entries['reindexed_xnn'] = list(reindexed_xnn)
+        augmented_entries['reindexed_xnn_scaled'] = list(reindexed_xnn_scaled)
+        return augmented_entries
 
     def augment_entry(self, entry):
         augmented_entry = copy.deepcopy(entry)
@@ -229,15 +271,9 @@ class Augmentor:
         perturbed_reindexed_unit_cell_scaled = self.perturb_unit_cell_common(reindexed_unit_cell_scaled)
         perturbed_reindexed_unit_cell = np.zeros(6)
         perturbed_reindexed_unit_cell[:3] = perturbed_reindexed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-        perturbed_reindexed_unit_cell[3:] = np.arccos(perturbed_reindexed_unit_cell_scaled[3:])
+        perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
         augmented_entry['reindexed_unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
         augmented_entry['reindexed_unit_cell'] = perturbed_reindexed_unit_cell
-        perturbed_reindexed_reciprocal_unit_cell = reciprocal_uc_conversion(
-            perturbed_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
-            )[0]
-        augmented_entry['reindexed_xnn'] = get_xnn_from_reciprocal_unit_cell(
-            perturbed_reindexed_reciprocal_unit_cell[np.newaxis], partial_unit_cell=False
-            )[0]
 
         # calculate new d-spacings
         reindexed_hkl_sa = np.stack(augmented_entry['reindexed_hkl_sa']).round(decimals=0).astype(int)
@@ -248,7 +284,7 @@ class Augmentor:
             tensorflow=False,
             representation='unit_cell'
             )
-        q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[self.y_indices][np.newaxis, :])[0]
+        q2_sa = q2_calculator.get_q2(perturbed_reindexed_unit_cell[self.unit_cell_indices][np.newaxis, :])[0]
         existing_peaks = np.any(reindexed_hkl_sa != 0, axis=1)
 
         q2_sa = q2_sa[existing_peaks]
@@ -269,9 +305,8 @@ class Augmentor:
             print()
             print()
         # choose new peaks
-        first_peak_index = self.first_probability['x'][
-            np.searchsorted(self.first_probability['cdf'], self.rng.random())
-            ]
+
+        first_peak_index = np.searchsorted(self.first_probability['cdf'], self.rng.random())
         if first_peak_index >= q2_sa.size:
             return None
         q2 = [q2_sa[first_peak_index]]
@@ -283,7 +318,7 @@ class Augmentor:
         peak_generation_info = get_peak_generation_info()
         broadening_params = peak_generation_info['broadening_params']
         broadening_multiplier = peak_generation_info['broadening_multiples'][
-            peak_generation_info['broadening_tags'].index(self.points_tag)
+            peak_generation_info['broadening_tags'].index(self.broadening_tag)
             ]
         for index in range(first_peak_index + 1, q2_sa.size):
             # cases:
@@ -310,7 +345,27 @@ class Augmentor:
                 elif distance_previous > overlap_threshold:
                     keep_next = False
                     if distance_next > overlap_threshold:
-                        if self.rng.random() < self.keep_rate(separation, q2_sa[index], self.keep_rate_params):
+                        keep_prob = self.interpolator((separation, q2_sa[index]))
+                        if np.isnan(keep_prob):
+                            # If the query values are out of the interpolation ranges the output is np.nan
+                            # Catch these cases and use the bounds
+                            if separation < self.difference_centers[0] and q2_sa[index] < self.q2_centers[0]:
+                                keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[0]))
+                            elif separation < self.difference_centers[0] and q2_sa[index] > self.q2_centers[-1]:
+                                keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[-1]))
+                            elif separation > self.difference_centers[-1] and q2_sa[index] < self.q2_centers[0]:
+                                keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[0]))
+                            elif separation > self.difference_centers[-1] and q2_sa[index] > self.q2_centers[-1]:
+                                keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[-1]))
+                            elif separation < self.difference_centers[0]:
+                                keep_prob = self.interpolator((self.difference_centers[0], q2_sa[index]))
+                            elif separation > self.difference_centers[-1]:
+                                keep_prob = self.interpolator((self.difference_centers[-1], q2_sa[index]))
+                            elif q2_sa[index] < self.q2_centers[0]:
+                                keep_prob = self.interpolator((separation, self.q2_centers[0]))
+                            elif q2_sa[index] > self.q2_centers[-1]:
+                                keep_prob = self.interpolator((separation, self.q2_centers[-1]))
+                        if self.rng.random() < keep_prob:
                             keep = True
                     else:
                         if self.rng.random() < 1/2:
@@ -323,15 +378,19 @@ class Augmentor:
                     reindexed_hkl.append(reindexed_hkl_sa[index])
                     previous_kept_index = index
 
-        if len(q2) >= self.n_points:
+        if len(q2) >= self.n_peaks:
             # This sort might be unneccessary, but not harmful.
             q2 = np.array(q2)
             sort_indices = np.argsort(q2)
-            q2 = q2[sort_indices][:self.n_points]
+            q2 = q2[sort_indices][:self.n_peaks]
 
-            reindexed_hkl = np.array(reindexed_hkl, dtype=int)[sort_indices][:self.n_points]
-            augmented_entry[f'q2_{self.points_tag}'] = q2
-            augmented_entry[f'd_spacing_{self.points_tag}'] = 1 / np.sqrt(q2)
+            reindexed_hkl = np.array(reindexed_hkl, dtype=int)[sort_indices][:self.n_peaks]
+            augmented_entry[f'q2_{self.broadening_tag}'] = q2
+            augmented_entry['q2'] = q2[:self.n_peaks]
+            augmented_entry['q2_scaled'] = (q2[:self.n_peaks] - self.q2_scaler.mean_[0]) / self.q2_scaler.scale_[0]
+
+            augmented_entry[f'd_spacing_{self.broadening_tag}'] = 1 / np.sqrt(q2)
+            augmented_entry[f'd_spacing'] = 1 / np.sqrt(q2[:self.n_peaks])
             augmented_entry['reindexed_hkl'] = reindexed_hkl
             return augmented_entry
         else:
@@ -339,26 +398,44 @@ class Augmentor:
 
     def _check_in_range(self, perturbed_unit_cell_scaled):
         if self.lattice_system == 'monoclinic':
+            minimum_angle_scaled = (np.pi/2 - np.pi/2) / self.angle_scale
+            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
+            good_angle = False
+            good_lengths = False
             if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
-                if -1 < perturbed_unit_cell_scaled[3] < 0:
-                    return True
+                if np.all(perturbed_unit_cell_scaled[:3] < self.max_unit_cell_scaled):
+                    good_lengths = True
+            if minimum_angle_scaled < perturbed_unit_cell_scaled[3] < maximum_angle_scaled:
+                good_angle = True
+            if good_angle & good_lengths:
+                return True
         elif self.lattice_system == 'triclinic':
-            #print(perturbed_unit_cell_scaled)
+            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
+            good_angles = False
+            good_lengths = False
             if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
-                if np.all(perturbed_unit_cell_scaled[3:] < 1):
-                    if np.all(perturbed_unit_cell_scaled[3:] > -1):
-                        return True
+                if np.all(perturbed_unit_cell_scaled[:3] < self.max_unit_cell_scaled):
+                    good_lengths = True
+            if np.all(perturbed_unit_cell_scaled[3:] <= maximum_angle_scaled):
+                good_angles = True
+            if good_angles & good_lengths:
+                return True
         elif self.lattice_system == 'rhombohedral':
+            good_length = False
             good_angle = False
             reciprocalable = False
             perturbed_unit_cell = np.zeros(2)
             perturbed_unit_cell[0] = perturbed_unit_cell_scaled[0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            perturbed_unit_cell[1] = np.arccos(perturbed_unit_cell_scaled[1])
+            perturbed_unit_cell[1] = perturbed_unit_cell_scaled[1] * self.angle_scale + np.pi/2
 
             if perturbed_unit_cell_scaled[0] > self.min_unit_cell_scaled:
-                if 0 < perturbed_unit_cell[1]:
-                    if perturbed_unit_cell[1] < 2*np.pi/3:
-                        good_angle = True
+                if perturbed_unit_cell_scaled[0] < self.max_unit_cell_scaled:
+                    good_length = True
+            if 0 < perturbed_unit_cell[1]:
+                if perturbed_unit_cell[1] < 2*np.pi/3:
+                    good_angle = True
+            if good_length == False:
+                return None
             if good_angle == False:
                 return None
 
@@ -368,14 +445,15 @@ class Augmentor:
                 lattice_system='rhombohedral',
                 )[0]
             reciprocalable = np.invert(np.any(np.isnan(reciprocal_unit_cell)))
-            if good_angle and reciprocalable:
+            if reciprocalable:
                 return True
         else:
             if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
-                return True
+                if np.all(perturbed_unit_cell_scaled < self.max_unit_cell_scaled):
+                    return True
 
     def _permute_perturbed_unit_cell(self, perturbed_unit_cell_scaled, unit_cell_scaled):
-        if self.lattice_system in ['monoclinic', 'orthorhombic']:
+        if self.lattice_system == 'monoclinic':
             initial_order = np.argsort(unit_cell_scaled[:3])
             initial_inverse_sort = np.argsort(initial_order)
             current_sort = np.argsort(perturbed_unit_cell_scaled[:3])
@@ -385,19 +463,29 @@ class Augmentor:
                 print(unit_cell_scaled)
                 print(perturbed_unit_cell_scaled)
                 print()
+        elif self.lattice_system in ['hexagonal', 'orthorhombic', 'tetragonal']:
+            initial_order = np.argsort(unit_cell_scaled)
+            initial_inverse_sort = np.argsort(initial_order)
+            current_sort = np.argsort(perturbed_unit_cell_scaled)
+            perturbed_unit_cell_scaled = perturbed_unit_cell_scaled[current_sort][initial_inverse_sort]
+            current_order = np.argsort(perturbed_unit_cell_scaled)
+            if np.any(initial_order != current_order):
+                print(unit_cell_scaled)
+                print(perturbed_unit_cell_scaled)
+                print()
         elif self.lattice_system == 'triclinic':
             perturbed_unit_cell = np.zeros(6)
             perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            perturbed_unit_cell[3:] = np.arccos(perturbed_unit_cell_scaled[3:])
+            perturbed_unit_cell[3:] = self.angle_scale * perturbed_unit_cell_scaled[3:] + np.pi/2
             perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell)
             perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            perturbed_unit_cell_scaled[3:] = np.cos(perturbed_unit_cell[3:])
+            perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
         return perturbed_unit_cell_scaled
 
     def perturb_unit_cell_common(self, unit_cell_scaled):
         perturbed_unit_cell_scaled = unit_cell_scaled.copy()
-        perturbed_unit_cell_scaled[self.y_indices] = self.perturb_unit_cell(
-            perturbed_unit_cell_scaled[self.y_indices]
+        perturbed_unit_cell_scaled[self.unit_cell_indices] = self.perturb_unit_cell(
+            perturbed_unit_cell_scaled[self.unit_cell_indices]
             )
         if self.lattice_system == 'cubic':
             perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[0]
