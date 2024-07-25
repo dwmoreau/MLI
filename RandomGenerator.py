@@ -3,6 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 
+from Reindexing import reindex_entry_monoclinic
+from Reindexing import reindex_entry_orthorhombic
+from Reindexing import reindex_entry_triclinic
 from Utilities import fix_unphysical
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_unit_cell_volume
@@ -226,7 +229,68 @@ class RandomGenerator:
             random_reciprocal_unit_cell[:, 0] *= scale
         elif self.lattice_system in ['monoclinic', 'triclinic']:
             random_reciprocal_unit_cell[:, :3] *= scale[:, np.newaxis]
-        
+
+        if self.lattice_system == 'monoclinic':
+            if self.bravais_lattice == 'mC':
+                standard_spacegroups = [
+                    'I 1 2 1', 'I 1 m 1', 'I 1 a 1', 'I 1 2/m 1', 'I 1 2/a 1'
+                    ]
+            elif self.bravais_lattice == 'mP':
+                standard_spacegroups = [
+                    'P 1 2 1', 'P 1 m 1', 'P 1 2/m 1', 'P 1 21 1', 'P 1 21/m 1',
+                    'P 1 n 1', 'P 1 2/n 1', 'P 1 21/n 1'
+                    ]
+            spacegroups = rng.choice(standard_spacegroups, n_unit_cells, replace=True)
+            for index in range(n_unit_cells):
+                random_reciprocal_unit_cell_ = np.array([
+                    random_reciprocal_unit_cell[index, 0],
+                    random_reciprocal_unit_cell[index, 1],
+                    random_reciprocal_unit_cell[index, 2],
+                    np.pi/2,
+                    random_reciprocal_unit_cell[index, 3],
+                    np.pi/2,
+                    ])
+                random_reciprocal_unit_cell_, _, _ = reindex_entry_monoclinic(
+                    random_reciprocal_unit_cell_,
+                    spacegroup_symbol=spacegroups[index],
+                    space='reciprocal'
+                    )
+                random_reciprocal_unit_cell[index, :3] = random_reciprocal_unit_cell_[:3]
+                random_reciprocal_unit_cell[index, 3] = random_reciprocal_unit_cell_[4]
+        elif self.lattice_system == 'orthorhombic':
+            if self.bravais_lattice in ['oF', 'oI', 'oP']:
+                # In these cases, the unit cells are sorted to get a<b<c
+                # The actual space group does not matter
+                spacegroup_symbol = 'P 2 2 2'
+                spacegroup_number = 16
+            elif self.bravais_lattice == 'oC':
+                # In these cases, the unit cells are sorted to get a<b
+                spacegroup_symbol = 'C 2 2 2'
+                spacegroup_number = 21
+            random_unit_cell = reciprocal_uc_conversion(
+                random_reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            for index in range(n_unit_cells):
+                random_unit_cell_ = np.array([
+                    random_unit_cell[index, 0],
+                    random_unit_cell[index, 1],
+                    random_unit_cell[index, 2],
+                    np.pi/2,
+                    np.pi/2,
+                    np.pi/2,
+                    ])
+                _, _, random_unit_cell_, _ = reindex_entry_orthorhombic(
+                    random_unit_cell_, spacegroup_symbol, spacegroup_number
+                    )
+                random_unit_cell[index] = random_unit_cell_[:3]
+            random_reciprocal_unit_cell = reciprocal_uc_conversion(
+                random_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+        elif self.lattice_system == 'triclinic':
+            random_reciprocal_unit_cell, _ = reindex_entry_triclinic(
+                random_reciprocal_unit_cell, space='reciprocal'
+                )
+
         random_unit_cell = reciprocal_uc_conversion(
             random_reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )

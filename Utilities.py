@@ -519,8 +519,8 @@ def fix_unphysical_monoclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_c
             unit_cell[too_small_angles, 3] = np.pi - unit_cell[too_small_angles, 3]
         if np.sum(too_large_angles) > 0:
             unit_cell[too_large_angles, 3] = rng.uniform(
-                low=0.95*maximum_angle,
-                high=maximum_angle,
+                low=0.95*np.pi,
+                high=np.pi,
                 size=np.sum(too_large_angles)
                 )
         return unit_cell
@@ -589,41 +589,77 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
     np.putmask(q2_ref_calc, ~smaller_ref_peaks, 0)
     last_smaller_ref_peak = np.max(q2_ref_calc, axis=1)
     N = np.sum(smaller_ref_peaks, axis=1)
-    expected_discrepancy = last_smaller_ref_peak / (2*N)
+
+    # There is an unknown issue that causes q2_calc to be all zero
+    # These cases are caught and the M20 score is returned as zero.
+    good_indices = q2_calc.sum(axis=1) != 0
+    expected_discrepancy = np.zeros(q2_calc.shape[0])
+    expected_discrepancy[good_indices] = last_smaller_ref_peak[good_indices] / (2*N[good_indices])
     M20 = expected_discrepancy / discrepancy
     return M20
 
 
-def get_multiplicity(hkl, lattice_system):
-    if lattice_system == 'triclinic':
-        multiplicity = 2*np.ones(hkl.shape[0])
-    elif lattice_system == 'monoclinic':
-        multiplicity = 4*np.ones(hkl.shape[0])
-        m2 = np.logical_or(
-            hkl[:, 1] == 0,
-            np.logical_and(
-                hkl[:, 0] == 0,
-                hkl[:, 2] == 0,
-                )
-            )
-        multiplicity[m2] = 2
-    elif lattice_system == 'orthorhombic':
-        multiplicity = 8*np.ones(hkl.shape[0])
-        m4 = np.any(np.stack((
-            hkl[:, 0] == 0,
-            hkl[:, 1] == 0,
-            hkl[:, 2] == 0,
-            ), axis=1), axis=1)
-        m2 = np.any(np.stack((
-            np.logical_and(hkl[:, 0] == 0, hkl[:, 1] == 0),
-            np.logical_and(hkl[:, 0] == 0, hkl[:, 2] == 0),
-            np.logical_and(hkl[:, 1] == 0, hkl[:, 2] == 0),
-            ), axis=2), axis=2)
-        multiplicity[m4] = 4
-        multiplicity[m2] = 2
-    else:
-        assert False
-    return multiplicity
+def get_M20_likelihood_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system, bravais_lattice):
+    hkl2 = get_hkl_matrix(hkl, lattice_system)
+    q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
+    hkl2_ref = get_hkl_matrix(hkl_ref, lattice_system)
+    q2_ref_calc = np.sum(hkl2_ref * xnn[:, np.newaxis, :], axis=2)
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
+    reciprocal_volume = get_unit_cell_volume(reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system)
+    return get_M20_taupin88(q2_obs, q2_calc, q2_ref_calc, bravais_lattice, reciprocal_volume)
+
+
+def get_M20_likelihood(q2_obs, q2_calc, q2_ref_calc, bravais_lattice, reciprocal_volume):
+    # This was inspired by Taupin 1988
+    # Probability that a peak is correctly assigned:
+    # arg = Expected number of peaks within error from random unit cell
+    # P = 1 / (1 + arg)
+    mu, nu = get_multiplicity_taupin88(bravais_lattice)
+    observed_difference2 = (np.sqrt(q2_obs[np.newaxis]) - np.sqrt(q2_calc))**2
+    arg = 8*np.pi*q2_obs * np.sqrt(observed_difference2) / (reciprocal_volume[:, np.newaxis] * mu)
+    return -np.sum(np.log(1/(1 + arg)), axis=1)
+
+
+def get_multiplicity_taupin88(bravais_lattice):
+    # The commented out returns come from Taupin 1988
+    # The others are from empirically plotting the
+    # non systematic absences
+    if bravais_lattice == 'cF':
+        return 4*32, 1
+    elif bravais_lattice == 'cI':
+        return 2*32, 1
+    elif bravais_lattice == 'cP':
+        return 1*32, 1
+    elif bravais_lattice == 'hP':
+        #return 1*24, 2
+        return 1*14, 2
+    elif bravais_lattice == 'hR':
+        #return 1*24, 2
+        return 1*8, 2
+    elif bravais_lattice == 'tI':
+        #return 2*16, 2
+        return 2*13, 2
+    elif bravais_lattice == 'tP':
+        #return 1*16, 2
+        return 1*13, 2
+    elif bravais_lattice in ['oC', 'oI']:
+        #return 2*8, 3
+        return 2*7, 3
+    elif bravais_lattice == 'oF':
+        #return 4*8, 3
+        return 4*7, 3
+    elif bravais_lattice == 'oP':
+        #return 1*8, 3
+        return 1*7, 3
+    elif bravais_lattice == 'mC':
+        #return 2*4, 4
+        return 2*3.2, 4
+    elif bravais_lattice == 'mP':
+        #return 1*4, 4
+        return 1*3.5, 4
+    elif bravais_lattice == 'aP':
+        #return 1*2, 6
+        return 1*1.8, 6
 
 
 def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):

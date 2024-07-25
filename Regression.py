@@ -3,6 +3,7 @@ import gc
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
+import pickle
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.decomposition import PCA
 import tensorflow as tf
@@ -466,6 +467,10 @@ class Regression:
             }
 
     def save(self):
+        # Loading the random forest models is a significant overhead cost when performing
+        # optimization. Saving / loading as pickle files is faster by a factor of two.
+        # joblib should be more agnostic to sklearn version, so there won't be a sklearn
+        # version requirement. Loading speeds can be improved by making the models smaller.
         model_params = copy.deepcopy(self.model_params)
         write_params(model_params, f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
@@ -474,13 +479,21 @@ class Regression:
                 self.random_forest_regressor,
                 f'{self.save_to}/{self.group}_random_forest_regressor.bin'
                 )
+            """
+            with open(f'{self.save_to}/{self.group}_random_forest_regressor.pickle', 'wb') as rf_file:
+                pickle.dump(self.random_forest_regressor, rf_file)
+            """
         else:
             for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
                 joblib.dump(
                     self.random_forest_regressor[ratio_index],
                     f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
                     )
-
+                """
+                with open(f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.pickle', 'wb') as rf_file:
+                    pickle.dump(self.random_forest_regressor[ratio_index], rf_file)
+                """
+                
     def load_from_tag(self):
         params = read_params(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         params_keys = [
@@ -523,6 +536,7 @@ class Regression:
                     self.model_params['random_forest']['max_depth'] = 'None'
                 else:
                     self.model_params['random_forest']['max_depth'] = int(value)
+
         if self.lattice_system == 'cubic':
             self.random_forest_regressor = joblib.load(
                 f'{self.save_to}/{self.group}_random_forest_regressor.bin'
@@ -674,12 +688,23 @@ class Regression:
     def generate_trees(self, n_unit_cells, rng, q2_obs, q2_scaler=None):
         q2_scaled = (q2_obs - q2_scaler.mean_[0]) / q2_scaler.scale_[0]
         _, _, generated_unit_cells = self.predict(q2_scaled=q2_scaled, model='trees')
+        # generated_unit_cells: n_entries, unit_cell_length, n_estimators
+        # Expected output: n_estimators, unit_cell_length
+        # We are only generating for one entry at a time so get the 0th element at the first axis
         if n_unit_cells <= generated_unit_cells.shape[2]:
             indices = rng.choice(generated_unit_cells.shape[2], size=n_unit_cells, replace=False)
-            generated_unit_cells = generated_unit_cells[:, :, indices]
+            generated_unit_cells = generated_unit_cells[0, :, indices]
         else:
-            print(f'Requested {n_unit_cells} when only {generated_unit_cells.shape[0]} are available')
-            assert False
+            # If more unit cells are requested than estimators, use the mean and covariance
+            # of the estimators predictions to randomly generate unit cells
+            random_unit_cells = rng.multivariate_normal(
+                mean=generated_unit_cells[0].mean(axis=1),
+                cov=np.cov(generated_unit_cells[0], rowvar=True),
+                size=n_unit_cells - generated_unit_cells.shape[2]
+                )
+            generated_unit_cells = np.concatenate((
+                generated_unit_cells[0].T, random_unit_cells
+                ), axis=0)
         return generated_unit_cells
 
     def predict(self, data=None, inputs=None, q2_scaled=None, batch_size=None, model=None):
@@ -699,7 +724,7 @@ class Regression:
         if model == 'nn':
             return uc_pred, uc_pred_var
         elif model == 'trees':
-            return uc_pred, uc_pred_var, uc_pred_scaled_trees
+            return uc_pred, uc_pred_var, uc_pred_trees
 
     def predict_trees(self, q2_scaled):
         N = q2_scaled.shape[0]

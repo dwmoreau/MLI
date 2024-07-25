@@ -1,5 +1,7 @@
 """
 Readings:
+    - Look more into TREOR
+        https://www.ba.ic.cnr.it/softwareic/expo/ntreor/
     - Bergmann 2004: Renewed interest in powder diffraction indexing
         - round robin comparison of existing programs
             - High quality data is the most important requirement for success
@@ -43,17 +45,15 @@ mC              | 97.5%
 mP              | 96.5%
 aP              | 86 - 92%
 
-
 *******************
 * Big refactoring *
 *******************
     - mpi parallelization for ground truth optimization
+        - No error case and known unit cell
+            - Verify that we can get the correct unit cell at expected rates
+        - No known bravais lattice case
         - Get running with known unit cell and error
             - Verify that we can get the correct unit cell at expected rates
-        - Add in no error case
-            - Verify that we can get the correct unit cell at expected rates
-        - Add in regression evaluations
-            - Consider which generators to remove
     - Predictions for a single unknown candidate
     
 - Documentation
@@ -67,10 +67,14 @@ aP              | 86 - 92%
     - attention based initial layer
 
 - Optimization
+    - implement a MCMC approach again using the new likelihood
     - Track the position of the first correct candidate
     - Track whether or not the correct unit cell is anywhere in the candidate list
 
 - data
+    - GSASII tutorials
+        - Create a refined peak list and attempt optimization for each powder pattern
+        - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
     - Statistics plots / tables
     - peak list
         - SACLA data
@@ -87,12 +91,10 @@ aP              | 86 - 92%
 - SWE:
     https://ideas-productivity.org/resources/series/hpc-best-practices-webinars/
 
-
 - Regression
-    - predict reciprocal space unit cell parameters
-    - non-dimensionalize the q2 and Xnn parameters
+    - non-dimensionalize the q2 and Xnn parameters with a volume estimate
     - Attention based network
-        - Nadaraya–Watson estimator
+        - Additive attention: https://d2l.ai/chapter_attention-mechanisms-and-transformers/attention-scoring-functions.html
     - https://dmol.pub/dl/attention.html
     - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
 
@@ -296,8 +298,9 @@ class Indexing:
         self.data_params['load_from_tag'] = True
         bravais_lattices = params['bravais_lattices'].replace(' ', '').replace("'", '')
         self.data_params['bravais_lattices'] = bravais_lattices.split('[')[1].split(']')[0].split(',')
-        split_groups = params['split_groups'].replace(' ', '').replace("'", '')
-        self.data_params['split_groups'] = split_groups.split('[')[1].split(']')[0].split(',')
+        split_groups = params['split_groups'].replace("'", '').replace('[', '').replace(']', '').replace(',', '')
+        self.data_params['split_groups'] = split_groups.split(' ')
+
         self.data_params['lattice_system'] = params['lattice_system']
         if params['augment'] == 'True':
             self.data_params['augment'] = True
@@ -318,8 +321,8 @@ class Indexing:
         self.reg_params['unit_cell_length'] = self.data_params['unit_cell_length']
 
         if load_bravais_lattice != 'all':
-            self.data_params['bravais_lattices'] = load_bravais_lattice
-            self.hkl_ref = dict.fromkeys([load_bravais_lattice])
+            self.data_params['bravais_lattices'] = [load_bravais_lattice]
+            self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
             self.hkl_ref[load_bravais_lattice] = np.load(
                 f'{self.save_to["data"]}/hkl_ref_{load_bravais_lattice}.npy'
                 )
@@ -327,6 +330,7 @@ class Indexing:
             for split_group in self.data_params['split_groups']:
                 if split_group.startswith(load_bravais_lattice):
                     split_groups.append(split_group)
+                    
             self.data_params['split_groups'] = split_groups
         else:
             self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
@@ -1190,7 +1194,6 @@ class Indexing:
 
     def setup_pitf(self):
         self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
-        print(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
             self.pitf_generator[split_group] = PhysicsInformedModel(

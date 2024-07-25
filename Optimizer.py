@@ -42,8 +42,7 @@ class Candidates:
             radius
             ):
         self.q2_obs = np.array(entry['q2'])
-        self.q2_obs_scaled = np.array(entry['q2_scaled'])
-        self.n_points = self.q2_obs.size
+        self.n_peaks = self.q2_obs.size
 
         self.n = unit_cell.shape[0]
         self.n_uc = unit_cell.shape[1]
@@ -166,31 +165,31 @@ class Candidates:
 
         hkl_pred_check = get_hkl_matrix(self.hkl, self.lattice_system)
         hkl_correct = self.hkl_true_check[np.newaxis] == hkl_pred_check
-        hkl_accuracy = np.count_nonzero(hkl_correct, axis=1) / self.n_points
+        hkl_accuracy = np.count_nonzero(hkl_correct, axis=1) / self.n_peaks
 
         impossible = np.any(self.hkl_labels_true == hkl_ref_length - 1)
 
         if self.lattice_system in ['monoclinic', 'orthorhombic', 'triclinic']:
-            h_info = self.n_points - np.sum(self.hkl_true[:, 0]**2 == 0)
-            k_info = self.n_points - np.sum(self.hkl_true[:, 1]**2 == 0)
-            l_info = self.n_points - np.sum(self.hkl_true[:, 2]**2 == 0)
+            h_info = self.n_peaks - np.sum(self.hkl_true[:, 0]**2 == 0)
+            k_info = self.n_peaks - np.sum(self.hkl_true[:, 1]**2 == 0)
+            l_info = self.n_peaks - np.sum(self.hkl_true[:, 2]**2 == 0)
             dominant_axis_info = np.sort([h_info, k_info, l_info])[1]
             dominant_zone_info = np.min([h_info, k_info, l_info])
         elif self.lattice_system == 'tetragonal':
             hk = self.hkl_true[:, 0]**2 + self.hkl_true[:, 1]**2
-            hk_info = self.n_points - np.sum(hk == 0)
-            l2_info = self.n_points - np.sum(self.hkl_true[:, 2]**2 == 0)
+            hk_info = self.n_peaks - np.sum(hk == 0)
+            l2_info = self.n_peaks - np.sum(self.hkl_true[:, 2]**2 == 0)
             dominant_axis_info = min(hk_info, l2_info)
-            dominant_zone_info = self.n_points
+            dominant_zone_info = self.n_peaks
         elif self.lattice_system == 'hexagonal':
             hk = self.hkl_true[:, 0]**2 + self.hkl_true[:, 0]*self.hkl_true[:, 1] + self.hkl_true[:, 1]**2
-            hk_info = self.n_points - np.sum(hk == 0)
-            l2_info = self.n_points - np.sum(self.hkl_true[:, 2]**2 == 0)
+            hk_info = self.n_peaks - np.sum(hk == 0)
+            l2_info = self.n_peaks - np.sum(self.hkl_true[:, 2]**2 == 0)
             dominant_axis_info = min(hk_info, l2_info)
-            dominant_zone_info = self.n_points
+            dominant_zone_info = self.n_peaks
         elif self.lattice_system in ['cubic', 'rhombohedral']:
-            dominant_axis_info = self.n_points
-            dominant_zone_info = self.n_points
+            dominant_axis_info = self.n_peaks
+            dominant_zone_info = self.n_peaks
 
         if self.lattice_system == 'monoclinic':
             unit_cell_true = get_different_monoclinic_settings(self.unit_cell_true, partial_unit_cell=True)
@@ -378,21 +377,21 @@ class Candidates:
                 # We want to redistribute the excess only to regions where the density is low
                 # Find candidates that have fewer than the number of maximum neighbors and
                 # redistribute excess to neighborhoods near these candidates
-                low_density_indices = np.where(neighbor_count < self.max_neighbors)[0]
-                if low_density_indices.size == 0:
+                low_densitunit_cell_indices = np.where(neighbor_count < self.max_neighbors)[0]
+                if low_densitunit_cell_indices.size == 0:
                     ### !!! FIX THIS CASE
                     ### !!! What should be done if there are no low density regions
                     break
                 # Bias the redistribution to the lowest density regions by probabalistly sampling
                 # the low density regions.
-                prob = self.max_neighbors - neighbor_count[low_density_indices]
+                prob = self.max_neighbors - neighbor_count[low_densitunit_cell_indices]
                 prob = prob / prob.sum()
-                if excess_neighbors <= low_density_indices.size:
+                if excess_neighbors <= low_densitunit_cell_indices.size:
                     replace = False
                 else:
                     replace = True
-                to_indices = low_density_indices[
-                    self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
+                to_indices = low_densitunit_cell_indices[
+                    self.rng.choice(low_densitunit_cell_indices.size, size=excess_neighbors, replace=replace, p=prob)
                     ]
                 redistributed_xnn = self.redistribute_and_perturb_xnn(
                     redistributed_xnn, from_indices, to_indices
@@ -450,21 +449,21 @@ class Candidates:
                 # We want to redistribute the excess only to regions where the density is low
                 # Find candidates that have fewer than the number of maximum neighbors and
                 # redistribute excess to neighborhoods near these candidates
-                low_density_indices = np.where(neighbor_count < self.max_neighbors)[0]
-                if low_density_indices.size == 0:
+                low_densitunit_cell_indices = np.where(neighbor_count < self.max_neighbors)[0]
+                if low_densitunit_cell_indices.size == 0:
                     ### !!! FIX THIS CASE
                     ### !!! What should be done if there are no low density regions
                     break
                 # Bias the redistribution to the lowest density regions by probabalistly sampling
                 # the low density regions.
-                prob = self.max_neighbors - neighbor_count[low_density_indices]
+                prob = self.max_neighbors - neighbor_count[low_densitunit_cell_indices]
                 prob = prob / prob.sum()
-                if excess_neighbors <= low_density_indices.size:
+                if excess_neighbors <= low_densitunit_cell_indices.size:
                     replace = False
                 else:
                     replace = True
-                to_indices = low_density_indices[
-                    self.rng.choice(low_density_indices.size, size=excess_neighbors, replace=replace, p=prob)
+                to_indices = low_densitunit_cell_indices[
+                    self.rng.choice(low_densitunit_cell_indices.size, size=excess_neighbors, replace=replace, p=prob)
                     ]
                 self.xnn = self.redistribute_and_perturb_xnn(self.xnn, from_indices, to_indices)
                 # self.starting_xnn is the initial starting coordinates which are updated each
@@ -817,11 +816,11 @@ class Candidates:
 
 
 class Optimizer:
-    def __init__(self, assign_params, data_params, opt_params, reg_params, template_params, bravais_lattice, seed=12345):
-        self.assign_params = assign_params
+    def __init__(self, data_params, opt_params, reg_params, template_params, pitf_params, bravais_lattice, seed=12345):
         self.data_params = data_params
         self.opt_params = opt_params
         self.reg_params = reg_params
+        self.pitf_params = pitf_params
         self.template_params = template_params
         self.bravais_lattice = bravais_lattice
         self.rng = np.random.default_rng(seed)
@@ -840,16 +839,14 @@ class Optimizer:
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
                 self.opt_params[key] = opt_params_defaults[key]
-        for key in self.assign_params[self.bravais_lattice]:
-            self.assign_params[self.bravais_lattice][key]['load_from_tag'] = True
-            self.assign_params[self.bravais_lattice][key]['mode'] = 'inference'
         for key in self.reg_params:
             self.reg_params[key]['load_from_tag'] = True
             self.reg_params[key]['alpha_params'] = {}
             self.reg_params[key]['beta_params'] = {}
             self.reg_params[key]['mean_params'] = {}
             self.reg_params[key]['var_params'] = {}
-            self.reg_params[key]['head_params'] = {}
+        for key in self.pitf_params:
+            self.pitf_params[key]['load_from_tag'] = True
         self.data_params['load_from_tag'] = True
         self.template_params[self.bravais_lattice]['load_from_tag'] = True
 
@@ -863,11 +860,11 @@ class Optimizer:
             os.mkdir(figure_directory)
 
         self.indexer = Indexing(
-            assign_params=self.assign_params, 
             data_params=self.data_params,
-            reg_params=self.reg_params, 
-            template_params=self.template_params, 
-            seed=12345, 
+            reg_params=self.reg_params,
+            template_params=self.template_params,
+            pitf_params=self.pitf_params,
+            seed=12345,
             )
         self.indexer.setup_from_tag()
         self.indexer.load_data_from_tag(
@@ -876,28 +873,8 @@ class Optimizer:
             load_bravais_lattice=self.bravais_lattice
             )
         self.indexer.setup_regression()
+        self.indexer.setup_pitf()
         self.indexer.setup_miller_index_templates()
-
-        self.opt_params['minimum_uc_scaled'] = \
-            (self.opt_params['minimum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
-        self.opt_params['maximum_uc_scaled'] = \
-            (self.opt_params['maximum_uc'] - self.indexer.uc_scaler.mean_[0]) / self.indexer.uc_scaler.scale_[0]
-
-        if self.indexer.data_params['lattice_system'] == 'rhombohedral':
-            # Maximum angle = 120 degrees
-            # 120 degrees is a hard maximum because the reciprocal space conversion fails
-            # The numerically stable lower angle limit is 0.5 degrees
-            # for the reciprocal space conversion.
-            self.opt_params['maximum_angle_scaled'] = np.cos(0.01)
-            self.opt_params['minimum_angle_scaled'] = np.cos(2*np.pi/3)
-        elif self.indexer.data_params['lattice_system'] in ['monoclinic', 'triclinic']:
-            # Minimum / Maximum angle = 90 / 180 degrees
-            # Monoclinic angles are restricted to be above 90 degrees because
-            # the same monoclinic unit cell can be represented with either an
-            # obtuse or acute angle.
-            # Scaling is np.cos(angle)
-            self.opt_params['maximum_angle_scaled'] = 0
-            self.opt_params['minimum_angle_scaled'] = -1
 
         self.n_groups = len(self.indexer.data_params['split_groups'])
         self.q2_calculator = Q2Calculator(
@@ -906,30 +883,6 @@ class Optimizer:
             tensorflow=False,
             representation='xnn'
             )
-
-    def predictions(self):
-        self.N = self.indexer.data.shape[0]
-        uc_scaled_mean_filename = os.path.join(
-            f'{self.save_to}', f'{self.bravais_lattice}_{self.data_params["tag"]}_uc_scaled_mean.npy'
-            )
-        uc_scaled_var_filename = os.path.join(
-            f'{self.save_to}', f'{self.bravais_lattice}_{self.data_params["tag"]}_uc_scaled_var.npy'
-            )
-        if self.opt_params['load_predictions']:
-            self.uc_scaled_mean = np.load(uc_scaled_mean_filename)
-            self.uc_scaled_var = np.load(uc_scaled_var_filename)
-        else:
-            self.uc_scaled_mean = np.zeros((self.N, self.n_groups, self.indexer.data_params['n_outputs']))
-            self.uc_scaled_var = np.zeros((self.N, self.n_groups, self.indexer.data_params['n_outputs']))
-            for group_index, group in enumerate(self.indexer.data_params['split_groups']):
-                print(f'Performing predictions with {group}')
-                uc_mean_scaled_group, uc_var_scaled_group = self.indexer.unit_cell_generator[group].do_predictions(
-                    data=self.indexer.data, verbose=0, batch_size=2048
-                    )
-                self.uc_scaled_mean[:, group_index, :] = uc_mean_scaled_group
-                self.uc_scaled_var[:, group_index, :] = uc_var_scaled_group
-            np.save(uc_scaled_mean_filename, self.uc_scaled_mean)
-            np.save(uc_scaled_var_filename, self.uc_scaled_var)
 
     def evaluate_regression(self, N_entries, n_candidates_steps, n_evaluations, threshold):
         candidates_per_model = min(
@@ -948,11 +901,11 @@ class Optimizer:
         for entry_index in tqdm(range(N_entries)):
             candidate_uc_nn = np.zeros((
                 len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_nn'],
-                self.indexer.data_params['n_outputs']
+                self.indexer.data_params['unit_cell_length']
                 ))
             candidate_uc_rf = np.zeros((
                 len(self.indexer.data_params['split_groups'])*self.opt_params['n_candidates_rf'],
-                self.indexer.data_params['n_outputs']
+                self.indexer.data_params['unit_cell_length']
                 ))
             entry = self.indexer.data.iloc[entry_index]
             for group_index, group in enumerate(self.indexer.data_params['split_groups']):
@@ -965,7 +918,7 @@ class Optimizer:
 
                 # Get candidates from the random forest model
                 q2_scaled = np.array(entry['q2_scaled'])[np.newaxis]
-                # candidates_scaled_tree: n_entries, n_outputs, n_trees
+                # candidates_scaled_tree: n_entries, unit_cell_length, n_trees
                 #   n_entries = 1 because there is only one q2_scaled input
                 _, _, candidates_scaled_tree = \
                     self.indexer.unit_cell_generator[group].do_predictions_trees(q2_scaled=q2_scaled)
@@ -1009,7 +962,7 @@ class Optimizer:
                 candidate_uc_tm, _ = reindex_entry_triclinic(candidate_uc_tm)
             
             reindexed_unit_cell_true = np.array(entry['reindexed_unit_cell'])
-            xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['y_indices']]
+            xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['unit_cell_indices']]
             candidate_xnn_nn = get_xnn_from_unit_cell(
                 candidate_uc_nn,
                 partial_unit_cell=True,
@@ -1069,190 +1022,16 @@ class Optimizer:
             ))
         plt.show()
 
-    def run(self):
-        report_counts = {
-            'Not found': 0,
-            'Found and best': 0,
-            'Found but not best': 0,
-            'Found but off by two': 0,
-            'Found explainers': 0,
-            }
-        diagnostic_df = pd.DataFrame(columns=[
-            'entry_index',
-            'true_unit_cell',
-            'closest_unit_cell',
-            'best_hkl_accuracy',
-            'mean_hkl_accuracy',
-            'bravais_lattice',
-            'spacegroup',
-            'impossible',
-            'found',
-            'counts_uc',
-            'counts_ruc',
-            'counts_xnn',
-            'dominant_axis_info',
-            'dominant_zone_info',
-            ])
-        if self.opt_params['rerun_failures']:
-            print()
-            print('Loading failures')
-            diagnostics = pd.read_json(
-                os.path.join(self.save_to, f'{self.bravais_lattice}_optimization_diagnostics.json')
-                )
-            entry_list = np.array(diagnostics[~diagnostics['found']]['entry_index'])
-        else:
-            entry_list = np.arange(self.N)
-        for entry_index in entry_list:
-            start = time.time()
-            candidates = self.generate_candidates(
-                self.uc_scaled_mean[entry_index],
-                self.uc_scaled_var[entry_index],
-                self.indexer.data.iloc[entry_index],
-                entry_index,
-                )
-            candidates, diagnostic_df_entry = self.optimize_entry(candidates, entry_index)
-            #self.save_candidates_for_testing(candidates, entry_index)
-            report_counts, found = candidates.get_best_candidates(report_counts)
-            diagnostic_df_entry['found'] = found
-            diagnostic_df_entry['entry_index'] = entry_index
-            diagnostic_df.loc[entry_index] = diagnostic_df_entry
-            if self.opt_params['rerun_failures'] == False:
-                diagnostic_df.to_json(os.path.join(
-                    self.save_to,
-                    f'{self.bravais_lattice}_optimization_diagnostics.json'
-                    ))
-            print(report_counts)
-            end = time.time()
-            print(end - start)
-
-    def save_candidates_for_testing(self, candidates, entry_index):
-        q2_ref_calc = self.q2_calculator.get_q2(candidates.best_xnn)
-        pairwise_differences = scipy.spatial.distance.cdist(
-            candidates.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-            ).reshape((self.indexer.data_params['n_points'], candidates.best_xnn.shape[0], self.indexer.data_params['hkl_ref_length']))
-        hkl_assign = pairwise_differences.argmin(axis=2).T
-        hkl_pred = np.take(self.indexer.hkl_ref[self.bravais_lattice], hkl_assign, axis=0)
-        
-        np.save(self.save_to + f'/{self.bravais_lattice}_q2_error_test_xnn_{entry_index:03d}.npy', candidates.best_xnn)
-        np.save(self.save_to + f'/{self.bravais_lattice}_q2_error_test_loss_{entry_index:03d}.npy', candidates.best_loss)
-        np.save(self.save_to + f'/{self.bravais_lattice}_q2_error_test_hkl_{entry_index:03d}.npy', hkl_pred)
-        np.save(self.save_to + f'/{self.bravais_lattice}_q2_error_test_q2_obs_{entry_index:03d}.npy', candidates.q2_obs)
-
-    def generate_unit_cells(self, uc_scaled_mean, uc_scaled_var):
-        if self.indexer.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            candidates_scaled = self.rng.normal(
-                loc=uc_scaled_mean,
-                scale=np.sqrt(uc_scaled_var),
-                size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs']),
-                )
-        elif self.indexer.data_params['lattice_system'] == 'rhombohedral':
-            uniform_angle = False
-            if uc_scaled_mean[1] <= self.opt_params['minimum_angle_scaled']:
-                uniform_angle = True
-            elif uc_scaled_mean[1] >= self.opt_params['maximum_angle_scaled']:
-                uniform_angle = True
-            if uniform_angle:
-                candidates_scaled = np.zeros((self.opt_params['n_candidates_nn'], 2))
-                candidates_scaled[:, 0] = self.rng.normal(
-                    loc=uc_scaled_mean[0],
-                    scale=np.sqrt(uc_scaled_var[0]),
-                    size=self.opt_params['n_candidates_nn']
-                    )
-                candidates_scaled[:, 1] = self.rng.uniform(
-                    low=self.opt_params['minimum_angle_scaled'],
-                    high=self.opt_params['maximum_angle_scaled'],
-                    size=self.opt_params['n_candidates_nn']
-                    )
-            else:
-                candidates_scaled = self.rng.normal(
-                    loc=uc_scaled_mean,
-                    scale=np.sqrt(uc_scaled_var),
-                    size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs']),
-                    )
-        elif self.indexer.data_params['lattice_system'] == 'monoclinic':
-            uniform_angle = False
-            if uc_scaled_mean[3] <= self.opt_params['minimum_angle_scaled']:
-                uniform_angle = True
-            elif uc_scaled_mean[3] >= self.opt_params['maximum_angle_scaled']:
-                uniform_angle = True
-            if uniform_angle:
-                candidates_scaled = np.zeros((self.opt_params['n_candidates_nn'], 4))
-                candidates_scaled[:, :3] = self.rng.normal(
-                    loc=uc_scaled_mean[:3],
-                    scale=np.sqrt(uc_scaled_var[:3]),
-                    size=(self.opt_params['n_candidates_nn'], 3),
-                    )
-                candidates_scaled[:, 3] = self.rng.uniform(
-                    low=self.opt_params['minimum_angle_scaled'],
-                    high=self.opt_params['maximum_angle_scaled'],
-                    size=self.opt_params['n_candidates_nn']
-                    )
-            else:
-                candidates_scaled = self.rng.normal(
-                    loc=uc_scaled_mean,
-                    scale=np.sqrt(uc_scaled_var),
-                    size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs']),
-                    )
-        elif self.indexer.data_params['lattice_system'] == 'triclinic':
-            uniform_alpha = False
-            uniform_beta = False
-            uniform_gamma = False
-            if uc_scaled_mean[3] <= self.opt_params['minimum_angle_scaled']:
-                uniform_alpha = True
-            elif uc_scaled_mean[3] >= self.opt_params['maximum_angle_scaled']:
-                uniform_alpha = True
-            if uc_scaled_mean[4] <= self.opt_params['minimum_angle_scaled']:
-                uniform_beta = True
-            elif uc_scaled_mean[4] >= self.opt_params['maximum_angle_scaled']:
-                uniform_beta = True
-            if uc_scaled_mean[5] <= self.opt_params['minimum_angle_scaled']:
-                uniform_gamma = True
-            elif uc_scaled_mean[5] >= self.opt_params['maximum_angle_scaled']:
-                uniform_gamma = True
-            candidates_scaled = self.rng.normal(
-                loc=uc_scaled_mean,
-                scale=np.sqrt(uc_scaled_var),
-                size=(self.opt_params['n_candidates_nn'], self.indexer.data_params['n_outputs'])
-                )
-            if uniform_alpha:
-                candidates_scaled[:, 3] = self.rng.uniform(
-                    low=self.opt_params['minimum_alpha_scaled'],
-                    high=self.opt_params['maximum_angle_scaled'],
-                    size=self.opt_params['n_candidates_nn']
-                    )
-            if uniform_beta:
-                candidates_scaled[:, 4] = self.rng.uniform(
-                    low=self.opt_params['minimum_beta_gamma_scaled'],
-                    high=self.opt_params['maximum_angle_scaled'],
-                    size=self.opt_params['n_candidates_nn']
-                    )
-            if uniform_gamma:
-                candidates_scaled[:, 5] = self.rng.uniform(
-                    low=self.opt_params['minimum_beta_gamma_scaled'],
-                    high=self.opt_params['maximum_angle_scaled'],
-                    size=self.opt_params['n_candidates_nn']
-                    )
-
-        candidate_unit_cells = self.indexer.revert_predictions(uc_pred_scaled=candidates_scaled)
-
-        return candidate_unit_cells
-
-    def generate_unit_cells_miller_index_templates(self, q2_obs):
-        unit_cell_templates = self.indexer.miller_index_templator[self.bravais_lattice].do_predictions(
-            q2_obs, n_templates=self.opt_params['n_candidates_template'],
-            )
-        return unit_cell_templates
-
     def plot_candidate_unit_cells(self, candidate_uc, entry, entry_index):
         if self.indexer.data_params['lattice_system'] in ['cubic', 'tetragonal', 'hexagonal', 'rhombohedral']:
             return None
         candidates_nn = np.zeros((
             self.n_groups * self.opt_params['n_candidates_nn'],
-            self.indexer.data_params['n_outputs']
+            self.indexer.data_params['unit_cell_length']
             ))
         candidates_rf = np.zeros((
             self.n_groups * self.opt_params['n_candidates_rf'],
-            self.indexer.data_params['n_outputs']
+            self.indexer.data_params['unit_cell_length']
             ))
         n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
         for group_index, group in enumerate(self.indexer.data_params['split_groups']):
@@ -1464,41 +1243,93 @@ class Optimizer:
             plt.clf()
             plt.close('all')
 
-    def generate_candidates(self, uc_scaled_mean, uc_scaled_var, entry, entry_index):
-        n_candidates = self.opt_params['n_candidates_nn'] + self.opt_params['n_candidates_rf']
-        candidate_unit_cells = np.zeros((
-            self.n_groups * n_candidates + self.opt_params['n_candidates_template'],
-            self.indexer.data_params['n_outputs']
-            ))
-        for group_index, group in enumerate(self.indexer.data_params['split_groups']):
-            start = group_index * n_candidates
-            stop = (group_index + 1) * n_candidates
-            # Get candidates from the neural network model
-            candidate_unit_cells[start: start + self.opt_params['n_candidates_nn'], :] = \
-                self.generate_unit_cells(
-                    uc_scaled_mean[group_index, :], uc_scaled_var[group_index, :]
+    def run(self):
+        report_counts = {
+            'Not found': 0,
+            'Found and best': 0,
+            'Found but not best': 0,
+            'Found but off by two': 0,
+            'Found explainers': 0,
+            }
+        diagnostic_df = pd.DataFrame(columns=[
+            'entry_index',
+            'true_unit_cell',
+            'closest_unit_cell',
+            'best_hkl_accuracy',
+            'mean_hkl_accuracy',
+            'bravais_lattice',
+            'spacegroup',
+            'impossible',
+            'found',
+            'counts_uc',
+            'counts_ruc',
+            'counts_xnn',
+            'dominant_axis_info',
+            'dominant_zone_info',
+            ])
+        if self.opt_params['rerun_failures']:
+            print()
+            print('Loading failures')
+            diagnostics = pd.read_json(
+                os.path.join(self.save_to, f'{self.bravais_lattice}_optimization_diagnostics.json')
+                )
+            entry_list = np.array(diagnostics[~diagnostics['found']]['entry_index'])
+        else:
+            entry_list = np.arange(self.indexer.data.shape[0])
+        for entry_index in entry_list:
+            start = time.time()
+            candidates = self.generate_candidates(self.indexer.data.iloc[entry_index])
+            candidates, diagnostic_df_entry = self.optimize_entry(candidates, entry_index)
+            #self.save_candidates_for_testing(candidates, entry_index)
+            report_counts, found = candidates.get_best_candidates(report_counts)
+            diagnostic_df_entry['found'] = found
+            diagnostic_df_entry['entry_index'] = entry_index
+            diagnostic_df.loc[entry_index] = diagnostic_df_entry
+            if self.opt_params['rerun_failures'] == False:
+                diagnostic_df.to_json(os.path.join(
+                    self.save_to,
+                    f'{self.bravais_lattice}_optimization_diagnostics.json'
+                    ))
+            print(report_counts)
+            end = time.time()
+            print(end - start)
+
+    def generate_candidates(self, entry):
+        candidate_unit_cells = []
+        for generator_info in self.opt_params['generator_info']:
+            if generator_info['generator'] == 'nn':
+                generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
+                    generator_info['n_unit_cells'],
+                    self.rng, 
+                    np.array(entry['q2'])[np.newaxis],
+                    batch_size=1,
+                    model='nn',
+                    q2_scaler=self.indexer.q2_scaler,
                     )
+            elif generator_info['generator'] == 'trees':
+                self.indexer.unit_cell_generator[generator_info['split_group']].generate(
+                    generator_info['n_unit_cells'],
+                    self.rng, 
+                    np.array(entry['q2'])[np.newaxis],
+                    model='trees',
+                    q2_scaler=self.indexer.q2_scaler,
+                    )
+            elif generator_info['generator'] == 'templates':
+                generator_unit_cells = self.indexer.miller_index_templator[self.bravais_lattice].generate(
+                    generator_info['n_unit_cells'],
+                    self.rng,
+                    np.array(entry['q2']), 
+                    )
+            elif generator_info['generator'] == 'pitf':
+                generator_unit_cells = self.indexer.pitf_generator[generator_info['split_group']].generate(
+                    generator_info['n_unit_cells'],
+                    self.rng,
+                    np.array(entry['q2']),
+                    batch_size=1,
+                    )
+            candidate_unit_cells.append(generator_unit_cells)
 
-            # Get candidates from the random forest model
-            q2_scaled = np.array(entry['q2_scaled'])[np.newaxis]
-            # candidates_scaled_tree: n_entries, n_outputs, n_trees
-            #   n_entries = 1 because there is only one q2_scaled input
-            _, _, candidates_scaled_tree = \
-                self.indexer.unit_cell_generator[group].do_predictions_trees(q2_scaled=q2_scaled)
-            tree_indices = self.rng.choice(
-                candidates_scaled_tree.shape[2],
-                size=self.opt_params['n_candidates_rf'],
-                replace=False
-                )
-            candidate_unit_cells_tree = self.indexer.revert_predictions(
-                uc_pred_scaled=candidates_scaled_tree[0, :, tree_indices]
-                )
-            candidate_unit_cells[start + self.opt_params['n_candidates_nn']: stop, :] = \
-                candidate_unit_cells_tree
-
-        candidate_unit_cells[self.n_groups * n_candidates:] = \
-            self.generate_unit_cells_miller_index_templates(np.array(entry['q2']))
-
+        candidate_unit_cells = np.concatenate(candidate_unit_cells, axis=0)
         candidate_unit_cells = fix_unphysical(
             unit_cell=candidate_unit_cells,
             rng=self.rng,
@@ -1584,7 +1415,7 @@ class Optimizer:
         q2_ref_calc = self.q2_calculator.get_q2(candidates.xnn)
         pairwise_differences = scipy.spatial.distance.cdist(
             candidates.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-            ).reshape((self.indexer.data_params['n_points'], candidates.n, self.indexer.data_params['hkl_ref_length']))
+            ).reshape((self.indexer.data_params['n_peaks'], candidates.n, self.indexer.data_params['hkl_ref_length']))
         hkl_assign = pairwise_differences.argmin(axis=2).T
         hkl_pred = np.take(self.indexer.hkl_ref[self.bravais_lattice], hkl_assign, axis=0)
         candidates.hkl = hkl_pred
@@ -1599,9 +1430,9 @@ class Optimizer:
             n_drop = self.rng.choice(iteration_info['n_drop'], size=1)[0]
         else:
             n_drop = iteration_info['n_drop']
-        n_keep = self.indexer.data_params['n_points'] - n_drop
+        n_keep = self.indexer.data_params['n_peaks'] - n_drop
         subsampled_indices = self.rng.permuted(
-            np.repeat(np.arange(self.indexer.data_params['n_points'])[np.newaxis], candidates.n, axis=0),
+            np.repeat(np.arange(self.indexer.data_params['n_peaks'])[np.newaxis], candidates.n, axis=0),
             axis=1
             )[:, :n_keep]
 

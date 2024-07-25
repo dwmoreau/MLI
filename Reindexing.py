@@ -971,3 +971,37 @@ def reindex_entry_triclinic(unit_cell, space='direct'):
     else:
         unit_cell_reduced, hkl_transformation, s6_reduced = selling_reduction(unit_cell, space)
     return unit_cell_reduced, hkl_transformation
+
+
+def reindex_entry_basic(unit_cell, lattice_system, bravais_lattice, space='direct'):
+    """
+    This function is meant to be called during optimization for a quick reindexing. There is an
+    assumption that the unit cell has been placed in the correct setting. For example, all the
+    centered monoclinic entries are initially placed in a body centered setting by 
+    reindex_entry_monoclinic. reindex_entry_monoclinic_basic assumes this has already been performed.
+
+    These also have been set so they operate in a vectorized manner on partial unit cells
+    """
+    if lattice_system == 'orthorhombic':
+        if bravais_lattice == 'oC':
+            order = np.argsort(unit_cell[:, :2], axis=1)
+            if space == 'reciprocal':
+                order = order[:, ::-1]
+            unit_cell[:, :2] = np.take_along_axis(unit_cell[:, :2], order, axis=1)
+        else:
+            order = np.argsort(unit_cell, axis=1)
+            if space == 'reciprocal':
+                order = order[:, ::-1]
+            unit_cell = np.take_along_axis(unit_cell, order, axis=1)
+    elif lattice_system == 'monoclinic':
+        if space == 'direct':
+            swap_ac = unit_cell[:, 0] > unit_cell[:, 2]
+            mirror_angle = unit_cell[:, 3] < np.pi/2
+        elif space == 'reciprocal':
+            swap_ac = unit_cell[:, 0] < unit_cell[:, 2]
+            mirror_angle = unit_cell[:, 3] > np.pi/2
+        unit_cell[swap_ac] = np.take(unit_cell[swap_ac], [2, 1, 0, 3], axis=1)
+        unit_cell[mirror_angle, 3] = np.pi - unit_cell[mirror_angle, 3]
+    elif lattice_system == 'triclinic':
+        unit_cell, _ = reindex_entry_triclinic(unit_cell, space)
+    return unit_cell

@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import scipy.special
+from sklearn.preprocessing import StandardScaler
 import shutil
 import tensorflow as tf
 
@@ -12,6 +13,7 @@ from TargetFunctions import LikelihoodLoss
 from Utilities import fix_unphysical
 from Utilities import get_hkl_matrix
 from Utilities import get_unit_cell_from_xnn
+from Utilities import get_unit_cell_volume
 from Utilities import PairwiseDifferenceCalculator
 from Utilities import vectorized_resampling
 from Utilities import read_params
@@ -80,12 +82,9 @@ class PhysicsInformedModel:
         self.split_group = split_group
         self.data_params = data_params
         self.model_params = model_params
-        if not 'mean_params' in self.model_params.keys():
-            self.model_params['mean_params'] = {}
-        if not 'var_params' in self.model_params.keys():
-            self.model_params['var_params'] = {}
-        self.model_params['mean_params']['unit_cell_length'] = len(self.data_params['unit_cell_indices'])
-        self.model_params['var_params']['unit_cell_length'] = len(self.data_params['unit_cell_indices'])
+        if not 'xnn_params' in self.model_params.keys():
+            self.model_params['xnn_params'] = {}
+        self.model_params['xnn_params']['unit_cell_length'] = len(self.data_params['unit_cell_indices'])
         self.n_peaks = data_params['n_peaks']
         self.unit_cell_length = data_params['unit_cell_length']
         self.unit_cell_indices = data_params['unit_cell_indices']
@@ -97,63 +96,64 @@ class PhysicsInformedModel:
         self.xnn_scaler = xnn_scaler
         self.hkl_ref = hkl_ref
 
-    def setup(self):
+    def setup(self, data):
+        train = data[data['train']]
+        train_rec_volume = 1 / np.array(train['reindexed_volume'])
+        self.volume_scaler = StandardScaler()
+        self.volume_scaler.fit(train_rec_volume[:, np.newaxis])
+
         model_params_defaults = {
-            'mean_params': {
+            'xnn_params': {
                 'layers': [2000, 1000, 1000],
                 'dropout_rate': 0.05,
                 'epsilon': 0.001,
                 'output_activation': 'linear',
-                'kernel_initializer': None,
-                'bias_initializer': None,
                 },
-            'var_params': {
+            'volume_params': {
                 'layers': [100, 100, 100],
-                'dropout_rate': 0.5,
+                'dropout_rate': 0.05,
                 'epsilon': 0.001,
-                'output_activation': 'softplus',
-                'kernel_initializer': None,
-                'bias_initializer': None,
+                'unit_cell_length': 1,
+                'output_activation': 'linear',
                 },
-            'calibration_params': {
+            'assign_params': {
                 'layers': [1000, 500, 100],
                 'dropout_rate': 0.25,
                 'n_components': 5,
                 'n_peaks': self.n_peaks,
                 },
             'epsilon_pds': 0.1,
-            'learning_rate_regression': 0.001,
-            'learning_rate_assignment': 0.001,
-            'learning_rate_index': 0.000001,
-            'cycles_regression': 2,
-            'epochs_regression': 10,
-            'epochs_assignment': 15,
-            'epochs_index': 15,
+            'learning_rate_volume': 0.001,
+            'learning_rate_xnn': 0.001,
+            'learning_rate_assign': 0.001,
+            'learning_rate_full': 0.000001,
+            'epochs_volume': 10,
+            'epochs_xnn': 10,
+            'epochs_assign': 10,
+            'epochs_full': 10,
             'batch_size': 128,
-            'beta_nll': 0.5,
             }
 
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
                 self.model_params[key] = model_params_defaults[key]
-        self.model_params['mean_params']['unit_cell_length'] = self.unit_cell_length
-        self.model_params['var_params']['unit_cell_length'] = self.unit_cell_length
+        self.model_params['xnn_params']['unit_cell_length'] = self.unit_cell_length
 
-        for key in model_params_defaults['mean_params'].keys():
-            if key not in self.model_params['mean_params'].keys():
-                self.model_params['mean_params'][key] = model_params_defaults['mean_params'][key]
-        self.model_params['mean_params']['kernel_initializer'] = None
-        self.model_params['mean_params']['bias_initializer'] = None
+        for key in model_params_defaults['xnn_params'].keys():
+            if key not in self.model_params['xnn_params'].keys():
+                self.model_params['mean_params'][key] = model_params_defaults['xnn_params'][key]
+        self.model_params['xnn_params']['kernel_initializer'] = None
+        self.model_params['xnn_params']['bias_initializer'] = None
 
-        for key in model_params_defaults['var_params'].keys():
-            if key not in self.model_params['var_params'].keys():
-                self.model_params['var_params'][key] = model_params_defaults['var_params'][key]
-        self.model_params['var_params']['kernel_initializer'] = None
-        self.model_params['var_params']['bias_initializer'] = None
+        for key in model_params_defaults['volume_params'].keys():
+            if key not in self.model_params['volume_params'].keys():
+                self.model_params['volume_params'][key] = model_params_defaults['volume_params'][key]
+        self.model_params['volume_params']['kernel_initializer'] = None
+        self.model_params['volume_params']['bias_initializer'] = None
 
-        for key in model_params_defaults['calibration_params'].keys():
-            if key not in self.model_params['calibration_params'].keys():
-                self.model_params['calibration_params'][key] = model_params_defaults['calibration_params'][key]
+        for key in model_params_defaults['assign_params'].keys():
+            if key not in self.model_params['assign_params'].keys():
+                self.model_params['assign_params'][key] = model_params_defaults['assign_params'][key]
 
         self.build_model()
         #self.model.summary()
@@ -244,86 +244,101 @@ class PhysicsInformedModel:
     def train(self, data):
         train = data[data['train']]
         val = data[~data['train']]
+
+        train_rec_volume = 1 / np.array(train['reindexed_volume'])
+        val_rec_volume = 1 / np.array(train['reindexed_volume'])
+        train_rec_volume_scaled = self.volume_scaler.transform(
+            train_rec_volume[:, np.newaxis]
+            )[:, 0]
+        val_rec_volume_scaled = self.volume_scaler.transform(
+            val_rec_volume[:, np.newaxis]
+            )[:, 0]
+
+        train_xnn = np.stack(train['reindexed_xnn'])[:, self.data_params['unit_cell_indices']],
+        val_xnn = np.stack(val['reindexed_xnn'])[:, self.data_params['unit_cell_indices']],
+        train_xnn_volume_scaled = train_xnn / train_rec_volume[:, np.newaxis]**(2/3)
+        val_xnn_volume_scaled = val_xnn / val_rec_volume[:, np.newaxis]**(2/3)
+
         train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])}
         val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])}
 
-        train_true_mean_var = {
-            'xnn_scaled': np.stack(train['reindexed_xnn_scaled'])[:, self.data_params['unit_cell_indices']],
-            }
-        val_true_mean_var = {
-            'xnn_scaled': np.stack(val['reindexed_xnn_scaled'])[:, self.data_params['unit_cell_indices']],
-            }
+        train_true_volume = {'rec_volume_scaled': train_rec_volume_scaled}
+        val_true_volume = {'rec_volume_scaled': val_rec_volume_scaled}
 
-        train_true_assign = {
-            'xnn_scaled': np.stack(train['reindexed_xnn_scaled'])[:, self.data_params['unit_cell_indices']],
-            'hkl_softmax': np.stack(train['hkl_labels']),
-            }
-        val_true_assign = {
-            'xnn_scaled': np.stack(val['reindexed_xnn_scaled'])[:, self.data_params['unit_cell_indices']],
-            'hkl_softmax': np.stack(val['hkl_labels']),
-            }
+        train_true_xnn = {'xnn_volume_scaled': train_xnn_volume_scaled}
+        val_true_xnn = {'xnn_volume_scaled': val_xnn_volume_scaled}
+
         train_true = {
-            'xnn_scaled': np.stack(train['reindexed_xnn_scaled'])[:, self.data_params['unit_cell_indices']],
+            'rec_volume_scaled': train_rec_volume_scaled,
+            'xnn_volume_scaled': train_xnn_volume_scaled,
             'hkl_softmax': np.stack(train['hkl_labels']),
-            'indexing_data': np.stack(train['q2']),
             }
         val_true = {
-            'xnn_scaled': np.stack(val['reindexed_xnn_scaled'])[:, self.data_params['unit_cell_indices']],
+            'rec_volume_scaled': val_rec_volume_scaled,
+            'xnn_volume_scaled': val_xnn_volume_scaled,
             'hkl_softmax': np.stack(val['hkl_labels']),
-            'indexing_data': np.stack(val['q2']),
             }
 
-
-        self.fit_history = [None for _ in range(2*self.model_params['cycles_regression'] + 2)]
+        self.fit_history = [None, None, None, None]
         print('Training Physics Informed Model')
-        print(f'\nStarting fitting: Unit cell regression {self.split_group}')
-        for cycle_index in range(self.model_params['cycles_regression']):
-            print(f'\n   Regression mean cycle: {cycle_index + 1}')
-            self.transfer_weights('var', 'mean')
-            self.fit_history[2*cycle_index] = self.mean_model.fit(
-                x=train_inputs,
-                y=train_true_mean_var,
-                epochs=self.model_params['epochs_regression'],
-                shuffle=True,
-                batch_size=self.model_params['batch_size'], 
-                validation_data=(val_inputs, val_true_mean_var),
-                callbacks=None,
-                )
-            print(f'\n   Regression var cycle: {cycle_index + 1}')
-            self.transfer_weights('mean', 'var')
-            self.fit_history[2*cycle_index + 1] = self.var_model.fit(
-                x=train_inputs,
-                y=train_true_mean_var,
-                epochs=self.model_params['epochs_regression'],
-                shuffle=True,
-                batch_size=self.model_params['batch_size'], 
-                validation_data=(val_inputs, val_true_mean_var),
-                callbacks=None,
-                )
-        print(f'\nStarting fitting: Miller index assignments calibration {self.split_group}')
-        self.transfer_weights('var', 'mean')
-        self.transfer_weights('mean', 'assign')
-        self.fit_history[2*self.model_params['cycles_regression']] = self.assign_model.fit(
+        print(f'\n   Starting fitting: Volume {self.split_group}')
+        self.fit_history[0] = self.volume_model.fit(
             x=train_inputs,
-            y=train_true_assign,
-            epochs=self.model_params['epochs_assignment'],
+            y=train_true_volume,
+            epochs=self.model_params['epochs_volume'],
             shuffle=True,
             batch_size=self.model_params['batch_size'], 
-            validation_data=(val_inputs, val_true_assign),
+            validation_data=(val_inputs, val_true_volume),
             callbacks=None,
             )
-        
-        print(f'\nStarting indexing: Unit cell & assignment calibration {self.split_group}')
-        self.transfer_weights('assign', 'index')
-        self.fit_history[2*self.model_params['cycles_regression'] + 1] = self.model.fit(
+
+        print(f'\n   Starting fitting: Xnn {self.split_group}')
+        self.transfer_weights('volume', 'xnn')
+        self.fit_history[1] = self.xnn_model.fit(
+            x=train_inputs,
+            y=train_true_xnn,
+            epochs=self.model_params['epochs_xnn'],
+            shuffle=True,
+            batch_size=self.model_params['batch_size'], 
+            validation_data=(val_inputs, val_true_xnn),
+            callbacks=None,
+            )
+
+        print(f'\n   Starting fitting: Xnn {self.split_group}')
+        self.transfer_weights('xnn', 'volume_xnn')
+        self.fit_history[2] = self.volume_xnn_model.fit(
+            x=train_inputs,
+            y=train_true_xnn,
+            epochs=self.model_params['epochs_volume_xnn'],
+            shuffle=True,
+            batch_size=self.model_params['batch_size'], 
+            validation_data=(val_inputs, val_true_xnn),
+            callbacks=None,
+            )
+
+        print(f'\n   Starting fitting: Miller index assignments calibration {self.split_group}')
+        self.transfer_weights('volume_xnn', 'assign')
+        self.fit_history[3] = self.assign_model.fit(
             x=train_inputs,
             y=train_true,
-            epochs=self.model_params['epochs_index'],
+            epochs=self.model_params['epochs_assignment'],
             shuffle=True,
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
             callbacks=None,
             )
+
+        self.transfer_weights('xnn', 'assign')
+        self.fit_history[2] = self.assign_model.fit(
+            x=train_inputs,
+            y=train_true,
+            epochs=self.model_params['epochs_assignment'],
+            shuffle=True,
+            batch_size=self.model_params['batch_size'], 
+            validation_data=(val_inputs, val_true),
+            callbacks=None,
+            )
+
         tf.keras.backend.clear_session()
         gc.collect()
         self.plot_training_loss()
@@ -433,57 +448,58 @@ class PhysicsInformedModel:
             q2_scaler=self.q2_scaler,
             )
 
-        self.mean_layer_names = []
-        for index in range(len(self.model_params['mean_params']['layers'])):
-            self.mean_layer_names.append(f'dense_xnn_scaled_mean_{index}')
-            self.mean_layer_names.append(f'layer_norm_xnn_scaled_mean_{index}')
-        self.mean_layer_names.append('xnn_scaled_mean')
+        self.volume_layer_names = []
+        for index in range(len(self.model_params['volume_params']['layers'])):
+            self.var_layer_names.append(f'dense_volume_scaled_{index}')
+            self.var_layer_names.append(f'layer_norm_volume_scaled_{index}')
+        self.volume_layer_names.append('volume_scaled')
 
-        self.var_layer_names = []
-        for index in range(len(self.model_params['var_params']['layers'])):
-            self.var_layer_names.append(f'dense_xnn_scaled_var_{index}')
-            self.var_layer_names.append(f'layer_norm_xnn_scaled_var_{index}')
-        self.var_layer_names.append('xnn_scaled_var')
+        self.xnn_layer_names = []
+        for index in range(len(self.model_params['xnn_params']['layers'])):
+            self.xnn_layer_names.append(f'dense_xnn_volume_scaled_{index}')
+            self.xnn_layer_names.append(f'layer_norm_xnn_volume_scaled_{index}')
+        self.xnn_layer_names.append('xnn_volume_scaled')
 
         self.calibration_layer_names = []
-        for index in range(len(self.model_params['calibration_params']['layers'])):
-            self.calibration_layer_names.append(f'dense_calibration_{index}')
-            self.calibration_layer_names.append(f'layer_norm_calibration_{index}')
+        for index in range(len(self.model_params['assign_params']['layers'])):
+            self.calibration_layer_names.append(f'dense_assign_{index}')
+            self.calibration_layer_names.append(f'layer_norm_assign_{index}')
         for index in range(self.n_peaks):
-            self.calibration_layer_names.append(f'calibration_scaler_{index}')
+            self.calibration_layer_names.append(f'assign_scaler_{index}')
 
-        self.mean_model = tf.keras.Model(inputs, self.model_builder(inputs, 'mean'))
-        self.var_model = tf.keras.Model(inputs, self.model_builder(inputs, 'var'))
+        self.volume_model = tf.keras.Model(inputs, self.model_builder(inputs, 'volume'))
+        self.xnn_model = tf.keras.Model(inputs, self.model_builder(inputs, 'xnn'))
+        self.volume_xnn_model = tf.keras.Model(inputs, self.model_builder(inputs, 'xnn'))
         self.assign_model = tf.keras.Model(inputs, self.model_builder(inputs, 'assign'))
-        self.model = tf.keras.Model(inputs, self.model_builder(inputs, 'full'))
+        self.model = tf.keras.Model(inputs, self.model_builder(inputs, 'assign'))
         self.compile_model()
 
     def model_builder(self, inputs, model_type):
-        xnn_scaled_mean = mlp_model_builder(
+        volume_scaled = mlp_model_builder(
             inputs['q2_scaled'],
-            'xnn_scaled_mean',
-            self.model_params['mean_params'],
-            'xnn_scaled_mean'
+            'volume_scaled',
+            self.model_params['volume_params'],
+            'volume_scaled'
             )
-        xnn_scaled_var = mlp_model_builder(
-            inputs['q2_scaled'],
-            'xnn_scaled_var',
-            self.model_params['var_params'],
-            'xnn_scaled_var'
-            )
-        xnn_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name='xnn_scaled'
-            )((
-                xnn_scaled_mean[:, :, tf.newaxis],
-                xnn_scaled_var[:, :, tf.newaxis],
-                ))
-        if model_type in ['mean', 'var']:
-            return xnn_scaled
+        if model_type == 'volume':
+            return volume_scaled
 
-        xnn = xnn_scaled_mean * self.xnn_scaler.scale_[0] + self.xnn_scaler.mean_[0]
-        pairwise_differences_scaled, q2_ref = self.pairwise_difference_calculator.get_pairwise_differences(
-            xnn, inputs['q2_scaled'], return_q2_ref=True
+        volume = volume_scaled*self.volume_scaler.scale_[0] + self.volume_scaler.mean_[0]
+        q2 = inputs['q2_scaled']*self.q2_scaler.scale_[0] + self.q2_scaler.mean_[0]
+        q2_volume_scaled = q2 / volume**(2/3)
+
+        xnn_volume_scaled = mlp_model_builder(
+            q2_volume_scaled,
+            'xnn_volume_scaled',
+            self.model_params['xnn_params'],
+            'xnn_volume_scaled'
+            )
+        if model_type == 'xnn':
+            return [volume_scaled, xnn_volume_scaled]
+
+        xnn = xnn_volume_scaled * volume**(2/3)
+        pairwise_differences_scaled = self.pairwise_difference_calculator.get_pairwise_differences(
+            xnn, inputs['q2_scaled'], return_q2_ref=False
             )
 
         # hkl_logits:               n_batch x n_peaks x hkl_ref_length
@@ -504,66 +520,74 @@ class PhysicsInformedModel:
             axis=2
             )(hkl_logits)
         if model_type == 'assign':
-            return [xnn_scaled, hkl_softmax]
-
-        indexing_data = tf.keras.layers.Concatenate(
-            axis=1,
-            name='indexing_data'
-            )((
-                hkl_softmax,
-                q2_ref[:, tf.newaxis, :],
-                ))
-        return [xnn_scaled, hkl_softmax, indexing_data]
+            return [volume_scaled, xnn_volume_scaled, hkl_softmax]
 
     def compile_model(self):
-        ##############
-        # mean model #
-        ##############
-        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_regression'])
+        ################
+        # volume model #
+        ################
+        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_volume'])
         loss_weights = {
-            'xnn_scaled': 1,
+            'rec_volume_scaled': 1,
             }
-        reg_loss = LikelihoodLoss(
-            likelihood='normal',
-            n=self.unit_cell_length,
-            beta_nll=self.model_params['beta_nll'],
-            )
-        for layer_name in self.mean_layer_names:
-            self.mean_model.get_layer(layer_name).trainable = True
-        for layer_name in self.var_layer_names:
-            self.mean_model.get_layer(layer_name).trainable = False
         loss_metrics = {
-            'xnn_scaled': reg_loss.mean_squared_error,
+            'rec_volume_scaled': None,
             }
         loss_functions = {
-            'xnn_scaled': reg_loss,
+            'rec_volume_scaled': tf.keras.losses.MeanSquaredError(),
             }
-        self.mean_model.compile(
+        self.volume_model.compile(
             optimizer=optimizer, 
             loss=loss_functions,
             loss_weights=loss_weights,
             metrics=loss_metrics
             )
 
-        ##################
-        # variance model #
-        ##################
-        reg_loss = LikelihoodLoss(
-            likelihood='normal',
-            n=self.unit_cell_length,
-            beta_nll=None,
-            )
-        for layer_name in self.mean_layer_names:
-            self.var_model.get_layer(layer_name).trainable = False
-        for layer_name in self.var_layer_names:
-            self.var_model.get_layer(layer_name).trainable = True
+        #############
+        # xnn model #
+        #############
+        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_xnn'])
+        for layer_name in self.volume_layer_names:
+            self.xnn_model.get_layer(layer_name).trainable = False
+        for layer_name in self.xnn_layer_names:
+            self.xnn_model.get_layer(layer_name).trainable = True
+        loss_weights = {
+            'xnn_volume_scaled': 1,
+            }
         loss_metrics = {
-            'xnn_scaled': reg_loss.mean_squared_error,
+            'xnn_volume_scaled': None,
             }
         loss_functions = {
-            'xnn_scaled': reg_loss,
+            'xnn_volume_scaled': tf.keras.losses.MeanSquaredError(),
             }
-        self.var_model.compile(
+        self.xnn_model.compile(
+            optimizer=optimizer, 
+            loss=loss_functions,
+            loss_weights=loss_weights,
+            metrics=loss_metrics
+            )
+
+        ####################
+        # volume xnn model #
+        ####################
+        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_volume_xnn'])
+        for layer_name in self.volume_layer_names:
+            self.volume_xnn_model.get_layer(layer_name).trainable = True
+        for layer_name in self.xnn_layer_names:
+            self.volume_xnn_model.get_layer(layer_name).trainable = True
+        loss_weights = {
+            'volume_scaled': 1,
+            'xnn_volume_scaled': 1,
+            }
+        loss_metrics = {
+            'volume_scaled': None,
+            'xnn_volume_scaled': None,
+            }
+        loss_functions = {
+            'volume_scaled': tf.keras.losses.MeanSquaredError(),
+            'xnn_volume_scaled': tf.keras.losses.MeanSquaredError(),
+            }
+        self.volume_xnn_model.compile(
             optimizer=optimizer, 
             loss=loss_functions,
             loss_weights=loss_weights,
@@ -573,16 +597,16 @@ class PhysicsInformedModel:
         ################
         # assign model #
         ################
-        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_assignment'])
-        loss_weights = {
-            'hkl_softmax': 1,
-            }
-        for layer_name in self.mean_layer_names:
+        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_assign'])
+        for layer_name in self.volume_layer_names:
             self.assign_model.get_layer(layer_name).trainable = False
-        for layer_name in self.var_layer_names:
+        for layer_name in self.xnn_layer_names:
             self.assign_model.get_layer(layer_name).trainable = False
         for layer_name in self.calibration_layer_names:
             self.assign_model.get_layer(layer_name).trainable = True
+        loss_weights = {
+            'hkl_softmax': 1,
+            }
         loss_metrics = {
             'hkl_softmax': 'accuracy',
             }
@@ -599,37 +623,21 @@ class PhysicsInformedModel:
         ##############
         # full model #
         ##############
-        reg_loss = LikelihoodLoss(
-            likelihood='normal',
-            n=self.unit_cell_length,
-            beta_nll=self.model_params['beta_nll'],
-            )
-        indexing_loss = IndexingTargetFunction(
-            likelihood='t-dist', 
-            error_fraction=np.linspace(0.01, 0.1, self.data_params['n_peaks']),
-            n_peaks=self.data_params['n_peaks'],
-            )
-        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_index'])
+        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate_full'])
         loss_weights = {
-            'xnn_scaled': 5,
+            'volume_scaled': 1,
+            'xnn_volume_scaled': 1,
             'hkl_softmax': 1,
-            'indexing_data': 0,
             }
-        for layer_name in self.mean_layer_names:
-            self.model.get_layer(layer_name).trainable = True
-        for layer_name in self.var_layer_names:
-            self.model.get_layer(layer_name).trainable = False
-        for layer_name in self.calibration_layer_names:
-            self.model.get_layer(layer_name).trainable = True
         loss_metrics = {
-            'xnn_scaled': reg_loss.mean_squared_error,
+            'volume_scaled': None,
+            'xnn_volume_scaled': None,
             'hkl_softmax': 'accuracy',
-            'indexing_data': indexing_loss,
             }
         loss_functions = {
-            'xnn_scaled': reg_loss,
+            'volume_scaled': tf.keras.losses.MeanSquaredError(),
+            'xnn_volume_scaled': tf.keras.losses.MeanSquaredError(),
             'hkl_softmax': tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False),
-            'indexing_data': indexing_loss,
             }
         self.model.compile(
             optimizer=optimizer, 
@@ -643,22 +651,14 @@ class PhysicsInformedModel:
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
         os.mkdir(tmp_dir)
-        if source == 'mean' and dest == 'var':
-            mean_name = os.path.join(tmp_dir, 'mean.h5')
-            self.mean_model.save_weights(mean_name)
-            self.var_model.load_weights(mean_name)
-        elif source == 'var' and dest == 'mean':
-            var_name = os.path.join(tmp_dir, 'var.h5')
-            self.var_model.save_weights(var_name)
-            self.mean_model.load_weights(var_name)
-        elif source == 'mean' and dest == 'assign':
-            mean_name = os.path.join(tmp_dir, 'mean.h5')
-            self.mean_model.save_weights(mean_name)
-            self.assign_model.load_weights(mean_name, by_name=True, skip_mismatch=True)
-        elif source == 'assign' and dest == 'index':
-            assign_name = os.path.join(tmp_dir, 'assign.h5')
-            self.assign_model.save_weights(assign_name)
-            self.model.load_weights(assign_name, by_name=True, skip_mismatch=True)
+        if source == 'volume' and dest == 'xnn':
+            volume_name = os.path.join(tmp_dir, 'volume.h5')
+            self.volume_model.save_weights(volume_name)
+            self.xnn_model.load_weights(volume_name, by_name=True, skip_mismatch=True)
+        elif source == 'xnn' and dest == 'assign':
+            xnn_name = os.path.join(tmp_dir, 'xnn.h5')
+            self.xnn_model.save_weights(xnn_name)
+            self.assign_model.load_weights(xnn_name, by_name=True, skip_mismatch=True)
         shutil.rmtree(tmp_dir)
 
     def predict(self, data=None, inputs=None, q2_scaled=None, batch_size=None):
