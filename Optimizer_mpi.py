@@ -1,0 +1,557 @@
+import copy
+import matplotlib.pyplot as plt
+from mpi4py import MPI
+import numpy as np
+import os
+import pandas as pd
+pd.options.mode.copy_on_write = True
+import scipy.optimize
+import scipy.spatial
+import scipy.special
+import time
+from tqdm import tqdm
+
+from Indexing import Indexing
+from Reindexing import get_different_monoclinic_settings
+from Reindexing import reindex_entry_basic
+from Reindexing import get_s6_from_unit_cell
+from TargetFunctions import CandidateOptLoss
+from Utilities import fix_unphysical
+from Utilities import get_hkl_matrix
+from Utilities import get_M20
+from Utilities import get_M20_from_xnn
+from Utilities import get_M20_likelihood
+from Utilities import get_reciprocal_unit_cell_from_xnn
+from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import get_xnn_from_unit_cell
+from Utilities import get_unit_cell_from_xnn
+from Utilities import get_unit_cell_volume
+from Utilities import Q2Calculator
+from Utilities import reciprocal_uc_conversion
+
+
+class Candidates:
+    def __init__(self, q2_obs, xnn, hkl_ref, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell):
+        self.mcmc = False
+        self.lattice_system = lattice_system
+        self.bravais_lattice = bravais_lattice
+        self.minimum_unit_cell = minimum_unit_cell
+        self.maximum_unit_cell = maximum_unit_cell
+        self.rng = np.random.default_rng()
+        self.hkl_ref = hkl_ref
+        self.hkl_ref_length = hkl_ref.shape[0]
+
+        self.q2_obs = q2_obs
+        self.n_peaks = self.q2_obs.size
+        self.xnn = xnn
+        self.best_xnn = self.xnn.copy()
+        self.n = self.xnn.shape[0]
+        self.candidate_index = np.arange(self.n)
+        self.update_unit_cell_from_xnn()
+
+        self.q2_calculator = Q2Calculator(
+            lattice_system=self.lattice_system,
+            hkl=self.hkl_ref,
+            tensorflow=False,
+            representation='xnn'
+            )
+        # self.assign_hkls() calculates the current M20 score
+        self.assign_hkls()
+        if self.mcmc:
+            self.neg_log_likelihood = -np.log(1e-4 * np.ones(self.n))
+        self.best_M20 = self.M20.copy()
+
+    def fix_bad_conversions(self):
+        bad_conversions = np.sum(np.isnan(self.reciprocal_unit_cell), axis=1) > 0
+        good_indices = np.arange(self.reciprocal_unit_cell.shape[0])[~bad_conversions]
+        n_bad = np.sum(bad_conversions)
+        if n_bad > 0:
+            if n_bad > bad_conversions.size - n_bad:
+                good_indices = self.rng.choice(good_indices, replace=True, size=n_bad)
+            else:
+                good_indices = self.rng.choice(good_indices, replace=False, size=n_bad)
+            self.xnn[bad_conversions] = self.xnn[good_indices]
+            self.reciprocal_unit_cell[bad_conversions] = self.reciprocal_unit_cell[good_indices]
+            self.unit_cell[bad_conversions] = self.unit_cell[good_indices]
+
+    def update_xnn_from_unit_cell(self):
+        self.reciprocal_unit_cell = reciprocal_uc_conversion(
+            self.unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        self.xnn = get_xnn_from_reciprocal_unit_cell(
+            self.reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        self.fix_bad_conversions()
+
+    def update_unit_cell_from_xnn(self):
+        self.reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            self.xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        self.unit_cell = reciprocal_uc_conversion(
+            self.reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        self.fix_bad_conversions()
+
+    def fix_out_of_range_candidates(self):
+        self.xnn = fix_unphysical(
+            xnn=self.xnn,
+            rng=self.rng,
+            minimum_unit_cell=self.minimum_unit_cell, 
+            maximum_unit_cell=self.maximum_unit_cell,
+            lattice_system=self.lattice_system,
+            )
+        self.update_unit_cell_from_xnn()
+
+    def assign_hkls(self):
+        q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
+        pairwise_differences = scipy.spatial.distance.cdist(
+            self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
+            ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
+        hkl_assign = pairwise_differences.argmin(axis=2).T
+        self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+
+        hkl2 = get_hkl_matrix(self.hkl, self.lattice_system)
+        q2_calc = np.sum(hkl2 * self.xnn[:, np.newaxis, :], axis=2)
+        self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+
+    def assign_hkls_mcmc(self, xnn_next):
+        q2_ref_calc = self.q2_calculator.get_q2(xnn_next)
+        pairwise_differences = scipy.spatial.distance.cdist(
+            self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
+            ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
+        hkl_assign = pairwise_differences.argmin(axis=2).T
+        hkl_next = np.take(self.hkl_ref, hkl_assign, axis=0)
+
+        hkl2 = get_hkl_matrix(hkl_next, self.lattice_system)
+        q2_calc = np.sum(hkl2 * xnn_next[:, np.newaxis, :], axis=2)
+        M20_next = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+
+        reciprocal_volume_next = get_unit_cell_volume(get_reciprocal_unit_cell_from_xnn(
+            xnn_next, partial_unit_cell=True, lattice_system=self.lattice_system
+            ), partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        neg_log_likelihood_next = get_M20_likelihood(
+            self.q2_obs, q2_calc, q2_ref_calc, self.bravais_lattice, reciprocal_volume_next
+            )
+        acceptance_prob = np.exp(-neg_log_likelihood_next) / np.exp(-self.neg_log_likelihood)
+        accepted = self.rng.random(self.n) < acceptance_prob
+        self.xnn[accepted] = xnn_next[accepted]
+        self.hkl[accepted] = hkl_next[accepted]
+        self.M20[accepted] = M20_next[accepted]
+        self.neg_log_likelihood[accepted] = neg_log_likelihood_next[accepted]
+        self.hkl[accepted] = hkl_next[accepted]
+
+    def random_subsampling(self, iteration_info):
+        if type(iteration_info['n_drop']) == list:
+            n_drop = self.rng.choice(iteration_info['n_drop'], size=1)[0]
+        else:
+            n_drop = iteration_info['n_drop']
+        n_keep = self.n_peaks - n_drop
+        subsampled_indices = self.rng.permuted(
+            np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
+            axis=1
+            )[:, :n_keep]
+
+        hkl_subsampled = np.take_along_axis(self.hkl, subsampled_indices[:, :, np.newaxis], axis=1)
+        q2_subsampled = np.take(self.q2_obs, subsampled_indices)
+
+        target_function = CandidateOptLoss(
+            q2_subsampled, 
+            lattice_system=self.lattice_system,
+            )
+        target_function.update(hkl_subsampled, self.xnn)
+        if self.mcmc:
+            xnn_next = self.xnn + target_function.gauss_newton_step(self.xnn)
+            xnn_next = fix_unphysical(
+                xnn=xnn_next,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell, 
+                maximum_unit_cell=self.maximum_unit_cell,
+                lattice_system=self.lattice_system,
+                )
+            self.assign_hkls_mcmc(xnn_next)
+            self.update_unit_cell_from_xnn()
+        else:
+            self.xnn += target_function.gauss_newton_step(self.xnn)
+            self.fix_out_of_range_candidates()
+            self.assign_hkls()
+        improved_M20 = self.M20 > self.best_M20
+        self.best_M20[improved_M20] = self.M20[improved_M20]
+        self.best_xnn[improved_M20] = self.xnn[improved_M20]
+
+
+class OptimizerBase:
+    def __init__(self, comm):
+        self.comm = comm
+        self.rank = self.comm.Get_rank()
+        self.n_ranks = self.comm.Get_size()
+        self.lattice_system = self.comm.bcast(self.lattice_system, root=self.root)
+        self.bravais_lattice = self.comm.bcast(self.bravais_lattice, root=self.root)
+        self.opt_params = self.comm.bcast(self.opt_params, root=self.root)
+        self.hkl_ref_length = self.comm.bcast(self.hkl_ref_length, root=self.root)
+        if self.rank != self.root:
+            self.hkl_ref = np.zeros(self.hkl_ref_length)
+        self.hkl_ref = self.comm.bcast(self.hkl_ref, root=self.root)
+        self.n_peaks = self.comm.bcast(self.n_peaks, root=self.root)
+
+    def generate_candidates_common(self, xnn_rank):
+        candidates = Candidates(
+            q2_obs=self.q2_obs,
+            xnn=xnn_rank,
+            hkl_ref=self.hkl_ref,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            minimum_unit_cell=self.opt_params['minimum_uc'],
+            maximum_unit_cell=self.opt_params['maximum_uc'],
+            )
+        return candidates
+
+    def optimize_entry(self, candidates):
+        for iteration_info in self.opt_params['iteration_info']:
+            for iter_index in range(iteration_info['n_iterations']):
+                candidates.random_subsampling(iteration_info)
+        return candidates
+
+
+class OptimizerWorker(OptimizerBase):
+    def __init__(self, comm):
+        self.root = 0
+        self.lattice_system = None
+        self.bravais_lattice = None
+        self.opt_params = None
+        self.hkl_ref = None
+        self.n_peaks = None
+        self.hkl_ref_length = None
+        self.rng = np.random.default_rng()
+        super().__init__(comm)
+        
+    def run(self):
+        self.q2_obs = np.zeros(self.n_peaks)
+        self.comm.Bcast(self.q2_obs, root=self.root)
+        candidates = self.generate_candidates_rank()
+        candidates = self.optimize_entry(candidates)
+
+        self.comm.Send(candidates.best_M20, dest=self.root)
+        self.comm.Send(candidates.best_xnn, dest=self.root)
+
+    def generate_candidates_rank(self):
+        candidate_xnn_rank = self.comm.recv(source=self.root)
+        return self.generate_candidates_common(candidate_xnn_rank)
+      
+
+class OptimizerManager(OptimizerBase):
+    def __init__(self, data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm, seed=12345):
+        self.root = comm.Get_rank()
+        assert self.root == 0
+        self.data_params = data_params
+        self.opt_params = opt_params
+        self.reg_params = reg_params
+        self.pitf_params = pitf_params
+        self.random_params = random_params
+        self.template_params = template_params
+        self.bravais_lattice = bravais_lattice
+        self.rng = np.random.default_rng(seed)
+
+        opt_params_defaults = {
+            'n_candidates_nn': 320,
+            'n_candidates_rf': 80,
+            'n_candidates_template': 1920,
+            'minimum_uc': 2,
+            'maximum_uc': 500,
+            }
+        for key in opt_params_defaults.keys():
+            if key not in self.opt_params.keys():
+                self.opt_params[key] = opt_params_defaults[key]
+        for key in self.reg_params:
+            self.reg_params[key]['load_from_tag'] = True
+            self.reg_params[key]['alpha_params'] = {}
+            self.reg_params[key]['beta_params'] = {}
+            self.reg_params[key]['mean_params'] = {}
+            self.reg_params[key]['var_params'] = {}
+        for key in self.pitf_params:
+            self.pitf_params[key]['load_from_tag'] = True
+        self.data_params['load_from_tag'] = True
+        self.template_params[self.bravais_lattice]['load_from_tag'] = True
+        self.random_params[self.bravais_lattice]['load_from_tag'] = True
+        self.save_to = os.path.join(
+            self.data_params['base_directory'], 'models', self.data_params['tag'], 'optimizer'
+            )
+        if not os.path.exists(self.save_to):
+            os.mkdir(self.save_to)
+
+        self.indexer = Indexing(
+            data_params=self.data_params,
+            reg_params=self.reg_params,
+            template_params=self.template_params,
+            pitf_params=self.pitf_params,
+            random_params=self.random_params,
+            seed=12345,
+            )
+        self.indexer.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
+        load_random_forest = False
+        load_nn = False
+        load_pitf = False
+        for generator_info in self.opt_params['generator_info']:
+            if generator_info['generator'] == 'trees':
+                load_random_forest = True
+            elif generator_info['generator'] == 'nn':
+                load_nn = True
+            elif generator_info['generator'] == 'pitf':
+                load_pitf = True
+        if load_nn or load_random_forest:
+            # eventually add an option so the NN doesn't get loaded if it won't be used
+            self.indexer.setup_regression()
+        if load_pitf:
+            self.indexer.setup_pitf()
+        self.indexer.setup_miller_index_templates()
+        self.indexer.setup_random()
+
+        self.n_groups = len(self.indexer.data_params['split_groups'])
+        self.lattice_system = self.indexer.data_params['lattice_system']
+        self.hkl_ref = self.indexer.hkl_ref[self.bravais_lattice]
+        self.hkl_ref_length = self.indexer.data_params['hkl_ref_length']
+        self.n_peaks = self.indexer.data_params['n_peaks']
+        self.unit_cell_length = self.indexer.data_params['unit_cell_length']
+        super().__init__(comm)
+
+    def run(self, entry, n_top_candidates):
+        self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
+        self.comm.Bcast(self.q2_obs, root=self.root)
+        candidates = self.generate_candidates_rank()
+        candidates = self.optimize_entry(candidates)
+
+        self.best_M20_all = []
+        self.best_xnn_all = []
+        for rank_index in range(self.n_ranks):
+            if rank_index == self.root:
+                self.best_M20_all.append(candidates.best_M20)
+                self.best_xnn_all.append(candidates.best_xnn)
+            else:
+                best_M20_rank = np.zeros(self.sent_candidates[rank_index])
+                best_xnn_rank = np.zeros((self.sent_candidates[rank_index], self.unit_cell_length))
+                self.comm.Recv(best_M20_rank, source=rank_index)
+                self.comm.Recv(best_xnn_rank, source=rank_index)
+                self.best_M20_all.append(best_M20_rank)
+                self.best_xnn_all.append(best_xnn_rank)
+        self.best_M20_all = np.concatenate(self.best_M20_all, axis=0)
+        self.best_xnn_all = np.concatenate(self.best_xnn_all, axis=0)
+        self.top_unit_cell, self.top_M20 = self.get_best_candidates(n_top_candidates)
+        return self.top_unit_cell, self.top_M20
+
+    def generate_candidates_rank(self):
+        candidate_unit_cells_all = []
+        for generator_info in self.opt_params['generator_info']:
+            if generator_info['generator'] in ['nn', 'trees']:
+                generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
+                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                    batch_size=1,
+                    model=generator_info['generator'],
+                    q2_scaler=self.indexer.q2_scaler,
+                    )
+            elif generator_info['generator'] == 'templates':
+                generator_unit_cells = self.indexer.miller_index_templator[self.bravais_lattice].generate(
+                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                    )
+            elif generator_info['generator'] == 'pitf':
+                generator_unit_cells = self.indexer.pitf_generator[generator_info['split_group']].generate(
+                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                    batch_size=1,
+                    )
+            elif generator_info['generator'] in ['random', 'distribution_volume', 'predicted_volume']:
+                generator_unit_cells = self.indexer.random_unit_cell_generator[self.bravais_lattice].generate(
+                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                    model=generator_info['generator'],
+                    )
+            candidate_unit_cells_all.append(generator_unit_cells)
+        candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
+
+        candidate_unit_cells_all = fix_unphysical(
+            unit_cell=candidate_unit_cells_all,
+            rng=self.rng,
+            minimum_unit_cell=self.opt_params['minimum_uc'],
+            maximum_unit_cell=self.opt_params['maximum_uc'],
+            lattice_system=self.lattice_system
+            )
+        candidate_unit_cells_all = reindex_entry_basic(
+            candidate_unit_cells_all,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            space='direct'
+            )
+        candidate_xnn_all = get_xnn_from_unit_cell(
+            candidate_unit_cells_all,
+            partial_unit_cell=True,
+            lattice_system=self.lattice_system
+            )
+        candidate_xnn_all = self.redistribute_xnn(candidate_xnn_all)
+
+        self.sent_candidates = np.zeros(self.n_ranks, dtype=int)
+        for rank_index in range(self.n_ranks):
+            self.sent_candidates[rank_index] = candidate_xnn_all[rank_index::self.n_ranks].shape[0]
+            if rank_index == self.root:
+                candidate_xnn_rank = candidate_xnn_all[rank_index::self.n_ranks]
+            else:
+                self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
+
+        return self.generate_candidates_common(candidate_xnn_rank)
+
+    def redistribute_xnn(self, xnn):
+        # This function is meant to be called only once before optimization starts
+        # exhaustive_search is meant to redistribute candidates during optimization
+        redistributed_xnn = xnn.copy()
+        n_redistributed = 0
+        iteration = 0
+        # Capping the number of iterations is arbitrary.
+        # Just an attempt to prevent an excessively long loop
+        largest_neighborhood = self.opt_params['max_neighbors'] + 1
+        while largest_neighborhood > self.opt_params['max_neighbors'] and iteration < 20:
+            distance = scipy.spatial.distance.cdist(redistributed_xnn, redistributed_xnn)
+            neighbor_array = distance < self.opt_params['neighbor_radius']
+            neighbor_count = np.sum(neighbor_array, axis=1)
+            largest_neighborhood = neighbor_count.max()
+            if largest_neighborhood > self.opt_params['max_neighbors']:
+                # This gets the candidate that has the most nearest neighbors and redistributes
+                # a subsample of its neighbors such that it has the correct amount of neighbors
+                highest_density_index = np.argmax(neighbor_count)
+                neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
+                excess_neighbors = neighbor_indices.size - self.opt_params['max_neighbors']
+                from_indices = neighbor_indices[
+                    self.rng.choice(neighbor_indices.size, size=excess_neighbors, replace=False)
+                    ]
+                n_redistributed += excess_neighbors
+
+                # We want to redistribute the excess only to regions where the density is low
+                # Find candidates that have fewer than the number of maximum neighbors and
+                # redistribute excess to neighborhoods near these candidates
+                low_density_indices = np.where(neighbor_count < self.opt_params['max_neighbors'])[0]
+                if low_density_indices.size == 0:
+                    ### !!! FIX THIS CASE
+                    ### !!! What should be done if there are no low density regions
+                    break
+                # Bias the redistribution to the lowest density regions by probabalistly sampling
+                # the low density regions.
+                prob = self.opt_params['max_neighbors'] - neighbor_count[low_density_indices]
+                prob = prob / prob.sum()
+                if excess_neighbors <= low_density_indices.size:
+                    replace = False
+                else:
+                    replace = True
+                to_indices = low_density_indices[self.rng.choice(
+                    low_density_indices.size, size=excess_neighbors, replace=replace, p=prob
+                    )]
+                redistributed_xnn = self.redistribute_and_perturb_xnn(
+                    redistributed_xnn, from_indices, to_indices
+                    )
+            iteration += 1
+        return redistributed_xnn
+
+    def redistribute_and_perturb_xnn(self, xnn, from_indices, to_indices, norm_factor=None):
+        n_indices = from_indices.size
+        if not norm_factor is None:
+            norm_factor = self.rng.uniform(low=norm_factor[0], high=norm_factor[1], size=n_indices)
+        else:
+            norm_factor = np.ones(n_indices)
+        norm_factor *= self.opt_params['neighbor_radius']
+        perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.unit_cell_length))
+        perturbation *= (norm_factor / np.linalg.norm(perturbation, axis=1))[:, np.newaxis]
+        xnn[from_indices] = xnn[to_indices] + perturbation
+        xnn = fix_unphysical(
+            xnn=xnn,
+            rng=self.rng,
+            minimum_unit_cell=self.opt_params['minimum_uc'], 
+            maximum_unit_cell=self.opt_params['maximum_uc'],
+            lattice_system=self.lattice_system
+            )
+
+        # Enforce the constraints on the unit cells by reindexing
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        reciprocal_unit_cell = reindex_entry_basic(
+            reciprocal_unit_cell,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            space='reciprocal'
+            )
+        xnn = get_xnn_from_reciprocal_unit_cell(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        return xnn
+
+    def get_best_candidates(self, n_top_candidates):
+        # This meant to be run at the end of optimization to remove very similar candidates
+        # If this isn't run, the results will be spammed with many candidates that are nearly
+        # identical.
+        # This method takes pairwise differences in Xnn space and combines candidates that are 
+        # closer than some given radius
+        # If this were performed with all the entries combined, it would be slow and memory intensive.
+        # Instead the candidates are sorted by reciprocal unit cell volume and filtering is
+        # performed in chunks.
+
+        # Start the process by a quick reindexing to enforce constraints
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            self.best_xnn_all, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        reciprocal_unit_cell = reindex_entry_basic(
+            reciprocal_unit_cell,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            space='reciprocal'
+            )
+        self.best_xnn_all = get_xnn_from_reciprocal_unit_cell(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+
+        reciprocal_volume = get_unit_cell_volume(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        sort_indices = np.argsort(reciprocal_volume)
+        xnn = self.best_xnn_all[sort_indices]
+        M20 = self.best_M20_all[sort_indices]
+        chunk_size = 1000
+        n_chunks = xnn.shape[0] // chunk_size + 1
+
+        # This radius is completely arbitrary. I'm not sure what the best value would be
+        radius = self.opt_params['neighbor_radius'] / 10
+        xnn_averaged = []
+        M20_averaged = []
+        for chunk_index in range(n_chunks):
+            if chunk_index == n_chunks - 1:
+                xnn_chunk = xnn[chunk_index * chunk_size:]
+                M20_chunk = M20[chunk_index * chunk_size:]
+            else:
+                xnn_chunk = xnn[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+                M20_chunk = M20[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+            status = True
+            while status:
+                distance = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk)
+                neighbor_array = distance < radius
+                neighbor_count = np.sum(neighbor_array, axis=1)
+                if neighbor_count.size > 0 and neighbor_count.max() > 1:
+                    highest_density_index = np.argmax(neighbor_count)
+                    neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
+                    best_neighbor = np.argmax(M20_chunk[neighbor_indices])
+                    xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
+                    M20_best_neighbor = M20_chunk[neighbor_indices][best_neighbor]
+                    xnn_chunk = np.row_stack((
+                        np.delete(xnn_chunk, neighbor_indices, axis=0), 
+                        xnn_best_neighbor
+                        ))
+                    M20_chunk = np.concatenate((
+                        np.delete(M20_chunk, neighbor_indices), 
+                        [M20_best_neighbor]
+                        ))
+                else:
+                    status = False
+            xnn_averaged.append(xnn_chunk)
+            M20_averaged.append(M20_chunk)
+        xnn_averaged = np.row_stack(xnn_averaged)
+        M20_averaged = np.concatenate(M20_averaged)
+        sort_indices = np.argsort(M20_averaged)[::-1][:n_top_candidates]
+        unit_cell_averaged = get_unit_cell_from_xnn(
+            xnn_averaged,
+            partial_unit_cell=True,
+            lattice_system=self.lattice_system,
+            )
+        return unit_cell_averaged[sort_indices], M20_averaged[sort_indices]
+

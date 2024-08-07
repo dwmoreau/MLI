@@ -94,7 +94,7 @@ aP              | 86 - 92%
 - Regression
     - non-dimensionalize the q2 and Xnn parameters with a volume estimate
     - Attention based network
-        - Additive attention: https://d2l.ai/chapter_attention-mechanisms-and-transformers/attention-scoring-functions.html
+        https://d2l.ai/chapter_attention-mechanisms-and-transformers/attention-scoring-functions.html
     - https://dmol.pub/dl/attention.html
     - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
 
@@ -1196,6 +1196,7 @@ class Indexing:
         self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
+            split_group_data = self.data[self.data['split_group'] == split_group]
             self.pitf_generator[split_group] = PhysicsInformedModel(
                 split_group,
                 self.data_params,
@@ -1206,11 +1207,10 @@ class Indexing:
                 self.xnn_scaler,
                 self.hkl_ref[bravais_lattice]
                 )
-            self.pitf_generator[split_group].setup()
+            self.pitf_generator[split_group].setup(split_group_data)
             if self.pitf_params[split_group]['load_from_tag']:
                 self.pitf_generator[split_group].load_from_tag()
             else:
-                split_group_data = self.data[self.data['split_group'] == split_group]
                 self.pitf_generator[split_group].train(data=split_group_data)
 
     def inferences_pitf(self):
