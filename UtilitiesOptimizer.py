@@ -5,7 +5,6 @@ from Optimizer_mpi import OptimizerManager
 from Reindexing import reindex_entry_triclinic
 
 
-
 def validate_candidate(entry, top_unit_cell, top_M20):
     found = False
     off_by_two = False

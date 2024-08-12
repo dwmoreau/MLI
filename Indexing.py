@@ -45,15 +45,15 @@ mC              | 97.5%
 mP              | 96.5%
 aP              | 86 - 92%
 
-*******************
-* Big refactoring *
-*******************
-    - mpi parallelization for ground truth optimization
-        - No error case and known unit cell
-            - Verify that we can get the correct unit cell at expected rates
-        - No known bravais lattice case
-        - Get running with known unit cell and error
-            - Verify that we can get the correct unit cell at expected rates
+
+- Optimization
+    - Track the M20 order of the first correct candidate
+    - Track whether or not the correct unit cell is anywhere in the candidate list
+
+    - Verify that we can get the correct unit cell at expected rates
+        - No unit cell error
+        - With unit cell error
+
     - Predictions for a single unknown candidate
     
 - Documentation
@@ -64,12 +64,8 @@ aP              | 86 - 92%
     - Add section on physics informed target function model
 
 - Physics informed target function
-    - attention based initial layer
-
-- Optimization
-    - implement a MCMC approach again using the new likelihood
-    - Track the position of the first correct candidate
-    - Track whether or not the correct unit cell is anywhere in the candidate list
+    - Attention based initial layer
+    - Get volume by scaling the q2_obs and q2_keys
 
 - data
     - GSASII tutorials

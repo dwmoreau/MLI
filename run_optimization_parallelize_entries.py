@@ -24,7 +24,6 @@ import pandas as pd
 
 from Optimizer_mpi import OptimizerManager
 from Optimizer_mpi import OptimizerWorker
-
 from UtilitiesOptimizer import get_cubic_optimizer
 from UtilitiesOptimizer import get_hexagonal_optimizer
 from UtilitiesOptimizer import get_monoclinic_optimizer
@@ -32,7 +31,7 @@ from UtilitiesOptimizer import get_orthorhombic_optimizer
 from UtilitiesOptimizer import get_rhombohedral_optimizer
 from UtilitiesOptimizer import get_tetragonal_optimizer
 from UtilitiesOptimizer import get_triclinic_optimizer
-from UtilitiesOptimizer import validate_candidate
+from UtilitiesOptimizer import validate_candidate_known_bl
 
 
 if __name__ == '__main__':
@@ -45,11 +44,11 @@ if __name__ == '__main__':
     broadening_tag = '0.5'
     error_tag = '0.1'
     n_entries = 500
-    q2_error_params = np.array([0.0001, 0.001]) / 1
-    #q2_error_params = np.array([0.000000001, 0])
+    #q2_error_params = np.array([0.0001, 0.001]) / 1
+    q2_error_params = np.array([0.000000001, 0])
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    bravais_lattices = ['oP']
+    bravais_lattices = ['hP']
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng()
     for bravais_lattice in bravais_lattices:
@@ -133,22 +132,26 @@ if __name__ == '__main__':
         print(entry)
         unit_cell_true = np.array(entry['reindexed_unit_cell'])
         for bravais_lattice in bravais_lattices:
-            top_unit_cell, top_M20 = optimizer[bravais_lattice].run(entry, n_top_candidates)
+            optimizer[bravais_lattice].run(entry, n_top_candidates)
             found = False
             off_by_two = False
             found_explainer = False
-            print(np.column_stack((top_unit_cell, top_M20)))
-            for candidate_index in range(top_unit_cell.shape[0]):
-                correct, off_by_two = validate_candidate(
+            print(np.column_stack((
+                optimizer[bravais_lattice].top_unit_cell,
+                optimizer[bravais_lattice].top_M20,
+                optimizer[bravais_lattice].top_spacegroup
+                )))
+            for candidate_index in range(optimizer[bravais_lattice].top_unit_cell.shape[0]):
+                correct, off_by_two = validate_candidate_known_bl(
                     unit_cell_true=unit_cell_true,
-                    unit_cell_pred=top_unit_cell[candidate_index],
+                    unit_cell_pred=optimizer[bravais_lattice].top_unit_cell[candidate_index],
                     bravais_lattice_pred=bravais_lattice,
                     )
                 if correct:
                     found = True
                 if off_by_two:
                     off_by_two = True
-                if np.any(top_M20 > 1000):
+                if np.any(optimizer[bravais_lattice].top_M20 > 1000):
                     found_explainer = True
             if found:
                 report_counts['Found'] += 1

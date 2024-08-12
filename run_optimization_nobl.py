@@ -102,7 +102,6 @@ for bl_index, bravais_lattice in enumerate(bravais_lattices):
 # This next section loads the Optimizer objects
 for bl_index, bravais_lattice in enumerate(bravais_lattices):
     if rank == mpi_managers[bravais_lattice].manager:
-        #print('Manager', rank, mpi_managers[bravais_lattice], bravais_lattice)
         # These function calls return an OptimizerManager object
         if bravais_lattice in ['cF', 'cI', 'cP']:
             optimizer[bravais_lattice] = get_cubic_optimizer(
@@ -154,7 +153,6 @@ for bl_index, bravais_lattice in enumerate(bravais_lattices):
                 mpi_managers[bravais_lattice].split_comm,
                 )
     elif rank in mpi_managers[bravais_lattice].workers:
-        #print('Worker', rank, mpi_managers[bravais_lattice], bravais_lattice)
         optimizer[bravais_lattice] = OptimizerWorker(mpi_managers[bravais_lattice].split_comm)
 
 # This loads the data for each bravais lattice:

@@ -31,7 +31,7 @@ class PeakListCreator:
         self.expt_file_name = os.path.join(self.save_to_directory, f'{self.tag}_combined.expt')
         self.refl_file_name = os.path.join(self.save_to_directory, f'{self.tag}_combined.refl')    
         if self.load_combined == False:
-            #self._combine_expt_refl_files()
+            self._combine_expt_refl_files()
             self._parse_refl_file()
         else:
             self.s0 = np.load(os.path.join(
@@ -76,7 +76,10 @@ class PeakListCreator:
         expt_file_names = []
         refl_file_names = []
         for run in self.runs:
-            input_path = self.input_path_template.replace('!!!!', f'{run:04d}')
+            if type(run) == str:
+                input_path = self.input_path_template.replace('!!!!', run)
+            else:
+                input_path = self.input_path_template.replace('!!!!', f'{run:04d}')
             for file_name in os.listdir(input_path):
                 if file_name.endswith(self.suffix):
                     expt_file_name = os.path.join(input_path, file_name)
@@ -570,7 +573,7 @@ class PeakListCreator:
             axes[2].set_ylim(ylim)
         axes[2].set_title('Closest peaks per experiment')
         fig.tight_layout()
-        plt.show
+        plt.show()
         
     def pick_secondary_peaks(self, include_list=[], prominence=30, yscale=None):
         indices = scipy.signal.find_peaks(self.secondary_hist_q2_difference, prominence=prominence)

@@ -42,10 +42,6 @@ def rename_spacegroup_for_gemmi(spacegroup_symbol):
         spacegroup_symbol = 'Fm-3m'
     elif spacegroup_symbol == 'Pn3':
         spacegroup_symbol = 'Pn-3'
-    elif spacegroup_symbol == 'Ia3':
-        spacegroup_symbol = 'Ia-3'
-    elif spacegroup_symbol == 'Ia3d':
-        spacegroup_symbol = 'Ia-3d'
     elif spacegroup_symbol == 'Pn3m':
         spacegroup_symbol = 'Pn-3m'
     elif spacegroup_symbol == 'B2_1':
@@ -58,22 +54,26 @@ def rename_spacegroup_for_gemmi(spacegroup_symbol):
         spacegroup_symbol = 'P a -3'
     elif spacegroup_symbol == 'Cc2b':
         spacegroup_symbol = 'Cc2a'
-    elif spacegroup_symbol == 'Ab2a':
-        spacegroup_symbol = 'Ac2a'
     elif spacegroup_symbol == 'C2ca':
         spacegroup_symbol = 'C2cb'
+    elif spacegroup_symbol == 'Ccma':
+        spacegroup_symbol = 'Ccmb'
+    elif spacegroup_symbol == 'Bbam':
+        spacegroup_symbol = 'Bbcm'
+    elif spacegroup_symbol == 'B2ab':
+        spacegroup_symbol = 'B2cb'
+    elif spacegroup_symbol == 'Ab2a':
+        spacegroup_symbol = 'Ac2a'
+    elif spacegroup_symbol == 'Ia3':
+        spacegroup_symbol = 'Ia-3'
+    elif spacegroup_symbol == 'Ia3d':
+        spacegroup_symbol = 'Ia-3d'
     elif spacegroup_symbol == 'Icm2':
         spacegroup_symbol = 'Ibm2'
     elif spacegroup_symbol == 'I2ma':
         spacegroup_symbol = 'I2mb'
     elif spacegroup_symbol == 'I2am':
         spacegroup_symbol = 'I2cm'
-    elif spacegroup_symbol == 'Bbam':
-        spacegroup_symbol = 'Bbcm'
-    elif spacegroup_symbol == 'B2ab':
-        spacegroup_symbol = 'B2cb'
-    elif spacegroup_symbol == 'Ccma':
-        spacegroup_symbol = 'Ccmb'
     return spacegroup_symbol
 
 

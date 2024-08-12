@@ -1,6 +1,8 @@
 import csv
+import gemmi
 import numpy as np
 import os
+import scipy.spatial
 
 
 def get_peak_generation_info():
@@ -599,17 +601,16 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
     return M20
 
 
-def get_M20_likelihood_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system, bravais_lattice):
+def get_M20_likelihood_from_xnn(q2_obs, xnn, hkl, lattice_system, bravais_lattice):
     hkl2 = get_hkl_matrix(hkl, lattice_system)
     q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
-    hkl2_ref = get_hkl_matrix(hkl_ref, lattice_system)
-    q2_ref_calc = np.sum(hkl2_ref * xnn[:, np.newaxis, :], axis=2)
     reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
     reciprocal_volume = get_unit_cell_volume(reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system)
-    return get_M20_taupin88(q2_obs, q2_calc, q2_ref_calc, bravais_lattice, reciprocal_volume)
+    log_likelihood, probability = get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume)
+    return log_likelihood, probability
 
 
-def get_M20_likelihood(q2_obs, q2_calc, q2_ref_calc, bravais_lattice, reciprocal_volume):
+def get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
     # This was inspired by Taupin 1988
     # Probability that a peak is correctly assigned:
     # arg = Expected number of peaks within error from random unit cell
@@ -617,7 +618,8 @@ def get_M20_likelihood(q2_obs, q2_calc, q2_ref_calc, bravais_lattice, reciprocal
     mu, nu = get_multiplicity_taupin88(bravais_lattice)
     observed_difference2 = (np.sqrt(q2_obs[np.newaxis]) - np.sqrt(q2_calc))**2
     arg = 8*np.pi*q2_obs * np.sqrt(observed_difference2) / (reciprocal_volume[:, np.newaxis] * mu)
-    return -np.sum(np.log(1/(1 + arg)), axis=1)
+    probability = 1/(1 + arg)
+    return -np.sum(np.log(probability), axis=1), probability
 
 
 def get_multiplicity_taupin88(bravais_lattice):
@@ -693,6 +695,134 @@ def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
     M20_reversed = expected_discrepancy_reversed / discrepancy_reversed
     M20_sym = M20 * M20_reversed
     return M20, M20_sym, M20_reversed
+
+
+def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
+    if bravais_lattice == 'cF':
+        #spacegroups = [196, 202, 203, 209, 210, 216, 219, 225, 226, 227, 228]
+        #spacegroups = [196, 203, 210, 219, 228]
+        spacegroups = ['F 2 3', 'F d -3', 'F 41 3 2', 'F -4 3 c', 'F d -3 c']
+    elif bravais_lattice == 'cI':
+        #spacegroups = [197, 199, 204, 206, 211, 214, 217, 220, 229, 230]
+        #spacegroups = [197, 206, 214, 220, 230]
+        spacegroups = ['I 2 3', 'I a -3', 'I 41 3 2', 'I -4 3 d', 'I a -3 d']
+    elif bravais_lattice == 'cP':
+        #spacegroups = [195, 198, 200, 201, 205, 207, 208, 212, 213, 215, 218, 221, 222, 223, 224]
+        #spacegroups = [195, 198, 201, 205, 212, 218, 222]
+        spacegroups = ['P 2 3', 'P 21 3', 'P n -3', 'P a -3', 'P 43 3 2', 'P -43 n', 'P n -3 n']
+    elif bravais_lattice == 'hR':
+        #spacegroups = [146, 148, 155, 160, 161, 166, 167]
+        #spacegroups = [146, 161]
+        spacegroups = ['R 3', 'R 3 c']
+    elif bravais_lattice == 'hP':
+        #spacegroups = [
+        #    143, 144, 145, 147, 149, 150, 151, 152, 153, 154, 156, 157, 158, 159, 162, 163, 164, 165, 166,
+        #    168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185,
+        #    186, 187, 188, 189, 190, 191, 192, 193, 194
+        #    ]
+        #spacegroups = [143, 144, 158, 159, 169, 173, 184]
+        spacegroups = ['P 3', 'P 31', 'P 3 c 1', 'P 3 1 c', 'P 61', 'P 63', 'P 6 c c']
+    elif bravais_lattice == 'tI':
+        #spacegroups = [79, 80, 82, 87, 88, 97, 98, 107, 108, 109, 110, 119, 120, 121, 122, 139, 140, 141, 142]
+        spacegroups = [79, 80, 88, 108, 109, 110, 141, 142]
+        spacegroups = [
+            'I 4', 'I 41', 'I 41/a', 'I 4 c m', 'I 41 m d', 'I 41 c d', 'I 41/a m d', 'I 41/a c d'
+            ]
+    elif bravais_lattice == 'tP':
+        #spacegroups = [
+        #    75, 76, 77, 78, 81, 83, 84, 85, 86, 89, 90, 91, 92, 93, 94, 95, 96, 99,
+        #    100, 101, 102, 103, 104, 105, 106, 111, 112, 113, 114, 115, 116, 117, 118,
+        #    123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138
+        #    ]
+        #spacegroups = [
+        #    75, 76, 77, 85, 86, 90, 92, 94,
+        #    100, 101, 102, 103, 104, 105, 106, 114,
+        #    125, 126, 130, 133, 134, 137, 138
+        #    ]
+        spacegroups = [
+            'P 4', 'P 41', 'P 42', 'P 4/n', 'P 42/n', 'P 4 21 2', 'P 41 21 2', 'P 42 21 2',
+            'P 4 b m', 'P 42 c m', 'P 42 n m', 'P 4 c c', 'P 4 n c', 'P 42 m c', 'P 42 b c', 'P -4 21 c',
+            'P 4/n b m', 'P 4/n n c', 'P 4/n c c', 'P 42/n b c', 'P 42/n n m', 'P 42/n m c', 'P 42/n c m'
+            ]
+    elif bravais_lattice == 'oC':
+        spacegroups = [
+            'C 2 2 21', 'C c c 2', 'C c 2 m', 'C 2 c m', 'C c 2 a', 'C 2 c b', 'C c c a', 'C 2 2 2', 'C m 2 a',
+            ]
+    elif bravais_lattice == 'oF':
+        #spacegroups = ['F 2 2 2', 'F m m m', 'F m m 2', 'F d d d', 'F 2 d d', 'F d 2 d', 'F d d 2']
+        spacegroups = ['F 2 2 2', 'F d d d', 'F 2 d d', 'F d 2 d', 'F d d 2']
+    elif bravais_lattice == 'oI':
+        spacegroups = [
+            'I m m m', 'I b c a', 'I b a 2', 'I 2 c b', 'I c 2 a', 'I b m 2', 'I m a 2', 'I m 2 a',
+            ]
+    elif bravais_lattice == 'oP':
+        spacegroups = [
+            'P 2 2 2', 'P 21 2 2', 'P 2 21 2', 'P 2 2 21',
+            'P 21 m a', 'P m 21 b', 'P m c 21',
+            'P 21 a m', 'P b 21 m', 'P c m 21', 
+            'P 2 a a', 'P b 2 b', 'P c c 2',
+            'P 2 21 21', 'P 21 2 21', 'P 21 21 2',
+            'P b c 21', 'P c a 21', 'P b 21 a', 'P c 21 b', 'P 21 c a', 'P 21 a b',
+            'P 2 c b', 'P c 2 a', 'P b a 2',
+            'P n c 2', 'P c n 2', 'P b 2 n', 'P n 2 b', 'P 2 n a', 'P 2 a n',
+            'P n m 21', 'P m 21 n', 'P 21 n m', 
+            'P n c b', 'P c n a', 'P b a n',
+            'P c c b', 'P c c a', 'P b a a', 'P b c b', 'P c a a', 'P b a b',
+            'P 21 21 21', 'P n n n', 'P b c a', 'P c a b',
+            'P n a 21', 'P b n 21', 'P c 21 n', 'P n 21 a', 'P 21 n b', 'P 21 c n',
+            'P 2 n n', 'P n 2 n', 'P n n 2', 'P n n a', 'P n n b', 'P n c n',
+            'P c c n', 'P b n b', 'P n a a',
+            'P b c n', 'P c a n', 'P b n a', 'P c n b', 'P n c a', 'P n a b'
+            ]
+    elif bravais_lattice == 'mC':
+        spacegroups = [
+            'C 1 2 1', 'C 1 c 1', 'I 1 2 1', 'I 1 a 1', 'A 1 2 1', 'A 1 a 1',
+            ]
+    elif bravais_lattice == 'mP':
+        spacegroups = [
+            'P 1 2 1', 'P 1 21 1', 'P 1 c 1', 'P 1 a 1', 'P 1 n 1', 'P 1 21/c 1', 'P 1 21/a 1', 'P 1 21/n 1'
+            ]
+    elif bravais_lattice == 'aP':
+        spacegroups = ['P 1']
+    hkl_ref_sg = dict.fromkeys(spacegroups)
+    for spacegroup in spacegroups:
+        ops = gemmi.SpaceGroup(spacegroup).operations()
+        systematically_absent = ops.systematic_absences(hkl_ref)
+        hkl_ref_sg[spacegroup] = hkl_ref[np.invert(systematically_absent)]
+    return hkl_ref_sg
+
+
+def get_extinction_group(xnn, q2_obs, hkl_ref_bl, bravais_lattice, lattice_system):
+    hkl_ref_sg = get_spacegroup_hkl_ref(hkl_ref_bl, bravais_lattice=bravais_lattice)
+    spacegroups = list(hkl_ref_sg.keys())
+    M20 = np.zeros((xnn.shape[0], len(spacegroups)))
+
+    n_peaks = q2_obs.size
+    n = xnn.shape[0]
+
+    for spacegroup_index, spacegroup in enumerate(spacegroups):
+        q2_ref_calc = Q2Calculator(
+            lattice_system=lattice_system,
+            hkl=hkl_ref_sg[spacegroup],
+            tensorflow=False,
+            representation='xnn'
+            ).get_q2(xnn)
+
+        hkl_ref_length = hkl_ref_sg[spacegroup].shape[0]
+        pairwise_differences = scipy.spatial.distance.cdist(
+            q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
+            ).reshape((n_peaks, n, hkl_ref_length))
+        hkl_assign = pairwise_differences.argmin(axis=2).T
+        hkl = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
+        hkl2 = get_hkl_matrix(hkl, lattice_system)
+        q2_calc = np.sum(hkl2 * xnn[:, np.newaxis], axis=2)
+
+        M20[:, spacegroup_index] = get_M20(q2_obs, q2_calc, q2_ref_calc)
+
+    best_indices = np.argmax(M20, axis=1)
+    best_spacegroup = list(np.take(spacegroups, best_indices))
+    best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
+    return best_M20, best_spacegroup
 
 
 class Q2Calculator:
