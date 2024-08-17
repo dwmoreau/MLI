@@ -64,8 +64,7 @@ aP              | 86 - 92%
     - Add section on physics informed target function model
 
 - Physics informed target function
-    - Attention based initial layer
-    - Get volume by scaling the q2_obs and q2_keys
+    - Read about attention
 
 - data
     - GSASII tutorials
@@ -1203,11 +1202,13 @@ class Indexing:
                 self.xnn_scaler,
                 self.hkl_ref[bravais_lattice]
                 )
-            self.pitf_generator[split_group].setup(split_group_data)
             if self.pitf_params[split_group]['load_from_tag']:
                 self.pitf_generator[split_group].load_from_tag()
+                self.pitf_generator[split_group].evaluate(split_group_data)
             else:
+                self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
+                self.pitf_generator[split_group].evaluate(split_group_data)
 
     def inferences_pitf(self):
         reindexed_xnn_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))

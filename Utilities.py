@@ -201,40 +201,38 @@ def fix_unphysical(xnn=None, unit_cell=None, rng=None, lattice_system=None, mini
         rng = np.random.default_rng()
     if not xnn is None:
         if lattice_system == 'triclinic':
-            xnn = fix_unphysical_triclinic(
+            return fix_unphysical_triclinic(
                 xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
         elif lattice_system == 'monoclinic':
-            xnn = fix_unphysical_monoclinic(
+            return fix_unphysical_monoclinic(
                 xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
         elif lattice_system == 'rhombohedral':
-            xnn = fix_unphysical_rhombohedral(
+            return fix_unphysical_rhombohedral(
                 xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
         elif lattice_system in ['cubic', 'orthorhombic', 'tetragonal', 'hexagonal']:
-            xnn = fix_unphysical_box(
+            return fix_unphysical_box(
                 xnn=xnn, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
-        return xnn
     elif not unit_cell is None:
         if lattice_system == 'triclinic':
-            unit_cell = fix_unphysical_triclinic(
+            return fix_unphysical_triclinic(
                 unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
         elif lattice_system == 'monoclinic':
-            unit_cell = fix_unphysical_monoclinic(
+            return fix_unphysical_monoclinic(
                 unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
         elif lattice_system == 'rhombohedral':
-            unit_cell = fix_unphysical_rhombohedral(
+            return fix_unphysical_rhombohedral(
                 unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
         elif lattice_system in ['cubic', 'orthorhombic', 'tetragonal', 'hexagonal']:
-            unit_cell = fix_unphysical_box(
+            return fix_unphysical_box(
                 unit_cell=unit_cell, rng=rng, minimum_unit_cell=minimum_unit_cell, maximum_unit_cell=maximum_unit_cell
                 )
-        return unit_cell
 
 
 def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500):
@@ -594,7 +592,8 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
 
     # There is an unknown issue that causes q2_calc to be all zero
     # These cases are caught and the M20 score is returned as zero.
-    good_indices = q2_calc.sum(axis=1) != 0
+    # Also catch cases where N == 0 for all peaks
+    good_indices = np.logical_and(q2_calc.sum(axis=1) != 0, N != 0)
     expected_discrepancy = np.zeros(q2_calc.shape[0])
     expected_discrepancy[good_indices] = last_smaller_ref_peak[good_indices] / (2*N[good_indices])
     M20 = expected_discrepancy / discrepancy
@@ -829,6 +828,12 @@ class Q2Calculator:
     def __init__(self, lattice_system, hkl, tensorflow, representation):
         self.lattice_system = lattice_system
         self.representation = representation
+        if len(hkl.shape) == 2:
+            self.multiple_hkl_sets = False
+        elif len(hkl.shape) == 3:
+            self.multiple_hkl_sets = True
+        else:
+            assert False
         if tensorflow:
             import tensorflow as tf
             assert self.representation == 'xnn'
@@ -843,6 +848,7 @@ class Q2Calculator:
             self.concatenate = tf.concat
             self.matmul = tf.linalg.matmul
             self.get_q2_xnn = self.get_q2_xnn_tensorflow
+            self.sum = tf.math.reduce_sum
             hkl = tf.cast(hkl, dtype=tf.float32)
         else:
             self.newaxis = np.newaxis
@@ -884,10 +890,10 @@ class Q2Calculator:
                     )
             elif self.lattice_system == 'hexagonal':
                 self.hkl2 = self.stack((
-                    (hkl[:, 0]**2 + hkl[:, 0]*hkl[:, 1] + hkl[:, 1]**2),
-                    hkl[:, 2]**2
+                    (hkl[..., 0]**2 + hkl[..., 0]*hkl[..., 1] + hkl[..., 1]**2),
+                    hkl[..., 2]**2
                     ),
-                    axis=1
+                    axis=-1
                     )
             elif self.lattice_system == 'rhombohedral':
                 self.hkl2 = self.stack((
@@ -932,10 +938,20 @@ class Q2Calculator:
             return self.get_q2_xnn(inputs)
 
     def get_q2_xnn_numpy(self, xnn):
-        return np.matmul(xnn, self.hkl2.T)
-
+        if self.multiple_hkl_sets:
+            arg = self.hkl2 * xnn[:, np.newaxis, :]
+            q2_pred = np.sum(arg, axis=2)
+            return q2_pred
+        else:
+            return np.matmul(xnn, self.hkl2.T)
+            
     def get_q2_xnn_tensorflow(self, xnn):
-        return self.matmul(xnn, self.hkl2, transpose_b=True)
+        if self.multiple_hkl_sets:
+            arg = self.hkl2 * xnn[:, self.newaxis, :]
+            q2_pred = self.sum(arg, axis=2)
+            return q2_pred
+        else:
+            return self.matmul(xnn, self.hkl2, transpose_b=True)
 
     def get_q2_cubic_unit_cell(self, unit_cell):
         a = unit_cell[:, 0][:, self.newaxis]

@@ -14,6 +14,7 @@ from Reindexing import reindex_entry_monoclinic
 from Utilities import get_peak_generation_info
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
+from Utilities import get_unit_cell_volume
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_xnn_from_unit_cell
 
@@ -262,6 +263,9 @@ class Augmentor:
         reindexed_xnn_scaled = (reindexed_xnn - self.xnn_scaler.mean_[0]) / self.xnn_scaler.scale_[0]
         augmented_entries['reindexed_xnn'] = list(reindexed_xnn)
         augmented_entries['reindexed_xnn_scaled'] = list(reindexed_xnn_scaled)
+        augmented_entries['reindexed_volume'] = list(get_unit_cell_volume(
+            reindexed_unit_cell, partial_unit_cell=False
+            ))
         return augmented_entries
 
     def augment_entry(self, entry):

@@ -191,22 +191,29 @@ class Candidates:
             mult_factors = np.ones((mult_factor.size**2, 2))
             mf_index = 0
             for mf0 in mult_factor:
-                mult_factors[mf_index, 0] = mf0
                 for mf1 in mult_factor:
+                    mult_factors[mf_index, 0] = mf0
                     mult_factors[mf_index, 1] = mf1
                     mf_index += 1
         elif self.lattice_system == 'rhombohedral':
             mult_factors = np.ones((mult_factor.size, 2))
             mult_factors[:, 0] = mult_factor
+            mult_factors[:, 1] = mult_factor
         elif self.lattice_system in ['orthorhombic', 'monoclinic', 'triclinic']:
-            mult_factors = np.ones((mult_factor.size**3, xnn.shape[1]))
+            mult_factors = np.ones((mult_factor.size**3, self.xnn.shape[1]))
             mf_index = 0
             for mf0 in mult_factor:
-                mult_factors[mf_index, 0] = mf0
                 for mf1 in mult_factor:
-                    mult_factors[mf_index, 1] = mf1
                     for mf2 in mult_factor:
+                        mult_factors[mf_index, 0] = mf0
+                        mult_factors[mf_index, 1] = mf1
                         mult_factors[mf_index, 2] = mf2
+                        if self.lattice_system == 'monoclinic':
+                            mult_factors[mf_index, 3] = np.sqrt(mf0 * mf2)
+                        elif self.lattice_system == 'triclinic':
+                            mult_factors[mf_index, 3] = np.sqrt(mf1 * mf2)
+                            mult_factors[mf_index, 4] = np.sqrt(mf0 * mf2)
+                            mult_factors[mf_index, 5] = np.sqrt(mf0 * mf1)
                         mf_index += 1
 
         M20 = np.zeros([self.n, mult_factors.shape[0]])
@@ -331,7 +338,7 @@ class OptimizerWorker(OptimizerBase):
         self.rng = np.random.default_rng()
         super().__init__(comm)
         
-    def run(self):
+    def run(self, foo, bar):
         self.q2_obs = np.zeros(self.n_peaks)
         self.run_common(n_top_candidates=None)
 
