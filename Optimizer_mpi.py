@@ -30,6 +30,7 @@ from Utilities import get_unit_cell_from_xnn
 from Utilities import get_unit_cell_volume
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
+from Utilities import fast_assign
 
 
 class Candidates:
@@ -107,10 +108,11 @@ class Candidates:
 
     def assign_hkls(self):
         q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
-        pairwise_differences = scipy.spatial.distance.cdist(
-            self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-            ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
-        hkl_assign = pairwise_differences.argmin(axis=2).T
+        #pairwise_differences = scipy.spatial.distance.cdist(
+        #    self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
+        #    ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
+        #hkl_assign = pairwise_differences.argmin(axis=2).T
+        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
 
         hkl2 = get_hkl_matrix(self.hkl, self.lattice_system)
@@ -119,10 +121,11 @@ class Candidates:
 
     def assign_hkls_mcmc(self, xnn_next):
         q2_ref_calc = self.q2_calculator.get_q2(xnn_next)
-        pairwise_differences = scipy.spatial.distance.cdist(
-            self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-            ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
-        hkl_assign = pairwise_differences.argmin(axis=2).T
+        #pairwise_differences = scipy.spatial.distance.cdist(
+        #    self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
+        #    ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
+        #hkl_assign = pairwise_differences.argmin(axis=2).T
+        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         hkl_next = np.take(self.hkl_ref, hkl_assign, axis=0)
 
         hkl2 = get_hkl_matrix(hkl_next, self.lattice_system)
@@ -221,10 +224,11 @@ class Candidates:
         for mf_index in range(mult_factors.shape[0]):
             xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn
             q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
-            pairwise_differences = scipy.spatial.distance.cdist(
-                self.q2_obs[:, np.newaxis], q2_ref_calc_mult.ravel()[:, np.newaxis]
-                ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
-            hkl_assign = pairwise_differences.argmin(axis=2).T
+            #pairwise_differences = scipy.spatial.distance.cdist(
+            #    self.q2_obs[:, np.newaxis], q2_ref_calc_mult.ravel()[:, np.newaxis]
+            #    ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
+            #hkl_assign = pairwise_differences.argmin(axis=2).T
+            hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
             hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
             hkl2 = get_hkl_matrix(hkl[:, mf_index], self.lattice_system)
             q2_calc_mult = np.sum(hkl2 * xnn_mult[:, np.newaxis, :], axis=2)
@@ -298,16 +302,10 @@ class OptimizerBase:
     def run_common(self, n_top_candidates):
         self.comm.Bcast(self.q2_obs, root=self.root)
         candidates = self.generate_candidates_rank()
-        candidates = self.optimize_entry(candidates)
-        self.get_best_candidates(candidates, n_top_candidates)
-
-    def optimize_entry(self, candidates):
         for iteration_info in self.opt_params['iteration_info']:
             for iter_index in range(iteration_info['n_iterations']):
                 candidates.random_subsampling(iteration_info)
-        return candidates
 
-    def get_best_candidates(self, candidates, n_top_candidates=None):
         # This meant to be run at the end of optimization to remove very similar candidates
         # If this isn't run, the results will be spammed with many candidates that are nearly
         # identical.

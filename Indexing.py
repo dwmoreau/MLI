@@ -47,14 +47,15 @@ aP              | 86 - 92%
 
 
 - Optimization
-    - Track the M20 order of the first correct candidate
     - Track whether or not the correct unit cell is anywhere in the candidate list
-
     - Verify that we can get the correct unit cell at expected rates
         - No unit cell error
         - With unit cell error
-
+    - performance profiling
     - Predictions for a single unknown candidate
+
+    - Initial quick optimization
+    - Redistribution of 
     
 - Documentation
     - One page summary
@@ -64,8 +65,10 @@ aP              | 86 - 92%
     - Add section on physics informed target function model
 
 - Physics informed target function
+    - Do math for new analytical convolution approach
     - Read about attention
-
+        - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
+        - https://dmol.pub/dl/attention.html
 - data
     - GSASII tutorials
         - Create a refined peak list and attempt optimization for each powder pattern
@@ -80,19 +83,10 @@ aP              | 86 - 92%
         - ICSD
         - www.oqmd.org
 
-- Dominant zone:
-    - 2D and 1D optimization
-
 - SWE:
     https://ideas-productivity.org/resources/series/hpc-best-practices-webinars/
 
 - Regression
-    - non-dimensionalize the q2 and Xnn parameters with a volume estimate
-    - Attention based network
-        https://d2l.ai/chapter_attention-mechanisms-and-transformers/attention-scoring-functions.html
-    - https://dmol.pub/dl/attention.html
-    - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
-
 - Random unit cell generator
 - Augmentation
 - Templating

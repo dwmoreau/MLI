@@ -1,5 +1,6 @@
 import csv
 import gemmi
+from numba import jit
 import numpy as np
 import os
 import scipy.spatial
@@ -599,7 +600,6 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
     M20 = expected_discrepancy / discrepancy
     return M20
 
-
 def get_M20_likelihood_from_xnn(q2_obs, xnn, hkl, lattice_system, bravais_lattice):
     hkl2 = get_hkl_matrix(hkl, lattice_system)
     q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
@@ -1171,3 +1171,22 @@ def best_assign_nocommon(softmaxes):
             )[:, 0]
         np.put(softmaxes, hkl_assign[:, np.newaxis, :], 0)
     return hkl_assign, softmax_assign
+
+@jit(fastmath=True)
+def fast_assign(a, b):
+    na = a.size
+    nb0 = b.shape[0]
+    nb1 = b.shape[1]
+    out = np.zeros((nb0, na), dtype=np.uint16)
+    for i_b0 in range(nb0):
+        for i_a in range(na):
+            current_min = 100
+            current_min_index = None
+            for i_b1 in range(nb1):
+                diff = a[i_a] - b[i_b0, i_b1]
+                diff_abs = abs(diff)
+                if diff_abs < current_min:
+                    current_min = diff_abs
+                    current_min_index = i_b1
+            out[i_b0, i_a] = current_min_index
+    return out

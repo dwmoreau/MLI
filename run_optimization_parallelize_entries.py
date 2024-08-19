@@ -43,9 +43,9 @@ if __name__ == '__main__':
     load_data = True
     broadening_tag = '0.5'
     error_tag = '0.1'
-    n_entries = 500
-    #q2_error_params = np.array([0.0001, 0.001]) / 1
-    q2_error_params = np.array([0.000000001, 0])
+    n_entries = 100
+    q2_error_params = np.array([0.0001, 0.001]) / 1
+    #q2_error_params = np.array([0.000000001, 0])
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     bravais_lattices = ['mP']

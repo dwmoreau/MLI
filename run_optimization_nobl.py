@@ -50,7 +50,7 @@ logger.info('Starting process')
 
 broadening_tag = '0.5'
 error_tag = '0.1'
-n_entries = 1 # Maximum number of entries to load for each Bravais lattice
+n_entries = 100 # Maximum number of entries to load for each Bravais lattice
 #q2_error_params = np.array([0.0001, 0.001]) / 1
 q2_error_params = np.array([0.000000001, 0])
 n_top_candidates = 20
@@ -68,9 +68,9 @@ lattices that are optimized serially. The next is for a joint communicator. This
 Bravais lattices optimized in parallel. 
 """
 
-#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-#manager_rank =     [   0,    0,    1,    2,    3,    4,    5,     1,     2,     3,     4,     5,     0,     1]
-#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
 #manager_rank =    [   0,    0,    1,    2,    3,    4,    5,     0,     0,     1,     2,     3,     4,     5]
 #manager_rank =     [   0,    1,    2,    0,    1,    2,    0,     1,     2,     0,     1,     2,     0,     1]
@@ -79,9 +79,9 @@ Bravais lattices optimized in parallel.
 #manager_rank =     [   0,    1,     0]
 #serial =           [True, True, False]
 
-bravais_lattices = ['cP', 'tP',  'oP']
-manager_rank =     [   0,    1,     0]
-serial =           [True, True, False]
+#bravais_lattices = ['cP', 'tP',  'oP']
+#manager_rank =     [   0,    1,     0]
+#serial =           [True, True, False]
 bl_string = ''
 for bl in bravais_lattices:
     bl_string += f' {bl}'
@@ -276,6 +276,7 @@ for bl_index_data, bravais_lattice_data in enumerate(bravais_lattices):
                     role = 'manager'
                 else:
                     role = 'worker'
+                mpi_managers[bravais_lattice].split_comm.barrier()
                 logger.info(f'Starting optimization of {bravais_lattice} {role}')
                 optimizer[bravais_lattice].run(entry, n_top_candidates)
                 logger.info(f'Finishing optimization of {bravais_lattice} {role}')
