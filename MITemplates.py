@@ -328,20 +328,25 @@ class MITemplates:
         self.setup_templates(data)
         self.save()
 
-    def generate_xnn_fast(self, q2_obs):
+    def generate_xnn_fast(self, q2_obs, indices=None):
         # This is still slow
         # original I just did linear least squares iteratively until q2_calc was ordered (1st for loop)
         # It is faster to use Gauss-Newton non-linear least squares (2nd for loop)
         # This is mostly copied from TargetFunctions.py
-        # I forgot the reason, but I don't use this function. It might not be numerically stable
+        # I forgot the reason, but I don't use this function.
 
-        hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
+        if indices is None:
+            hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
+            n_templates = self.template_params['n_templates']
+        else:
+            hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates[indices]], self.lattice_system)
+            n_templates = indices.size
 
         # Calculate initial values for xnn using linear least squares methods
-        xnn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
+        xnn = np.zeros((n_templates, self.unit_cell_length))
         A = hkl2 / q2_obs[np.newaxis, :, np.newaxis]
         b = np.ones(self.n_peaks)
-        for template_index in range(self.template_params['n_templates']):
+        for template_index in range(n_templates):
             xnn[template_index], r, rank, s = np.linalg.lstsq(
                 A[template_index], b, rcond=None
                 )
@@ -360,7 +365,7 @@ class MITemplates:
             term0 = np.matmul(hkl2[:, :, :, np.newaxis], hkl2[:, :, np.newaxis, :])
             H = np.sum(hessian_prefactor * term0, axis=1)
             good = np.linalg.matrix_rank(H, hermitian=True) == self.unit_cell_length
-            delta_gn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
+            delta_gn = np.zeros((n_templates, self.unit_cell_length))
             delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
         loss = np.linalg.norm(1 - q2_calc/q2_obs[np.newaxis], axis=1)
@@ -368,13 +373,20 @@ class MITemplates:
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
         return xnn, loss
 
-    def generate_xnn(self, q2_obs):
+    def generate_xnn(self, q2_obs, indices=None):
         # This is slower
-        xnn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
-        loss = np.zeros(self.template_params['n_templates'])
+        if indices is None:
+            hkl2_all = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
+            n_templates = self.template_params['n_templates']
+        else:
+            hkl2_all = get_hkl_matrix(self.hkl_ref[self.miller_index_templates[indices]], self.lattice_system)
+            n_templates = indices.size
+
+        xnn = np.zeros((n_templates, self.unit_cell_length))
+        loss = np.zeros(n_templates)
         order = np.arange(self.n_peaks)
-        hkl2_all = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
-        for template_index in range(self.template_params['n_templates']):
+        
+        for template_index in range(n_templates):
             sigma = q2_obs
             hkl2 = hkl2_all[template_index]
             status = True
@@ -404,7 +416,7 @@ class MITemplates:
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
         return xnn, loss
 
-    def generate(self, n_templates, rng, q2_obs):
+    def generate_old(self, n_templates, rng, q2_obs):
         # This is primary used to generate candidates for the optimizer, which expects that the
         # sum of the template and sampled candidates to be the same. This is why n_samples gets
         # changed
@@ -432,6 +444,45 @@ class MITemplates:
                 replace = False
             indices = self.rng.choice(
                 xnn_templates.shape[0],
+                size=difference,
+                replace=replace,
+                p=self.miller_index_templates_prob,
+                )
+            xnn_templates =  np.concatenate((xnn_templates, xnn_templates[indices]), axis=0)
+
+        unit_cell_templates = get_unit_cell_from_xnn(
+            xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        return unit_cell_templates
+
+    def generate(self, n_templates, rng, q2_obs):
+        # This is primary used to generate candidates for the optimizer, which expects that the
+        # sum of the template and sampled candidates to be the same. This is why n_samples gets
+        # changed
+        if n_templates == 'all':
+            xnn_templates, _ = self.generate_xnn(q2_obs)
+        elif n_templates < self.template_params['n_templates']:
+            # requesting fewer templates than in the set
+            # subsample
+            indices = self.rng.choice(
+                self.template_params['n_templates'],
+                size=n_templates,
+                replace=False,
+                p=self.miller_index_templates_prob,
+                )
+            xnn_templates, _ = self.generate_xnn(q2_obs, indices)
+        elif n_templates > self.template_params['n_templates']:
+            xnn_templates, _ = self.generate_xnn(q2_obs)
+            # requesting more templates than in the set
+            # Just sample multiple times
+            print('WARNING: Requesting more templates than available. Duplicates will be returned')
+            difference = n_templates - self.template_params['n_templates']
+            if difference > self.template_params['n_templates']:
+                replace = True
+            else:
+                replace = False
+            indices = self.rng.choice(
+                self.template_params['n_templates'],
                 size=difference,
                 replace=replace,
                 p=self.miller_index_templates_prob,

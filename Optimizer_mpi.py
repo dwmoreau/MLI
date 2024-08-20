@@ -35,7 +35,6 @@ from Utilities import fast_assign
 
 class Candidates:
     def __init__(self, q2_obs, xnn, hkl_ref, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell):
-        self.mcmc = False
         self.lattice_system = lattice_system
         self.bravais_lattice = bravais_lattice
         self.minimum_unit_cell = minimum_unit_cell
@@ -60,8 +59,6 @@ class Candidates:
             )
         # self.assign_hkls() calculates the current M20 score
         self.assign_hkls()
-        if self.mcmc:
-            self.neg_log_likelihood = -np.log(1e-4 * np.ones(self.n))
         self.best_M20 = self.M20.copy()
         self.best_hkl = self.hkl.copy()
 
@@ -108,44 +105,12 @@ class Candidates:
 
     def assign_hkls(self):
         q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
-        #pairwise_differences = scipy.spatial.distance.cdist(
-        #    self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-        #    ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
-        #hkl_assign = pairwise_differences.argmin(axis=2).T
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
 
         hkl2 = get_hkl_matrix(self.hkl, self.lattice_system)
         q2_calc = np.sum(hkl2 * self.xnn[:, np.newaxis, :], axis=2)
         self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
-
-    def assign_hkls_mcmc(self, xnn_next):
-        q2_ref_calc = self.q2_calculator.get_q2(xnn_next)
-        #pairwise_differences = scipy.spatial.distance.cdist(
-        #    self.q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-        #    ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
-        #hkl_assign = pairwise_differences.argmin(axis=2).T
-        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
-        hkl_next = np.take(self.hkl_ref, hkl_assign, axis=0)
-
-        hkl2 = get_hkl_matrix(hkl_next, self.lattice_system)
-        q2_calc = np.sum(hkl2 * xnn_next[:, np.newaxis, :], axis=2)
-        M20_next = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
-
-        reciprocal_volume_next = get_unit_cell_volume(get_reciprocal_unit_cell_from_xnn(
-            xnn_next, partial_unit_cell=True, lattice_system=self.lattice_system
-            ), partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        neg_log_likelihood_next, _ = get_M20_likelihood(
-            self.q2_obs, q2_calc, self.bravais_lattice, reciprocal_volume_next
-            )
-        acceptance_prob = np.exp(-neg_log_likelihood_next) / np.exp(-self.neg_log_likelihood)
-        accepted = self.rng.random(self.n) < acceptance_prob
-        self.xnn[accepted] = xnn_next[accepted]
-        self.hkl[accepted] = hkl_next[accepted]
-        self.M20[accepted] = M20_next[accepted]
-        self.neg_log_likelihood[accepted] = neg_log_likelihood_next[accepted]
-        self.hkl[accepted] = hkl_next[accepted]
 
     def random_subsampling(self, iteration_info):
         if type(iteration_info['n_drop']) == list:
@@ -166,21 +131,9 @@ class Candidates:
             lattice_system=self.lattice_system,
             )
         target_function.update(hkl_subsampled, self.xnn)
-        if self.mcmc:
-            xnn_next = self.xnn + target_function.gauss_newton_step(self.xnn)
-            xnn_next = fix_unphysical(
-                xnn=xnn_next,
-                rng=self.rng,
-                minimum_unit_cell=self.minimum_unit_cell, 
-                maximum_unit_cell=self.maximum_unit_cell,
-                lattice_system=self.lattice_system,
-                )
-            self.assign_hkls_mcmc(xnn_next)
-            self.update_unit_cell_from_xnn()
-        else:
-            self.xnn += target_function.gauss_newton_step(self.xnn)
-            self.fix_out_of_range_candidates()
-            self.assign_hkls()
+        self.xnn += target_function.gauss_newton_step(self.xnn)
+        self.fix_out_of_range_candidates()
+        self.assign_hkls()
         improved_M20 = self.M20 > self.best_M20
         self.best_M20[improved_M20] = self.M20[improved_M20]
         self.best_xnn[improved_M20] = self.xnn[improved_M20]
@@ -219,15 +172,30 @@ class Candidates:
                             mult_factors[mf_index, 5] = np.sqrt(mf0 * mf1)
                         mf_index += 1
 
+        n_test = int(0.05 * self.n)
+        test_indices = np.argsort(self.best_M20)[::-1][:n_test]
+        M20 = np.zeros([n_test, mult_factors.shape[0]])
+        hkl = np.zeros([n_test, mult_factors.shape[0], self.n_peaks, 3])
+        for mf_index in range(mult_factors.shape[0]):
+            xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn[test_indices]
+            q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
+            hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
+            hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
+            hkl2 = get_hkl_matrix(hkl[:, mf_index], self.lattice_system)
+            q2_calc_mult = np.sum(hkl2 * xnn_mult[:, np.newaxis, :], axis=2)
+            M20[:, mf_index] = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
+        best_index = np.argmax(M20, axis=1)
+        final_mult_factor = np.take(mult_factors, best_index, axis=0)        
+        self.best_xnn[test_indices] *= final_mult_factor**2
+        self.best_M20[test_indices] = np.take_along_axis(M20, best_index[:, np.newaxis], axis=1)[:, 0]
+        self.best_hkl[test_indices] = np.take_along_axis(hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1)[:, 0]
+
+        """
         M20 = np.zeros([self.n, mult_factors.shape[0]])
         hkl = np.zeros([self.n, mult_factors.shape[0], self.n_peaks, 3])
         for mf_index in range(mult_factors.shape[0]):
             xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn
             q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
-            #pairwise_differences = scipy.spatial.distance.cdist(
-            #    self.q2_obs[:, np.newaxis], q2_ref_calc_mult.ravel()[:, np.newaxis]
-            #    ).reshape((self.n_peaks, self.n, self.hkl_ref_length))
-            #hkl_assign = pairwise_differences.argmin(axis=2).T
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
             hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
             hkl2 = get_hkl_matrix(hkl[:, mf_index], self.lattice_system)
@@ -238,7 +206,7 @@ class Candidates:
         self.best_xnn *= final_mult_factor**2
         self.best_M20 = np.take_along_axis(M20, best_index[:, np.newaxis], axis=1)[:, 0]
         self.best_hkl = np.take_along_axis(hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1)[:, 0]
-
+        """
         # do quick reindexing to enforce constraints
         reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
             self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
@@ -495,9 +463,19 @@ class OptimizerManager(OptimizerBase):
         # Capping the number of iterations is arbitrary.
         # Just an attempt to prevent an excessively long loop
         largest_neighborhood = self.opt_params['max_neighbors'] + 1
+        from_indices = None
         while largest_neighborhood > self.opt_params['max_neighbors'] and iteration < 20:
-            distance = scipy.spatial.distance.cdist(redistributed_xnn, redistributed_xnn)
-            neighbor_array = distance < self.opt_params['neighbor_radius']
+            # This initial distance calculation is time intensive.
+            # After the first iteration, only calculate distances after they have been updated.
+            if from_indices is None:
+                distance = scipy.spatial.distance.cdist(redistributed_xnn, redistributed_xnn)
+                neighbor_array = distance < self.opt_params['neighbor_radius']
+            else:
+                distance_0 = scipy.spatial.distance.cdist(redistributed_xnn[from_indices], redistributed_xnn)
+                distance[from_indices, :] = distance_0
+                distance[:, from_indices] = distance_0.T
+                neighbor_array[from_indices, :] = distance[from_indices, :] < self.opt_params['neighbor_radius']
+                neighbor_array[:, from_indices] = distance[:, from_indices] < self.opt_params['neighbor_radius']
             neighbor_count = np.sum(neighbor_array, axis=1)
             largest_neighborhood = neighbor_count.max()
             if largest_neighborhood > self.opt_params['max_neighbors']:
@@ -546,8 +524,8 @@ class OptimizerManager(OptimizerBase):
         perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.unit_cell_length))
         perturbation *= (norm_factor / np.linalg.norm(perturbation, axis=1))[:, np.newaxis]
         xnn[from_indices] = xnn[to_indices] + perturbation
-        xnn = fix_unphysical(
-            xnn=xnn,
+        xnn[from_indices] = fix_unphysical(
+            xnn=xnn[from_indices],
             rng=self.rng,
             minimum_unit_cell=self.opt_params['minimum_uc'], 
             maximum_unit_cell=self.opt_params['maximum_uc'],
@@ -558,8 +536,9 @@ class OptimizerManager(OptimizerBase):
         reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
             xnn, partial_unit_cell=True, lattice_system=self.lattice_system
             )
-        reciprocal_unit_cell = reindex_entry_basic(
-            reciprocal_unit_cell,
+        # This reindexing is time intensive. Only reindex entries that were updated.
+        reciprocal_unit_cell[from_indices] = reindex_entry_basic(
+            reciprocal_unit_cell[from_indices],
             lattice_system=self.lattice_system,
             bravais_lattice=self.bravais_lattice,
             space='reciprocal'

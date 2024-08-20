@@ -48,7 +48,7 @@ if __name__ == '__main__':
     #q2_error_params = np.array([0.000000001, 0])
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    bravais_lattices = ['mP']
+    bravais_lattices = ['oP']
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng()
     for bravais_lattice in bravais_lattices:

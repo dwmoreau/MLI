@@ -715,7 +715,7 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
             ]
     iteration_info = [{
         'worker': 'random_subsampling',
-        'n_iterations': 40,
+        'n_iterations': 200,
         'n_peaks': 20,
         'n_drop': 10,
         }]
@@ -744,14 +744,15 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
     pitf_params = {
         f'{bravais_lattice}_00': pitf_group_params,
         }
+    f = 1
     generator_info = [
-        {'generator': 'nn', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': 1000},
-        {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': 1000},
-        #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': 100},
-        {'generator': 'templates', 'n_unit_cells': 1000},
-        {'generator': 'random', 'n_unit_cells': 1000},
-        #{'generator': 'distribution_volume', 'n_unit_cells': 100},
-        {'generator': 'predicted_volume', 'n_unit_cells': 1000},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(f * 1000)},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(f * 1000)},
+        #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(f * 100)},
+        {'generator': 'templates', 'n_unit_cells': int(f * 1000)},
+        {'generator': 'random', 'n_unit_cells': int(f * 1000)},
+        #{'generator': 'distribution_volume', 'n_unit_cells': int(f * 100)},
+        {'generator': 'predicted_volume', 'n_unit_cells': int(f * 1000)},
         ]
     iteration_info = [{
         'worker': 'random_subsampling',
@@ -763,7 +764,7 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
         'tag': 'monoclinic_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
-        'max_neighbors': 100,
-        'neighbor_radius': 0.0005,
+        'max_neighbors': 50,
+        'neighbor_radius': 0.003
         }
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)

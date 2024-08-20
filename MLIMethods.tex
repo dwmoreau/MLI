@@ -427,7 +427,7 @@ Unit cell angle parameters are converted to radians and subtracted by $\pi/2$. T
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/regression_inputs_aP_00.png}
+%\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/regression_inputs_aP_00.png}
 \caption{Data distributions for the triclinic lattice system. Top row plots the raw parameters for the unaugmented data in blue and augmented data in orange. The bottom row plots the parameters after scaling. The left column are the input peak spacings. The following columns are the unit cell parameters}
 \label{UnitCells}
 \end{center}
@@ -435,7 +435,7 @@ Unit cell angle parameters are converted to radians and subtracted by $\pi/2$. T
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/covariance_inputs.png}
+%\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/covariance_inputs.png}
 \caption{Covariance of the unit cell parameters for the triclinic lattice system. The left column is the covariance matrix for the raw unit cell parameters. The right column is the covariance after standard scaling has been applied.}
 \label{UnitCells}
 \end{center}
@@ -513,7 +513,7 @@ After the first peak is selected, there are three different cases for peaks:
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/augmentor/aug_setup_triclinic_1.png}
+%\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/augmentor/aug_setup_triclinic_1.png}
 \caption{Augmentation statistics for the triclinic lattice system determined from the training entries. The left column is the probability distribution for the index of the first observed peak in the list of all non-systematically absent peaks. The top left plot is the PDF and bottom plot is the CDF. The lower right column plots the distribution of spacings between all possible non-systematically absent peaks. The upper right plot is the probability that a peak is observed vs. the separation from its closest neighboring peak. The different colors represent different ranges of absolution peak position. The markers are the observed data and the solid lines are the fit curves.}
 \label{Augmentation}
 \end{center}
@@ -523,12 +523,12 @@ After the first peak is selected, there are three different cases for peaks:
 \centering
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/hkl_labels_unaugmented_aP.png}
+  %\includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/hkl_labels_unaugmented_aP.png}
   \caption{Unaugmented}
 \end{minipage}
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/hkl_labels_augmented_aP.png}
+  %\includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/hkl_labels_augmented_aP.png}
   \caption{Augmented}
 \end{minipage}
 \begin{center}
@@ -580,7 +580,7 @@ All training occurs with the Adam optimizer using a learning rate of 0.0001 and 
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models/triclinic_1/regression/aP_reg.png}
+%\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models/triclinic_1/regression/aP_reg.png}
 \caption{Regression results for the neural network model. The top row plots the predicted vs true unit cell parameters. The second row plots prediction error vs true parameters. The titles print the RMSD and percentiles for the training and validation sets.}
 \label{NNReg}
 \end{center}
@@ -595,7 +595,7 @@ Some hyperparameter optimization was performed on the triclinic lattice system. 
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models/triclinic_1/regression/aP_reg_tree.png}
+%\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models/triclinic_1/regression/aP_reg_tree.png}
 \caption{Regression results for the random forest model. The top row plots the predicted vs true unit cell parameters. The second row plots prediction error vs true parameters. The titles print the RMSD and percentiles for the training and validation sets.}
 \label{TreeReg}
 \end{center}
@@ -635,7 +635,7 @@ After all the Miller index templates are generated, only unique templates are re
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/template/aP_dominant_zone_ratio_triclinic_1.png}
+%\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/template/aP_dominant_zone_ratio_triclinic_1.png}
 \caption{Dominant zone metrics for triclinic. The left three histograms are metrics for dominant zones based on unit cell values. These are quantified for the ratios of the $x_{nn}$ parameters, the direct unit cell, and the reciprocal unit cell. The fourth plot is the minimum information. The rightmost plot is a scatter plot of dominant zone ratio vs minimum information. While these are correlated on average (orange line), there is considerable deviation from average.}
 \label{DominantZone}
 \end{center}
@@ -670,11 +670,11 @@ Training of the assignment neural networks is performed with all the unaugmented
 \centering
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/aP_assignment_triclinic_1_aP_0.png}
+  %\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/aP_assignment_triclinic_1_aP_0.png}
 \end{minipage}
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/assignment_calibration_triclinic_1_aP_0.png}
+  %\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/assignment_calibration_triclinic_1_aP_0.png}
 \end{minipage}
 \begin{center}
 \caption{Assignment diagnostics for triclinic with 0.5\% unit cell perturbation. The left plot is the accuracy and the right plot is the calibration. The accuracy plots a histogram of accuarcy for entire entries. The blue plot is the training data and the orange plot is the validation data. The green plot is a baseline that represents the accuracy if the closest peak was chosen instead of the neural network predictions. The calibration plot shows the average accuracy vs confidence.}
@@ -686,11 +686,11 @@ Training of the assignment neural networks is performed with all the unaugmented
 \centering
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/aP_assignment_triclinic_1_aP_1.png}
+  %\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/aP_assignment_triclinic_1_aP_1.png}
 \end{minipage}
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/assignment_calibration_triclinic_1_aP_1.png}
+  %\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/assignment_calibration_triclinic_1_aP_1.png}
 \end{minipage}
 \begin{center}
 \caption{Assignment diagnostics for triclinic with 0.25\% unit cell perturbation.}
@@ -702,11 +702,11 @@ Training of the assignment neural networks is performed with all the unaugmented
 \centering
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/aP_assignment_triclinic_1_aP_2.png}
+  %\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/aP_assignment_triclinic_1_aP_2.png}
 \end{minipage}
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/assignment_calibration_triclinic_1_aP_2.png}
+  %\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/assigner/assignment_calibration_triclinic_1_aP_2.png}
 \end{minipage}
 \begin{center}
 \caption{Assignment diagnostics for triclinic with 0.1\% unit cell perturbation.}
