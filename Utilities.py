@@ -785,7 +785,12 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
         spacegroups = ['P 1']
     hkl_ref_sg = dict.fromkeys(spacegroups)
     for spacegroup in spacegroups:
-        ops = gemmi.SpaceGroup(spacegroup).operations()
+        if bravais_lattice == 'hR':
+            # gemmi gives the systematic absences for rhombohedral in the hexagonal setting.
+            # The ':R' component tells gemmi to use the rhombohedral setting
+            ops = gemmi.SpaceGroup(f'{spacegroup}:R').operations()
+        else:
+            ops = gemmi.SpaceGroup(spacegroup).operations()
         systematically_absent = ops.systematic_absences(hkl_ref)
         hkl_ref_sg[spacegroup] = hkl_ref[np.invert(systematically_absent)]
     return hkl_ref_sg
