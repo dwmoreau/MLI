@@ -218,9 +218,16 @@ class RandomGenerator:
                 preds[est_index] = self.random_forest_regressor.estimators_[est_index].predict(
                     q2_obs[np.newaxis]
                     )[0]
-            random_volume_scale = np.abs(rng.normal(
-                loc=preds.mean(), scale=preds.std(), size=n_unit_cells
-                ))
+            if n_unit_cells > self.model_params['n_estimators']:
+                replace = True
+            else:
+                replace = False
+            indices = rng.choice(
+                self.model_params['n_estimators'],
+                size=n_unit_cells,
+                replace=replace
+                )
+            random_volume_scale = preds[indices]
 
         scale = (random_volume_scale / random_volume_generated)**(1/3)
         if self.lattice_system in ['cubic', 'tetragonal', 'hexagonal', 'orthorhombic']:
