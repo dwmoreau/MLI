@@ -15,8 +15,17 @@ import subprocess
 
 
 class PeakListCreator:
-    def __init__(self, tag, save_to_directory=None, load_combined=False, runs=None, input_path_template=None, suffix='_strong.expt', known_unit_cell=None, known_space_group=None):
-        self.runs = runs
+    def __init__(self, tag, save_to_directory=None, load_combined=False, runs=None, run_limits=None, run_limits_sacla=None, input_path_template=None, suffix='_strong.expt', min_reflections_per_experiment=3, known_unit_cell=None, known_space_group=None):
+        if not run_limits_sacla is None:
+            self.runs = []
+            for run_index in range(run_limits_sacla[0], run_limits_sacla[1] + 1):
+                for sub_run_index in range(3):
+                    self.runs.append(f'{run_index}-{sub_run_index}')
+        elif not run_limits is None:
+            self.runs = np.arange(run_limits[0], run_limits[1] + 1)
+        else:
+            self.runs = runs
+        self.min_reflections_per_experiment = min_reflections_per_experiment
         self.input_path_template = input_path_template
         self.suffix = suffix
         self.tag = tag
@@ -96,7 +105,7 @@ class PeakListCreator:
         command += refl_file_names
         command += [
             'reference_from_experiment.detector=0',
-            'min_reflections_per_experiment=3',
+            f'min_reflections_per_experiment={self.min_reflections_per_experiment}',
             f'output.experiments_filename={self.tag}_combined.expt',
             f'output.reflections_filename={self.tag}_combined.refl',
             ]
@@ -133,7 +142,6 @@ class PeakListCreator:
         rlp_primary = []
         s1_primary = []
         s0_expt = []
-        dot_products = []
         refl_counts = []
         min_separation = []
         if update == False:
@@ -171,30 +179,23 @@ class PeakListCreator:
             N_primary = rlp_primary_lattice.shape[0]
             N_secondary = int(N_primary**2 / 2 - N_primary / 2)
             s1_secondary_lattice_difference = np.zeros((N_primary, N_primary, 3))
-            s1_secondary_lattice_sum = np.zeros((N_primary, N_primary, 3))
             for i in range(3):
                 s1_secondary_lattice_difference[:, :, i] = rlp_primary_lattice[:, i][np.newaxis] - rlp_primary_lattice[:, i][:, np.newaxis]
-                s1_secondary_lattice_sum[:, :, i] = rlp_primary_lattice[:, i][np.newaxis] + rlp_primary_lattice[:, i][:, np.newaxis]
             indices = np.triu_indices(N_primary, k=1)
             s1_secondary_lattice_difference = s1_secondary_lattice_difference[indices[0], indices[1], :]
-            s1_secondary_lattice_sum = s1_secondary_lattice_sum[indices[0], indices[1], :]
 
             q2_secondary_lattice_difference = np.linalg.norm(s1_secondary_lattice_difference, axis=1)**2
             min_separation.append(q2_secondary_lattice_difference.min())
-            q2_secondary_lattice = np.zeros((N_secondary, 7))
+            q2_secondary_lattice = np.zeros((N_secondary, 5))
             q2_secondary_lattice[:, 0] = q2_primary[-1][indices[0], 0]
             q2_secondary_lattice[:, 1] = q2_primary[-1][indices[1], 0]
             q2_secondary_lattice[:, 2] = len(refls_expt)
             q2_secondary_lattice[:, 3] = q2_secondary_lattice_difference.min()
             q2_secondary_lattice[:, 4] = q2_secondary_lattice_difference
-            q2_secondary_lattice[:, 5] = np.linalg.norm(s1_secondary_lattice_sum, axis=1)**2
-            q2_secondary_lattice[:, 6] = np.matmul(rlp_primary_lattice, rlp_primary_lattice.T)[indices[0], indices[1]]
-            dot_products.append(np.matmul(rlp_primary_lattice, rlp_primary_lattice.T).ravel())
             q2_secondary.append(q2_secondary_lattice)
 
         self.refl_counts = np.array(refl_counts, dtype=int)
         self.min_separation = np.array(min_separation)
-        self.dot_products = np.concatenate(dot_products)
         self.s0 = np.row_stack(s0_expt)
         self.s1_primary = np.row_stack(s1_primary)
         self.q2_primary = np.row_stack(q2_primary)
@@ -335,23 +336,23 @@ class PeakListCreator:
     def pick_primary_peaks(self, exclude_list=[], exclude_max=100, add_peaks=[], shift={}, prominence=30, plot_kapton_peaks=False, yscale=None):
         found_peak_indices = scipy.signal.find_peaks(self.primary_hist_q2, prominence=prominence)
         found_peaks = self.primary_centers_q2[found_peak_indices[0]]
-    
-        primary_peaks = []
-        for i in range(exclude_max, len(found_peaks)):
-            exclude_list.append(i)
+        found_peaks = np.delete(found_peaks[:exclude_max], exclude_list)
+        primary_peaks = np.sort(np.concatenate((found_peaks, add_peaks)))
     
         fig, axes = plt.subplots(1, 1, figsize=(30, 6), sharex=True)
         axes.plot(self.primary_centers_q2, self.primary_hist_q2, label='Histogram')
-        for p_index, p in enumerate(found_peaks):
-            if not p_index in exclude_list:
-                if p_index in shift.keys():
-                    p += shift[p_index]
-                primary_peaks.append(p)
-                axes.plot([p, p], [0, self.primary_hist_q2.max()], linestyle='dotted', linewidth=1, color=[0, 0, 0], label='Found Peaks')
-                axes.annotate(p_index, xy=(p, self.primary_hist_q2.max()))
-        for p in add_peaks:
-            primary_peaks.append(p)
-            axes.plot([p, p], [0, self.primary_hist_q2.max()], linestyle='dotted', linewidth=1, color=[0.8, 0, 0], label='Added Peaks')
+        for p_index, p in enumerate(primary_peaks):
+            if p_index in shift.keys():
+                primary_peaks[p_index] += shift[p_index]
+            if p in add_peaks:
+                color = [0.8, 0, 0]
+            else:
+                color = [0, 0, 0]
+            axes.plot(
+                [p, p], [0, self.primary_hist_q2.max()],
+                linestyle='dotted', linewidth=1, color=color
+                )
+            axes.annotate(p_index, xy=(p-0.001, (1-p_index/primary_peaks.size) * self.primary_hist_q2.max()))
         if plot_kapton_peaks:
             kapton_peaks = [15.25, 7.625, 5.083333333, 3.8125, 3.05]
             for p in kapton_peaks:
@@ -363,125 +364,163 @@ class PeakListCreator:
         fig.tight_layout()
         fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_primary_peaks.png'))
         plt.show()
-        self.q2_primary_picked = np.sort(np.array(primary_peaks))
+        self.q2_primary_picked = primary_peaks
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_primary_peaks.npy'),
             1/np.sqrt(self.q2_primary_picked)
             )
         print(repr(1/np.sqrt(self.q2_primary_picked)))
 
-    def fit_peaks(self, n_max, fit_shift=True):
-        def get_q2_calc(x, q2_0, q2_centers, mode, jac=False):
-            # Fit breadths & amplitudes
-            n = q2_0.size
-            if mode == 'amplitudes_breadths':
-                amplitudes = x[:n][:, np.newaxis]
-                shift = np.zeros(n)[:, np.newaxis]
-                p = x[n:]
-            elif mode == 'all':
-                amplitudes = x[:n][:, np.newaxis]
-                shift = x[n: 2*n][:, np.newaxis]
-                p = x[2*n:]
-            breadths = (p[0] + p[1]*q2_0)[:, np.newaxis]
-    
-            prefactor = 1 / np.sqrt(2*np.pi) / breadths
-            exponential = np.exp(-1/2 * ((q2_0[:, np.newaxis] + shift - q2_centers[np.newaxis]) / breadths)**2)
-            q2_calc = np.sum(amplitudes * prefactor * exponential, axis=0)
+    def fit_peaks(self, n_max, ind_peak_indices, fit_shift=True):
+        def get_I_calc(amplitudes, q2_centers, broadening_params, q2, jac=False):
+            breadths = (broadening_params[0] + broadening_params[1]*q2_centers)[:, np.newaxis]
+            prefactor = 1 / np.sqrt(2*np.pi * breadths**2)
+            exponential = np.exp(-1/2 * ((q2_centers[:, np.newaxis] - q2[np.newaxis]) / breadths)**2)
+            I_calc = np.sum(amplitudes[:, np.newaxis] * prefactor * exponential, axis=0)
             if jac:
-                dq2_calc_damplitudes = prefactor * exponential
-    
-                dexponential_dshift = -exponential * (q2_0[:, np.newaxis] + shift - q2_centers[np.newaxis]) / breadths**2
-                dq2_calc_dshift = amplitudes * prefactor * dexponential_dshift
-    
-                dbreadths_dp0 = np.ones(n)[:, np.newaxis]
-                dbreadths_dp1 = q2_0[:, np.newaxis]
-                dprefactor_dbreadths = -1 / np.sqrt(2*np.pi) / breadths**2
-                dexponential_dbreadths = exponential * (q2_0[:, np.newaxis] - q2_centers)**2 / breadths**3
-                dq2_calc_dbreadths = amplitudes * (dprefactor_dbreadths * exponential + prefactor * dexponential_dbreadths)
-                dq2_calc_dp0 = np.sum(dq2_calc_dbreadths * dbreadths_dp0, axis=0)[np.newaxis]
-                dq2_calc_dp1 = np.sum(dq2_calc_dbreadths * dbreadths_dp1, axis=0)[np.newaxis]
-                return q2_calc, dq2_calc_damplitudes, dq2_calc_dshift, dq2_calc_dp0, dq2_calc_dp1
+                dI_calc_damplitudes = prefactor * exponential
+
+                dexponential_dq2_centers = -exponential * (q2_centers[:, np.newaxis] - q2[np.newaxis]) / breadths**2
+                dI_calc_dq2_centers = amplitudes[:, np.newaxis] * prefactor * dexponential_dq2_centers
+                return I_calc, dI_calc_damplitudes, dI_calc_dq2_centers
             else:
-                return q2_calc
-    
-        def breadth_fit_loss(x, q2_0, q2_hist, q2_centers, mode):
-            # Fit breadths & amplitudes
-            q2_calc = get_q2_calc(x, q2_0, q2_centers, mode, False)
-            L = q2_calc - q2_hist
+                return I_calc
+        def fit_loss(x, amplitudes, q2_centers, mask, broadening_params, I_obs, q2, mode):
+            amplitudes_all = np.zeros(mask.size)
+            q2_centers_all = np.zeros(mask.size)
+            if mode == 'amplitudes':
+                amplitudes_all[mask] = x
+                amplitudes_all[~mask] = amplitudes[~mask]
+                q2_centers_all = q2_centers
+            elif mode == 'amplitudes_centers':
+                amplitudes_all[mask] = x[:mask.sum()]
+                amplitudes_all[~mask] = amplitudes[~mask]
+                q2_centers_all[mask] = x[mask.sum():]
+                q2_centers_all[~mask] = q2_centers[~mask]
+            I_calc = get_I_calc(amplitudes_all, q2_centers_all, broadening_params, q2, False)
+            L = I_calc - I_obs
             return L
-    
-        def breadth_fit_jac(x, q2_0, q2_hist, q2_centers, mode):
-            _, dq2_calc_damplitudes, dq2_calc_dshift, dq2_calc_dp0, dq2_calc_dp1 = get_q2_calc(x, q2_0, q2_centers, mode, True)
-            if mode == 'amplitudes_breadths':
-                jac = np.concatenate((dq2_calc_damplitudes, dq2_calc_dp0, dq2_calc_dp1), axis=0).T
-            elif mode == 'all':
-                jac = np.concatenate((dq2_calc_damplitudes, dq2_calc_dshift, dq2_calc_dp0, dq2_calc_dp1), axis=0).T
+        def fit_jac(x, amplitudes, q2_centers, mask, broadening_params, I_obs, q2, mode):
+            amplitudes_all = np.zeros(mask.size)
+            q2_centers_all = np.zeros(mask.size)
+            if mode == 'amplitudes':
+                amplitudes_all[mask] = x
+                amplitudes_all[~mask] = amplitudes[~mask]
+                q2_centers_all = q2_centers
+            elif mode == 'amplitudes_centers':
+                amplitudes_all[mask] = x[:mask.sum()]
+                amplitudes_all[~mask] = amplitudes[~mask]
+                q2_centers_all[mask] = x[mask.sum():]
+                q2_centers_all[~mask] = q2_centers[~mask]
+            I_calc, dI_calc_damplitudes, dI_calc_dq2_centers = get_I_calc(amplitudes_all, q2_centers_all, broadening_params, q2, True)
+            if mode == 'amplitudes':
+                jac = dI_calc_damplitudes[mask].T
+            elif mode == 'amplitudes_centers':
+                jac = np.concatenate((dI_calc_damplitudes[mask], dI_calc_dq2_centers[mask]), axis=0).T
             return jac
-    
+        def basic_gaussian(p, x):
+            return p[0] / np.sqrt(2*np.pi*p[1]**2) * np.exp(-1/2 * ((x - p[2]) / p[1])**2)
+        def basic_gaussian_loss(p, x, y):
+            return basic_gaussian(p, x) - y
+
+        # Start by fitting individual peaks
+        # Peaks fit individually will be fixed in the next stages when peaks during the profile fit.
+        ind_amplitudes = np.zeros(len(ind_peak_indices))
+        ind_breadths = np.zeros(len(ind_peak_indices))
+        ind_q2_centers = np.zeros(len(ind_peak_indices))
+
+        for index, peak_index in enumerate(ind_peak_indices):
+            loc = np.searchsorted(self.primary_centers_q2, self.q2_primary_picked[peak_index])
+            delta = 10
+            low = max(0, loc - delta)
+            high = min(self.primary_centers_q2.size, loc + delta)
+            results = scipy.optimize.least_squares(
+                basic_gaussian_loss,
+                x0=(1, 0.00001, self.q2_primary_picked[peak_index]),
+                args=(self.primary_centers_q2[low: high], self.primary_hist_q2[low: high])
+                )
+            ind_amplitudes[index] = np.abs(results.x[0])
+            ind_breadths[index] = np.abs(results.x[1])
+            ind_q2_centers[index] = np.abs(results.x[2])
+
+        broadening_params_polyfit = np.polyfit(x=ind_q2_centers, y=ind_breadths, deg=1)
+        self.broadening_params = np.array([broadening_params_polyfit[1], broadening_params_polyfit[0]])
+        
+        mask = np.ones(n_max, dtype=bool)
+        amplitudes = np.zeros(n_max)
+        q2_centers = self.q2_primary_picked[:n_max].copy()
+        for index, peak_index in enumerate(ind_peak_indices):
+            if peak_index < n_max:
+                mask[peak_index] = False
+                amplitudes[peak_index] = ind_amplitudes[index]
+                q2_centers[peak_index] = ind_q2_centers[index]
+
         # Fit breadths and amplitudes
-        x0 = np.concatenate((
-            0.5 * np.ones(n_max),
-            [0.00001, 0.002]
-            ))
-        lower_bounds = np.concatenate((
-            np.zeros(n_max),
-            [-np.inf, -np.inf]
-            ))
-        upper_bounds = np.concatenate((
-            1 * np.ones(n_max),
-            [np.inf, np.inf]
-            ))
+        max_index = np.searchsorted(self.primary_centers_q2, self.q2_primary_picked[n_max]) + 20
         results = scipy.optimize.least_squares(
-            breadth_fit_loss,
-            x0=x0,
-            jac=breadth_fit_jac,
-            args=(self.q2_primary_picked[:n_max], self.primary_hist_q2, self.primary_centers_q2, 'amplitudes_breadths'),
-            bounds=(lower_bounds, upper_bounds),
+            fit_loss,
+            x0=amplitudes[mask],
+            jac=fit_jac,
+            args=(
+                amplitudes,
+                q2_centers,
+                mask,
+                self.broadening_params,
+                self.primary_hist_q2[:max_index],
+                self.primary_centers_q2[:max_index],
+                'amplitudes'
+                ),
+            method='lm',
             )
+        amplitudes[mask] = results.x
         print(results)
-        self.broadening_params = results.x[n_max:]
-        q2_calc = get_q2_calc(results.x, self.q2_primary_picked[:n_max], self.primary_centers_q2, 'amplitudes_breadths', False)
-        print(self.broadening_params)
         if fit_shift:
             # Fit breadths, amplitudes, and shift
-            x0 = np.concatenate((
-                results.x[:n_max], 0.000001 * np.ones(n_max), results.x[n_max:]
-                ))
-        
-            lower_bounds = np.concatenate((
-                np.zeros(n_max),
-                -np.inf * np.ones(n_max),
-                [-np.inf, -np.inf]
-                ))
-            upper_bounds = np.concatenate((
-                1 * np.ones(n_max),
-                np.inf * np.ones(n_max),
-                [np.inf, np.inf]
-                ))
+            x0 = np.concatenate((amplitudes[mask], q2_centers[mask]))
+            print(x0.shape, x0) 
             results = scipy.optimize.least_squares(
-                breadth_fit_loss,
+                fit_loss,
                 x0=x0,
-                jac=breadth_fit_jac,
-                args=(self.q2_primary_picked[:n_max], self.primary_hist_q2, self.primary_centers_q2, 'all'),
-                bounds=(lower_bounds, upper_bounds),
+                jac=fit_jac,
+                args=(
+                    amplitudes,
+                    q2_centers,
+                    mask,
+                    self.broadening_params,
+                    self.primary_hist_q2[:max_index],
+                    self.primary_centers_q2[:max_index],
+                    'amplitudes_centers'
+                    ),
+                method='lm'
                 )
             print(results)
-            shift = results.x[n_max: 2*n_max]
-            self.broadening_params = results.x[2*n_max:]
-            q2_calc = get_q2_calc(results.x, self.q2_primary_picked[:n_max], self.primary_centers_q2, 'all', False)
-            self.q2_primary_picked[:n_max] += shift        
-        
-        fig, axes = plt.subplots(1, 1, figsize=(40,  8), sharex=True)
-        axes.plot(self.primary_centers_q2, self.primary_hist_q2)
-        axes.plot(self.primary_centers_q2, q2_calc)
+            amplitudes[mask] = results.x[:mask.sum()]
+            q2_centers[mask] = results.x[mask.sum():]
+            q2_primary_picked_original = self.q2_primary_picked[:n_max].copy()
+            self.q2_primary_picked[:n_max] = q2_centers
+
+        I_calc = get_I_calc(amplitudes, q2_centers, self.broadening_params, self.primary_centers_q2[:max_index])
+        fig, axes = plt.subplots(1, 1, figsize=(30,  8), sharex=True)
+        axes.plot(self.primary_centers_q2[:max_index], self.primary_hist_q2[:max_index])
+        axes.plot(self.primary_centers_q2[:max_index], I_calc)
         ylim = axes.get_ylim()
+        for peak_index, p in enumerate(self.q2_primary_picked[:n_max]):
+            if p in ind_peak_indices:
+                color = [0.8, 0, 0]
+            else:
+                color = [0, 0, 0]
+            axes.plot([p, p], ylim, color=color, linestyle='dotted')
         if fit_shift:
             for i in range(n_max):
+                shift = self.q2_primary_picked[i] - q2_primary_picked_original[i]
                 axes.annotate(
-                    f'{shift[i]:0.5f}',
+                    f'{shift:0.5f}',
                     xy=(self.q2_primary_picked[i], 0.9 * ylim[1]),
                     rotation=90
                     )
+        fig, axes = plt.subplots(1, 1, figsize=(6, 3))
+        axes.plot(self.q2_primary_picked[ind_peak_indices], ind_breadths, marker='.')
+        axes.plot(self.q2_primary_picked[ind_peak_indices], np.polyval(broadening_params_polyfit, self.q2_primary_picked[ind_peak_indices]))
         plt.show()
 
     def create_secondary_peaks(self, q2_max=None, max_difference=None, max_refl_count=None, min_separation=None, n_bins=800):
@@ -531,14 +570,12 @@ class PeakListCreator:
             )), axis=1
             )
         
-        self.q2_secondary_filtered = self.q2_secondary[resolution_indices][filtered_indices, 4:]
+        self.q2_secondary_filtered = self.q2_secondary[resolution_indices][filtered_indices, 4]
     
         self.secondary_bins_q2 = np.linspace(0.00000001, self.q2_max, n_bins + 1)
         self.secondary_centers_q2 = (self.secondary_bins_q2[1:] + self.secondary_bins_q2[:-1]) / 2
         self.secondary_hist_q2_difference_unfiltered, _ = np.histogram(self.q2_secondary[:, 4], bins=self.secondary_bins_q2)
-        self.secondary_hist_q2_difference, _ = np.histogram(self.q2_secondary_filtered[:, 0], bins=self.secondary_bins_q2)
-        self.secondary_hist_q2_sum, _ = np.histogram(self.q2_secondary_filtered[:, 1], bins=self.secondary_bins_q2)
-        self.secondary_hist_q2_dot, _ = np.histogram(self.q2_secondary_filtered[:, 2], bins=self.secondary_bins_q2)
+        self.secondary_hist_q2_difference, _ = np.histogram(self.q2_secondary_filtered, bins=self.secondary_bins_q2)
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_secondary_hist_difference.npy'),
             np.column_stack((self.secondary_hist_q2_difference, self.secondary_centers_q2))
@@ -717,3 +754,4 @@ class PeakListCreator:
         fig, axes = plt.subplots(1, 1, figsize=(6, 3))
         axes.plot(self.q2_primary_picked, self.error)
         plt.show()
+
