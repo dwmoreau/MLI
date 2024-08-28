@@ -1,20 +1,4 @@
-"""
-extremely small error:
-cF:  100% {'Not found': 0, 'Found': 238, 'Off by two': 0, 'Found explainers': 0}
-cI: 99.6% {'Not found': 1, 'Found': 249, 'Off by two': 0, 'Found explainers': 0}
-cP: 99.8% {'Not found': 1, 'Found': 533, 'Off by two': 0, 'Found explainers': 0}
-hP: 98.6% {'Not found': 4, 'Found': 493, 'Off by two': 0, 'Found explainers': 3}
-hR: 99.0% {'Not found': 5, 'Found': 495, 'Off by two': 0, 'Found explainers': 0}
-tI: 98.8% {'Not found': 6, 'Found': 494, 'Off by two': 0, 'Found explainers': 0}
-tP: 97.2% {'Not found': 3, 'Found': 486, 'Off by two': 0, 'Found explainers': 11}
-oC: 
-oF: 97.0% {'Not found': 7, 'Found': 485, 'Off by two': 0, 'Found explainers': 8}
-oI:
-oP: 98.5% {'Not found': 1, 'Found': 447, 'Off by two': 0, 'Found explainers': 6}
-mC:
-mP:
-aP:
-"""
+
 from mpi4py import MPI
 import numpy as np
 import os
@@ -41,31 +25,32 @@ if __name__ == '__main__':
     split_comm = comm.Split(color=rank, key=rank)
 
     load_data = True
-    broadening_tag = '0.5'
-    error_tag = '0.1'
-    n_entries = 100
-    q2_error_params = np.array([0.0001, 0.001]) / 1
+    broadening_tag = '1'
+    error_tag = '1'
+    n_entries = 500
+    #q2_error_params = np.array([0.0001, 0.001]) / 1
     #q2_error_params = np.array([0.000000001, 0])
+    q2_error_params = np.array([0.000087, 0.00092]) / 1# [9.23692112e-04 8.72845689e-05]
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    bravais_lattices = ['oP']
+    bravais_lattices = ['hP']
     optimizer = dict.fromkeys(bravais_lattices)
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, error_tag, split_comm)
+            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, split_comm)
         elif bravais_lattice in ['hP']:
-            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, error_tag, split_comm)
+            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, split_comm)
         elif bravais_lattice in ['hR']:
-            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, error_tag, split_comm)
+            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, split_comm)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, error_tag, split_comm)
+            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, split_comm)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, error_tag, split_comm)
+            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, split_comm)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, error_tag, split_comm)
+            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, split_comm)
         elif bravais_lattice in ['aP']:
-            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, error_tag, split_comm)
+            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, split_comm)
 
     if rank == 0:
         if load_data:
@@ -132,7 +117,7 @@ if __name__ == '__main__':
         print(entry)
         unit_cell_true = np.array(entry['reindexed_unit_cell'])
         for bravais_lattice in bravais_lattices:
-            optimizer[bravais_lattice].run(entry, n_top_candidates)
+            optimizer[bravais_lattice].run(entry=entry, n_top_candidates=n_top_candidates)
             found = False
             off_by_two = False
             found_explainer = False

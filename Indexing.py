@@ -47,48 +47,59 @@ aP              | 86 - 92%
 
 
 - Optimization
-    - Track whether or not the correct unit cell is anywhere in the candidate list
-    - Verify that we can get the correct unit cell at expected rates
-        - No unit cell error
-        - With unit cell error
-    - performance profiling
-    - Predictions for a single unknown candidate
+    * Add a final refinement of the unit cell
+        - Optimize for the given indexed peaks
+    - Add mechanism for analysis of failed entries    
+    - Is there an optimal number of subsampled peaks
+    - Add a validation for the correct extinction group
 
-    - Initial quick optimization
-    - Redistribution of 
-    
 - Documentation
+    - Rewrite starting at the optimization
+    - Edit
     - One page summary
-    - Update after generalization has been implemented
-    - Delete excess
-    - Add discussion on mixture integer linear programing
-    - Add section on physics informed target function model
+    - github README.md
 
-- Physics informed target function
-    - Do math for new analytical convolution approach
-    - Read about attention
-        - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
-        - https://dmol.pub/dl/attention.html
-- data
-    - GSASII tutorials
-        - Create a refined peak list and attempt optimization for each powder pattern
-        - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
-    - Statistics plots / tables
-    - peak list
+- Experimental Data
+    * peak list
+        * refactor code entirely:
+            * Combine by run, then combine by frames to get around the maximum number of expts files error
+            * Place constraints on parsing refls to prevent memory blow up when making secondary peaks
+        * new peak list extraction program
         - SACLA data
         - LCLS data
         - RRUFF
-    - More training data
-        - Materials project
-        - ICSD
-        - www.oqmd.org
+    - GSASII tutorials
+        - Create a refined peak list and attempt optimization for each powder pattern
+        - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
+
+- Physics informed target function
+    - ratio cannot be arbitrary - must remain constant as volume scales.
+    - Document ideas
+    - Analytical convolutions
+        - Work through general mathematics:
+            - Volume during convolutions.
+            - scaling?
+        - Verify that there are not errors in the notebook
+    - Read about attention
+        - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
+        - https://dmol.pub/dl/attention.html
+    - Reindex triclinic in reciprocal space.
 
 - SWE:
     https://ideas-productivity.org/resources/series/hpc-best-practices-webinars/
 
-- Regression
-- Random unit cell generator
+- Spacegroup assignments:
+    - Put extinction group in the dataset
+        - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
+    - https://www.markvardsen.net/projects/ExtSym/main.html
+    - https://journals.iucr.org/paper?S0021889808031087
+    - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
+    - https://journals.iucr.org/paper?fe5024
+    - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
+
 - Augmentation
+- Random unit cell generator
+- Regression
 - Templating
 - Indexing.py
 - Assignments

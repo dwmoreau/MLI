@@ -1,7 +1,11 @@
+from collections import namedtuple
+import logging
 import numpy as np
 import scipy.spatial
 
+from MPIFileHandler import MPIFileHandler
 from Optimizer_mpi import OptimizerManager
+from Optimizer_mpi import OptimizerWorker
 from Reindexing import reindex_entry_triclinic
 
 
@@ -271,7 +275,7 @@ def get_best_candidates(self, report_counts):
     return report_counts, found
 
 
-def get_cubic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
+def get_cubic_optimizer(bravais_lattice, broadening_tag, comm):
     data_params = {
         'tag': f'cubic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -296,7 +300,6 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
         'n_drop': 5,
         }]
     opt_params = {
-        'tag': f'cubic_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 10,
@@ -305,7 +308,7 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_tetragonal_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
+def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm):
     data_params = {
         'tag': f'tetragonal_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -351,7 +354,6 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
         {'generator': 'predicted_volume', 'n_unit_cells': 200},
         ]
     opt_params = {
-        'tag': 'tetragonal_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 100,
@@ -360,7 +362,7 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_hexagonal_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
+def get_hexagonal_optimizer(bravais_lattice, broadening_tag, comm):
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -426,7 +428,6 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
         'n_drop': 10,
         }]
     opt_params = {
-        'tag': 'hexagonal_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 20,
@@ -435,7 +436,7 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
+def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, comm):
     data_params = {
         'tag': f'rhombohedral_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -471,7 +472,6 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, error_tag, comm)
         'n_drop': 10,
         }]
     opt_params = {
-        'tag': 'rhombohedral_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 100,
@@ -480,7 +480,7 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, error_tag, comm)
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
+def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, comm):
     data_params = {
         'tag': f'orthorhombic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -499,16 +499,16 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, error_tag, comm)
             f'{bravais_lattice}_0_01': pitf_group_params,
             }
         generator_info = [
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 500},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 500},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 500},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 500},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 750},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 750},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 750},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 750},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 100},
-            {'generator': 'templates', 'n_unit_cells': 1000},
+            {'generator': 'templates', 'n_unit_cells': 2000},
             #{'generator': 'random', 'n_unit_cells': 200},
             #{'generator': 'distribution_volume', 'n_unit_cells': 100},
-            {'generator': 'predicted_volume', 'n_unit_cells': 1000},
+            {'generator': 'predicted_volume', 'n_unit_cells': 2000},
             ]
     elif bravais_lattice == 'oI':
         reg_params = {f'{bravais_lattice}_0_00': reg_group_params,}
@@ -517,33 +517,28 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, error_tag, comm)
             {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 1000},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 1000},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
-            {'generator': 'templates', 'n_unit_cells': 1000},
+            {'generator': 'templates', 'n_unit_cells': 2000},
             #{'generator': 'random', 'n_unit_cells': 200},
             #{'generator': 'distribution_volume', 'n_unit_cells': 100},
-            {'generator': 'predicted_volume', 'n_unit_cells': 1000},
+            {'generator': 'predicted_volume', 'n_unit_cells': 2000},
             ]
     elif bravais_lattice == 'oC':
         reg_params = {
             f'{bravais_lattice}_0_00': reg_group_params,
-            f'{bravais_lattice}_1_00': reg_group_params,
             f'{bravais_lattice}_2_00': reg_group_params,
             }
         pitf_params = {
             f'{bravais_lattice}_0_00': pitf_group_params,
-            f'{bravais_lattice}_1_00': pitf_group_params,
             f'{bravais_lattice}_2_00': pitf_group_params,
             }
         generator_info = [
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 350},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 350},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': 350},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 350},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 350},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': 350},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 500},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': 500},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 500},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': 500},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
-            #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 100},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': 100},
-            {'generator': 'templates', 'n_unit_cells': 1000},
+            {'generator': 'templates', 'n_unit_cells': 2000},
             #{'generator': 'random', 'n_unit_cells': 200},
             #{'generator': 'distribution_volume', 'n_unit_cells': 100},
             {'generator': 'predicted_volume', 'n_unit_cells': 1000},
@@ -612,7 +607,6 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, error_tag, comm)
         'n_drop': 10,
         }]
     opt_params = {
-        'tag': 'orthorhombic_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 100,
@@ -621,7 +615,7 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, error_tag, comm)
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_monoclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
+def get_monoclinic_optimizer(bravais_lattice, broadening_tag, comm):
     data_params = {
         'tag': f'monoclinic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -649,28 +643,28 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
             f'{bravais_lattice}_4_03': pitf_group_params,
             }
         generator_info = [
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 100},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 100},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 100},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 100},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': 100},
-            {'generator': 'nn', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': 100},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 100},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 100},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 100},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 100},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': 100},
-            {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': 100},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 140},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 140},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 140},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 140},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': 140},
+            {'generator': 'nn', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': 140},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 140},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 140},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 140},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 140},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': 140},
+            {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': 140},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 100},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 100},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 100},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 100},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': 100},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': 100},
-            {'generator': 'templates', 'n_unit_cells': 500},
-            {'generator': 'random', 'n_unit_cells': 500},
+            {'generator': 'templates', 'n_unit_cells': 1000},
+            #{'generator': 'random', 'n_unit_cells': 500},
             #{'generator': 'distribution_volume', 'n_unit_cells': 100},
-            {'generator': 'predicted_volume', 'n_unit_cells': 500},
+            {'generator': 'predicted_volume', 'n_unit_cells': 1000},
             ]
     elif bravais_lattice == 'mP':
         reg_params = {
@@ -709,18 +703,17 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_4_00', 'n_unit_cells': int(f * 100)},
             #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_4_01', 'n_unit_cells': int(f * 100)},
             {'generator': 'templates', 'n_unit_cells': int(f * 500)},
-            {'generator': 'random', 'n_unit_cells': int(f * 500)},
+            #{'generator': 'random', 'n_unit_cells': int(f * 500)},
             #{'generator': 'distribution_volume', 'n_unit_cells': int(f * 100)},
             {'generator': 'predicted_volume', 'n_unit_cells': int(f * 500)},
             ]
     iteration_info = [{
         'worker': 'random_subsampling',
-        'n_iterations': 200,
+        'n_iterations': 100,
         'n_peaks': 20,
         'n_drop': 10,
         }]
     opt_params = {
-        'tag': 'monoclinic_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 100,
@@ -729,7 +722,7 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_triclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
+def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm):
     data_params = {
         'tag': f'triclinic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -750,7 +743,7 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(f * 1000)},
         #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(f * 100)},
         {'generator': 'templates', 'n_unit_cells': int(f * 1000)},
-        {'generator': 'random', 'n_unit_cells': int(f * 1000)},
+        #{'generator': 'random', 'n_unit_cells': int(f * 1000)},
         #{'generator': 'distribution_volume', 'n_unit_cells': int(f * 100)},
         {'generator': 'predicted_volume', 'n_unit_cells': int(f * 1000)},
         ]
@@ -761,10 +754,112 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, error_tag, comm):
         'n_drop': 10,
         }]
     opt_params = {
-        'tag': 'monoclinic_{broadening_tag}_{error_tag}',
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 50,
         'neighbor_radius': 0.003
         }
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
+
+
+
+def get_logger(comm):
+    logger = logging.getLogger(f'rank[{comm.rank}]')
+    logger.setLevel(logging.DEBUG)                                                 
+    mh = MPIFileHandler('logfile.log')
+    mh.setFormatter(logging.Formatter('%(asctime)s:%(name)s:%(levelname)s:%(message)s'))                                                
+    logger.addHandler(mh)
+    return logger
+
+
+def get_mpi_organizer(comm, bravais_lattices, manager_rank, serial):
+    rank = comm.Get_rank()
+    n_ranks = comm.Get_size()
+    mpi_organizer = namedtuple('mpi_organizer', ['manager', 'workers', 'color', 'split_comm'])
+    mpi_organizers = dict.fromkeys(bravais_lattices)
+    serial_split_comm = comm.Split(color=rank, key=0)
+    for bl_index, bravais_lattice in enumerate(bravais_lattices):
+        if serial[bl_index]:
+            if rank == manager_rank[bl_index]:
+                mpi_organizers[bravais_lattice] = mpi_organizer(
+                    manager_rank[bl_index],
+                    [manager_rank[bl_index]],
+                    manager_rank[bl_index],
+                    serial_split_comm
+                    )
+            else:
+                mpi_organizers[bravais_lattice] = mpi_organizer(
+                    manager_rank[bl_index],
+                    [manager_rank[bl_index]],
+                    rank,
+                    None
+                    )
+        else:
+            if rank == manager_rank[bl_index]:
+                key = 0
+            else:
+                key = rank + 1
+            mpi_organizers[bravais_lattice] = mpi_organizer(
+                manager_rank[bl_index],
+                [i for i in range(n_ranks)],
+                bl_index,
+                comm.Split(color=bl_index, key=key)
+                )
+    return mpi_organizers
+
+
+def get_optimizers(rank, mpi_organizers, broadening_tag, logger=None):
+    bravais_lattices = mpi_organizers.keys()
+    optimizer = dict.fromkeys(bravais_lattices)
+    for bl_index, bravais_lattice in enumerate(bravais_lattices):
+        if rank == mpi_organizers[bravais_lattice].manager:
+            # These function calls return an OptimizerManager object
+            if bravais_lattice in ['cF', 'cI', 'cP']:
+                optimizer[bravais_lattice] = get_cubic_optimizer(
+                    bravais_lattice,
+                    broadening_tag,
+                    mpi_organizers[bravais_lattice].split_comm,
+                    )
+            elif bravais_lattice in ['hP']:
+                optimizer[bravais_lattice] = get_hexagonal_optimizer(
+                    bravais_lattice,
+                    broadening_tag,
+                    mpi_organizers[bravais_lattice].split_comm,
+                    )
+            elif bravais_lattice in ['hR']:
+                optimizer[bravais_lattice] = get_rhombohedral_optimizer(
+                    bravais_lattice,
+                    broadening_tag,
+                    mpi_organizers[bravais_lattice].split_comm,
+                    )
+            elif bravais_lattice in ['tI', 'tP']:
+                optimizer[bravais_lattice] = get_tetragonal_optimizer(
+                    bravais_lattice,
+                    broadening_tag,
+                    mpi_organizers[bravais_lattice].split_comm,
+                    )
+            elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
+                optimizer[bravais_lattice] = get_orthorhombic_optimizer(
+                    bravais_lattice,
+                    broadening_tag,
+                    mpi_organizers[bravais_lattice].split_comm,
+                    )
+            elif bravais_lattice in ['mC', 'mP']:
+                optimizer[bravais_lattice] = get_monoclinic_optimizer(
+                    bravais_lattice,
+                    broadening_tag,
+                    mpi_organizers[bravais_lattice].split_comm,
+                    )
+            elif bravais_lattice in ['aP']:
+                optimizer[bravais_lattice] = get_triclinic_optimizer(
+                    bravais_lattice,
+                    broadening_tag,
+                    mpi_organizers[bravais_lattice].split_comm,
+                    )
+            if not logger is None:
+                logger.info(f'Loaded manager optimizer for {bravais_lattice}')
+        elif rank in mpi_organizers[bravais_lattice].workers:
+            optimizer[bravais_lattice] = OptimizerWorker(mpi_organizers[bravais_lattice].split_comm)
+            if not logger is None:
+                logger.info(f'Loaded worker optimizer for {bravais_lattice}')
+    return optimizer

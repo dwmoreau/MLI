@@ -122,7 +122,6 @@ class Candidates:
             np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
             axis=1
             )[:, :n_keep]
-
         hkl_subsampled = np.take_along_axis(self.hkl, subsampled_indices[:, :, np.newaxis], axis=1)
         q2_subsampled = np.take(self.q2_obs, subsampled_indices)
 
@@ -138,6 +137,50 @@ class Candidates:
         self.best_M20[improved_M20] = self.M20[improved_M20]
         self.best_xnn[improved_M20] = self.xnn[improved_M20]
         self.best_hkl[improved_M20] = self.hkl[improved_M20]
+
+    def refine_cell(self):
+        _, probability = get_M20_likelihood_from_xnn(
+            q2_obs=self.q2_obs,
+            xnn=self.best_xnn,
+            hkl=self.best_hkl,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            )
+        indexed_peaks = probability > 0.5
+        n_indexed_peaks = np.sum(indexed_peaks, axis=1)
+        unique_n_indexed_peaks = np.unique(n_indexed_peaks)
+        refined_xnn = self.best_xnn.copy()
+        for n in unique_n_indexed_peaks:
+            candidate_indices = n_indexed_peaks == n
+            subsampled_indices = np.argwhere(indexed_peaks[candidate_indices])
+            # subsampled_indices: n_candidates x n_peaks
+            # hkl:                n_candidates x n_peaks x 3
+            subsampled_indices = subsampled_indices[:, 1].reshape((candidate_indices.sum(), n))
+            hkl_subsampled = np.take_along_axis(
+                self.best_hkl[candidate_indices],
+                subsampled_indices[:, :, np.newaxis],
+                axis=1
+                )
+            q2_subsampled = np.take(self.q2_obs, subsampled_indices)
+            target_function = CandidateOptLoss(
+                q2_subsampled, 
+                lattice_system=self.lattice_system,
+                )
+            target_function.update(hkl_subsampled, refined_xnn[candidate_indices])
+            refined_xnn[candidate_indices] += target_function.gauss_newton_step(refined_xnn[candidate_indices])
+
+        q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
+        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
+        refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+
+        hkl2 = get_hkl_matrix(refined_hkl, self.lattice_system)
+        q2_calc = np.sum(hkl2 * refined_xnn[:, np.newaxis, :], axis=2)
+        refined_M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+
+        update = refined_M20 > self.best_M20
+        self.best_hkl[update] = refined_hkl[update]
+        self.best_M20[update] = refined_M20[update]
+        self.best_xnn[update] = refined_xnn[update]
 
     def correct_off_by_two(self):
         mult_factor = np.array([1/2, 1, 2, 3, 4])
@@ -287,6 +330,7 @@ class OptimizerBase:
         # each axis. This also performs a quick reindexing.
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
+        candidates.refine_cell()
         candidates.correct_off_by_two()
         candidates.assign_extinction_group()
         candidates.calculate_peaks_indexed()
@@ -304,7 +348,7 @@ class OptimizerWorker(OptimizerBase):
         self.rng = np.random.default_rng()
         super().__init__(comm)
         
-    def run(self, foo, bar):
+    def run(self, entry=None, q2=None, n_top_candidates=20):
         self.q2_obs = np.zeros(self.n_peaks)
         self.run_common(n_top_candidates=None)
 
@@ -332,9 +376,6 @@ class OptimizerManager(OptimizerBase):
         self.rng = np.random.default_rng(seed)
 
         opt_params_defaults = {
-            'n_candidates_nn': 320,
-            'n_candidates_rf': 80,
-            'n_candidates_template': 1920,
             'minimum_uc': 2,
             'maximum_uc': 500,
             }
@@ -352,11 +393,6 @@ class OptimizerManager(OptimizerBase):
         self.data_params['load_from_tag'] = True
         self.template_params[self.bravais_lattice]['load_from_tag'] = True
         self.random_params[self.bravais_lattice]['load_from_tag'] = True
-        self.save_to = os.path.join(
-            self.data_params['base_directory'], 'models', self.data_params['tag'], 'optimizer'
-            )
-        if not os.path.exists(self.save_to):
-            os.mkdir(self.save_to)
 
         self.indexer = Indexing(
             data_params=self.data_params,
@@ -393,8 +429,11 @@ class OptimizerManager(OptimizerBase):
         self.unit_cell_length = self.indexer.data_params['unit_cell_length']
         super().__init__(comm)
 
-    def run(self, entry, n_top_candidates):
-        self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
+    def run(self, entry=None, q2=None, n_top_candidates=20):
+        if entry is None:
+            self.q2_obs = q2[:self.n_peaks]
+        elif q2 is None:
+            self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
         self.run_common(n_top_candidates=n_top_candidates)
 
     def generate_candidates_rank(self):

@@ -318,8 +318,8 @@ def get_split_group(lattice_system, unit_cell=None, reciprocal_reindexed_unit_ce
         if reindexed_spacegroup_symbol_hm[0] in ['P', 'I', 'F']:
             split = 0
         else:
-            if reindexed_unit_cell[0] <= reindexed_unit_cell[2]:
-                if reindexed_unit_cell[1] <= reindexed_unit_cell[2]:
+            if reciprocal_reindexed_unit_cell[0] <= reciprocal_reindexed_unit_cell[2]:
+                if reciprocal_reindexed_unit_cell[1] <= reciprocal_reindexed_unit_cell[2]:
                     split = 0 # abc
                 else:
                     split = 1 # acb
@@ -572,6 +572,8 @@ def get_unit_cell_from_s6(s6):
 
 
 def selling_reduction(unit_cell, space='direct'):
+    assert space == 'direct'
+
     reduction_op_bc = np.array([
         [-1, 0, 0, 0, 0, 0], 
         [1, 1, 0, 0, 0, 0],
@@ -898,7 +900,6 @@ def selling_reduction(unit_cell, space='direct'):
         ])
 
     s6 = get_s6_from_unit_cell(unit_cell)
-
     s6_reduced = s6.copy()
     hkl_transformation = np.repeat(np.eye(3)[np.newaxis], unit_cell.shape[0], axis=0)
     for iteration in range(20):
@@ -907,16 +908,10 @@ def selling_reduction(unit_cell, space='direct'):
         s6_max_index = np.argmax(s6_reduced, axis=1)
         s6_max = np.take_along_axis(s6_reduced, s6_max_index[:, np.newaxis], axis=1)[:, 0]
         for axis_index in range(6):
-            if space == 'direct':
-                indices = np.logical_and(
-                    s6_max_index == axis_index,
-                    s6_max > 0
-                    )
-            elif space == 'reciprocal':
-                indices = np.logical_and(
-                    s6_max_index == axis_index,
-                    s6_max < 0
-                    )
+            indices = np.logical_and(
+                s6_max_index == axis_index,
+                s6_max > 0
+                )
             if indices.sum() > 0:
                 s6_reduced_next[indices] = np.matmul(
                     reduction_ops[axis_index],
@@ -935,8 +930,6 @@ def selling_reduction(unit_cell, space='direct'):
         np.sqrt(-(s6_reduced[:, 4] + s6_reduced[:, 0] + s6_reduced[:, 2])),
         np.sqrt(-(s6_reduced[:, 5] + s6_reduced[:, 0] + s6_reduced[:, 1]))
         )), axis=1)
-    if space == 'reciprocal':
-        order = order[:, ::-1]
 
     abc = np.all(order == np.array([0, 1, 2]), axis=1)
     acb = np.all(order == np.array([0, 2, 1]), axis=1)
@@ -1003,5 +996,17 @@ def reindex_entry_basic(unit_cell, lattice_system, bravais_lattice, space='direc
         unit_cell[swap_ac] = np.take(unit_cell[swap_ac], [2, 1, 0, 3], axis=1)
         unit_cell[mirror_angle, 3] = np.pi - unit_cell[mirror_angle, 3]
     elif lattice_system == 'triclinic':
-        unit_cell, _ = reindex_entry_triclinic(unit_cell, space)
+        if space == 'reciprocal':
+            # The reciprocal space reindexing algorithm for triclinic is broken...
+            # This is here until it gets fixed.
+            from Utilities import reciprocal_uc_conversion
+            direct_unit_cell = reciprocal_uc_conversion(
+                unit_cell, partial_unit_cell=True, lattice_system='triclinic'
+                )
+            direct_unit_cell, _ = reindex_entry_triclinic(direct_unit_cell, 'direct')
+            unit_cell = reciprocal_uc_conversion(
+                direct_unit_cell, partial_unit_cell=True, lattice_system='triclinic'
+                )
+        else:
+            unit_cell, _ = reindex_entry_triclinic(unit_cell, space)
     return unit_cell

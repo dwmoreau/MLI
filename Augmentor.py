@@ -2,6 +2,7 @@ import copy
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scipy.signal
 import scipy.stats
 import scipy.optimize
 from sklearn.decomposition import PCA
@@ -151,10 +152,12 @@ class Augmentor:
             }
 
         y = keep_sum / total_sum
+        y_filt = scipy.signal.medfilt(y, kernel_size=(5, 1))
+        y_filt[total_sum == 0] = 0.5
         y[total_sum == 0] = 0.5
         self.interpolator = scipy.interpolate.RegularGridInterpolator(
             points=(self.difference_centers, self.q2_centers),
-            values=y,
+            values=y_filt,
             bounds_error=False,
             fill_value=np.nan,
             )
@@ -228,12 +231,9 @@ class Augmentor:
         #       reindexed_unit_cell
         #       reindexed_hkl
         reindexed_unit_cell = np.stack(augmented_entries['reindexed_unit_cell'])
-        if self.lattice_system in ['triclinic', 'monoclinic']:
+        if self.lattice_system in ['monoclinic']:
             reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(reindexed_unit_cell)
-            if self.lattice_system == 'triclinic':
-                reciprocal_reindexed_unit_cell, hkl_reindexer = \
-                    reindex_entry_triclinic(reciprocal_reindexed_unit_cell, space='reciprocal')
-            elif self.lattice_system == 'monoclinic':
+            if self.lattice_system == 'monoclinic':
                 hkl_reindexer = np.zeros((reindexed_unit_cell.shape[0], 3, 3))
                 reindexed_spacegroup_symbol_hm = list(augmented_entries['reindexed_spacegroup_symbol_hm'])
                 split_group = [None for i in range(reindexed_unit_cell.shape[0])]
@@ -251,6 +251,10 @@ class Augmentor:
                         )
                     split_group[entry_index] = group[entry_index].replace(f'_', f'_{split}_')
                 augmented_entries['split_group'] = split_group
+            # triclinic reindexing in reciprocal space is broken
+            #elif self.lattice_system == 'triclinic':
+            #    reciprocal_reindexed_unit_cell, hkl_reindexer = \
+            #        reindex_entry_triclinic(reciprocal_reindexed_unit_cell, space='reciprocal')
             reindexed_unit_cell = reciprocal_uc_conversion(reciprocal_reindexed_unit_cell)
             augmented_entries['reindexed_unit_cell'] = list(reindexed_unit_cell)
             reindexed_hkl = np.stack(augmented_entries['reindexed_hkl'])
@@ -318,7 +322,6 @@ class Augmentor:
 
         previous_kept_index = first_peak_index
 
-        keep_next = False
         peak_generation_info = get_peak_generation_info()
         broadening_params = peak_generation_info['broadening_params']
         broadening_multiplier = peak_generation_info['broadening_multiples'][
@@ -328,7 +331,57 @@ class Augmentor:
             # cases:
             # 1) Close to previous_kept: Reject
             # 2) Far from previous_kept and next: Use formula
-            # 3) Far from previous_kept, close to next: Accept with 50% probability. If rejected, accept the next
+            # 3) Far from previous_kept, close to next: Accept with 0.5xformula probability
+
+            # There is a problem with really large q2 values. Like ~100 I believe they are comming from
+            # setting the hkl to [-100, -100, -100] for empty peaks in the peak list
+            if q2_sa[index] < 1:
+                peak_breadth_std = broadening_multiplier * (broadening_params[0] + q2_sa[index]*broadening_params[1])
+                overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5
+                distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
+                # Case 1 will not pass beyond this
+                if distance_previous > overlap_threshold: 
+                    if index == q2_sa.size - 1:
+                        separation = distance_previous
+                        distance_next = distance_previous
+                    else:
+                        distance_next = q2_sa[index + 1] - q2_sa[index]
+                        separation = min(distance_previous, distance_next)
+                    keep_prob = self.interpolator((separation, q2_sa[index]))
+                    if np.isnan(keep_prob):
+                        # If the query values are out of the interpolation ranges the output is np.nan
+                        # Catch these cases and use the bounds
+                        if separation < self.difference_centers[0] and q2_sa[index] < self.q2_centers[0]:
+                            keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[0]))
+                        elif separation < self.difference_centers[0] and q2_sa[index] > self.q2_centers[-1]:
+                            keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[-1]))
+                        elif separation > self.difference_centers[-1] and q2_sa[index] < self.q2_centers[0]:
+                            keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[0]))
+                        elif separation > self.difference_centers[-1] and q2_sa[index] > self.q2_centers[-1]:
+                            keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[-1]))
+                        elif separation < self.difference_centers[0]:
+                            keep_prob = self.interpolator((self.difference_centers[0], q2_sa[index]))
+                        elif separation > self.difference_centers[-1]:
+                            keep_prob = self.interpolator((self.difference_centers[-1], q2_sa[index]))
+                        elif q2_sa[index] < self.q2_centers[0]:
+                            keep_prob = self.interpolator((separation, self.q2_centers[0]))
+                        elif q2_sa[index] > self.q2_centers[-1]:
+                            keep_prob = self.interpolator((separation, self.q2_centers[-1]))
+                    if distance_next > overlap_threshold:
+                        multiplier = 1
+                    else:
+                        multiplier = 0.5
+                    if self.rng.random() < multiplier*keep_prob:
+                        q2.append(q2_sa[index])
+                        reindexed_hkl.append(reindexed_hkl_sa[index])
+                        previous_kept_index = index
+        """
+        keep_next = False
+        for index in range(first_peak_index + 1, q2_sa.size):
+            # cases:
+            # 1) Close to previous_kept: Reject
+            # 2) Far from previous_kept and next: Use formula
+            # 3) Far from previous_kept, close to next: Accept with 0.5xformula probability
 
             # There is a problem with really large q2 values. Like ~100 I believe they are comming from
             # setting the hkl to [-100, -100, -100] for empty peaks in the peak list
@@ -381,10 +434,13 @@ class Augmentor:
                     q2.append(q2_sa[index])
                     reindexed_hkl.append(reindexed_hkl_sa[index])
                     previous_kept_index = index
-
+        """
         if len(q2) >= self.n_peaks:
             # This sort might be unneccessary, but not harmful.
             q2 = np.array(q2)
+            check = np.sum((q2[1:] - q2[:-1]) < 0)
+            if check > 0:
+                print('q2 is not sorted. This is a bug')
             sort_indices = np.argsort(q2)
             q2 = q2[sort_indices][:self.n_peaks]
 
@@ -481,7 +537,7 @@ class Augmentor:
             perturbed_unit_cell = np.zeros(6)
             perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
             perturbed_unit_cell[3:] = self.angle_scale * perturbed_unit_cell_scaled[3:] + np.pi/2
-            perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell)
+            perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell, space='direct')
             perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
             perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
         return perturbed_unit_cell_scaled

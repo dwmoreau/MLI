@@ -36,7 +36,15 @@ class RandomGenerator:
 
     def train(self, data):
         q2 = np.stack(data['q2'])
-        vol = get_unit_cell_volume(np.stack(data['reciprocal_reindexed_unit_cell']))
+        # This is to correct for a bug in the dataset parsing.
+        # This has been corrected and the following lines should be deleted when the 
+        # dataset is regenerated next
+        reciprocal_reindexed_unit_cell = np.stack(data['reciprocal_reindexed_unit_cell'])
+        if np.sum(reciprocal_reindexed_unit_cell == 0) > 0:
+            print('THERE ARE ZEROS IN THE RECIPROCAL REINDEXED UNIT CELLL')
+            reindexed_unit_cell = np.stack(data['reindexed_unit_cell'])
+            reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(reindexed_unit_cell)
+        vol = get_unit_cell_volume(reciprocal_reindexed_unit_cell)
         train = np.array(data['train'], dtype=bool)
             
         # Get limits for a continuous distribution of volume
@@ -218,6 +226,7 @@ class RandomGenerator:
                 preds[est_index] = self.random_forest_regressor.estimators_[est_index].predict(
                     q2_obs[np.newaxis]
                     )[0]
+
             if n_unit_cells > self.model_params['n_estimators']:
                 replace = True
             else:
@@ -294,10 +303,15 @@ class RandomGenerator:
                 random_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
                 )
         elif self.lattice_system == 'triclinic':
-            random_reciprocal_unit_cell, _ = reindex_entry_triclinic(
-                random_reciprocal_unit_cell, space='reciprocal'
+            random_unit_cell = reciprocal_uc_conversion(
+                random_reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
                 )
-
+            random_reciprocal_unit_cell, _ = reindex_entry_triclinic(
+                random_unit_cell, space='direct'
+                )
+            random_reciprocal_unit_cell = reciprocal_uc_conversion(
+                random_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
         random_unit_cell = reciprocal_uc_conversion(
             random_reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
             )

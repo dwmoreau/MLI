@@ -81,4 +81,4 @@ def remove_duplicates(source, n_ranks):
     all_duplicated_entries.to_parquet(f'data/duplicate_entries_{source}.parquet')
 
 if __name__ == '__main__':
-    remove_duplicates(source='cod', n_ranks=8)
+    remove_duplicates(source='csd', n_ranks=8)

@@ -18,9 +18,9 @@ from Reindexing import hexagonal_to_rhombohedral_unit_cell
 from Reindexing import hexagonal_to_rhombohedral_hkl
 from Utilities import get_xnn_from_unit_cell
 from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import map_spacegroup_to_extinction_group
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
-
 
 class ProcessEntry:
     def __init__(self):
@@ -355,6 +355,8 @@ class ProcessEntry:
                 return None
         elif self.lattice_system == 'monoclinic':
             # Perform reindexing in direct space
+            # Reindexing is performed twice. The first is in direct space and puts the unit cell
+            # in the correct space group setting. I am not sure if this is necessary...
             reindexed_unit_cell, self.reindexed_spacegroup_symbol_hm, hkl_reindexer = \
                 reindex_entry_monoclinic(self.unit_cell, self.spacegroup_symbol_hm, space='direct')
             if reindexed_unit_cell is None:
@@ -393,6 +395,7 @@ class ProcessEntry:
                 return None
 
         elif self.lattice_system == 'triclinic':
+            """
             # Same explaination for reindexing in reciprocal space as monoclinic
             # For triclinic, skipping this results 20% incorrectly ordered xnn 
             reciprocal_unit_cell = reciprocal_uc_conversion(
@@ -403,6 +406,9 @@ class ProcessEntry:
             self.reindexed_unit_cell = reciprocal_uc_conversion(
                 self.reciprocal_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
                 )[0]
+            """
+            self.reindexed_unit_cell, self.hkl_reindexer = \
+                reindex_entry_triclinic(self.unit_cell, space='direct')
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
@@ -437,10 +443,11 @@ class ProcessEntry:
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
 
-        if not self.lattice_system in ['monoclinic', 'triclinic']:
-            self.reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(
-                self.reindexed_unit_cell[np.newaxis]
-                )[0]
+        # This still needs some work...
+        #self.reindexed_extinction_group, _ = map_spacegroup_to_extinction_group(self.reindexed_spacegroup_symbol_hm)
+        self.reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(
+            self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+            )[0]
         self.reindexed_xnn = get_xnn_from_reciprocal_unit_cell(
             self.reciprocal_reindexed_unit_cell[np.newaxis], partial_unit_cell=False
             )[0]

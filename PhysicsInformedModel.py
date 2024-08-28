@@ -582,6 +582,8 @@ class PhysicsInformedModel:
         print(reciprocal_volume_scaled.shape)
         print(xnn_values.shape)
 
+        np.save('hkl_ref.npy', self.hkl_ref)
+        np.save('hkl_labels.npy', np.stack(data['hkl_labels']))
         np.save('q2_queries.npy', inputs['q2_queries'])
         np.save('q2_keys.npy', q2_keys)
         np.save('weights.npy', weights)

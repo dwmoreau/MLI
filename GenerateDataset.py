@@ -85,20 +85,12 @@ class EntryGenerator:
         self.theta2_pattern = peak_generation_info['theta2_pattern']
         self.q2_pattern = peak_generation_info['q2_pattern']
         # This is the information to store for each peak
-        if self.lattice_system in ['monoclinic', 'triclinic']:
-            self.peak_components = {
-                'q2': 'float64',
-                'reindexed_h': 'int',
-                'reindexed_k': 'int',
-                'reindexed_l': 'int',
-                }
-        else:
-            self.peak_components = {
-                'q2': 'float64',
-                'reindexed_h': 'int',
-                'reindexed_k': 'int',
-                'reindexed_l': 'int',
-                }
+        self.peak_components = {
+            'q2': 'float64',
+            'reindexed_h': 'int',
+            'reindexed_k': 'int',
+            'reindexed_l': 'int',
+            }
         self.data_set_components = {
             'database': 'string',
             'identifier': 'string',
@@ -201,9 +193,12 @@ class EntryGenerator:
         q2_peaks = q2_peaks[sort_indices]
         hkl_peaks = hkl_peaks[sort_indices]
         intensities = intensities[sort_indices]
-        redundant_indices = np.where((q2_peaks[1:] - q2_peaks[:-1]) == 0)[0] + 1
-        q2_peaks_unique = np.delete(q2_peaks, redundant_indices)
-        hkl_peaks_unique =  np.delete(hkl_peaks, redundant_indices, axis=0)
+        redundant = np.where((q2_peaks[1:] - q2_peaks[:-1]) == 0)[0] + 1
+        if len(redundant) > 0:
+            intensities[redundant - 1] = intensities[redundant] + intensities[redundant - 1]
+            intensities = np.delete(intensities, redundant, axis=0)
+            q2_peaks = np.delete(q2_peaks, redundant, axis=0)
+            hkl_peaks =  np.delete(hkl_peaks, redundant, axis=0)
 
         breadths_q2_peaks = self.broadening_params[0, :] + self.broadening_params[1, :] * q2_peaks[:, np.newaxis]
         prefactor = 1/np.sqrt(2*np.pi*breadths_q2_peaks[:, np.newaxis]**2)
@@ -214,7 +209,7 @@ class EntryGenerator:
         peaks_dict = {}
         for broadening_index, broadening_tag in enumerate(self.broadening_tags):
             I_norm, q2_found, hkl_found = pick_peaks(
-                I_pattern[:, broadening_index], self.q2_pattern, q2_peaks_unique, hkl_peaks_unique, self.peak_length
+                I_pattern[:, broadening_index], self.q2_pattern, q2_peaks, hkl_peaks, self.peak_length
                 )
             reindexed_hkl_found = np.matmul(hkl_found, hkl_reindexer).round(decimals=0).astype(int)
             peak_length = min(q2_found.size, self.peak_length)
@@ -242,15 +237,15 @@ class EntryGenerator:
                 print()
                 print(np.round(np.column_stack((q2, reindexed_q2, reciprocal_reindexed_q2)), decimals=4))
             """
-        peak_length = min(q2_peaks_unique.size, self.peak_length)
-        reindexed_hkl_peaks_unique = np.matmul(
-            hkl_peaks_unique, hkl_reindexer
+        peak_length = min(q2_peaks.size, self.peak_length)
+        reindexed_hkl_peaks = np.matmul(
+            hkl_peaks, hkl_reindexer
             ).round(decimals=0).astype(int)
         peaks_dict.update({
-            'q2_sa': q2_peaks_unique,
-            'reindexed_h_sa': reindexed_hkl_peaks_unique[:peak_length, 0],
-            'reindexed_k_sa': reindexed_hkl_peaks_unique[:peak_length, 1],
-            'reindexed_l_sa': reindexed_hkl_peaks_unique[:peak_length, 2],
+            'q2_sa': q2_peaks,
+            'reindexed_h_sa': reindexed_hkl_peaks[:peak_length, 0],
+            'reindexed_k_sa': reindexed_hkl_peaks[:peak_length, 1],
+            'reindexed_l_sa': reindexed_hkl_peaks[:peak_length, 2],
             })
         return True, peaks_dict
 
