@@ -151,10 +151,10 @@ class Augmentor:
             'cdf': cdf
             }
 
-        y = keep_sum / total_sum
+        y = 0.5 * np.ones(keep_sum.shape)
+        indices = total_sum != 0
+        y[indices] = keep_sum[indices] / total_sum[indices]
         y_filt = scipy.signal.medfilt(y, kernel_size=(5, 1))
-        y_filt[total_sum == 0] = 0.5
-        y[total_sum == 0] = 0.5
         self.interpolator = scipy.interpolate.RegularGridInterpolator(
             points=(self.difference_centers, self.q2_centers),
             values=y_filt,
@@ -220,7 +220,7 @@ class Augmentor:
                     while augmented_entry is None:
                         augmented_entry = self.augment_entry(entry)
                         attempts += 1
-                        if attempts == 10:
+                        if attempts == 100:
                             break
                     if augmented_entry is not None:
                         augmented_entries.append(augmented_entry)
@@ -327,6 +327,7 @@ class Augmentor:
         broadening_multiplier = peak_generation_info['broadening_multiples'][
             peak_generation_info['broadening_tags'].index(self.broadening_tag)
             ]
+
         for index in range(first_peak_index + 1, q2_sa.size):
             # cases:
             # 1) Close to previous_kept: Reject
@@ -347,26 +348,30 @@ class Augmentor:
                     else:
                         distance_next = q2_sa[index + 1] - q2_sa[index]
                         separation = min(distance_previous, distance_next)
-                    keep_prob = self.interpolator((separation, q2_sa[index]))
-                    if np.isnan(keep_prob):
-                        # If the query values are out of the interpolation ranges the output is np.nan
-                        # Catch these cases and use the bounds
-                        if separation < self.difference_centers[0] and q2_sa[index] < self.q2_centers[0]:
-                            keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[0]))
-                        elif separation < self.difference_centers[0] and q2_sa[index] > self.q2_centers[-1]:
-                            keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[-1]))
-                        elif separation > self.difference_centers[-1] and q2_sa[index] < self.q2_centers[0]:
-                            keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[0]))
-                        elif separation > self.difference_centers[-1] and q2_sa[index] > self.q2_centers[-1]:
-                            keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[-1]))
-                        elif separation < self.difference_centers[0]:
-                            keep_prob = self.interpolator((self.difference_centers[0], q2_sa[index]))
-                        elif separation > self.difference_centers[-1]:
-                            keep_prob = self.interpolator((self.difference_centers[-1], q2_sa[index]))
-                        elif q2_sa[index] < self.q2_centers[0]:
-                            keep_prob = self.interpolator((separation, self.q2_centers[0]))
-                        elif q2_sa[index] > self.q2_centers[-1]:
-                            keep_prob = self.interpolator((separation, self.q2_centers[-1]))
+                    
+                    # If the query values are out of the interpolation ranges the output is np.nan
+                    # Catch these cases and use the bounds
+                    check_0 = self.difference_centers[0] < separation < self.difference_centers[-1]
+                    check_1 = self.q2_centers[0] < q2_sa[index] < self.q2_centers[-1]
+                    if check_0 and check_1:
+                        keep_prob = self.interpolator((separation, q2_sa[index]))
+                    elif separation < self.difference_centers[0] and q2_sa[index] < self.q2_centers[0]:
+                        keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[0]))
+                    elif separation < self.difference_centers[0] and q2_sa[index] > self.q2_centers[-1]:
+                        keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[-1]))
+                    elif separation > self.difference_centers[-1] and q2_sa[index] < self.q2_centers[0]:
+                        keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[0]))
+                    elif separation > self.difference_centers[-1] and q2_sa[index] > self.q2_centers[-1]:
+                        keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[-1]))
+                    elif separation < self.difference_centers[0]:
+                        keep_prob = self.interpolator((self.difference_centers[0], q2_sa[index]))
+                    elif separation > self.difference_centers[-1]:
+                        keep_prob = self.interpolator((self.difference_centers[-1], q2_sa[index]))
+                    elif q2_sa[index] < self.q2_centers[0]:
+                        keep_prob = self.interpolator((separation, self.q2_centers[0]))
+                    elif q2_sa[index] > self.q2_centers[-1]:
+                        keep_prob = self.interpolator((separation, self.q2_centers[-1]))
+
                     if distance_next > overlap_threshold:
                         multiplier = 1
                     else:
@@ -375,66 +380,7 @@ class Augmentor:
                         q2.append(q2_sa[index])
                         reindexed_hkl.append(reindexed_hkl_sa[index])
                         previous_kept_index = index
-        """
-        keep_next = False
-        for index in range(first_peak_index + 1, q2_sa.size):
-            # cases:
-            # 1) Close to previous_kept: Reject
-            # 2) Far from previous_kept and next: Use formula
-            # 3) Far from previous_kept, close to next: Accept with 0.5xformula probability
 
-            # There is a problem with really large q2 values. Like ~100 I believe they are comming from
-            # setting the hkl to [-100, -100, -100] for empty peaks in the peak list
-            if q2_sa[index] < 1:
-                peak_breadth_std = broadening_multiplier * (broadening_params[0] + q2_sa[index]*broadening_params[1])
-                overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5
-                distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
-                if index == q2_sa.size - 1:
-                    separation = distance_previous
-                    distance_next = distance_previous
-                else:
-                    distance_next = q2_sa[index + 1] - q2_sa[index]
-                    separation = min(distance_previous, distance_next)
-                keep = False
-                if keep_next:
-                    keep = True
-                    keep_next = False
-                elif distance_previous > overlap_threshold:
-                    keep_next = False
-                    if distance_next > overlap_threshold:
-                        keep_prob = self.interpolator((separation, q2_sa[index]))
-                        if np.isnan(keep_prob):
-                            # If the query values are out of the interpolation ranges the output is np.nan
-                            # Catch these cases and use the bounds
-                            if separation < self.difference_centers[0] and q2_sa[index] < self.q2_centers[0]:
-                                keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[0]))
-                            elif separation < self.difference_centers[0] and q2_sa[index] > self.q2_centers[-1]:
-                                keep_prob = self.interpolator((self.difference_centers[0], self.q2_centers[-1]))
-                            elif separation > self.difference_centers[-1] and q2_sa[index] < self.q2_centers[0]:
-                                keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[0]))
-                            elif separation > self.difference_centers[-1] and q2_sa[index] > self.q2_centers[-1]:
-                                keep_prob = self.interpolator((self.difference_centers[-1], self.q2_centers[-1]))
-                            elif separation < self.difference_centers[0]:
-                                keep_prob = self.interpolator((self.difference_centers[0], q2_sa[index]))
-                            elif separation > self.difference_centers[-1]:
-                                keep_prob = self.interpolator((self.difference_centers[-1], q2_sa[index]))
-                            elif q2_sa[index] < self.q2_centers[0]:
-                                keep_prob = self.interpolator((separation, self.q2_centers[0]))
-                            elif q2_sa[index] > self.q2_centers[-1]:
-                                keep_prob = self.interpolator((separation, self.q2_centers[-1]))
-                        if self.rng.random() < keep_prob:
-                            keep = True
-                    else:
-                        if self.rng.random() < 1/2:
-                            keep = True
-                            keep_next = False
-                        else:
-                            keep_next = True
-                if keep:
-                    q2.append(q2_sa[index])
-                    reindexed_hkl.append(reindexed_hkl_sa[index])
-                    previous_kept_index = index
-        """
         if len(q2) >= self.n_peaks:
             # This sort might be unneccessary, but not harmful.
             q2 = np.array(q2)

@@ -25,7 +25,7 @@ class RandomGenerator:
     def setup(self):
         model_params_defaults = {
             'random_state': 0,
-            'n_estimators': 100,
+            'n_estimators': 200,
             'min_samples_leaf': 1,
             'max_depth': None,
             'subsample': 0.1,

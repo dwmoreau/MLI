@@ -13,6 +13,7 @@ from UtilitiesOptimizer import validate_candidate
 
 base_dir = '/Users/DWMoreau/MLI/data/experimental_data/SACLA'
 broadening_tag = '1'
+optimization_tag = 'updated'
 n_top_candidates = 20
 entry_tags = [
     '1napthyl',
@@ -68,7 +69,7 @@ rng = np.random.default_rng()
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 n_ranks = comm.Get_size()
-logger = get_logger(comm)
+logger = get_logger(comm, optimization_tag)
 logger.info('Starting process')
 
 
@@ -176,5 +177,5 @@ for entry_tag in entry_tags:
                     })
         output_df = pd.DataFrame(output_data)
         output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
-        output_df.to_json(base_dir + f'/{entry_tag}/{entry_tag}_indexing_results.json')
+        output_df.to_json(base_dir + f'/{entry_tag}/{entry_tag}_indexing_results_{optimization_tag}.json')
     logger.info(f'Finished gathering optimization results of {entry_tag}')

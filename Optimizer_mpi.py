@@ -13,8 +13,10 @@ from tqdm import tqdm
 
 from Indexing import Indexing
 from Reindexing import get_different_monoclinic_settings
-from Reindexing import reindex_entry_basic
 from Reindexing import get_s6_from_unit_cell
+from Reindexing import monoclinic_standardization
+from Reindexing import reindex_entry_basic
+from Reindexing import selling_reduction
 from TargetFunctions import CandidateOptLoss
 from Utilities import fix_unphysical
 from Utilities import get_extinction_group
@@ -183,6 +185,22 @@ class Candidates:
         self.best_xnn[update] = refined_xnn[update]
 
     def correct_off_by_two(self):
+        # These do a quick standardization of monoclinic and triclinic candidates. It is just a
+        # Selling reduction.
+        # This is performed in this function because the Miller indices are reassigned at the 
+        # end. Miller index transformations are not tracked in monoclinic_standardization
+        if self.lattice_system in ['monoclinic', 'triclinic']:
+            best_unit_cell = get_unit_cell_from_xnn(
+                self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            if self.lattice_system == 'monoclinic':
+                best_unit_cell = monoclinic_standardization(best_unit_cell, partial_unit_cell=True)
+            elif self.lattice_system == 'triclinic':
+                best_unit_cell, _, _ = selling_reduction(best_unit_cell)
+            self.best_xnn = get_xnn_from_unit_cell(
+                best_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+
         mult_factor = np.array([1/2, 1, 2, 3, 4])
         if self.lattice_system == 'cubic':
             mult_factors = mult_factor[:, np.newaxis]
@@ -233,23 +251,6 @@ class Candidates:
         self.best_M20[test_indices] = np.take_along_axis(M20, best_index[:, np.newaxis], axis=1)[:, 0]
         self.best_hkl[test_indices] = np.take_along_axis(hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1)[:, 0]
 
-        """
-        M20 = np.zeros([self.n, mult_factors.shape[0]])
-        hkl = np.zeros([self.n, mult_factors.shape[0], self.n_peaks, 3])
-        for mf_index in range(mult_factors.shape[0]):
-            xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn
-            q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
-            hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
-            hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
-            hkl2 = get_hkl_matrix(hkl[:, mf_index], self.lattice_system)
-            q2_calc_mult = np.sum(hkl2 * xnn_mult[:, np.newaxis, :], axis=2)
-            M20[:, mf_index] = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
-        best_index = np.argmax(M20, axis=1)
-        final_mult_factor = np.take(mult_factors, best_index, axis=0)        
-        self.best_xnn *= final_mult_factor**2
-        self.best_M20 = np.take_along_axis(M20, best_index[:, np.newaxis], axis=1)[:, 0]
-        self.best_hkl = np.take_along_axis(hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1)[:, 0]
-        """
         # do quick reindexing to enforce constraints
         reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
             self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system

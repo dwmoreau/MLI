@@ -524,6 +524,46 @@ def get_different_monoclinic_settings(unit_cell, partial_unit_cell=False):
     return reindexed_unit_cell
 
 
+def monoclinic_standardization(unit_cell, partial_unit_cell=False):
+    # This performs a very quick "standardization" of the monoclinic lattice.
+    # It performs a Selling reduction and then places the unique axis at b
+    if partial_unit_cell:
+        unit_cell_full = np.zeros((unit_cell.shape[0], 6))
+        unit_cell_full[:, :3] = unit_cell[:, :3]
+        unit_cell_full[:, 4] = unit_cell[:, 3]
+        unit_cell_full[:, 3] = np.pi/2
+        unit_cell_full[:, 5] = np.pi/2
+    else:
+        unit_cell_full = unit_cell
+    reduced_unit_cell_full, _, _ = selling_reduction(unit_cell_full)
+    right_angle = np.isclose(reduced_unit_cell_full[:, 3:], np.pi/2)
+
+    standardized_unit_cell_full = reduced_unit_cell_full.copy()
+    for i in range(unit_cell.shape[0]):
+        if right_angle[i, 0] and right_angle[i, 2]:
+            # a -> a, b -> b, c -> c
+            continue
+        elif right_angle[i, 0] and right_angle[i, 1]:
+            # a -> -a, b -> -c, c -> -b
+            standardized_unit_cell_full[i, 1] = reduced_unit_cell_full[i, 2]
+            standardized_unit_cell_full[i, 2] = reduced_unit_cell_full[i, 1]
+            standardized_unit_cell_full[i, 4] = reduced_unit_cell_full[i, 5]
+            standardized_unit_cell_full[i, 5] = np.pi/2
+        elif right_angle[i, 1] and right_angle[i, 2]:
+            # a -> -b, b -> -b, c -> -c
+            standardized_unit_cell_full[i, 0] = reduced_unit_cell_full[i, 1]
+            standardized_unit_cell_full[i, 1] = reduced_unit_cell_full[i, 0]
+            standardized_unit_cell_full[i, 4] = reduced_unit_cell_full[i, 3]
+            standardized_unit_cell_full[i, 3] = np.pi/2
+        else:
+            # This case should be fixed. 
+            standardized_unit_cell_full[i] = unit_cell_full[i]
+    if partial_unit_cell:
+        return standardized_unit_cell_full[:, [0, 1, 2, 4]]
+    else:
+        return standardized_unit_cell_full
+
+
 def get_s6_from_unit_cell(unit_cell):
     a = unit_cell[:, 0]
     b = unit_cell[:, 1]

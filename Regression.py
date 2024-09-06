@@ -50,18 +50,42 @@ class Regression:
 
     def compile_model(self, mode):
         if mode == 'mean':
+            self.reg_loss = LikelihoodLoss(
+                self.model_params['target_function'],
+                n=self.unit_cell_length,
+                beta_nll=self.model_params['beta_nll']
+                )
             mean_setting = True
             var_setting = False
             self.reg_loss.beta_likelihood = True
         elif mode == 'variance':
+            self.reg_loss = LikelihoodLoss(
+                self.model_params['variance_model'],
+                n=self.unit_cell_length,
+                beta_nll=self.model_params['beta_nll']
+                )
             mean_setting = False
             var_setting = True
             self.reg_loss.beta_likelihood = False
         elif mode == 'both':
+            self.reg_loss = LikelihoodLoss(
+                self.model_params['variance_model'], 
+                n=self.unit_cell_length,
+                beta_nll=self.model_params['beta_nll']
+                )
             mean_setting = True
             var_setting = True
             self.reg_loss.beta_likelihood = True
 
+        self.loss_functions = {
+            f'uc_pred_scaled_{self.group}': self.reg_loss
+            }
+        self.loss_weights = {
+            f'uc_pred_scaled_{self.group}': 1
+            }
+        self.loss_metrics = {
+            f'uc_pred_scaled_{self.group}': [self.reg_loss.mean_squared_error, self.reg_loss.log_cosh_error]
+            }
         for layer_name in self.mean_layer_names:
             self.model.get_layer(layer_name).trainable = mean_setting
         for layer_name in self.var_layer_names:
@@ -379,17 +403,26 @@ class Regression:
     def setup(self):
         model_params_defaults = {
             'fit_strategy': 'cycles',
-            'epochs': 10,
-            'cycles': 5,
+            'epochs': 15,
+            'cycles': 3,
             'beta_nll': 0.5,
             'batch_size': 64,
             'learning_rate': 0.0001,
+            'target_function': 'log_cosh',
+            'variance_model': 'normal',
             'mean_params': {
                 'layers': [200, 100, 60],
                 'dropout_rate': 0.25,
                 'epsilon': 0.001,
                 'output_activation': 'linear',
                 'output_name': 'uc_mean_scaled',
+                },
+            'var_params': {
+                'layers': [100, 60],
+                'dropout_rate': 0.25,
+                'epsilon': 0.001,
+                'output_activation': 'softplus',
+                'output_name': 'uc_var_scaled',
                 },
             'alpha_params': {
                 'layers': [100, 60],
@@ -407,8 +440,8 @@ class Regression:
                 },
             'random_forest': {
                 'random_state': 0,
-                'n_estimators': 80,
-                'min_samples_leaf': 10,
+                'n_estimators': 200,
+                'min_samples_leaf': 2,
                 'max_depth': None,
                 'subsample': 0.1,
                 'n_dominant_zone_bins': 10,
@@ -418,6 +451,7 @@ class Regression:
             if key not in self.model_params.keys():
                 self.model_params[key] = model_params_defaults[key]
         self.model_params['mean_params']['unit_cell_length'] = self.unit_cell_length
+        self.model_params['var_params']['unit_cell_length'] = self.unit_cell_length
         self.model_params['alpha_params']['unit_cell_length'] = self.unit_cell_length
         self.model_params['beta_params']['unit_cell_length'] = self.unit_cell_length
         if self.model_params['fit_strategy'] == 'cycles':
@@ -437,6 +471,13 @@ class Regression:
         self.model_params['mean_params']['kernel_initializer'] = None
         self.model_params['mean_params']['bias_initializer'] = None
 
+        for key in model_params_defaults['var_params'].keys():
+            if key not in self.model_params['var_params'].keys():
+                self.model_params['var_params'][key] = model_params_defaults['var_params'][key]
+        self.model_params['var_params']['kernel_initializer'] = None
+        self.model_params['var_params']['bias_initializer'] = \
+            tf.keras.initializers.RandomNormal(mean=-1, stddev=0.05, seed=self.seed)
+
         for key in model_params_defaults['alpha_params'].keys():
             if key not in self.model_params['alpha_params'].keys():
                 self.model_params['alpha_params'][key] = model_params_defaults['alpha_params'][key]
@@ -455,17 +496,6 @@ class Regression:
             if key not in self.model_params['random_forest'].keys():
                 self.model_params['random_forest'][key] = model_params_defaults['random_forest'][key]
 
-        self.reg_loss = LikelihoodLoss('alpha_beta', n=self.unit_cell_length, beta_nll=self.model_params['beta_nll'])
-        self.loss_weights = {
-            f'uc_pred_scaled_{self.group}': 1
-            }
-        self.loss_functions = {
-            f'uc_pred_scaled_{self.group}': self.reg_loss
-            }
-        self.loss_metrics = {
-            f'uc_pred_scaled_{self.group}': [self.reg_loss.mean_squared_error]
-            }
-
     def save(self):
         # Loading the random forest models is a significant overhead cost when performing
         # optimization. Saving / loading as pickle files is faster by a factor of two.
@@ -479,26 +509,19 @@ class Regression:
                 self.random_forest_regressor,
                 f'{self.save_to}/{self.group}_random_forest_regressor.bin'
                 )
-            """
-            with open(f'{self.save_to}/{self.group}_random_forest_regressor.pickle', 'wb') as rf_file:
-                pickle.dump(self.random_forest_regressor, rf_file)
-            """
         else:
             for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
                 joblib.dump(
                     self.random_forest_regressor[ratio_index],
                     f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
                     )
-                """
-                with open(f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.pickle', 'wb') as rf_file:
-                    pickle.dump(self.random_forest_regressor[ratio_index], rf_file)
-                """
                 
     def load_from_tag(self):
         params = read_params(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
         params_keys = [
             'tag',
             'mean_params',
+            'var_params',
             'alpha_params',
             'beta_params',
             'beta_nll',
@@ -558,7 +581,7 @@ class Regression:
             'kernel_initializer',
             'bias_initializer',
             ]
-        network_keys = ['mean_params', 'alpha_params', 'beta_params']
+        network_keys = ['mean_params', 'var_params', 'alpha_params', 'beta_params']
         for network_key in network_keys:
             self.model_params[network_key] = dict.fromkeys(params_keys)
             self.model_params[network_key]['unit_cell_length'] = self.unit_cell_length
@@ -591,28 +614,45 @@ class Regression:
             model_params=self.model_params['mean_params'],
             output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}'
             )
-        uc_pred_alpha_scaled = 1 + mlp_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_alpha_scaled_{self.group}',
-            model_params=self.model_params['alpha_params'],
-            output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}'
-            )
-        uc_pred_beta_scaled = mlp_model_builder(
-            inputs['q2_scaled'],
-            tag=f'uc_pred_beta_scaled_{self.group}',
-            model_params=self.model_params['beta_params'],
-            output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}'
-            )
+        if self.model_params['variance_model'] == 'normal':
+            uc_pred_var_scaled = mlp_model_builder(
+                inputs['q2_scaled'],
+                tag=f'uc_pred_var_scaled_{self.group}',
+                model_params=self.model_params['var_params'],
+                output_name=f'{self.model_params["var_params"]["output_name"]}_{self.group}'
+                )
 
-        # uc_pred_mean_scaled: n_batch x unit_cell_length
-        uc_pred_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name=f'uc_pred_scaled_{self.group}'
-            )((
-                uc_pred_mean_scaled[:, :, tf.newaxis],
-                uc_pred_alpha_scaled[:, :, tf.newaxis],
-                uc_pred_beta_scaled[:, :, tf.newaxis],
-                ))
+            # uc_pred_mean_scaled: n_batch x unit_cell_length
+            uc_pred_scaled = tf.keras.layers.Concatenate(
+                axis=2,
+                name=f'uc_pred_scaled_{self.group}'
+                )((
+                    uc_pred_mean_scaled[:, :, tf.newaxis],
+                    uc_pred_var_scaled[:, :, tf.newaxis],
+                    ))
+        elif self.model_params['variance_model'] == 'alpha_beta':
+            uc_pred_alpha_scaled = 1 + mlp_model_builder(
+                inputs['q2_scaled'],
+                tag=f'uc_pred_alpha_scaled_{self.group}',
+                model_params=self.model_params['alpha_params'],
+                output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}'
+                )
+            uc_pred_beta_scaled = mlp_model_builder(
+                inputs['q2_scaled'],
+                tag=f'uc_pred_beta_scaled_{self.group}',
+                model_params=self.model_params['beta_params'],
+                output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}'
+                )
+
+            # uc_pred_mean_scaled: n_batch x unit_cell_length
+            uc_pred_scaled = tf.keras.layers.Concatenate(
+                axis=2,
+                name=f'uc_pred_scaled_{self.group}'
+                )((
+                    uc_pred_mean_scaled[:, :, tf.newaxis],
+                    uc_pred_alpha_scaled[:, :, tf.newaxis],
+                    uc_pred_beta_scaled[:, :, tf.newaxis],
+                    ))
         return uc_pred_scaled
 
     def get_layer_names(self):
@@ -623,14 +663,20 @@ class Regression:
         self.mean_layer_names.append(f'{self.model_params["mean_params"]["output_name"]}_{self.group}')
 
         self.var_layer_names = []
-        for layer_index in range(len(self.model_params['alpha_params']['layers'])):
-            self.var_layer_names.append(f'dense_uc_pred_alpha_scaled_{self.group}_{layer_index}')
-            self.var_layer_names.append(f'layer_norm_uc_pred_alpha_scaled_{self.group}_{layer_index}')
-        self.var_layer_names.append(f'{self.model_params["alpha_params"]["output_name"]}_{self.group}')
-        for layer_index in range(len(self.model_params['beta_params']['layers'])):
-            self.var_layer_names.append(f'dense_uc_pred_beta_scaled_{self.group}_{layer_index}')
-            self.var_layer_names.append(f'layer_norm_uc_pred_beta_scaled_{self.group}_{layer_index}')
-        self.var_layer_names.append(f'{self.model_params["beta_params"]["output_name"]}_{self.group}')
+        if self.model_params['variance_model'] == 'normal':
+            for layer_index in range(len(self.model_params['var_params']['layers'])):
+                self.var_layer_names.append(f'dense_uc_pred_var_scaled_{self.group}_{layer_index}')
+                self.var_layer_names.append(f'layer_norm_uc_pred_var_scaled_{self.group}_{layer_index}')
+            self.var_layer_names.append(f'{self.model_params["var_params"]["output_name"]}_{self.group}')
+        elif self.model_params['variance_model'] == 'alpha_beta':
+            for layer_index in range(len(self.model_params['alpha_params']['layers'])):
+                self.var_layer_names.append(f'dense_uc_pred_alpha_scaled_{self.group}_{layer_index}')
+                self.var_layer_names.append(f'layer_norm_uc_pred_alpha_scaled_{self.group}_{layer_index}')
+            self.var_layer_names.append(f'{self.model_params["alpha_params"]["output_name"]}_{self.group}')
+            for layer_index in range(len(self.model_params['beta_params']['layers'])):
+                self.var_layer_names.append(f'dense_uc_pred_beta_scaled_{self.group}_{layer_index}')
+                self.var_layer_names.append(f'layer_norm_uc_pred_beta_scaled_{self.group}_{layer_index}')
+            self.var_layer_names.append(f'{self.model_params["beta_params"]["output_name"]}_{self.group}')
 
     def revert_predictions(self, uc_pred_scaled=None, uc_pred_scaled_var=None):
         if not uc_pred_scaled is None:
@@ -768,15 +814,23 @@ class Regression:
 
             outputs = self.model.predict_on_batch(batch_inputs)
 
-            if batch_index == n_batches:
-                uc_pred_scaled[start:] = outputs[:left_over, :, 0]
-                pred_alpha = outputs[:left_over, :, 1]
-                pred_beta = outputs[:left_over, :, 2]
-                uc_pred_scaled_var[start:] = pred_beta / (pred_alpha - 1)
-            else:
-                uc_pred_scaled[start: start + batch_size] = outputs[:, :, 0]
-                pred_alpha = outputs[:, :, 1]
-                pred_beta = outputs[:, :, 2]
-                uc_pred_scaled_var[start: start + batch_size] = pred_beta / (pred_alpha - 1)
+            if self.model_params['variance_model'] == 'normal':
+                if batch_index == n_batches:
+                    uc_pred_scaled[start:] = outputs[:left_over, :, 0]
+                    uc_pred_scaled_var[start:] = outputs[:left_over, :, 1]
+                else:
+                    uc_pred_scaled[start: start + batch_size] = outputs[:, :, 0]
+                    uc_pred_scaled_var[start: start + batch_size] = outputs[:, :, 1]
+            elif self.model_params['variance_model'] == 'alpha_beta':
+                if batch_index == n_batches:
+                    uc_pred_scaled[start:] = outputs[:left_over, :, 0]
+                    pred_alpha = outputs[:left_over, :, 1]
+                    pred_beta = outputs[:left_over, :, 2]
+                    uc_pred_scaled_var[start:] = pred_beta / (pred_alpha - 1)
+                else:
+                    uc_pred_scaled[start: start + batch_size] = outputs[:, :, 0]
+                    pred_alpha = outputs[:, :, 1]
+                    pred_beta = outputs[:, :, 2]
+                    uc_pred_scaled_var[start: start + batch_size] = pred_beta / (pred_alpha - 1)
 
         return uc_pred_scaled, uc_pred_scaled_var

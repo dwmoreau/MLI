@@ -1,17 +1,26 @@
 """
-New approach:
-    x start with xnn ratios & hkl patterns (value & link) and calculate q2_key
-        x start with 1 link
-        - generalize to random ratio and hkl patterns
-    x Get a q2_query, calculate a volume for each ratio & hkl pattern by scaling q2_query & q2_key
-        - does accuracy of volume estimate correlate with qk_distance - yes
-    x Volume scale q2_query for each ratio & hkl_pattern
-    - Calculate distance between q2_query_scaled and q2_keys
-        qk_distance = np.linalg.norm(
-            1 - q2_queries_scaled[:, np.newaxis, :key_length] / q2_keys[np.newaxis, :, :key_length],
-            axis=2
-            )**2
-    - Convert distance to a probability with softmax
+Improve orthorhombic predictions
+    - Work through recipes 
+        - https://karpathy.github.io/2019/04/25/recipe/
+    - Add augmentation
+
+'oC_0_00' - Redo augment
+'oC_1_00' - Redo augment
+'oC_2_00' - Redo augment
+'oF_0_00' - Redo small augment
+'oF_0_01' - Redo run longer
+'oI_0_00' - Redo augment
+'oP_0_00' x Done
+'oP_0_01' x Done
+'oP_0_02' x Done
+'oP_0_03' x Done
+'oP_0_04' x Done
+'oP_0_05' x Done
+'oP_0_06' x Done
+'oP_0_07' - Redo augment
+'oP_0_08' - Redo augment
+
+Implement generative aspect
 """
 import h5py
 import joblib
@@ -20,6 +29,7 @@ import numpy as np
 import os
 # This supresses the tensorflow message on import
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import scipy.special
 from sklearn.preprocessing import StandardScaler
 import tensorflow as tf
 
@@ -31,6 +41,7 @@ from Utilities import get_hkl_matrix
 from Utilities import get_unit_cell_from_xnn
 from Utilities import get_unit_cell_volume
 from Utilities import get_xnn_from_reciprocal_unit_cell
+from Utilities import get_xnn_from_unit_cell
 from Utilities import PairwiseDifferenceCalculator
 from Utilities import read_params
 from Utilities import Q2Calculator
@@ -38,181 +49,243 @@ from Utilities import vectorized_resampling
 from Utilities import write_params
 
 
-class CosineAttention(tf.keras.layers.Layer):
-    def __init__(self, xnn_ratio_values, hkl_links, key_length, ratio_start, lattice_system, source, **kwargs):
+class ExtractionLayer(tf.keras.layers.Layer):
+    def __init__(self, model_params, **kwargs):
         super().__init__(**kwargs)
-        self.lattice_system = lattice_system
-        self.key_length = key_length
-        self.ratio_start = ratio_start
-
-        if source is None:
-            self.n_keys = hkl_links.shape[0]
-            self.n_peaks = hkl_links.shape[1]
-            similarity_weights = tf.random.normal(
-                shape=(self.key_length,), mean=1.0, stddev=0.01, seed=None, dtype=tf.float32
-                )
-            volume_weights = tf.random.normal(
-                shape=(self.n_peaks - self.ratio_start,), mean=1.0, stddev=0.01, seed=None, dtype=tf.float32
-                )
-            ratio_scale = np.median(xnn_ratio_values)
-        else:
-            with h5py.File(source, 'r') as h5_file:
-                hkl_links = np.array(h5_file['cosine_attention']['hkl_links:0'])
-                self.n_keys = hkl_links.shape[0]
-                self.n_peaks = hkl_links.shape[1]
-                xnn_ratio_values = np.array(h5_file['cosine_attention']['xnn_ratio_values:0'])
-                similarity_weights = tf.cast(
-                    np.array(h5_file['cosine_attention']['similarity_weights:0']),
-                    dtype=tf.float32
-                    )
-                volume_weights = tf.cast(
-                    np.array(h5_file['cosine_attention']['volume_weights:0']),
-                    dtype=tf.float32
-                    )
-                ratio_scale = np.array(h5_file['cosine_attention']['ratio_scale:0'])            
-
-        self.hkl_links = tf.Variable(
-            tf.cast(hkl_links, dtype=tf.float32),
-            trainable=False,
-            name='hkl_links'
-            )
-        self.xnn_ratio_values = tf.Variable(
-            initial_value=tf.cast(xnn_ratio_values, dtype=tf.float32),
-            trainable=False,
-            name='xnn_ratio_values'
-            )
-        self.similarity_weights = tf.Variable(
-            similarity_weights,
-            trainable=False,
-            name='similarity_weights'
-            )
-        self.volume_weights = tf.Variable(
-            volume_weights,
-            trainable=True,
-            name='volume_weights'
-            )
-        self.ratio_scale = tf.Variable(
-            tf.cast(ratio_scale, dtype=tf.float32),
-            trainable=False,
-            name='ratio_scale'
-            )
-
-        self.q2_calculator = Q2Calculator(
-            lattice_system=self.lattice_system,
-            hkl=hkl_links,
-            tensorflow=True,
-            representation='xnn'
-            )
-
-    def validate_linkage(self, q2_keys):
-        # This is purely for checking consistency between values, keys, and links.
-        q2_keys = tf.Variable(
-            tf.cast(q2_keys[:, :self.key_length], dtype=tf.float32),
-            trainable=False,
+        """
+        There is no regularization applied to any of the layer weights. If all the weights in this 
+        layer are set to non-trainable, the model will still overfit. Most of the parameters in the 
+        full model are in the dense layer following this layer.
+        """
+        self.model_params = model_params
+        self.seed = 0
+        # q2_obs are all positive since the are divided by a scale factor.
+        # q2_filter then should be positive. Hence the NonNeg constraint for volumes and filters
+        self.volumes = self.add_weight(
+            shape=(self.model_params['n_volumes'], 1, 1),
+            initializer=tf.keras.initializers.RandomUniform(
+                minval=1.5, maxval=5, seed=None,
+                ),
             dtype=tf.float32,
-            shape=(self.n_keys, self.key_length),
-            name='keys'
+            trainable=True,
+            regularizer=None,
+            constraint=tf.keras.constraints.NonNeg(),
+            name='volumes'
             )
-        xnn_values = self.get_xnn_from_ratio(
-            self.xnn_ratio_values, lattice_system=self.lattice_system, tensorflow=True
+
+        self.filters = self.add_weight(
+            shape=(1, self.model_params['n_filters'], self.model_params['filter_length']),
+            initializer=tf.keras.initializers.RandomUniform(
+                minval=0.01, maxval=1, seed=None
+                ),
+            dtype=tf.float32,
+            trainable=True,
+            regularizer=None,
+            constraint=tf.keras.constraints.NonNeg(),
+            name='filters'
             )
 
-        q2_check = self.q2_calculator.get_q2(xnn_values)[:, :self.key_length]
-        if not tf.math.reduce_all(tf.experimental.numpy.isclose(q2_check, q2_keys)):
-            print('KEYS AND VALUES ARE NOT PROPERLY LINKED!!!!!!!!!!!!!')
-            for i in range(10):
-                print(q2_check[i])
-                print(q2_keys[i])
-                print(xnn_values[i])
-                print()
-
-    def link_keys_and_values(self):
-        if self.lattice_system == 'tetragonal':
-            denominator = self.xnn_ratio_values[:, 0]
-        elif self.lattice_system == 'hexagonal':
-            denominator = self.xnn_ratio_values[:, 0] * tf.math.sin(np.pi/3)
-        else:
-            assert False
-        xll = 1 / denominator
-        xhh = tf.math.sqrt(xll) * self.xnn_ratio_values[:, 0]
-        xnn_values = tf.stack((xhh, xll), axis=1)
-        return self.q2_calculator.get_q2(xnn_values)
-
-    def call(self, q2_queries, **kwargs):
-        q2_keys = self.link_keys_and_values()
-        # q2_queries:        batch_size, n_peaks
-        # q2_keys:           n_keys,     n_peaks
-        # q2_ratio:          batch_size, n_keys, n_peaks
-        # reciprocal_volume: batch_size, n_keys
-        q2_ratio = (
-            q2_queries[:, tf.newaxis, self.ratio_start:] / q2_keys[tf.newaxis, :, self.ratio_start:]
-            )**(3/2)
-        volume_weights = tf.nn.softmax(self.volume_weights)
-        reciprocal_volume = tf.math.reduce_sum(
-            volume_weights[tf.newaxis, tf.newaxis] * q2_ratio,
-            axis=2,
-            name='reciprocal_volume'
+        self.sigma_scale = 0.01
+        self.sigma_mean = tf.math.log(tf.math.exp(0.005) - 1)
+        self.sigma_params = self.add_weight(
+            shape=(
+                1, 1,
+                self.model_params['n_filters'],
+                self.model_params['filter_length'],
+                self.model_params['extraction_peak_length']
+                ),
+            initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.1, seed=None),
+            dtype=tf.float32,
+            trainable=True,
+            regularizer=None,
+            name='sigma_params'
             )
-        # q2_queries:        batch_size, n_peaks
-        # reciprocal_volume: batch_size, n_keys
-        # q2_queries_scaled: batch_size, n_keys, n_peaks
-        # q2_keys:           n_keys, n_peaks
-        q2_queries_scaled = q2_queries[:, tf.newaxis] / reciprocal_volume[:, :, tf.newaxis]**(2/3)
 
-        similarity_weights = tf.nn.softmax(self.similarity_weights)
-        query_key_distance = tf.norm(
-            similarity_weights * (1 - q2_queries_scaled[:, :, :self.key_length] / q2_keys[tf.newaxis, :, :self.key_length]),
-            axis=2
-            ) / 0.1
+        self.amplitude_logits = self.add_weight(
+            shape=(
+                1, 1,
+                self.model_params['n_filters'],
+                self.model_params['filter_length'],
+                self.model_params['extraction_peak_length']
+                ),
+            initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=1.0, seed=None),
+            dtype=tf.float32,
+            trainable=True,
+            regularizer=None,
+            constraint=None,
+            name='amplitude_logits'
+            )
+        self.volumes_init = self.volumes.numpy()[:, 0, 0]
+        self.filters_init = self.filters.numpy()[0]
+        self.sigma_params_init = self.sigma_params.numpy()[0, 0]
+        self.amplitude_logits_init = self.amplitude_logits.numpy()[0, 0]
 
-        return query_key_distance, reciprocal_volume
+    def call(self, q2_obs, **kwargs):
+        # filters:     1, n_filters, filter_length
+        # volumes:     n_volumes, 1, 1
+        # q2_filters:  n_volumes, n_filters, filter_length
+        # q2_obs:      batch_size, extraction_peak_length
+        # metric:      batch_size, n_volumes, n_filters
+        q2_filters = (self.volumes * self.filters)[tf.newaxis, :, :, :, tf.newaxis]
 
-    def ratio_target_function(self, ratio_true, weights):
-        # ratio_true: (batch_size)
-        # weights:    (batch_size, n_keys)
-        difference = ((ratio_true - self.xnn_ratio_values[tf.newaxis, :, 0]) / self.ratio_scale)**2
-        return tf.reduce_sum(difference * weights, axis=1)
+        # difference: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
+        difference = q2_filters - q2_obs[:, tf.newaxis, tf.newaxis, tf.newaxis, :]
 
-    def reciprocal_volume_target_function(self, reciprocal_volume_scaled_true, predictions):
-        # reciprocal_volume_true: batch_size
-        # weights:                batch_size, n_keys
-        # reciprocal_volume_pred: batch_size, n_keys
-        weights = predictions[:, :, 0]
-        reciprocal_volume_scaled_pred = predictions[:, :, 1]
-        difference = (reciprocal_volume_scaled_true[:, tf.newaxis] - reciprocal_volume_scaled_pred)**2
-        return tf.reduce_sum(difference * weights, axis=1)
+        sigma = tf.math.softplus(self.sigma_params*self.sigma_scale + self.sigma_mean)
+        arg = -1/2 * (difference / sigma)**2
+        amplitudes = tf.keras.layers.Softmax(axis=2)(self.amplitude_logits)
+        distances = amplitudes * tf.math.exp(arg)
+        # distances: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
+        metric = tf.reduce_sum(distances, axis=(3, 4))
 
-    @staticmethod
-    def get_ratio_from_xnn(xnn, lattice_system, tensorflow):
-        if tensorflow:
-            if lattice_system in ['hexagonal', 'tetragonal']:
-                return (xnn[:, 0] / tf.math.sqrt(xnn[:, 1]))[:, tf.newaxis]
-        else:
-            if lattice_system in ['hexagonal', 'tetragonal']:
-                return (xnn[:, 0] / np.sqrt(xnn[:, 1]))[:, np.newaxis]
+        # These should not be all zeros
+        #print()
+        #print(
+        #    tf.math.reduce_sum(metric),
+        #    tf.math.reduce_mean(metric),
+        #    tf.math.reduce_max(metric),
+        #    )
+        return metric
 
-    @staticmethod
-    def get_xnn_from_ratio(ratio, lattice_system, tensorflow):
-        if tensorflow:
-            if lattice_system == 'tetragonal':
-                denominator = ratio[:, 0]
-            elif lattice_system == 'hexagonal':
-                denominator = ratio[:, 0] * tf.math.sin(np.pi/3)
-            else:
-                assert False
-            xll = 1 / denominator
-            xhh = tf.math.sqrt(xll) * ratio[:, 0]
-            return tf.stack((xhh, xll), axis=1)
-        else:
-            if lattice_system == 'tetragonal':
-                denominator = ratio[:, 0]
-            elif lattice_system == 'hexagonal':
-                denominator = ratio[:, 0] * np.sin(np.pi/3)
-            else:
-                assert False
-            xll = 1 / denominator
-            xhh = np.sqrt(xll) * ratio[:, 0]
-            return np.stack((xhh, xll), axis=1)
+    def loss_function(self, y_true, y_pred):
+        # y_true: batch_size, unit_cell_length
+        # y_pred: batch_size, n_volumes, unit_cell_length + 1
+        xnn_scaled_pred = y_pred[:, :, :self.model_params['unit_cell_length']]
+        logits = y_pred[:, :, self.model_params['unit_cell_length']]
+        probabilities = tf.nn.softmax(logits)
+        errors = y_true[:, tf.newaxis, :] - xnn_scaled_pred
+        if self.model_params['loss_type'] == 'log_cosh':
+            losses = tf.reduce_sum(tf.math.log(tf.math.cosh(errors)), axis=2)
+        elif self.model_params['loss_type'] == 'mse':
+            losses = 1/2 * tf.reduce_mean(errors**2, axis=2)
+        return tf.reduce_sum(losses * probabilities, axis=1)
+
+    def evaluate_weights(self, save_to, split_group, tag):
+        volumes_opt = self.volumes.numpy()[:, 0, 0]
+        filters_opt = self.filters.numpy()[0]
+        sigma_params_opt = self.sigma_params.numpy()[0, 0]
+        amplitude_logits_opt = self.amplitude_logits.numpy()[0, 0]
+
+        # sigma / amplitudes: n_filters, filter_length, extraction_peak_length
+        # filter:             n_fitlers, filter_length
+        sigma_opt = np.log(1 + np.exp(sigma_params_opt*self.sigma_scale + self.sigma_mean))
+        amplitudes_opt = scipy.special.softmax(amplitude_logits_opt, axis=2)
+        sort_indices = np.argsort(filters_opt, axis=1)
+        for index in range(self.model_params['n_filters']):
+            sigma_opt[index, :, :] = sigma_opt[index, sort_indices[index], :]
+            amplitudes_opt[index, :, :] = amplitudes_opt[index, sort_indices[index], :]
+        # plot sigma & amplitudes vs position
+        # amplitude mean, std, max
+        fig, axes = plt.subplots(1, 3, figsize=(8, 2), sharex=True, sharey=True)
+        imshow0 = axes[0].imshow(amplitudes_opt.mean(axis=0), aspect='auto')
+        imshow1 = axes[1].imshow(amplitudes_opt.std(axis=0), aspect='auto')
+        imshow2 = axes[2].imshow(amplitudes_opt.max(axis=0), aspect='auto')
+        fig.colorbar(imshow0, ax=axes[0])
+        fig.colorbar(imshow1, ax=axes[1])
+        fig.colorbar(imshow2, ax=axes[2])
+        axes[0].set_title('Mean Amplitude')
+        axes[1].set_title('STD Amplitude')
+        axes[2].set_title('Max Amplitude')
+        for i in range(3):
+            axes[i].set_xlabel('Peak List Position')
+        axes[0].set_ylabel('Filter Position')
+        fig.tight_layout()
+        fig.savefig(f'{save_to}/{split_group}_pitf_amplitudes_{tag}.png')
+        plt.close()
+
+        # sigma mean, amplitude weighted mean, std
+        fig, axes = plt.subplots(2, 2, figsize=(5, 4), sharex=True, sharey=True)
+        imshow00 = axes[0, 0].imshow(sigma_opt.mean(axis=0), aspect='auto')
+        imshow01 = axes[0, 1].imshow(sigma_opt.std(axis=0), aspect='auto')
+        imshow10 = axes[1, 0].imshow((sigma_opt * amplitudes_opt).mean(axis=0), aspect='auto')
+        imshow11 = axes[1, 1].imshow((sigma_opt * amplitudes_opt).std(axis=0), aspect='auto')
+        fig.colorbar(imshow00, ax=axes[0, 0])
+        fig.colorbar(imshow01, ax=axes[0, 1])
+        fig.colorbar(imshow10, ax=axes[1, 0])
+        fig.colorbar(imshow11, ax=axes[1, 1])
+        axes[0, 0].set_title('Mean Sigma')
+        axes[0, 1].set_title('STD Sigma')
+        axes[1, 0].set_title('Mean Amplitude x Sigma')
+        axes[1, 1].set_title('STD Amplitude x Sigma')
+        for i in range(2):
+            axes[1, i].set_xlabel('Peak List Position')
+            axes[i, 0].set_ylabel('Filter Position')
+        fig.tight_layout()
+        fig.savefig(f'{save_to}/{split_group}_pitf_sigmas_{tag}.png')
+        plt.close()
+
+        ###############################################
+        # Plot histogram of weights and their changes #
+        ###############################################
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        alpha = 0.75
+        fig, axes = plt.subplots(2, 4, figsize=(10, 5))
+        axes[0, 0].hist(
+            self.volumes_init,
+            bins=10, color=colors[0], label='Init'
+            )
+        axes[0, 0].hist(
+            volumes_opt, bins=10, color=colors[1], alpha=alpha, label='Optimized'
+            )
+        axes[1, 0].hist(
+            self.volumes_init - volumes_opt, bins=10, color=colors[2], label='Init - Optimized'
+            )
+
+        axes[0, 1].hist(
+            self.filters_init.ravel(), bins=10, color=colors[0], label='Init'
+            )
+        axes[0, 1].hist(
+            filters_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
+            )
+        axes[1, 1].hist(
+            self.filters_init.ravel() - filters_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
+            )
+
+        axes[0, 2].hist(
+            self.sigma_params_init.ravel(), bins=10, color=colors[0], label='Init'
+            )
+        axes[0, 2].hist(
+            sigma_params_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
+            )
+        axes[1, 2].hist(
+            self.sigma_params_init.ravel() - sigma_params_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
+            )
+
+        axes[0, 3].hist(
+            self.amplitude_logits_init.ravel(), bins=10, color=colors[0], label='Init'
+            )
+        axes[0, 3].hist(
+            amplitude_logits_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
+            )
+        axes[1, 3].hist(
+            self.amplitude_logits_init.ravel() - amplitude_logits_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
+            )
+
+        axes[0, 0].set_title('Volume Weights')
+        axes[0, 1].set_title('Filter Weights')
+        axes[0, 2].set_title('Sigma Weights')
+        axes[0, 3].set_title('Amplitude Weights')
+        for i in range(4):
+            axes[0, i].set_xlabel('Value')
+            axes[1, i].set_xlabel('Difference')
+        axes[0, 0].legend()
+        axes[1, 0].legend()
+        fig.tight_layout()
+        fig.savefig(f'{save_to}/{split_group}_pitf_weights_{tag}.png')
+        plt.close()
+
+    def evaluate_init(self, q2_obs, save_to, split_group, tag):
+        q2_filters = (self.volumes * self.filters).numpy()
+        bins = np.linspace(0, 5, 101)
+        fig, axes = plt.subplots(1, 1, figsize=(4, 3))
+        axes.hist(q2_obs.ravel(), bins=bins, label='q2_obs', density=True)
+        axes.hist(q2_filters.ravel(), bins=bins, alpha=0.75, label='q2_filters', density=True)
+        axes.set_xlabel('q2 scaled')
+        axes.set_ylabel('distribution')
+        axes.legend()
+        fig.tight_layout()
+        fig.savefig(f'{save_to}/{split_group}_pitf_filter_init_{tag}.png')
+        plt.close()
 
 
 class PhysicsInformedModel:
@@ -225,137 +298,230 @@ class PhysicsInformedModel:
         self.unit_cell_length = data_params['unit_cell_length']
         self.unit_cell_indices = data_params['unit_cell_indices']
         self.save_to = save_to
+        self.save_to_split_group = os.path.join(self.save_to, split_group)
+        if not os.path.exists(self.save_to_split_group):
+            os.mkdir(self.save_to_split_group)
         self.seed = seed
         self.rng = np.random.default_rng(self.seed)
 
         self.lattice_system = self.data_params['lattice_system']
-        self.q2_scaler = q2_scaler
-        self.xnn_scaler = xnn_scaler
-        self.hkl_ref = hkl_ref
+
+        tf.keras.utils.set_random_seed(1)
+        tf.config.experimental.enable_op_determinism()
 
     def setup(self, data):
         model_params_defaults = {
-            'key_length': 6,
-            'ratio_start': 0,
-            'layers': 2,
-            'dropout_rate': 0.05,
-            'learning_rate': 0.002,
-            'epochs': 100,
+            'peak_length': 20,
+            'extraction_peak_length': 6,
+            'filter_length': 3,
+            'n_volumes': 200,
+            'n_filters': 200,
+            'layers': [200, 100, 50],
+            'dropout_rate_extraction': 0.1,
+            'dropout_rate': 0.1,
+            'orthogonal_regularization': 0.01,
+            'learning_rate': 0.00005,
+            'epochs': 50,
             'batch_size': 64,
+            'loss_type': 'mse',
             }
 
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
                 self.model_params[key] = model_params_defaults[key]
-        self.key_length = self.model_params['key_length']
+        self.model_params['unit_cell_length'] = self.unit_cell_length
         self.build_model(data=data)
 
     def save(self):
-        write_params(self.model_params, f'{self.save_to}/{self.split_group}_pitf_params_{self.model_params["tag"]}.csv')
-        self.model.save_weights(f'{self.save_to}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5')
-        joblib.dump(
-            self.volume_scaler,
-            f'{self.save_to}/{self.split_group}_pitf_volume_scaler_{self.model_params["tag"]}.bin'
+        write_params(self.model_params, f'{self.save_to_split_group}/{self.split_group}_pitf_params_{self.model_params["tag"]}.csv')
+        self.model.save_weights(f'{self.save_to_split_group}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5')
+        np.save(
+            f'{self.save_to_split_group}/{self.split_group}_q2_obs_scale_{self.model_params["tag"]}.npy',
+            self.q2_obs_scale
+            )
+        np.save(
+            f'{self.save_to_split_group}/{self.split_group}_xnn_scaler_{self.model_params["tag"]}.npy',
+            np.array((self.xnn_mean, self.xnn_scale))
             )
 
     def load_from_tag(self):
-        params = read_params(f'{self.save_to}/{self.split_group}_pitf_params_{self.model_params["tag"]}.csv')
+        params = read_params(f'{self.save_to_split_group}/{self.split_group}_pitf_params_{self.model_params["tag"]}.csv')
         params_keys = [
             'tag',
-            'n_keys',
-            'key_length',
-            'ratio_start',
+            'peak_length',
+            'extraction_peak_length',
+            'filter_length',
+            'n_volumes',
+            'n_filters',
             'layers',
+            'dropout_rate_extraction',
             'dropout_rate',
+            'orthogonal_regularization'
             'learning_rate',
             'epochs',
             'batch_size',
+            'loss_type'
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
-        self.model_params['n_keys'] = int(params['n_keys'])
-        self.model_params['key_length'] = int(params['key_length'])
-        self.model_params['ratio_start'] = int(params['ratio_start'])
-        self.model_params['layers'] = int(params['layers'])
+        self.model_params['peak_length'] = int(params['peak_length'])
+        self.model_params['extraction_peak_length'] = int(params['extraction_peak_length'])
+        self.model_params['filter_length'] = int(params['filter_length'])
+        self.model_params['n_volumes'] = int(params['n_volumes'])
+        self.model_params['n_filters'] = int(params['n_filters'])
+        self.model_params['layers'] = np.array(
+            params['layers'].split('[')[1].split(']')[0].split(','),
+            dtype=int
+            )
+        self.model_params['dropout_rate_extraction'] = float(params['dropout_rate_extraction'])
         self.model_params['dropout_rate'] = float(params['dropout_rate'])
+        self.model_params['orthogonal_regularization'] = float(params['orthogonal_regularization'])
         self.model_params['learning_rate'] = float(params['learning_rate'])
         self.model_params['epochs'] = int(params['epochs'])
         self.model_params['batch_size'] = int(params['batch_size'])
-        self.key_length = self.model_params['key_length']
-
-        self.volume_scaler = joblib.load(f'{self.save_to}/{self.split_group}_pitf_volume_scaler_{self.model_params["tag"]}.bin')
+        self.model_params['loss_type'] = params['loss_type']
 
         self.build_model(data=None)
         self.compile_model()
         self.model.load_weights(
-            filepath=f'{self.save_to}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5',
+            filepath=f'{self.save_to_split_group}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5',
             by_name=True
             )
-        #print(self.AttentionLayer.ratio_scale)
-        #print(self.AttentionLayer.similarity_weights)
-        #print(self.AttentionLayer.volume_weights)
-        #print(self.AttentionLayer.xnn_ratio_values.numpy().sum())
-        #print(self.AttentionLayer.hkl_links.numpy().sum())
+        self.q2_obs_scale = np.load(
+            f'{self.save_to_split_group}/{self.split_group}_q2_obs_scale_{self.model_params["tag"]}.npy',
+            )
+        self.xnn_mean, self.xnn_scale = np.load(
+            f'{self.save_to_split_group}/{self.split_group}_xnn_scaler_{self.model_params["tag"]}.npy',
+            )
+
+    def build_model(self, data=None):
+        inputs = {
+            'q2_obs_scaled': tf.keras.Input(
+                shape=self.model_params['peak_length'],
+                name='q2_obs_scaled',
+                dtype=tf.float32,
+                )
+            }
+
+        self.extraction_layer = ExtractionLayer(self.model_params)
+        self.model = tf.keras.Model(inputs, self.model_builder(inputs))
+        self.compile_model()
+        #self.model.summary()
+
+    def model_builder(self, inputs):
+        # Calculate the reciprocal volume from the ratio of q2_keys and q2_queries
+        # inputs['q2_obs']: batch_size, n_peaks
+        # metric:           batch_size, n_volumes, n_filters
+        metric = self.extraction_layer(
+            inputs['q2_obs_scaled'][:, :self.model_params['extraction_peak_length']]
+            )
+        metric = tf.keras.layers.SpatialDropout1D(
+            rate=self.model_params['dropout_rate_extraction'],
+            name=f'dropout_extraction',
+            )(metric)
+
+        # metric: batch_size, n_volumes, peak_length + n_filters
+        x = tf.keras.layers.Concatenate(axis=2)((
+            tf.keras.layers.RepeatVector(self.model_params['n_volumes'])(inputs['q2_obs_scaled']),
+            metric
+            ))
+        regularizer = tf.keras.regularizers.OrthogonalRegularizer(
+            factor=self.model_params['orthogonal_regularization'],
+            mode='rows'
+            )
+        #regularizer = None
+        for index in range(len(self.model_params['layers'])):
+            x = tf.keras.layers.Dense(
+                self.model_params['layers'][index],
+                activation='linear',
+                name=f'dense_{index}',
+                use_bias=False,
+                kernel_regularizer=regularizer,
+                )(x)
+            x = tf.keras.layers.LayerNormalization(
+                name=f'layer_norm_{index}'
+                )(x)
+            x = tf.keras.activations.gelu(x)
+            x = tf.keras.layers.Dropout(
+                rate=self.model_params['dropout_rate'],
+                name=f'dropout_{index}',
+                )(x)
+
+        # output: batch_size, n_volumes, unit_cell_length + 1
+        output = tf.keras.layers.Dense(
+            self.unit_cell_length + 1,
+            activation='linear',
+            name='xnn_scaled',
+            kernel_regularizer=regularizer,
+            )(x)
+        return output
+
+    def compile_model(self):
+        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
+        loss_functions = {
+            'xnn_scaled': self.extraction_layer.loss_function
+            }
+        loss_weights = {
+            'xnn_scaled': 1
+            }
+        self.model.compile(
+            optimizer=optimizer, 
+            loss=loss_functions,
+            loss_weights=loss_weights,
+            metrics=None,
+            run_eagerly=False,
+            )
 
     def train(self, data):
+        data = data[~data['augmented']]
         train = data[data['train']]
         val = data[~data['train']]
 
-        q2_queries = np.stack(train['q2'])[:, :self.key_length]
-        q2_keys = self.AttentionLayer.link_keys_and_values().numpy()
-        similarity = np.matmul(q2_queries, q2_keys[:, :self.key_length].T)
-        mag_keys = np.linalg.norm(q2_keys[:, :self.key_length], axis=1)
-        mag_queries = np.linalg.norm(q2_queries, axis=1)
-        similarity /= (mag_queries[:, np.newaxis] * mag_keys[np.newaxis])
-        most_similar = similarity.max(axis=1)
-        train_indices = most_similar < 0.99999999
+        train_q2_obs = np.stack(train['q2'])[:, :self.model_params['peak_length']]
+        val_q2_obs = np.stack(val['q2'])[:, :self.model_params['peak_length']]
+        self.q2_obs_scale = train_q2_obs.std()
+        train_q2_obs_scaled = train_q2_obs / self.q2_obs_scale
+        val_q2_obs_scaled = val_q2_obs / self.q2_obs_scale
 
-        train_inputs = {'q2_queries': np.stack(train['q2'])[train_indices]}
-        val_inputs = {'q2_queries': np.stack(val['q2'])}
+        train_inputs = {'q2_obs_scaled': train_q2_obs_scaled}
+        val_inputs = {'q2_obs_scaled': val_q2_obs_scaled}
 
-        train_xnn = np.stack(train['reindexed_xnn'])[train_indices][:, self.data_params['unit_cell_indices']]
-        train_ratio = CosineAttention.get_ratio_from_xnn(
-            train_xnn, lattice_system=self.lattice_system, tensorflow=False
+        train_unit_cell = np.stack(train['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        val_unit_cell = np.stack(val['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        train_xnn = get_xnn_from_unit_cell(train_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
+        val_xnn = get_xnn_from_unit_cell(val_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
+        
+        self.xnn_mean = np.median(train_xnn, axis=0)[np.newaxis]
+        self.xnn_scale = np.median(np.abs(train_xnn - self.xnn_mean), axis=0)[np.newaxis]
+
+        train_xnn_scaled = (train_xnn - self.xnn_mean) / self.xnn_scale
+        val_xnn_scaled = (val_xnn - self.xnn_mean) / self.xnn_scale
+
+        train_true = {'xnn_scaled': train_xnn_scaled}
+        val_true = {'xnn_scaled': val_xnn_scaled}
+
+        self.extraction_layer.evaluate_init(
+            train_q2_obs_scaled, self.save_to_split_group, self.split_group, self.model_params["tag"]
             )
-        val_xnn = np.stack(val['reindexed_xnn'])[:, self.data_params['unit_cell_indices']]
-        val_ratio = CosineAttention.get_ratio_from_xnn(
-            val_xnn, lattice_system=self.lattice_system, tensorflow=False
-            )
+        fig, axes = plt.subplots(1, self.unit_cell_length + 1, figsize=(6, 3))
+        bins0 = np.linspace(0, 5, 301)
+        bins1 = np.linspace(-5, 5, 301)
+        xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+        for index in range(self.unit_cell_length + 1):
+            if index == 0:
+                axes[index].hist(train_q2_obs_scaled.ravel(), bins=bins0, density=True)
+                axes[index].plot(bins0, 2/np.sqrt(2*np.pi)*np.exp(-1/2*bins0**2), color=[1, 0, 0])
+            else:
+                axes[index].hist(train_xnn_scaled[:, index - 1], bins=bins1, density=True)
+                axes[index].plot(bins1, 1/np.sqrt(2*np.pi)*np.exp(-1/2*bins1**2), color=[1, 0, 0])
+        axes[0].set_title('q2_obs_scaled')
+        #xnn_error_titles = xnn_titles[uc_index]
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_io_{self.model_params["tag"]}.png')
+        plt.close()
 
-        train_reciprocal_unit_cell = np.stack(
-            train['reciprocal_reindexed_unit_cell']
-            )[train_indices][:, self.unit_cell_indices]
-        train_reciprocal_unit_cell_volume = get_unit_cell_volume(
-            train_reciprocal_unit_cell,
-            partial_unit_cell=True,
-            lattice_system=self.data_params['lattice_system']
-            )
-        train_reciprocal_unit_cell_volume_scaled = \
-            (train_reciprocal_unit_cell_volume - self.volume_scaler.mean_[0]) / self.volume_scaler.scale_[0]
 
-        val_reciprocal_unit_cell = np.stack(
-            val['reciprocal_reindexed_unit_cell']
-            )[:, self.unit_cell_indices]
-        val_reciprocal_unit_cell_volume = get_unit_cell_volume(
-            val_reciprocal_unit_cell,
-            partial_unit_cell=True,
-            lattice_system=self.data_params['lattice_system']
-            )
-        val_reciprocal_unit_cell_volume_scaled = \
-            (val_reciprocal_unit_cell_volume - self.volume_scaler.mean_[0]) / self.volume_scaler.scale_[0]
-
-        train_true = {
-            'weights': train_ratio,
-            'weights__reciprocal_volume_scaled': train_reciprocal_unit_cell_volume_scaled,
-            }
-        val_true = {
-            'weights': val_ratio,
-            'weights__reciprocal_volume_scaled': val_reciprocal_unit_cell_volume_scaled,
-            }
-
-        print(self.AttentionLayer.similarity_weights)
-        print(self.AttentionLayer.volume_weights)
-        print(self.AttentionLayer.xnn_ratio_values.numpy().sum())
+        print(f'\nStarting training analytical convolution model for {self.split_group}')
         self.fit_history = self.model.fit(
             x=train_inputs,
             y=train_true,
@@ -365,229 +531,286 @@ class PhysicsInformedModel:
             validation_data=(val_inputs, val_true),
             callbacks=None,
             )
-        #print(self.AttentionLayer.ratio_scale)
-        print(self.AttentionLayer.similarity_weights)
-        print(self.AttentionLayer.volume_weights)
-        print(self.AttentionLayer.xnn_ratio_values.numpy().sum())
-        #print(self.AttentionLayer.hkl_links.numpy().sum())
         self.save()
+        self.extraction_layer.evaluate_weights(
+            self.save_to_split_group, self.split_group, self.model_params["tag"]
+            )
 
-        fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
-        axes[0].plot(
-            self.fit_history.history['weights_loss'], 
+        ##############################
+        # Plot training loss vs time #
+        ##############################
+        fig, axes = plt.subplots(1, 1, figsize=(6, 6), sharex=True)
+        axes.plot(
+            self.fit_history.history['loss'], 
             label='Training', marker='.'
             )
-        axes[0].plot(
-            self.fit_history.history['val_weights_loss'], 
+        axes.plot(
+            self.fit_history.history['val_loss'], 
             label='Validation', marker='v'
             )
-        axes[1].plot(
-            self.fit_history.history['weights__reciprocal_volume_scaled_loss'], 
-            label='Training', marker='.'
-            )
-        axes[1].plot(
-            self.fit_history.history['val_weights__reciprocal_volume_scaled_loss'], 
-            label='Validation', marker='v'
-            )
-        axes[0].set_ylabel('Ratio Loss')
-        axes[1].set_ylabel('Volume Loss')
-        axes[1].set_xlabel('Epoch')
-        axes[0].legend()
+        axes.set_ylabel('Loss')
+        axes.set_xlabel('Epoch')
+        axes.legend()
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.split_group}_pitf_training_loss_{self.model_params["tag"]}.png')
+        fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
-    def get_keys_values(self, data):
-        training_data = data[data['train']]
-        q2 = np.stack(training_data['q2'])
-        xnn = np.stack(training_data['reindexed_xnn'])[:, self.unit_cell_indices]
-        hkl = np.stack(training_data['reindexed_hkl'])
-        reciprocal_unit_cell = np.stack(training_data['reciprocal_reindexed_unit_cell'])[:, self.unit_cell_indices]
-        reciprocal_unit_cell_volume = get_unit_cell_volume(
-            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.data_params['lattice_system']
-            )
-        
-        q2_volume_scaled = q2 / reciprocal_unit_cell_volume[:, np.newaxis]**(2/3)
-        xnn_volume_scaled = xnn / reciprocal_unit_cell_volume[:, np.newaxis]**(2/3)
-
-        self.volume_scaler = StandardScaler(with_mean=False)
-        self.volume_scaler.fit(reciprocal_unit_cell_volume[:, np.newaxis])
-
-        if self.data_params['lattice_system'] in ['tetragonal', 'hexagonal']:
-            ratio = CosineAttention.get_ratio_from_xnn(
-                xnn, lattice_system=self.data_params['lattice_system'], tensorflow=False
-                )[:, 0]
-            chunk_size = 10000
-            threshold = 0.999
-
-            n_chunks = q2_volume_scaled.shape[0] // chunk_size + 1
-            #print(q2_volume_scaled.shape[0], n_chunks)
-            xnn_values = []
-            q2_keys = []
-            hkl_links = []
-
-            sort_indices = np.argsort(ratio)
-            q2_volume_scaled = q2_volume_scaled[sort_indices]
-            xnn_volume_scaled = xnn_volume_scaled[sort_indices]
-            hkl = hkl[sort_indices]
-
-            for chunk_index in range(n_chunks):
-                if chunk_index == n_chunks - 1:
-                    xnn_chunk = xnn_volume_scaled[chunk_index * chunk_size:]
-                    q2_chunk = q2_volume_scaled[chunk_index * chunk_size:]
-                    hkl_chunk = hkl[chunk_index * chunk_size:]
-                else:
-                    xnn_chunk = xnn_volume_scaled[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                    q2_chunk = q2_volume_scaled[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                    hkl_chunk = hkl[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                status = True
-                while status:
-                    similarity = np.matmul(q2_chunk[:, :self.key_length], q2_chunk[:, :self.key_length].T)
-                    mag = np.linalg.norm(q2_chunk[:, :self.key_length], axis=1)
-                    similarity /= mag[:, np.newaxis] * mag[np.newaxis]
-                    neighbor_array = similarity > threshold
-                    neighbor_count = np.sum(neighbor_array, axis=1)
-                    if neighbor_count.size > 0 and neighbor_count.max() > 1:
-                        highest_density_index = np.argmax(neighbor_count)
-                        neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
-                        delete_indices = neighbor_indices[
-                            np.where(neighbor_indices != highest_density_index)[0]
-                            ]
-                        xnn_chunk = np.delete(xnn_chunk, delete_indices, axis=0)
-                        q2_chunk = np.delete(q2_chunk, delete_indices, axis=0)
-                        hkl_chunk = np.delete(hkl_chunk, delete_indices, axis=0)
-                    else:
-                        status = False
-                xnn_values.append(xnn_chunk)
-                q2_keys.append(q2_chunk)
-                hkl_links.append(hkl_chunk)
-                    
-            xnn_values = np.row_stack(xnn_values)
-            q2_keys = np.row_stack(q2_keys)
-            hkl_links = np.row_stack(hkl_links)
-            #print(self.q2_keys.shape)
-            #print(self.xnn_values.shape)
-            #print(self.hkl_links.shape)
-        else:
-            assert False
-
-        return q2_keys, xnn_values, hkl_links
-
-    def build_model(self, data=None):
-        inputs = {
-            'q2_queries': tf.keras.Input(
-                shape=self.data_params['n_peaks'],
-                name='q2_queries',
-                dtype=tf.float32,
-                )
-            }
-        if not data is None:
-            q2_keys, xnn_values, hkl_links = self.get_keys_values(data)
-            xnn_ratio_values = CosineAttention.get_ratio_from_xnn(
-                xnn_values, lattice_system=self.data_params['lattice_system'], tensorflow=False
-                )
-            self.model_params['n_keys'] = hkl_links.shape[0]
-            source = None
-        else:
-            xnn_ratio_values = None
-            hkl_links = None
-            source = f'{self.save_to}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5'
-        self.AttentionLayer = CosineAttention(
-            xnn_ratio_values,
-            hkl_links,
-            self.key_length,
-            self.model_params['ratio_start'],
-            self.lattice_system,
-            source
-            )
-        if not data is None:
-            self.AttentionLayer.validate_linkage(q2_keys)
-        self.model = tf.keras.Model(inputs, self.model_builder(inputs))
-        self.compile_model()
-        self.model.summary()
-
-    def model_builder(self, inputs):
-        # Calculate the reciprocal volume from the ratio of q2_keys and q2_queries
-        # inputs['q2_queries']:        batch_size, n_peaks
-        # self.AttentionLayer.q2_keys: n_keys,     n_peaks
-        # query_key_distance:          batch_size, n_keys
-        # weights:                     batch_size, n_keys
-        # reciprocal_volume:           batch_size, n_keys
-
-        query_key_distance, reciprocal_volume = self.AttentionLayer(inputs['q2_queries'])
-        reciprocal_volume_scaled = (reciprocal_volume - self.volume_scaler.mean_[0]) / self.volume_scaler.scale_[0]
-        weights = tf.keras.layers.Softmax(
-            name='weights',
-            )(query_key_distance)
-        weights__reciprocal_volume_scaled = tf.keras.layers.Concatenate(
-            axis=2,
-            name='weights__reciprocal_volume_scaled'
-            )((
-                weights[:, :, tf.newaxis],
-                reciprocal_volume_scaled[:, :, tf.newaxis]
-                ))
-        return [weights, weights__reciprocal_volume_scaled]
-
-    def compile_model(self):
-        ####################
-        # similarity model #
-        ####################
-        optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
-        loss_functions = {
-            'weights': self.AttentionLayer.ratio_target_function,
-            'weights__reciprocal_volume_scaled': self.AttentionLayer.reciprocal_volume_target_function,
-            }
-        loss_weights = {
-            'weights': 1,
-            'weights__reciprocal_volume_scaled': 1,
-            }
-        self.model.compile(
-            optimizer=optimizer, 
-            loss=loss_functions,
-            loss_weights=loss_weights,
-            )
-
     def evaluate(self, data):
-        """
-        RMS xnn:
-            - most probable
-            - top 10
-            - top 100
-        """
+        data = data[~data['augmented']]
+        train = data[data['train']]
+        val = data[~data['train']]
 
-        xnn_true = np.stack(data['reindexed_xnn'])[:, self.data_params['unit_cell_indices']]
-        inputs = {'q2_queries': np.stack(data['q2'])}
-        outputs = self.model(inputs)
-        q2_keys = self.AttentionLayer.link_keys_and_values()
+        train_q2_obs = np.stack(train['q2'])[:, :self.model_params['peak_length']]
+        val_q2_obs = np.stack(val['q2'])[:, :self.model_params['peak_length']]
+        train_q2_obs_scaled = train_q2_obs / self.q2_obs_scale
+        val_q2_obs_scaled = val_q2_obs / self.q2_obs_scale
 
-        weights = outputs[1][:, :, 0]
-        reciprocal_volume_scaled = outputs[1][:, :, 1]
-        reciprocal_volume_pred = reciprocal_volume_scaled*self.volume_scaler.scale_[0] + self.volume_scaler.mean_[0]
+        train_inputs = {'q2_obs_scaled': train_q2_obs_scaled}
+        val_inputs = {'q2_obs_scaled': val_q2_obs_scaled}
 
-        reciprocal_unit_cell = np.stack(
-            data['reciprocal_reindexed_unit_cell']
-            )[:, self.unit_cell_indices]
-        reciprocal_volume_true = get_unit_cell_volume(
-            reciprocal_unit_cell,
-            partial_unit_cell=True,
-            lattice_system=self.data_params['lattice_system']
+        train_unit_cell = np.stack(train['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        val_unit_cell = np.stack(val['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        train_xnn = get_xnn_from_unit_cell(train_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
+        val_xnn = get_xnn_from_unit_cell(val_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
+        train_xnn_scaled = (train_xnn - self.xnn_mean) / self.xnn_scale
+        val_xnn_scaled = (val_xnn - self.xnn_mean) / self.xnn_scale
+
+        val_pred = self.model.predict(val_inputs)
+
+        val_all_xnn_scaled_pred = val_pred[:, :, :self.unit_cell_length]
+        val_logits = val_pred[:, :, self.unit_cell_length]
+        val_softmax = scipy.special.softmax(val_logits, axis=1)
+        val_xnn_scaled_pred_top5 = np.take_along_axis(
+            val_all_xnn_scaled_pred,
+            np.argsort(val_softmax, axis=1)[:, ::-1][:, :5, np.newaxis],
+            axis=1
             )
+        val_xnn_pred_top5 = val_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
+        val_unit_cell_pred_top5 = np.zeros(val_xnn_pred_top5.shape)
+        for index in range(5):
+            val_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
+                val_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+                )
 
-        xnn_values = self.AttentionLayer.get_xnn_from_ratio(
-            self.AttentionLayer.xnn_ratio_values.numpy(),
-            lattice_system=self.data_params['lattice_system'],
-            tensorflow=False
+        train_pred = self.model.predict(train_inputs)
+        train_all_xnn_scaled_pred = train_pred[:, :, :self.unit_cell_length]
+        train_logits = train_pred[:, :, self.unit_cell_length]
+        train_softmax = scipy.special.softmax(train_logits, axis=1)
+        train_xnn_scaled_pred_top5 = np.take_along_axis(
+            train_all_xnn_scaled_pred,
+            np.argsort(train_softmax, axis=1)[:, ::-1][:, :5, np.newaxis],
+            axis=1
             )
-        print(weights.shape)
-        print(reciprocal_volume_scaled.shape)
-        print(xnn_values.shape)
+        train_xnn_pred_top5 = train_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
+        train_unit_cell_pred_top5 = np.zeros(train_xnn_pred_top5.shape)
+        for index in range(5):
+            train_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
+                train_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+                )
 
-        np.save('hkl_ref.npy', self.hkl_ref)
-        np.save('hkl_labels.npy', np.stack(data['hkl_labels']))
-        np.save('q2_queries.npy', inputs['q2_queries'])
-        np.save('q2_keys.npy', q2_keys)
-        np.save('weights.npy', weights)
-        np.save('reciprocal_volume_pred.npy', reciprocal_volume_pred)
-        np.save('reciprocal_volume_true.npy', reciprocal_volume_true)
-        np.save('xnn_values.npy', xnn_values)
-        np.save('xnn_true.npy', xnn_true)
+        for index in range(10):
+            self.plot_predictions(
+                val_xnn_scaled[index],
+                val_all_xnn_scaled_pred[index],
+                val_softmax[index],
+                index
+                )
+
+        ##############################
+        # Plot unit cell evaluations #
+        ##############################
+        figsize = (self.unit_cell_length*2 + 2, 6)
+        fig, axes = plt.subplots(2, self.unit_cell_length, figsize=figsize)
+        unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
+        xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+        alpha = 0.1
+        markersize = 0.5
+        for plot_index in range(2):
+            if plot_index == 0:
+                val_xnn_pred = val_xnn_pred_top5[:, 0, :]
+                val_unit_cell_pred = val_unit_cell_pred_top5[:, 0, :]
+                train_xnn_pred = train_xnn_pred_top5[:, 0, :]
+                train_unit_cell_pred = train_unit_cell_pred_top5[:, 0, :]
+
+                save_label = 'most_probable'
+            elif plot_index == 1:
+                val_diff = np.linalg.norm(val_xnn_scaled_pred_top5 - val_xnn_scaled[:, np.newaxis, :], axis=2)
+                val_xnn_pred = np.take_along_axis(
+                    val_xnn_pred_top5,
+                    np.argmin(val_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+                val_unit_cell_pred = np.take_along_axis(
+                    val_unit_cell_pred_top5,
+                    np.argmin(val_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+
+                train_diff = np.linalg.norm(train_xnn_scaled_pred_top5 - train_xnn_scaled[:, np.newaxis, :], axis=2)
+                train_xnn_pred = np.take_along_axis(
+                    train_xnn_pred_top5,
+                    np.argmin(train_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+                train_unit_cell_pred = np.take_along_axis(
+                    train_unit_cell_pred_top5,
+                    np.argmin(train_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+                save_label = 'best'
+
+            train_unit_cell_error = np.abs(train_unit_cell_pred - train_unit_cell)
+            val_unit_cell_error = np.abs(val_unit_cell_pred - val_unit_cell)
+            train_xnn_error = np.abs(train_xnn_pred - train_xnn)
+            val_xnn_error = np.abs(val_xnn_pred - val_xnn)
+            for uc_index in range(self.unit_cell_length):
+                sorted_unit_cell = np.sort(train_unit_cell[:, uc_index])
+                lower_unit_cell = sorted_unit_cell[int(0.005*sorted_unit_cell.size)]
+                upper_unit_cell = sorted_unit_cell[int(0.995*sorted_unit_cell.size)]
+                if upper_unit_cell > lower_unit_cell:
+                    axes[0, uc_index].plot(
+                        train_unit_cell[:, uc_index], train_unit_cell_pred[:, uc_index],
+                        color=[0, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[0, uc_index].plot(
+                        val_unit_cell[:, uc_index], val_unit_cell_pred[:, uc_index],
+                        color=[0.8, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[0, uc_index].plot(
+                        [lower_unit_cell, upper_unit_cell], [lower_unit_cell, upper_unit_cell],
+                        color=[0.7, 0, 0], linestyle='dotted'
+                        )
+                    axes[0, uc_index].set_xlim([lower_unit_cell, upper_unit_cell])
+                    axes[0, uc_index].set_ylim([lower_unit_cell, upper_unit_cell])
+
+                error_train = np.sort(train_unit_cell_error[:, uc_index])
+                error_train = error_train[~np.isnan(error_train)]
+                unit_cell_p25_train = error_train[int(0.25 * error_train.size)]
+                unit_cell_p50_train = error_train[int(0.50 * error_train.size)]
+                unit_cell_p75_train = error_train[int(0.75 * error_train.size)]
+                unit_cell_rmse_train = np.sqrt(1/error_train.size * np.linalg.norm(error_train)**2)
+                error_val = np.sort(val_unit_cell_error[:, uc_index])
+                error_val = error_val[~np.isnan(error_val)]
+                unit_cell_p25_val = error_val[int(0.25 * error_val.size)]
+                unit_cell_p50_val = error_val[int(0.50 * error_val.size)]
+                unit_cell_p75_val = error_val[int(0.75 * error_val.size)]
+                unit_cell_rmse_val = np.sqrt(1/error_val.size * np.linalg.norm(error_val)**2)
+                unit_cell_error_titles = [
+                    unit_cell_titles[uc_index],
+                    f'RMSE: {unit_cell_rmse_train:0.2f} / {unit_cell_rmse_val:0.2f}',
+                    f'25%: {unit_cell_p25_train:0.2f} / {unit_cell_p25_val:0.2f}',
+                    f'50%: {unit_cell_p50_train:0.2f} / {unit_cell_p50_val:0.2f}',
+                    f'75%: {unit_cell_p75_train:0.2f} / {unit_cell_p75_val:0.2f}',
+                    ]
+                axes[0, uc_index].set_title('\n'.join(unit_cell_error_titles), fontsize=12)
+
+                sorted_xnn = np.sort(train_xnn[:, uc_index])
+                lower_xnn = sorted_xnn[int(0.005*sorted_xnn.size)]
+                upper_xnn = sorted_xnn[int(0.995*sorted_xnn.size)]
+
+                if upper_xnn > lower_xnn:
+                    axes[1, uc_index].plot(
+                        train_xnn[:, uc_index], train_xnn_pred[:, uc_index],
+                        color=[0, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[1, uc_index].plot(
+                        val_xnn[:, uc_index], val_xnn_pred[:, uc_index],
+                        color=[0.8, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[1, uc_index].plot(
+                        [lower_xnn, upper_xnn], [lower_xnn, upper_xnn],
+                        color=[0.7, 0, 0], linestyle='dotted'
+                        )
+                    axes[1, uc_index].set_xlim([lower_xnn, upper_xnn])
+                    axes[1, uc_index].set_ylim([lower_xnn, upper_xnn])
+
+                error_train = np.sort(train_xnn_error[:, uc_index])
+                error_train = error_train[~np.isnan(error_train)]
+                xnn_p25_train = error_train[int(0.25 * error_train.size)]
+                xnn_p50_train = error_train[int(0.50 * error_train.size)]
+                xnn_p75_train = error_train[int(0.75 * error_train.size)]
+                xnn_rmse_train = np.sqrt(1/error_train.size * np.linalg.norm(error_train)**2)
+                error_val = np.sort(val_xnn_error[:, uc_index])
+                error_val = error_val[~np.isnan(error_val)]
+                xnn_p25_val = error_val[int(0.25 * error_val.size)]
+                xnn_p50_val = error_val[int(0.50 * error_val.size)]
+                xnn_p75_val = error_val[int(0.75 * error_val.size)]
+                xnn_rmse_val = np.sqrt(1/error_val.size * np.linalg.norm(error_val)**2)
+                xnn_error_titles = [
+                    xnn_titles[uc_index],
+                    f'RMSE: {xnn_rmse_train:0.4f} / {xnn_rmse_val:0.4f}',
+                    f'25%: {xnn_p25_train:0.4f} / {xnn_p25_val:0.4f}',
+                    f'50%: {xnn_p50_train:0.4f} / {xnn_p50_val:0.4f}',
+                    f'75%: {xnn_p75_train:0.4f} / {xnn_p75_val:0.4f}',
+                    ]
+                axes[1, uc_index].set_title('\n'.join(xnn_error_titles), fontsize=12)
+
+                axes[0, uc_index].set_xlabel('True')
+                axes[1, uc_index].set_xlabel('True')
+            axes[0, 0].set_ylabel('Predicted')
+            axes[1, 0].set_ylabel('Predicted')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_reg_eval_{self.model_params["tag"]}_{save_label}.png')
+            plt.close()
+
+        ##########################
+        # Plot branch importance #
+        ##########################
+        # number of times a branch is the most probable
+        # number of times a branch is in the top 5, 10, 50
+        train_rankings = np.argsort(train_softmax, axis=1)[:, ::-1]
+        val_rankings = np.argsort(val_softmax, axis=1)[:, ::-1]
+
+        train_top1 = np.bincount(train_rankings[:, 0].ravel(), minlength=self.model_params['n_volumes'])
+        val_top1 = np.bincount(val_rankings[:, 0].ravel(), minlength=self.model_params['n_volumes'])
+        train_top5 = np.bincount(train_rankings[:, :5].ravel(), minlength=self.model_params['n_volumes'])
+        val_top5 = np.bincount(val_rankings[:, :5].ravel(), minlength=self.model_params['n_volumes'])
+        train_top10 = np.bincount(train_rankings[:, :10].ravel(), minlength=self.model_params['n_volumes'])
+        val_top10 = np.bincount(val_rankings[:, :10].ravel(), minlength=self.model_params['n_volumes'])
+        train_top50 = np.bincount(train_rankings[:, :50].ravel(), minlength=self.model_params['n_volumes'])
+        val_top50 = np.bincount(val_rankings[:, :50].ravel(), minlength=self.model_params['n_volumes'])
+
+        fig, axes = plt.subplots(1, 4, figsize=(10, 3), sharex=True)
+        x = np.arange(self.model_params['n_volumes'])
+        alpha = 0.75
+        width = 0.9
+        axes[0].bar(x, train_top1, width=width, label='Training')
+        axes[0].bar(x, val_top1, width=width, alpha=alpha, label='Validation')
+        axes[1].bar(x, train_top5, width=width, label='Training')
+        axes[1].bar(x, val_top5, width=width, alpha=alpha, label='Validation')
+        axes[2].bar(x, train_top10, width=width, label='Training')
+        axes[2].bar(x, val_top10, width=width, alpha=alpha, label='Validation')
+        axes[3].bar(x, train_top50, width=width, label='Training')
+        axes[3].bar(x, val_top50, width=width, alpha=alpha, label='Validation')
+        axes[0].set_title('Top 1 occurances')
+        axes[1].set_title('Top 5 occurances')
+        axes[2].set_title('Top 10 occurances')
+        axes[3].set_title('Top 50 occurances')
+        for i in range(4):
+            axes[i].set_xlabel('Branch')
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_branch_importance_{self.model_params["tag"]}.png')
+        plt.close()
+
+    def plot_predictions(self, xnn_true, xnn_pred, softmax, index):
+        if self.lattice_system == 'orthorhombic':
+            fig, axes = plt.subplots(1, 3, figsize=(7, 3))
+            axes[0].scatter(xnn_pred[:, 0], xnn_pred[:, 1], c=softmax)
+            axes[1].scatter(xnn_pred[:, 0], xnn_pred[:, 2], c=softmax)
+            axes[2].scatter(xnn_pred[:, 1], xnn_pred[:, 2], c=softmax)
+            axes[0].plot(xnn_true[0], xnn_true[1], marker='x', color=[0, 0, 0])
+            axes[1].plot(xnn_true[0], xnn_true[2], marker='x', color=[0, 0, 0])
+            axes[2].plot(xnn_true[1], xnn_true[2], marker='x', color=[0, 0, 0])
+            axes[0].set_xlabel('a')
+            axes[1].set_xlabel('a')
+            axes[2].set_xlabel('b')
+            axes[0].set_ylabel('b')
+            axes[1].set_ylabel('c')
+            axes[2].set_ylabel('c')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_example_{index}_{self.model_params["tag"]}.png')
+            plt.close()

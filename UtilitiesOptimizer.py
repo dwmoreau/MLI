@@ -763,10 +763,10 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm):
 
 
 
-def get_logger(comm):
+def get_logger(comm, optimization_tag):
     logger = logging.getLogger(f'rank[{comm.rank}]')
     logger.setLevel(logging.DEBUG)                                                 
-    mh = MPIFileHandler('logfile.log')
+    mh = MPIFileHandler(f'logfile_{optimization_tag}.log')
     mh.setFormatter(logging.Formatter('%(asctime)s:%(name)s:%(levelname)s:%(message)s'))                                                
     logger.addHandler(mh)
     return logger

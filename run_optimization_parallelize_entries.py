@@ -29,11 +29,11 @@ if __name__ == '__main__':
     error_tag = '1'
     n_entries = 500
     #q2_error_params = np.array([0.0001, 0.001]) / 1
-    #q2_error_params = np.array([0.000000001, 0])
-    q2_error_params = np.array([0.000087, 0.00092]) / 1# [9.23692112e-04 8.72845689e-05]
+    q2_error_params = np.array([0.000000001, 0])
+    #q2_error_params = np.array([0.000087, 0.00092]) / 1# [9.23692112e-04 8.72845689e-05]
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    bravais_lattices = ['hP']
+    bravais_lattices = ['aP']
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:

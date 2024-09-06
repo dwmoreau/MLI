@@ -43,6 +43,8 @@ class LikelihoodLoss:
             self.likelihood_function = self.mean_absolute_error
         elif likelihood == 'mean_squared_error':
             self.likelihood_function = self.mean_squared_error
+        elif likelihood == 'log_cosh':
+            self.likelihood_function = self.log_cosh_likelihood
 
         if beta_nll is None:
             self.beta_likelihood = False
@@ -100,10 +102,25 @@ class LikelihoodLoss:
             likelihoods = likelihoods * tf.stop_gradient(var**self.beta_nll)
         return tf.reduce_sum(likelihoods, axis=1)
 
+    def log_cosh_likelihood(self, y_true, y_pred):
+        # This is not a likelihood function. The "likelihood" distinguishes this
+        # call that uses variance from the "error" call that does not.
+        mean = y_pred[:, :, 0]
+        var = y_pred[:, :, 1]
+        error = (y_true - mean) / tf.math.sqrt(var)
+        log_cosh = tf.math.log(tf.math.cosh(error))
+        return tf.reduce_mean(log_cosh, axis=1)
+
     def mean_squared_error(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         square_difference = (y_true - mean)**2
         return tf.reduce_mean(square_difference, axis=1)
+
+    def log_cosh_error(self, y_true, y_pred):
+        mean = y_pred[:, :, 0]
+        error = (y_true - mean)
+        log_cosh = tf.math.log(tf.math.cosh(error))
+        return tf.reduce_mean(log_cosh, axis=1)
 
     def mean_absolute_error(self, y_true, y_pred):
         mean = y_pred[:, :, 0]

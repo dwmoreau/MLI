@@ -46,9 +46,30 @@ mP              | 96.5%
 aP              | 86 - 92%
 
 
+- Regression
+    - Make a different scaling value for each unit cell parameter or xnn
+    - minimize number of split_groups
+        - tetragonal
+        - hexagonal
+        - orthorhombic
+        - monoclinic
+    - Re-evaluate hexagonal:
+        x Augmentation helps considerably
+        x Hard to tell if the alpha_beta model is better.
+            x Make the alpha_beta model an option
+        x The LogCosh target function helps
+            x Make the normal target_function an option
+        x a bigger model improves predictions without overfitting
+    - Retrain regression networks with updates
+    - Look at individual split_groups and retrain overfit networks with smaller models
+
 - Optimization
-    * Add a final refinement of the unit cell
-        - Optimize for the given indexed peaks
+    * Optimize the number of candidates generated per model.    
+        - Determine radius of convergence for each BL
+            - Generate N candidates a radius of R from the correct solution
+                - At what R do all candidates converge to the correct solution?
+        - Optimize emsemble of models to minimize failure rate given a penalty of number of candidates and efficiency
+    * standardization of monoclinic cells
     - Add mechanism for analysis of failed entries    
     - Is there an optimal number of subsampled peaks
     - Add a validation for the correct extinction group
@@ -64,22 +85,19 @@ aP              | 86 - 92%
         * refactor code entirely:
             * Combine by run, then combine by frames to get around the maximum number of expts files error
             * Place constraints on parsing refls to prevent memory blow up when making secondary peaks
-        * new peak list extraction program
-        - SACLA data
         - LCLS data
-        - RRUFF
     - GSASII tutorials
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 
 - Physics informed target function
-    - ratio cannot be arbitrary - must remain constant as volume scales.
-    - Document ideas
-    - Analytical convolutions
-        - Work through general mathematics:
-            - Volume during convolutions.
-            - scaling?
-        - Verify that there are not errors in the notebook
+    - Analytical Convolutions
+        - get working on orthorhombic
+    - Attention model:
+        x ratio cannot be arbitrary - must remain constant as volume scales.
+        - Implement new filter metric
+        - Implement LogCosh target function
+
     - Read about attention
         - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
         - https://dmol.pub/dl/attention.html
@@ -97,9 +115,7 @@ aP              | 86 - 92%
     - https://journals.iucr.org/paper?fe5024
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
-- Augmentation
 - Random unit cell generator
-- Regression
 - Templating
 - Indexing.py
 - Assignments
@@ -162,15 +178,20 @@ class Indexing:
 
         if not os.path.exists(self.save_to['results']):
             os.mkdir(self.save_to['results'])
+        if not os.path.exists(self.save_to['assigner']):
             os.mkdir(self.save_to['assigner'])
+        if not os.path.exists(self.save_to['augmentor']):
             os.mkdir(self.save_to['augmentor'])
+        if not os.path.exists(self.save_to['data']):
             os.mkdir(self.save_to['data'])
-            os.mkdir(self.save_to['random'])
-            os.mkdir(self.save_to['regression'])
-            os.mkdir(self.save_to['template'])
-            os.mkdir(self.save_to['pitf'])
         if not os.path.exists(self.save_to['random']):
             os.mkdir(self.save_to['random'])
+        if not os.path.exists(self.save_to['regression']):
+            os.mkdir(self.save_to['regression'])
+        if not os.path.exists(self.save_to['template']):
+            os.mkdir(self.save_to['template'])
+        if not os.path.exists(self.save_to['pitf']):
+            os.mkdir(self.save_to['pitf'])
 
         if self.data_params['load_from_tag']:
             self.setup_from_tag(load_bravais_lattice)
@@ -1193,6 +1214,12 @@ class Indexing:
         self.data['reindexed_unit_cell_pred_var_trees'] = list(reindexed_uc_pred_var_trees)
 
     def setup_pitf(self):
+        from Utilities import get_xnn_from_unit_cell
+        print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
+        unit_cell = np.stack(self.data['reindexed_unit_cell'])
+        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
+        self.data['reindexed_xnn'] = np.stack(xnn)
+
         self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
