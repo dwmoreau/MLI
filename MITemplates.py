@@ -416,45 +416,6 @@ class MITemplates:
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
         return xnn, loss
 
-    def generate_old(self, n_templates, rng, q2_obs):
-        # This is primary used to generate candidates for the optimizer, which expects that the
-        # sum of the template and sampled candidates to be the same. This is why n_samples gets
-        # changed
-        xnn_templates, _ = self.generate_xnn(q2_obs)
-        if n_templates == 'all':
-            pass
-        elif n_templates < xnn_templates.shape[0]:
-            # requesting fewer templates than in the set
-            # subsample
-            indices = self.rng.choice(
-                xnn_templates.shape[0],
-                size=n_templates,
-                replace=False,
-                p=self.miller_index_templates_prob,
-                )
-            xnn_templates =  xnn_templates[indices]
-        elif n_templates > xnn_templates.shape[0]:
-            # requesting more templates than in the set
-            # Just sample multiple times
-            print('WARNING: Requesting more templates than available. Duplicates will be returned')
-            difference = n_templates - xnn_templates.shape[0]
-            if difference > xnn_templates.shape[0]:
-                replace = True
-            else:
-                replace = False
-            indices = self.rng.choice(
-                xnn_templates.shape[0],
-                size=difference,
-                replace=replace,
-                p=self.miller_index_templates_prob,
-                )
-            xnn_templates =  np.concatenate((xnn_templates, xnn_templates[indices]), axis=0)
-
-        unit_cell_templates = get_unit_cell_from_xnn(
-            xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        return unit_cell_templates
-
     def generate(self, n_templates, rng, q2_obs):
         # This is primary used to generate candidates for the optimizer, which expects that the
         # sum of the template and sampled candidates to be the same. This is why n_samples gets

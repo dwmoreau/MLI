@@ -28,31 +28,7 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 
-Bravais Lattice | accuracy
---------------------------
-cF              | 100.0%
-cI              | 100.0%
-cP              | 100.0%
-tI              | 99.2%
-tP              | 99.7%
-hP              | 99.6%
-hR              | 99.9%
-oC              | 99.3%
-oF              | 99.3%
-oI              | 98.5%
-oP              | 99.8%
-mC              | 97.5%
-mP              | 96.5%
-aP              | 86 - 92%
-
-
 - Regression
-    - Make a different scaling value for each unit cell parameter or xnn
-    - minimize number of split_groups
-        - tetragonal
-        - hexagonal
-        - orthorhombic
-        - monoclinic
     - Re-evaluate hexagonal:
         x Augmentation helps considerably
         x Hard to tell if the alpha_beta model is better.
@@ -82,29 +58,19 @@ aP              | 86 - 92%
 
 - Experimental Data
     * peak list
-        * refactor code entirely:
-            * Combine by run, then combine by frames to get around the maximum number of expts files error
-            * Place constraints on parsing refls to prevent memory blow up when making secondary peaks
+        - Triplets
         - LCLS data
     - GSASII tutorials
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 
-- Physics informed target function
-    - Analytical Convolutions
-        - get working on orthorhombic
-    - Attention model:
-        x ratio cannot be arbitrary - must remain constant as volume scales.
-        - Implement new filter metric
-        - Implement LogCosh target function
-
-    - Read about attention
-        - https://d2l.ai/chapter_attention-mechanisms-and-transformers/index.html
-        - https://dmol.pub/dl/attention.html
+* Physics informed model
+    * Integral filter model
+        - https://en.wikipedia.org/wiki/Statistical_distance
+    - permutation invariance
+    - Look at sensitivity analysis
+    - Generatative model
     - Reindex triclinic in reciprocal space.
-
-- SWE:
-    https://ideas-productivity.org/resources/series/hpc-best-practices-webinars/
 
 - Spacegroup assignments:
     - Put extinction group in the dataset
@@ -115,12 +81,16 @@ aP              | 86 - 92%
     - https://journals.iucr.org/paper?fe5024
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
-- Random unit cell generator
+- SWE
 - Templating
+    - Calibrate templates with a random forest model that converts error at a peak position to a probability.
+- Augmentation
+- Random unit cell generator
 - Indexing.py
 - Assignments
 """
 import joblib
+import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -535,6 +505,8 @@ class Indexing:
             self.data.drop(columns=drop_columns, inplace=True)
 
         self.setup_hkl()
+        if self.data_params['augment']:
+            self.evaluate_augmentation()
 
         # This does another shuffle.
         self.data = self.data.sample(frac=1, replace=False, random_state=self.random_seed)
@@ -662,9 +634,10 @@ class Indexing:
             xnn_scaler=self.xnn_scaler,
             q2_scaler=self.q2_scaler,
             )
-        self.augmentor.setup(self.data)
+        self.augmentor.setup(self.data, self.data_params['split_groups'])
         data_augmented = [None for _ in range(len(self.data_params['split_groups']))]
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
+            print()
             print(f'Augmenting {split_group}')
             split_group_data = self.data[self.data['split_group'] == split_group]
             data_augmented[split_group_index] = self.augmentor.augment(
@@ -674,6 +647,12 @@ class Indexing:
         data_augmented = pd.concat(data_augmented, ignore_index=True)
         self.data = pd.concat((self.data, data_augmented), ignore_index=True)
         print('Finished Augmenting')
+
+    def evaluate_augmentation(self):
+        for split_group_index, split_group in enumerate(self.data_params['split_groups']):
+            print(f'Evaluating {split_group} Augmentation')
+            split_group_data = self.data[self.data['split_group'] == split_group]
+            self.augmentor.evaluate(split_group_data, split_group)
 
     def q2_scale(self, q2):
         return self.q2_scaler.transform(q2.ravel()[:, np.newaxis]).reshape(q2.shape)
@@ -1110,6 +1089,100 @@ class Indexing:
                 fig.savefig(f'{self.save_to["data"]}/axis_order_{split_group}.png')
                 plt.close()
 
+        # split group similarity
+        # This was worked out in a Jupyter Notebook. It is a bit hackish...
+        unaugmented_data = self.data[~self.data['augmented']]
+        unit_cell_volume = np.array(unaugmented_data['reindexed_volume'])
+        split_group = unaugmented_data['split_group']
+        split_groups = list(split_group.unique())
+        if len(split_groups[0].split('_')) == 3:
+            groups = ['_'.join((i.split('_')[0], i.split('_')[2])) for i in split_groups]
+            groups = list(set(groups))
+        elif len(split_groups[0].split('_')) == 2:
+            groups = split_groups
+        groups_index = np.arange(len(groups))
+        spacegroup = unaugmented_data['reindexed_spacegroup_symbol_hm']
+        spacegroups = list(spacegroup.unique())
+        hkl_labels = np.stack(unaugmented_data['hkl_labels'])
+
+        spacegroup_mapping = dict.fromkeys(spacegroups)
+        for index in range(len(unaugmented_data)):
+            if len(split_groups[0].split('_')) == 3:
+                spacegroup_mapping[spacegroup[index]] = '_'.join((split_group[index].split('_')[0], split_group[index].split('_')[2]))
+            elif len(split_groups[0].split('_')) == 2:
+                spacegroup_mapping[spacegroup[index]] = split_group[index]
+
+        ordered_spacegroups_ = [[] for _ in range(len(groups))]
+        for sg in spacegroups:
+            ordered_spacegroups_[groups.index(spacegroup_mapping[sg])].append(sg)
+        ordered_spacegroups = []
+        n_spacegroups_group = []
+        for index in range(len(groups)):
+            n_spacegroups_group.append(len(ordered_spacegroups_[index]))
+            ordered_spacegroups += ordered_spacegroups_[index]
+
+        sorted_volume = np.sort(unit_cell_volume)
+        volume_bins = np.linspace(0, sorted_volume[int(0.995*sorted_volume.size)], 101)
+        volume_centers = (volume_bins[1:] + volume_bins[:-1]) / 2
+        volume_distributions = dict.fromkeys(ordered_spacegroups)
+        n_peaks = 10
+        hkl_distributions = dict.fromkeys(ordered_spacegroups)
+        for sg in ordered_spacegroups:
+            indices = spacegroup == sg
+            sg_volume = unit_cell_volume[indices]
+            sg_hkl_labels = hkl_labels[indices]
+            volume_distributions[sg], _ = np.histogram(sg_volume, bins=volume_bins, density=True)
+            hkl_distributions[sg] = np.zeros((hkl_labels.max(), n_peaks))
+            for peak_index in range(n_peaks):
+                bad_indices = sg_hkl_labels[:, peak_index] == hkl_labels.max()
+                sg_hkl_labels[bad_indices, peak_index] = hkl_labels.max() - 1
+                hkl_distributions[sg][:, peak_index] = np.bincount(sg_hkl_labels[:, peak_index], minlength=hkl_labels.max()) / indices.sum()
+
+        volume_distance = np.zeros((len(ordered_spacegroups), len(ordered_spacegroups)))
+        hkl_distance = np.zeros((len(ordered_spacegroups), len(ordered_spacegroups)))
+        for sg0_index, sg0 in enumerate(ordered_spacegroups):
+            for sg1_index, sg1 in enumerate(ordered_spacegroups):
+                volume_distance[sg0_index, sg1_index] = np.trapz(np.abs(volume_distributions[sg0] - volume_distributions[sg1]), volume_centers)
+                hkl_distance[sg0_index, sg1_index] = np.trapz(np.abs(hkl_distributions[sg1] - hkl_distributions[sg0]).ravel()) / n_peaks
+        volume_distance[np.arange(len(ordered_spacegroups)), np.arange(len(ordered_spacegroups))] = np.nan
+        hkl_distance[np.arange(len(ordered_spacegroups)), np.arange(len(ordered_spacegroups))] = np.nan
+
+        if self.data_params['lattice_system'] == 'orthorhombic':
+            fig, axes = plt.subplots(1, 1, figsize=(20, 20))
+        else:
+            fig, axes = plt.subplots(1, 1, figsize=(10, 10))
+        axes.imshow(volume_distance, cmap='seismic')
+        start = 0
+        for n in n_spacegroups_group:
+            rect = patches.Rectangle((start - 0.5, start - 0.5), n, n, linewidth=2, edgecolor=[0, 0, 0], facecolor='none')
+            axes.add_patch(rect)
+            start += n
+        axes.set_yticks(np.arange(len(ordered_spacegroups)))
+        axes.set_xticks(np.arange(len(ordered_spacegroups)))
+        axes.set_yticklabels(ordered_spacegroups)
+        axes.set_xticklabels(ordered_spacegroups, rotation=90)
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to["data"]}/volume_similarity.png')
+        plt.close()
+
+        if self.data_params['lattice_system'] == 'orthorhombic':
+            fig, axes = plt.subplots(1, 1, figsize=(20, 20))
+        else:
+            fig, axes = plt.subplots(1, 1, figsize=(10, 10))
+        axes.imshow(hkl_distance, cmap='seismic')
+        start = 0
+        for n in n_spacegroups_group:
+            rect = patches.Rectangle((start - 0.5, start - 0.5), n, n, linewidth=2, edgecolor=[0, 0, 0], facecolor='none')
+            axes.add_patch(rect)
+            start += n
+        axes.set_yticks(np.arange(len(ordered_spacegroups)))
+        axes.set_xticks(np.arange(len(ordered_spacegroups)))
+        axes.set_yticklabels(ordered_spacegroups)
+        axes.set_xticklabels(ordered_spacegroups, rotation=90)
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to["data"]}/hkl_similarity.png')
+        plt.close()
+
     def setup_random(self):
         self.random_unit_cell_generator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
@@ -1235,8 +1308,9 @@ class Indexing:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
-                self.pitf_generator[split_group].load_from_tag()
-                self.pitf_generator[split_group].evaluate(split_group_data)
+                if split_group == 'oP_0_00':
+                    self.pitf_generator[split_group].load_from_tag()
+                    self.pitf_generator[split_group].evaluate(split_group_data)
             else:
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)

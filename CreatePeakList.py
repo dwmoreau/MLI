@@ -503,6 +503,20 @@ class PeakListCreator:
                 )
             start += refl_counts
 
+    def bump_detector_distance(self, bump):
+        self.s1[:, 2] += bump
+        q2 = []
+        start = 0
+        for expt_index, refl_counts in enumerate(self.refl_counts):
+            q2_obs = self.q2_obs[start: start + refl_counts]
+            s1 = self.s1[start: start + refl_counts]
+            s0 = self.s0[expt_index]
+            wavelength = 1 / np.linalg.norm(s0)
+            s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
+            # q2_lattice is the magnitude**2 of the scattering vector
+            q2.append(self._get_q2_spacing(s1_normed, s0))
+        self.q2_obs = np.concatenate(q2)
+
     """
     def filter_peaks(self, max_difference=0.001, n_peaks=20):
         # assign peaks and get distances

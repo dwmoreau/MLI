@@ -1,6 +1,19 @@
 """
-- "Optimized" approach to initialization
-- Move to orthorhombic
+- Try different measures of statistical distance:
+        - https://en.wikipedia.org/wiki/Statistical_distance
+        - Total Variation
+        - Hellinger distance 
+            - https://www.stat.cmu.edu/~larry/=stat705/Lecture27.pdf
+- Presentation
+    - Baseline with log_cosh target function
+
+- Model from Standard Normal
+    - volumes linearly distributed over the volume range
+    - q2_filters distributed to match q2 normalized by volumes
+
+- Deep model:
+    - First layer is initialized as currently
+    - Max pool on the volume axis
 """
 import h5py
 import joblib
@@ -40,36 +53,21 @@ class ExtractionLayer(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.model_params = model_params
         self.seed = 0
-        sigma = 0.02
-        self.sigma_scale = 0.01
-        self.sigma_mean = tf.math.log(tf.math.exp(sigma) - 1)
-        self.sigma_params = self.add_weight(
-            shape=(
-                1, 1, 1,
-                self.model_params['filter_length'],
-                self.model_params['extraction_peak_length']
-                ),
-            initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.1, seed=None),
-            dtype=tf.float32,
-            trainable=True,
-            regularizer=None,
-            name='sigma_params'
-            )
-
+        self.sigma = self.model_params['sigma']
+        params_per_filter = self.model_params['filter_length'] * (1 + self.model_params['extraction_peak_length'])
+        self.params_per_volume = params_per_filter * self.model_params['n_filters']
         if self.model_params['init_method'] == 'random':
             # q2_obs are all positive since the are divided by a scale factor.
             # q2_filter then should be positive. Hence the NonNeg constraint for volumes and filters
-            self.volumes = self.add_weight(
-                shape=(self.model_params['n_volumes'], 1, 1),
-                initializer=tf.keras.initializers.RandomUniform(
-                    minval=1.5, maxval=5, seed=None,
-                    ),
-                dtype=tf.float32,
-                trainable=True,
-                regularizer=None,
-                constraint=tf.keras.constraints.NonNeg(),
-                name='volumes'
-                )
+            #self.volumes = tf.cast(
+            #        np.linspace(0.75, 7, self.model_params['n_volumes']),
+            #        dtype=tf.float32
+            #        )[:, tf.newaxis, tf.newaxis]
+
+            self.volumes = tf.cast(
+                    np.linspace(1, 5, self.model_params['n_volumes']),
+                    dtype=tf.float32
+                    )[:, tf.newaxis, tf.newaxis]
 
             self.filters = self.add_weight(
                 shape=(1, self.model_params['n_filters'], self.model_params['filter_length']),
@@ -109,18 +107,9 @@ class ExtractionLayer(tf.keras.layers.Layer):
                 )
             reciprocal_volume_samples = reciprocal_volume_rv.rvs(size=self.model_params['n_volumes'])
             random_volumes = (reciprocal_volume_samples / q2_obs_scale**2)**(2/3)
-            self.volumes = self.add_weight(
-                shape=(self.model_params['n_volumes'], 1, 1),
-                initializer=tf.keras.initializers.Zeros(),
-                dtype=tf.float32,
-                trainable=True,
-                regularizer=None,
-                constraint=tf.keras.constraints.NonNeg(),
-                name='volumes'
-                )
-            self.volumes.assign(
-                tf.cast(random_volumes, dtype=tf.float32)[:, tf.newaxis, tf.newaxis]
-                )
+            self.volumes = tf.cast(
+                random_volumes, dtype=tf.float32
+                )[:, tf.newaxis, tf.newaxis]
 
             def filter_lims_fun(x, q2_obs_scaled, volumes, n_filters, filter_length, seed):
                 rng = np.random.default_rng(seed)
@@ -185,95 +174,28 @@ class ExtractionLayer(tf.keras.layers.Layer):
                 constraint=None,
                 name='amplitude_logits'
                 )
-        elif self.model_params['init_method'] == 'informed':
-            mean_reciprocal_volume = reciprocal_volume.mean()
-            amplitude_base = 1
-            amplitude_frac = 1/2
-            rng = np.random.default_rng(self.seed)
-            if xnn.shape[0] >= self.model_params['n_filters']:
-                replace = False
-            else:
-                replace = True
-            entry_indices = rng.choice(
-                xnn.shape[0], size=self.model_params['n_filters'], replace=replace
-                )
-            q2_filters = np.zeros((
-                self.model_params['n_filters'],
-                self.model_params['filter_length']
-                ))
-            amplitude_logits = np.zeros((
-                self.model_params['n_filters'],
-                self.model_params['filter_length'],
-                self.model_params['extraction_peak_length']
-                ))
-            for filter_index, entry_index in enumerate(entry_indices):
-                peak_indices = np.sort(rng.choice(
-                    self.model_params['extraction_peak_length'],
-                    size=self.model_params['filter_length'],
-                    replace=False
-                    ))
-                q2_filters[filter_index] = q2_obs[entry_index, peak_indices]
-                q2_filters[filter_index] *= (mean_reciprocal_volume / reciprocal_volume[entry_index])**(2/3)
-                for filter_position in range(self.model_params['filter_length']):
-                    peak_position = peak_indices[filter_position]
-                    amplitude_logits[filter_index, filter_position, peak_position] = amplitude_base
-                    if peak_position == 0:
-                        amplitude_logits[filter_index, filter_position, peak_position + 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position + 2] = amplitude_base * amplitude_frac**2
-                    elif peak_position == 1:
-                        amplitude_logits[filter_index, filter_position, peak_position - 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position + 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position + 2] = amplitude_base * amplitude_frac**2
-                    elif peak_position == self.model_params['extraction_peak_length'] - 1:
-                        amplitude_logits[filter_index, filter_position, peak_position - 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position - 2] = amplitude_base * amplitude_frac**2
-                    elif peak_position == self.model_params['extraction_peak_length'] - 2:
-                        amplitude_logits[filter_index, filter_position, peak_position + 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position - 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position - 2] = amplitude_base * amplitude_frac**2
-                    else:
-                        amplitude_logits[filter_index, filter_position, peak_position + 2] = amplitude_base * amplitude_frac**2
-                        amplitude_logits[filter_index, filter_position, peak_position + 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position - 1] = amplitude_base * amplitude_frac
-                        amplitude_logits[filter_index, filter_position, peak_position - 2] = amplitude_base * amplitude_frac**2
-            q2_filters /= q2_obs_scale
-            q2_filters += rng.normal(
-                loc=0, scale=0.1*sigma, size=q2_filters.shape
-                )
-            amplitude_logits += rng.normal(
-                loc=0, scale=0.25*amplitude_base, size=amplitude_logits.shape
-                )
-
-            scale = (reciprocal_volume / mean_reciprocal_volume)**(2/3)
-            bins = np.linspace(0, np.sort(scale)[int(0.99*scale.size)], 101)
-            scale_distribution = scipy.stats.rv_histogram(
-                histogram=np.histogram(scale, bins=bins, density=True)
-                )
-            random_volumes = scale_distribution.rvs(
-                size=self.model_params['n_volumes'],
-                random_state=rng
-                )
-            self.volumes = self.add_weight(
-                shape=(self.model_params['n_volumes'], 1, 1),
-                initializer=tf.keras.initializers.Zeros(),
-                dtype=tf.float32,
-                trainable=True,
-                regularizer=None,
-                constraint=tf.keras.constraints.NonNeg(),
-                name='volumes'
-                )
-            self.volumes.assign(tf.cast(random_volumes, dtype=tf.float32)[:, tf.newaxis, tf.newaxis])
+        elif self.model_params['init_method'] == 'random_normal':
+            # q2_obs are all positive since the are divided by a scale factor.
+            # q2_filter then should be positive. Hence the NonNeg constraint for volumes and filters
+            self.volumes_min = 1.0
+            self.volumes_max = 5
+            self.volumes = tf.cast(
+                np.linspace(self.volumes_min, self.volumes_max, self.model_params['n_volumes']),
+                dtype=tf.float32
+                )[:, tf.newaxis, tf.newaxis]
 
             self.filters = self.add_weight(
                 shape=(1, self.model_params['n_filters'], self.model_params['filter_length']),
-                initializer=tf.keras.initializers.Zeros(),
+                initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=1.0, seed=None),
                 dtype=tf.float32,
                 trainable=True,
                 regularizer=None,
-                constraint=tf.keras.constraints.NonNeg(),
+                constraint=None,
                 name='filters'
                 )
-            self.filters.assign(tf.cast(q2_filters, dtype=tf.float32)[tf.newaxis])
+            self.filters_min = 0.01
+            self.filters_max = 1
+            self.sigmoid_scale = 2
 
             self.amplitude_logits = self.add_weight(
                 shape=(
@@ -282,18 +204,15 @@ class ExtractionLayer(tf.keras.layers.Layer):
                     self.model_params['filter_length'],
                     self.model_params['extraction_peak_length']
                     ),
-                initializer=tf.keras.initializers.Zeros(),
+                initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=1.0, seed=None),
                 dtype=tf.float32,
                 trainable=True,
                 regularizer=None,
                 constraint=None,
                 name='amplitude_logits'
                 )
-            self.amplitude_logits.assign(tf.cast(amplitude_logits, dtype=tf.float32)[tf.newaxis, tf.newaxis])
 
-        self.volumes_init = self.volumes.numpy()[:, 0, 0]
         self.filters_init = self.filters.numpy()[0]
-        self.sigma_params_init = self.sigma_params.numpy()[0, 0, 0]
         self.amplitude_logits_init = self.amplitude_logits.numpy()[0, 0]
 
     def call(self, q2_obs_scaled, **kwargs):
@@ -302,18 +221,58 @@ class ExtractionLayer(tf.keras.layers.Layer):
         # q2_filters:  n_volumes, n_filters, filter_length
         # q2_obs:      batch_size, extraction_peak_length
         # difference: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
-        q2_filters = (self.volumes * self.filters)[tf.newaxis, :, :, :, tf.newaxis]
+        if self.model_params['init_method'] == 'random_normal':
+            filters_transformed = tf.keras.activations.sigmoid(self.sigmoid_scale*self.filters)
+            filters = self.filters_min + (self.filters_max - self.filters_min) * filters_transformed
+            q2_filters = (self.volumes * filters)[tf.newaxis, :, :, :, tf.newaxis]
+        else:
+            q2_filters = (self.volumes * self.filters)[tf.newaxis, :, :, :, tf.newaxis]
         difference = q2_filters - q2_obs_scaled[:, tf.newaxis, tf.newaxis, tf.newaxis, :]
-
-        sigma = tf.math.softplus(self.sigma_params*self.sigma_scale + self.sigma_mean)
-        arg = -1/2 * (difference / sigma)**2
-        #amplitudes = self.model_params['filter_length'] * tf.nn.softmax(self.amplitude_logits, axis=3)
-        amplitudes = self.model_params['filter_length'] * tf.nn.softmax(self.amplitude_logits, axis=4)
-        #amplitudes = self.model_params['filter_length'] * tf.nn.softmax(self.amplitude_logits, axis=(3, 4))
-        distances = amplitudes * tf.math.exp(arg)
+        amplitudes = self.model_params['filter_length'] * tf.keras.activations.softmax(self.amplitude_logits, axis=4) # peak axis
+        distances = amplitudes * tf.math.exp(-1/2 * (difference / self.sigma)**2)
         # distances: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
         # metric:    batch_size, n_volumes, n_filters
-        metric = tf.reduce_sum(distances, axis=(3, 4))
+        if self.model_params['metric_type'] == 'integral':
+            metric = tf.reduce_sum(distances, axis=(3, 4))
+        elif self.model_params['metric_type'] == 'kl_div':
+            metric = tf.reduce_prod(tf.reduce_sum(distances, axis=4), axis=3)
+        return metric
+
+    def subsequent_call(self, q2_obs_scaled, x):
+        # x: batch_size, n_volumes, filter_length * n_filters + filter_length * extraction_peak_length * n_fitlers 
+        #                                  q2_filters                   amplitudes
+        # q2_filters:  batch_size, n_volumes, filter_length * n_filters
+        q2_filters = x[:, :, :self.model_params['filter_length'] * self.model_params['n_filters']]
+        q2_filters = tf.keras.layers.Reshape((
+            self.model_params['n_volumes'],
+            self.model_params['n_filters'],
+            self.model_params['filter_length'],
+            1
+            ))(q2_filters)
+        q2_filters = 10*tf.keras.activations.sigmoid(2*q2_filters)
+
+        # amplitudes: batch_size, n_volumes, filter_length * extraction_peak_length * n_filters
+        amplitudes = x[:, :,  self.model_params['filter_length'] * self.model_params['n_filters']:]
+        amplitudes = tf.keras.layers.Reshape((
+            self.model_params['n_volumes'],
+            self.model_params['n_filters'],
+            self.model_params['filter_length'],
+            self.model_params['extraction_peak_length'],
+            ))(amplitudes)
+        amplitudes = self.model_params['filter_length'] * tf.keras.activations.softmax(
+            self.amplitude_logits, axis=4
+            ) # peak axis
+
+        # q2_obs:      batch_size, extraction_peak_length
+        # q2_filters:  batch_size, n_volumes, n_filters, filter_length
+        difference = q2_filters - q2_obs_scaled[:, tf.newaxis, tf.newaxis, tf.newaxis, :]
+        distances = amplitudes * tf.math.exp(-1/2 * (difference / self.sigma)**2)
+        # distances: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
+        # metric:    batch_size, n_volumes, n_filters
+        if self.model_params['metric_type'] == 'integral':
+            metric = tf.reduce_sum(distances, axis=(3, 4))
+        elif self.model_params['metric_type'] == 'kl_div':
+            metric = tf.reduce_prod(tf.reduce_sum(distances, axis=4), axis=3)
         return metric
 
     def loss_function_common(self, y_true, y_pred):
@@ -336,9 +295,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
         return tf.reduce_sum(losses * probabilities, axis=1)
 
     def evaluate_weights(self, q2_obs, save_to, split_group, tag):
-        volumes_opt = self.volumes.numpy()[:, 0, 0]
         filters_opt = self.filters.numpy()[0]
-        sigma_params_opt = self.sigma_params.numpy()[0, 0, 0]
         amplitude_logits_opt = self.amplitude_logits.numpy()[0, 0]
 
         metric_max = np.zeros(q2_obs.shape[0])
@@ -361,9 +318,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
         fig.savefig(f'{save_to}/{split_group}_pitf_metric_max_{tag}.png')
         plt.close()
 
-        # sigma / amplitudes: n_filters, filter_length, extraction_peak_length
         # filter:             n_fitlers, filter_length
-        sigma_opt = np.log(1 + np.exp(sigma_params_opt*self.sigma_scale + self.sigma_mean))
         amplitudes_opt = scipy.special.softmax(amplitude_logits_opt, axis=2)
         sort_indices = np.argsort(filters_opt, axis=1)
         for index in range(self.model_params['n_filters']):
@@ -387,80 +342,35 @@ class ExtractionLayer(tf.keras.layers.Layer):
         fig.savefig(f'{save_to}/{split_group}_pitf_amplitudes_{tag}.png')
         plt.close()
 
-        """
-        # sigma mean, amplitude weighted mean, std
-        fig, axes = plt.subplots(2, 2, figsize=(5, 4), sharex=True, sharey=True)
-        imshow00 = axes[0, 0].imshow(sigma_opt.mean(axis=0), aspect='auto')
-        imshow01 = axes[0, 1].imshow(sigma_opt.std(axis=0), aspect='auto')
-        imshow10 = axes[1, 0].imshow((sigma_opt * amplitudes_opt).mean(axis=0), aspect='auto')
-        imshow11 = axes[1, 1].imshow((sigma_opt * amplitudes_opt).std(axis=0), aspect='auto')
-        fig.colorbar(imshow00, ax=axes[0, 0])
-        fig.colorbar(imshow01, ax=axes[0, 1])
-        fig.colorbar(imshow10, ax=axes[1, 0])
-        fig.colorbar(imshow11, ax=axes[1, 1])
-        axes[0, 0].set_title('Mean Sigma')
-        axes[0, 1].set_title('STD Sigma')
-        axes[1, 0].set_title('Mean Amplitude x Sigma')
-        axes[1, 1].set_title('STD Amplitude x Sigma')
-        for i in range(2):
-            axes[1, i].set_xlabel('Peak List Position')
-            axes[i, 0].set_ylabel('Filter Position')
-        fig.tight_layout()
-        fig.savefig(f'{save_to}/{split_group}_pitf_sigmas_{tag}.png')
-        plt.close()
-        """
         ###############################################
         # Plot histogram of weights and their changes #
         ###############################################
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         alpha = 0.75
-        fig, axes = plt.subplots(2, 4, figsize=(10, 5))
+        fig, axes = plt.subplots(2, 2, figsize=(6, 5))
         axes[0, 0].hist(
-            self.volumes_init,
-            bins=10, color=colors[0], label='Init'
-            )
-        axes[0, 0].hist(
-            volumes_opt, bins=10, color=colors[1], alpha=alpha, label='Optimized'
-            )
-        axes[1, 0].hist(
-            self.volumes_init - volumes_opt, bins=10, color=colors[2], label='Init - Optimized'
-            )
-
-        axes[0, 1].hist(
             self.filters_init.ravel(), bins=10, color=colors[0], label='Init'
             )
-        axes[0, 1].hist(
+        axes[0, 0].hist(
             filters_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
             )
-        axes[1, 1].hist(
+        axes[1, 0].hist(
             self.filters_init.ravel() - filters_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
             )
 
-        axes[0, 2].hist(
-            self.sigma_params_init.ravel(), bins=10, color=colors[0], label='Init'
-            )
-        axes[0, 2].hist(
-            sigma_params_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
-            )
-        axes[1, 2].hist(
-            self.sigma_params_init.ravel() - sigma_params_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
-            )
-
-        axes[0, 3].hist(
+        axes[0, 1].hist(
             self.amplitude_logits_init.ravel(), bins=10, color=colors[0], label='Init'
             )
-        axes[0, 3].hist(
+        axes[0, 1].hist(
             amplitude_logits_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
             )
-        axes[1, 3].hist(
+        axes[1, 1].hist(
             self.amplitude_logits_init.ravel() - amplitude_logits_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
             )
         
-        axes[0, 0].set_title('Volume Weights')
-        axes[0, 1].set_title('Filter Weights')
-        axes[0, 2].set_title('Sigma Weights')
-        axes[0, 3].set_title('Amplitude Weights')
-        for i in range(4):
+        axes[0, 0].set_title('Filter Weights')
+        axes[0, 1].set_title('Amplitude Weights')
+        for i in range(2):
             axes[0, i].set_xlabel('Value')
             axes[1, i].set_xlabel('Difference')
         axes[0, 0].legend()
@@ -470,7 +380,13 @@ class ExtractionLayer(tf.keras.layers.Layer):
         plt.close()
 
     def evaluate_init(self, q2_obs_scaled, save_to, split_group, tag):
-        q2_filters = (self.volumes * self.filters).numpy()
+        if self.model_params['init_method'] == 'random_normal':
+            filters_transformed = tf.keras.activations.sigmoid(self.sigmoid_scale*self.filters)
+            filters = self.filters_min + (self.filters_max - self.filters_min) * filters_transformed
+            q2_filters = (self.volumes * filters).numpy()
+        else:
+            q2_filters = (self.volumes * self.filters).numpy()
+        
         bins = np.linspace(0, 5, 101)
         fig, axes = plt.subplots(1, 1, figsize=(4, 3))
         axes.hist(q2_obs_scaled.ravel(), bins=bins, label='q2_obs_scaled', density=True)
@@ -512,81 +428,6 @@ class ExtractionLayer(tf.keras.layers.Layer):
         plt.close()
 
 
-class DataGenerator(tf.keras.utils.Sequence):
-    def __init__(self, rng, q2_obs_scaled, xnn_scaled, xnn, lattice_system, batch_size, super_batch_size):
-        self.rng = rng
-        self.q2_obs_scaled = q2_obs_scaled
-        self.xnn_scaled = xnn_scaled
-        self.batch_size = batch_size
-        self.super_batch_size = super_batch_size
-        self.n_entries = self.q2_obs_scaled.shape[0]
-        self.n_batches = int(np.floor(self.n_entries / self.batch_size))
-        self.n_super_batches = int(np.floor(self.n_entries / (self.super_batch_size * self.batch_size)))
-
-        unit_cell = get_unit_cell_from_xnn(
-            xnn, partial_unit_cell=True, lattice_system=lattice_system
-            )
-        unit_cell_volume = get_unit_cell_volume(
-            unit_cell, partial_unit_cell=True, lattice_system=lattice_system
-            )
-        if lattice_system in ['tetragonal', 'hexagonal']:
-            self.sort_indices = [
-                np.arange(self.n_entries),
-                np.argsort(xnn[:, 0] / xnn[:, 1]),
-                np.argsort(unit_cell_volume),
-                ]
-        elif lattice_system == 'orthorhombic':
-            self.sort_indices = [
-                np.arange(self.n_entries),
-                np.argsort(xnn[:, 0] / xnn[:, 1]),
-                np.argsort(xnn[:, 0] / xnn[:, 2]),
-                np.argsort(xnn[:, 1] / xnn[:, 2]),
-                np.argsort(unit_cell_volume),
-                ]
-        elif lattice_system == 'monoclinic':
-            self.sort_indices = [
-                np.arange(self.n_entries),
-                np.argsort(xnn[:, 0] / xnn[:, 1]),
-                np.argsort(xnn[:, 0] / xnn[:, 2]),
-                np.argsort(xnn[:, 1] / xnn[:, 2]),
-                np.argsort(unit_cell[:, 3]),
-                np.argsort(unit_cell_volume),
-                ]
-        self.on_epoch_end()
-
-    def __len__(self):
-        'Denotes the number of batches per epoch'
-        return self.n_batches
-
-    def on_epoch_end(self):
-        'Updates indexes after each epoch'
-        # Pick sort type (a/c, b/c, angle)
-        sort_indices = self.sort_indices[
-            self.rng.choice(len(self.sort_indices), size=1)[0]
-            ]
-        self.shuffle_indices = np.zeros(self.n_entries, dtype=int)
-        iterable = self.rng.permutation(np.arange(self.n_super_batches))
-        start = 0
-        for index, super_batch_index in enumerate(iterable):
-            super_batch_start = super_batch_index*self.super_batch_size*self.batch_size
-            if super_batch_index == self.n_super_batches - 1:
-                super_batch_stop = self.n_entries
-            else:
-                super_batch_stop = (super_batch_index + 1)*self.super_batch_size*self.batch_size
-            super_batch_indices = sort_indices[super_batch_start: super_batch_stop]
-            stop = start + (super_batch_stop - super_batch_start)
-            self.shuffle_indices[start: stop] = self.rng.permutation(super_batch_indices)
-            start += stop - start
-
-    def __getitem__(self, index):
-        'Generate one batch of data'
-        # Generate indexes of the batch
-        start = index * self.batch_size
-        stop = (index + 1) * self.batch_size
-        indices = self.shuffle_indices[start: stop]
-        return self.q2_obs_scaled[indices], self.xnn_scaled[indices]
-
-
 class PhysicsInformedModel:
     def __init__(self, split_group, data_params, model_params, save_to, seed, q2_scaler, xnn_scaler, hkl_ref):
         self.split_group = split_group
@@ -624,9 +465,9 @@ class PhysicsInformedModel:
             'batch_size': 64,
             'loss_type': 'mse',
             'init_method': 'random',
-            'superbatch_shuffle': False,
             'augment': False,
             'model_type': 'metric',
+            'metric_type': 'integral',
             }
 
         for key in model_params_defaults.keys():
@@ -665,9 +506,10 @@ class PhysicsInformedModel:
             'batch_size',
             'loss_type',
             'init_method',
-            'superbatch_shuffle',
             'augment',
             'model_type',
+            'metric_type',
+            'sigma',
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
@@ -688,15 +530,13 @@ class PhysicsInformedModel:
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['loss_type'] = params['loss_type']
         self.model_params['init_method'] = params['init_method']
-        if self.model_params['superbatch_shuffle'] == 'True':
-            self.model_params['superbatch_shuffle'] = True
-        else:
-            self.model_params['superbatch_shuffle'] = False
         if self.model_params['augment'] == 'True':
             self.model_params['augment'] = True
         else:
             self.model_params['augment'] = False
         self.model_params['model_type'] = params['model_type']
+        self.model_params['metric_type'] = params['metric_type']
+        self.model_params['sigma'] = float(params['metric_type'])
 
         self.build_model(data=None)
         self.compile_model()
@@ -712,14 +552,6 @@ class PhysicsInformedModel:
             )
 
     def build_model(self, data=None):
-        inputs = {
-            'q2_obs_scaled': tf.keras.Input(
-                shape=self.model_params['peak_length'],
-                name='q2_obs_scaled',
-                dtype=tf.float32,
-                )
-            }
-
         data = data[data['train']]
         #data = data[~data['augmented']]
         q2_obs = np.stack(data['q2'])[:, :self.model_params['extraction_peak_length']]
@@ -735,14 +567,25 @@ class PhysicsInformedModel:
         self.extraction_layer = ExtractionLayer(
             self.model_params, q2_obs, xnn, reciprocal_volume, self.q2_obs_scale
             )
+        inputs = {
+            'q2_obs_scaled': tf.keras.Input(
+                shape=self.model_params['peak_length'],
+                name='q2_obs_scaled',
+                dtype=tf.float32,
+                )
+            }
         if self.model_params['model_type'] == 'metric':
             self.model = tf.keras.Model(inputs, self.model_builder_metric(inputs))
-        elif self.model_params['model_type'] == 'base_line':
-            self.model = tf.keras.Model(inputs, self.model_builder_base_line(inputs))
+        elif self.model_params['model_type'] == 'metric_deep':
+            params_per_filter = self.model_params['filter_length'] * (1 + self.model_params['extraction_peak_length'])
+            self.params_per_volume = params_per_filter * self.model_params['n_filters']
+            self.model = tf.keras.Model(inputs, self.model_builder_metric_deep(inputs))
         elif self.model_params['model_type'] == 'combined':
             self.model = tf.keras.Model(inputs, self.model_builder_combined(inputs))
+        elif self.model_params['model_type'] == 'base_line':
+            self.model = tf.keras.Model(inputs, self.model_builder_base_line(inputs))
         self.compile_model()
-        #self.model.summary()
+        self.model.summary()
 
     def model_builder_metric(self, inputs):
         # inputs['q2_obs_scaled']: batch_size, n_peaks
@@ -750,10 +593,15 @@ class PhysicsInformedModel:
         metric = self.extraction_layer(
             inputs['q2_obs_scaled'][:, :self.model_params['extraction_peak_length']]
             )
+        x = tf.keras.layers.LayerNormalization(
+                name=f'layer_norm_extraction',
+                axis=1,
+                center=False,
+                )(metric)
         x = tf.keras.layers.SpatialDropout1D(
             rate=self.model_params['dropout_rate_extraction'],
             name=f'dropout_extraction',
-            )(metric)
+            )(x)
 
         regularizer = tf.keras.regularizers.OrthogonalRegularizer(
             factor=self.model_params['orthogonal_regularization'],
@@ -783,7 +631,78 @@ class PhysicsInformedModel:
             self.unit_cell_length + 1,
             activation='linear',
             name='xnn_scaled',
+            )(x)
+        return output
+
+    def model_builder_metric_deep(self, inputs):
+        #regularizer = tf.keras.regularizers.OrthogonalRegularizer(
+        #    factor=self.model_params['orthogonal_regularization'],
+        #    mode='rows'
+        #    )
+        regularizer = None
+        # inputs['q2_obs_scaled']: batch_size, n_peaks
+        # metric:                  batch_size, n_volumes, n_filters
+        metric = self.extraction_layer(
+            inputs['q2_obs_scaled'][:, :self.model_params['extraction_peak_length']]
+            )
+        x = tf.keras.layers.SpatialDropout1D(
+            rate=self.model_params['dropout_rate_extraction'],
+            name=f'dropout_extraction',
+            )(metric)
+
+        x = tf.keras.layers.Dense(
+            self.model_params['n_filters'],
+            activation='linear',
+            name=f'dense_extract',
+            use_bias=False,
             kernel_regularizer=regularizer,
+            )(x)
+        x = tf.keras.layers.LayerNormalization(
+            name=f'layer_norm_extract',
+            axis=2,
+            center=True,
+            )(x)
+        x = tf.keras.activations.gelu(x)
+        x = tf.keras.layers.Dropout(
+            rate=self.model_params['dropout_rate'],
+            name=f'dropout_extract',
+            )(x)
+        x = tf.keras.layers.Dense(
+            self.params_per_volume,
+            activation='linear',
+            name=f'dense_extraction_input',
+            use_bias=True,
+            )(x)
+
+        x = self.extraction_layer.subsequent_call(
+            inputs['q2_obs_scaled'][:, :self.model_params['extraction_peak_length']],
+            x, 
+            )
+        
+        for index in range(len(self.model_params['layers'])):
+            x = tf.keras.layers.Dense(
+                self.model_params['layers'][index],
+                activation='linear',
+                name=f'dense_{index}',
+                use_bias=False,
+                kernel_regularizer=regularizer,
+                )(x)
+            x = tf.keras.layers.LayerNormalization(
+                name=f'layer_norm_{index}',
+                axis=2,
+                center=True,
+                )(x)
+            x = tf.keras.activations.gelu(x)
+            x = tf.keras.layers.Dropout(
+                rate=self.model_params['dropout_rate'],
+                name=f'dropout_{index}',
+                )(x)
+
+        # output: batch_size, n_volumes, unit_cell_length + 1
+        output = tf.keras.layers.Dense(
+            self.unit_cell_length + 1,
+            activation='linear',
+            name='xnn_scaled',
             )(x)
         return output
 
@@ -797,7 +716,6 @@ class PhysicsInformedModel:
                 activation='linear',
                 name=f'dense_{index}',
                 use_bias=True,
-                kernel_regularizer=regularizer,
                 )(x)
             x = tf.keras.layers.LayerNormalization(
                 name=f'layer_norm_{index}',
@@ -815,7 +733,6 @@ class PhysicsInformedModel:
             self.unit_cell_length + 1,
             activation='linear',
             name='xnn_scaled',
-            kernel_regularizer=regularizer,
             )(x)
         return output
 
@@ -891,9 +808,7 @@ class PhysicsInformedModel:
         return output
 
     def compile_model(self):
-        #optimizer = tf.optimizers.legacy.RMSprop(self.model_params['learning_rate']) # loss: 1.4567 - val_loss: 1.1458
         optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])    # loss: 1.4367 - val_loss: 1.2484
-        #optimizer = tf.optimizers.legacy.Adagrad(0.001) # loss: 2.0963 - val_loss: 1.5882
 
         if self.model_params['loss_type'] == 'mse':
             loss_functions = {
@@ -941,14 +856,6 @@ class PhysicsInformedModel:
         train_xnn_scaled = (train_xnn - self.xnn_mean) / self.xnn_scale
         val_xnn_scaled = (val_xnn - self.xnn_mean) / self.xnn_scale
 
-        train_true = {'xnn_scaled': train_xnn_scaled}
-        val_true = {'xnn_scaled': val_xnn_scaled}
-        train_inputs = {'q2_obs_scaled': train_q2_obs_scaled}
-        val_inputs = {'q2_obs_scaled': val_q2_obs_scaled}
-
-        self.extraction_layer.evaluate_init(
-            train_q2_obs_scaled, self.save_to_split_group, self.split_group, self.model_params["tag"]
-            )
         fig, axes = plt.subplots(1, self.unit_cell_length + 1, figsize=(6, 3))
         bins0 = np.linspace(0, 5, 301)
         bins1 = np.linspace(-5, 5, 301)
@@ -966,28 +873,18 @@ class PhysicsInformedModel:
         fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_io_{self.model_params["tag"]}.png')
         plt.close()
 
-        print(f'\nStarting training integral filter model for {self.split_group}')
-        if self.model_params['superbatch_shuffle']:
-            x = DataGenerator(
-                self.rng,
-                train_q2_obs_scaled,
-                train_xnn_scaled,
-                train_xnn,
-                self.lattice_system,
-                self.model_params['batch_size'],
-                super_batch_size=4,
-                )
-            y = None
-            shuffle = False
-        else:
-            x = train_inputs
-            y = train_true
-            shuffle = True
+        train_true = {'xnn_scaled': train_xnn_scaled}
+        val_true = {'xnn_scaled': val_xnn_scaled}
+        train_inputs = {'q2_obs_scaled': train_q2_obs_scaled}
+        val_inputs = {'q2_obs_scaled': val_q2_obs_scaled}
+        self.extraction_layer.evaluate_init(
+            train_q2_obs_scaled, self.save_to_split_group, self.split_group, self.model_params["tag"]
+            )
         self.fit_history = self.model.fit(
-            x=x,
-            y=y,
+            x=train_inputs,
+            y=train_true,
             epochs=self.model_params['epochs'],
-            shuffle=shuffle,
+            shuffle=True,
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
             callbacks=None,
@@ -1299,15 +1196,23 @@ class PhysicsInformedModel:
             axes[0].scatter(xnn_pred[:, 0], xnn_pred[:, 1], c=softmax)
             axes[1].scatter(xnn_pred[:, 0], xnn_pred[:, 2], c=softmax)
             axes[2].scatter(xnn_pred[:, 1], xnn_pred[:, 2], c=softmax)
-            axes[0].plot(xnn_true[0], xnn_true[1], marker='x', color=[0, 0, 0])
-            axes[1].plot(xnn_true[0], xnn_true[2], marker='x', color=[0, 0, 0])
-            axes[2].plot(xnn_true[1], xnn_true[2], marker='x', color=[0, 0, 0])
-            axes[0].set_xlabel('a')
-            axes[1].set_xlabel('a')
-            axes[2].set_xlabel('b')
-            axes[0].set_ylabel('b')
-            axes[1].set_ylabel('c')
-            axes[2].set_ylabel('c')
-            fig.tight_layout()
-            fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_example_{index}_{self.model_params["tag"]}.png')
-            plt.close()
+            axes[0].plot(xnn_true[0], xnn_true[1], marker='X', color=[1, 0, 0])
+            axes[1].plot(xnn_true[0], xnn_true[2], marker='X', color=[1, 0, 0])
+            axes[2].plot(xnn_true[1], xnn_true[2], marker='X', color=[1, 0, 0])
+            axes[0].set_xlabel('Xhh (scaled)')
+            axes[1].set_xlabel('Xhh (scaled)')
+            axes[2].set_xlabel('Xkk (scaled)')
+            axes[0].set_ylabel('Xkk (scaled)')
+            axes[1].set_ylabel('Xll (scaled)')
+            axes[2].set_ylabel('Xll (scaled)')
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
+            fig, axes = plt.subplots(1, 1, figsize=(5, 3))
+            axes.scatter(xnn_pred[:, 0], xnn_pred[:, 1], c=softmax)
+            axes.plot(xnn_true[0], xnn_true[1], marker='X', color=[1, 0, 0])
+            axes.set_ylabel('Xhh (scaled)')
+            axes.set_xlabel('Xll (scaled)')
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_example_{index}_{self.model_params["tag"]}.png')
+        plt.close()
+
+

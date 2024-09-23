@@ -2,10 +2,12 @@ import copy
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scipy.ndimage
+import scipy.optimize
 import scipy.signal
 import scipy.stats
-import scipy.optimize
 from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import ConfusionMatrixDisplay
 from tqdm import tqdm
 
@@ -52,41 +54,59 @@ class Augmentor:
         self.xnn_scaler = xnn_scaler
         self.angle_scale = angle_scale
         self.q2_scaler = q2_scaler
+        if type(self.aug_params['augment_shift']) == float:
+            self.augment_shift = self.aug_params['augment_shift']
+        elif type(self.aug_params['augment_shift']) == list:
+            self.augment_shift = np.linspace(
+                self.aug_params['augment_shift'][0],
+                self.aug_params['augment_shift'][1],
+                self.unit_cell_length
+                )
 
-    def setup(self, data):
+    def setup(self, data, split_groups):
         print(f'\n Setting up augmentation {self.aug_params["tag"]}')
         # Calculate the number of times each entry is to be augmented
         training_data = data[data['train']]
-        unit_cell_scaled = np.stack(training_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
+        n_groups = len(split_groups)
         if self.aug_params['augment_method'] == 'random':
             self.perturb_unit_cell = self.perturb_unit_cell_std
 
         elif self.aug_params['augment_method'] == 'cov':
             self.perturb_unit_cell = self.perturb_unit_cell_cov
-            self.cov = np.cov(unit_cell_scaled.T)
-            fig, axes = plt.subplots(1, 1, figsize=(6, 4))
-            cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov)
-            cov_display.plot(ax=axes, colorbar=False, values_format='0.2f')
-            axes.set_title('Unit cell covariance')
-            axes.set_xlabel('')
-            axes.set_ylabel('')
+            fig, axes = plt.subplots(n_groups, 1, figsize=(6, 2 + 2*n_groups))
+            self.cov = dict.fromkeys(split_groups)
+            for split_group_index, split_group in enumerate(split_groups):
+                split_group_data = training_data[training_data['split_group'] == split_group]
+                unit_cell_scaled = np.stack(split_group_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
+                self.cov[split_group] = np.cov(unit_cell_scaled.T)
+                cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov[split_group])
+                cov_display.plot(ax=axes[split_group_index], colorbar=False, values_format='0.2f')
+                axes[split_group_index].set_xlabel('')
+                axes[split_group_index].set_ylabel(split_group)
+            axes[0].set_title('Unit cell covariance')
             fig.tight_layout()
             fig.savefig(f'{self.save_to}/aug_unit_cell_cov_{self.aug_params["tag"]}.png')
             plt.close()
 
         elif self.aug_params['augment_method'] == 'pca':
             self.perturb_unit_cell = self.perturb_unit_cell_pca
-            self.pca = PCA(n_components=self.unit_cell_length).fit(unit_cell_scaled)
-            unit_cell_scaled_transformed = self.pca.transform(unit_cell_scaled)
-            self.stddev = np.std(unit_cell_scaled_transformed, axis=0)
-            fig, axes = plt.subplots(2, 1, figsize=(6, 6))
-            pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca.components_)
-            pca_display.plot(ax=axes[0], colorbar=False, values_format='0.2f')
-            axes[1].plot(self.pca.singular_values_, marker='.')
-            axes[0].set_title('PCA Components')
-            axes[0].set_xlabel('')
-            axes[0].set_ylabel('')
-            axes[1].set_title('PCA Singular values')
+
+            self.pca = dict.fromkeys(split_groups)
+            self.stddev = dict.fromkeys(split_groups)
+            fig, axes = plt.subplots(n_groups, 2, figsize=(6, 2 + 3*n_groups))
+            for split_group_index, split_group in enumerate(split_groups):
+                split_group_data = training_data[training_data['split_group'] == split_group]
+                unit_cell_scaled = np.stack(split_group_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
+                self.pca[split_group] = PCA(n_components=self.unit_cell_length).fit(unit_cell_scaled)
+                unit_cell_scaled_transformed = self.pca[split_group].transform(unit_cell_scaled)
+                self.stddev[split_group] = np.std(unit_cell_scaled_transformed, axis=0)
+                pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca[split_group].components_)
+                pca_display.plot(ax=axes[split_group_index, 0], colorbar=False, values_format='0.2f')
+                axes[split_group_index, 1].plot(self.pca[split_group].singular_values_, marker='.')
+                axes[split_group_index, 0].set_xlabel('')
+                axes[split_group_index, 0].set_ylabel(split_group)
+            axes[0, 0].set_title('PCA Components')
+            axes[0, 1].set_title('PCA Singular values')
             fig.tight_layout()
             fig.savefig(f'{self.save_to}/aug_unit_cell_pca_{self.aug_params["tag"]}.png')
             plt.close()
@@ -154,7 +174,12 @@ class Augmentor:
         y = 0.5 * np.ones(keep_sum.shape)
         indices = total_sum != 0
         y[indices] = keep_sum[indices] / total_sum[indices]
-        y_filt = scipy.signal.medfilt(y, kernel_size=(5, 1))
+        footprint = np.array([
+            [False, True, False],
+            [True, True, True],
+            [False, True, False],
+            ])
+        y_filt = scipy.ndimage.median_filter(y, footprint=footprint, mode='nearest')
         self.interpolator = scipy.interpolate.RegularGridInterpolator(
             points=(self.difference_centers, self.q2_centers),
             values=y_filt,
@@ -206,12 +231,15 @@ class Augmentor:
                     indices = self.rng.choice(n_subgroup_entries, size=n_augment_remainder, replace=False)
                     n_augment[sub_group][indices] += 1
             else:
-                n_augment[sub_group] = np.zeros(n_subgroup_entries, dtype=int)
+                n_augment[sub_group] = np.ones(n_subgroup_entries, dtype=int)
 
         augmented_entries = []
         for sub_group in sub_groups:
-            print(sub_group)
             sub_group_data = data[data[subgroup_label] == sub_group]
+            total_failures = 0
+            print(sub_group)
+            print(f'    Total entries: {len(sub_group_data)}')
+            print(f'    Average n_augment: {n_augment[sub_group].mean()}')
             for entry_index in tqdm(range(len(sub_group_data))):
                 entry = sub_group_data.iloc[entry_index]
                 for augment_index in range(n_augment[sub_group][entry_index]):
@@ -224,6 +252,10 @@ class Augmentor:
                             break
                     if augmented_entry is not None:
                         augmented_entries.append(augmented_entry)
+                    else:
+                        total_failures += 1
+            print(f'    Total failures: {total_failures}')
+            print()
         augmented_entries = pd.DataFrame(augmented_entries)
 
         # Reindexing for triclinic and monoclinic is performed in reciprocal space
@@ -276,7 +308,10 @@ class Augmentor:
         augmented_entry = copy.deepcopy(entry)
         augmented_entry['augmented'] = True
         reindexed_unit_cell_scaled = np.array(augmented_entry['reindexed_unit_cell_scaled'])
-        perturbed_reindexed_unit_cell_scaled = self.perturb_unit_cell_common(reindexed_unit_cell_scaled)
+        perturbed_reindexed_unit_cell_scaled = self.perturb_unit_cell_common(
+            reindexed_unit_cell_scaled,
+            augmented_entry['split_group']
+            )
         perturbed_reindexed_unit_cell = np.zeros(6)
         perturbed_reindexed_unit_cell[:3] = perturbed_reindexed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
         perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
@@ -304,16 +339,7 @@ class Augmentor:
         augmented_entry['d_spacing_sa'] = 1 / np.sqrt(q2_sa)
         augmented_entry['q2_sa'] = q2_sa
 
-        if np.sum(q2_sa <= 0) > 0:
-            print(perturbed_reindexed_unit_cell)
-            print(reindexed_hkl_sa)
-            print(q2_sa)
-            print()
-            print()
-            print()
-            print()
         # choose new peaks
-
         first_peak_index = np.searchsorted(self.first_probability['cdf'], self.rng.random())
         if first_peak_index >= q2_sa.size:
             return None
@@ -332,13 +358,21 @@ class Augmentor:
             # cases:
             # 1) Close to previous_kept: Reject
             # 2) Far from previous_kept and next: Use formula
-            # 3) Far from previous_kept, close to next: Accept with 0.5xformula probability
+            # 3) Far from previous_kept, close to next: Accept with 1 x formula probability
+            #    Originally this was 0.5, but I changed it to 0.5 and it doesn't seem to matter
+            #    There is a problem with the last 5 q2_obs values being distributed to higher 
+            #    values in the augmented data that I can't seem to resolve.
 
             # There is a problem with really large q2 values. Like ~100 I believe they are comming from
             # setting the hkl to [-100, -100, -100] for empty peaks in the peak list
             if q2_sa[index] < 1:
                 peak_breadth_std = broadening_multiplier * (broadening_params[0] + q2_sa[index]*broadening_params[1])
-                overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5
+                # STD / FWHM conversion
+                # 2.35 = 2*np.sqrt(2*np.log(2))
+                #overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5 # over rejects
+                #overlap_threshold = peak_breadth_std / 2 # over rejects
+                #overlap_threshold = peak_breadth_std / 4 # not run
+                overlap_threshold = 0 # over rejects
                 distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
                 # Case 1 will not pass beyond this
                 if distance_previous > overlap_threshold: 
@@ -375,7 +409,7 @@ class Augmentor:
                     if distance_next > overlap_threshold:
                         multiplier = 1
                     else:
-                        multiplier = 0.5
+                        multiplier = 1
                     if self.rng.random() < multiplier*keep_prob:
                         q2.append(q2_sa[index])
                         reindexed_hkl.append(reindexed_hkl_sa[index])
@@ -488,10 +522,10 @@ class Augmentor:
             perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_common(self, unit_cell_scaled):
+    def perturb_unit_cell_common(self, unit_cell_scaled, split_group):
         perturbed_unit_cell_scaled = unit_cell_scaled.copy()
         perturbed_unit_cell_scaled[self.unit_cell_indices] = self.perturb_unit_cell(
-            perturbed_unit_cell_scaled[self.unit_cell_indices]
+            perturbed_unit_cell_scaled[self.unit_cell_indices], split_group
             )
         if self.lattice_system == 'cubic':
             perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[0]
@@ -502,14 +536,14 @@ class Augmentor:
             perturbed_unit_cell_scaled[3:] = perturbed_unit_cell_scaled[3]
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_std(self, unit_cell_scaled):
+    def perturb_unit_cell_std(self, unit_cell_scaled, split_group):
         # perturb unit cell
         status = True
         i = 0
         while status:
             perturbed_unit_cell_scaled = self.rng.normal(
                 loc=unit_cell_scaled,
-                scale=self.aug_params['augment_shift'],
+                scale=self.augment_shift,
                 )[0]
             i += 1
             if self._check_in_range(perturbed_unit_cell_scaled):
@@ -519,13 +553,13 @@ class Augmentor:
             )
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_cov(self, unit_cell_scaled):
+    def perturb_unit_cell_cov(self, unit_cell_scaled, split_group):
         # perturb unit cell
         status = True
         while status:
             perturbed_unit_cell_scaled = self.rng.multivariate_normal(
                 mean=unit_cell_scaled,
-                cov=self.aug_params['augment_shift']**2 * self.cov,
+                cov=self.augment_shift**2 * self.cov[split_group],
                 size=1
                 )[0]
             if self._check_in_range(perturbed_unit_cell_scaled):
@@ -535,16 +569,18 @@ class Augmentor:
             )
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_pca(self, unit_cell_scaled):
+    def perturb_unit_cell_pca(self, unit_cell_scaled, split_group):
         # perturb unit cell
         status = True
-        unit_cell_scaled_transformed = self.pca.transform(unit_cell_scaled[np.newaxis, :])[0]
+        unit_cell_scaled_transformed = self.pca[split_group].transform(
+            unit_cell_scaled[np.newaxis, :]
+            )[0]
         while status:
             perturbed_unit_cell_scaled_transformed = self.rng.normal(
                 loc=unit_cell_scaled_transformed,
-                scale=self.aug_params['augment_shift'] * self.stddev,
+                scale=self.augment_shift * self.stddev[split_group],
                 )
-            perturbed_unit_cell_scaled = self.pca.inverse_transform(
+            perturbed_unit_cell_scaled = self.pca[split_group].inverse_transform(
                 perturbed_unit_cell_scaled_transformed[np.newaxis, :]
                 )[0, :]
             perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
@@ -553,3 +589,147 @@ class Augmentor:
             if self._check_in_range(perturbed_unit_cell_scaled):
                 status = False
         return perturbed_unit_cell_scaled
+
+    def evaluate(self, data, split_group):
+        train = data[data['train']]
+        train_uc = np.stack(train['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        train_uc_volume = get_unit_cell_volume(
+            train_uc, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        train_y = np.array(train['augmented'], dtype=int)
+        train_q2_obs = np.stack(train['q2'])
+
+        val = data[~data['train']]
+        val_uc = np.stack(val['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        val_uc_volume = get_unit_cell_volume(
+            val_uc, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        val_y = np.array(val['augmented'], dtype=int)
+        val_q2_obs = np.stack(val['q2'])
+
+        uc_classifier = RandomForestClassifier(
+            max_depth=3,
+            min_samples_split=10,
+            min_samples_leaf=10,
+            class_weight='balanced_subsample',
+            )
+        uc_classifier.fit(X=train_uc, y=train_y)
+        train_accuracy = uc_classifier.score(X=train_uc, y=train_y)
+        val_accuracy = uc_classifier.score(X=val_uc, y=val_y)
+
+        train_pred = uc_classifier.predict(train_uc)
+        train_correct = train_pred == train_y
+
+        val_pred = uc_classifier.predict(val_uc)
+        val_correct = val_pred == val_y
+
+        q2_obs_classifier = RandomForestClassifier(
+            max_depth=3,
+            min_samples_split=10,
+            min_samples_leaf=10,
+            class_weight='balanced_subsample',
+            )
+        q2_obs_classifier.fit(X=train_q2_obs, y=train_y)
+        train_accuracy_q2_obs = q2_obs_classifier.score(X=train_q2_obs, y=train_y)
+        val_accuracy_q2_obs = q2_obs_classifier.score(X=val_q2_obs, y=val_y)
+
+        n_bins = 40
+        bins = [None for _ in range(self.unit_cell_length + 1)]
+        centers = [None for _ in range(self.unit_cell_length + 1)]
+        train_true_frac = np.zeros((n_bins, self.unit_cell_length + 1))
+        val_true_frac = np.zeros((n_bins, self.unit_cell_length + 1))
+
+        for uc_index in range(self.unit_cell_length + 1):
+            if uc_index == self.unit_cell_length:
+                sorted_uc = np.sort(train_uc_volume)
+            else:
+                sorted_uc = np.sort(train_uc[:, uc_index])
+            bins[uc_index] = np.linspace(sorted_uc[0], sorted_uc[int(0.99*sorted_uc.size)], n_bins + 1)
+            centers[uc_index] = (bins[uc_index][1:] + bins[uc_index][:-1]) / 2
+            if uc_index == self.unit_cell_length:
+                train_bin_indices = np.searchsorted(bins[uc_index], train_uc_volume) - 1
+                val_bin_indices = np.searchsorted(bins[uc_index], val_uc_volume) - 1
+            else:
+                train_bin_indices = np.searchsorted(bins[uc_index], train_uc[:, uc_index]) - 1
+                val_bin_indices = np.searchsorted(bins[uc_index], val_uc[:, uc_index]) - 1
+            for bin_index in range(n_bins):
+                train_select = train_correct[train_bin_indices == bin_index]
+                val_select = val_correct[val_bin_indices == bin_index]
+                if train_select.size > 0:
+                    train_true_frac[bin_index, uc_index] = train_select.sum() / train_select.size
+                else:
+                    train_true_frac[bin_index, uc_index] = np.nan
+                if val_select.size > 0:
+                    val_true_frac[bin_index, uc_index] = val_select.sum() / val_select.size
+                else:
+                    val_true_frac[bin_index, uc_index] = np.nan
+
+        figsize = (5 + 1.5**(self.unit_cell_length + 1), 3)
+        fig, axes = plt.subplots(1, self.unit_cell_length + 1, figsize=figsize)
+        if self.lattice_system == 'cubic':
+            labels = ['a', 'Volume']
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
+            labels = ['a', 'b', 'Volume']
+        elif self.lattice_system == 'orthorhombic':
+            labels = ['a', 'b', 'c', 'Volume']
+        elif self.lattice_system == 'monoclinic':
+            labels = ['a', 'b', 'c', 'beta', 'Volume']
+        elif self.lattice_system == 'triclinic':
+            labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma', 'Volume']
+        elif self.lattice_system == 'rhombohedral':
+            labels = ['a', 'alpha', 'Volume']
+        axes_r = [axes[i].twinx() for i in range(self.unit_cell_length + 1)]
+        for uc_index in range(self.unit_cell_length + 1):
+            if uc_index == self.unit_cell_length:
+                unaugmented_uc = train_uc_volume[~train['augmented']]
+                augmented_uc = train_uc_volume[train['augmented']]
+            else:
+                unaugmented_uc = train_uc[~train['augmented'], uc_index]
+                augmented_uc = train_uc[train['augmented'], uc_index]
+            axes[uc_index].hist(unaugmented_uc, bins=bins[uc_index], label='Original', density=True)
+            axes[uc_index].hist(augmented_uc, bins=bins[uc_index], label='Augmented', density=True, alpha=0.5)
+            axes_r[uc_index].plot(centers[uc_index], train_true_frac[:, uc_index], color=[1, 0, 0], label='Train Accuracy')
+            axes_r[uc_index].plot(centers[uc_index], val_true_frac[:, uc_index], color=[0, 1, 0], label='Val Accuracy')
+            axes_r[uc_index].plot(centers[uc_index], 0.5*np.ones(centers[uc_index].size), color=[0, 0, 0], linestyle='dotted')
+            axes[uc_index].set_xlabel(labels[uc_index])
+        axes[0].set_ylabel('Distribution')
+        axes_r[self.unit_cell_length].set_ylabel('Prediction Accuracy')
+        axes[0].legend(frameon=False, framealpha=0.5)
+        axes_r[self.unit_cell_length].legend(frameon=False, framealpha=0.5)
+        axes[0].set_title('\n'.join([
+            f'UC Train / Val Acc: {train_accuracy:0.2f} / {val_accuracy:0.2f}',
+            f'q2 Train / Val Acc: {train_accuracy_q2_obs:0.2f} / {val_accuracy_q2_obs:0.2f}',
+            ]))
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to}/aug_predictions_{split_group}_{self.aug_params["tag"]}.png')
+        plt.close()
+
+        fig, axes = plt.subplots(1, 2, figsize=(6, 3))
+        axes[0].plot(uc_classifier.feature_importances_, marker='.')
+        axes[1].plot(q2_obs_classifier.feature_importances_, marker='.')
+        axes[0].set_xlabel('Unit Cell Feature Importance')
+        axes[1].set_xlabel('Peak Position Feature Importance')
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to}/aug_feature_importance_{split_group}_{self.aug_params["tag"]}.png')
+        plt.close()
+
+        n_important = 5
+        feature_indices = np.argsort(q2_obs_classifier.feature_importances_)[::-1][:n_important]
+        sorted_q2 = np.sort(train_q2_obs.ravel())
+        q2_bins = np.linspace(0, sorted_q2[int(0.9975*sorted_q2.size)], 101)
+        unaugmented_q2 = train_q2_obs[~train['augmented']]
+        augmented_q2 = train_q2_obs[train['augmented']]
+        fig, axes = plt.subplots(1, n_important + 1, figsize=(10, 4), sharex=True)
+        axes[0].hist(unaugmented_q2.ravel(), bins=q2_bins, density=True, label='Original')
+        axes[0].hist(augmented_q2.ravel(), bins=q2_bins, density=True, alpha=0.5, label='Augmented')
+        axes[0].set_title('All Peaks')
+        for axes_index, feature_index in enumerate(feature_indices):
+            axes[axes_index + 1].hist(unaugmented_q2[:, feature_index], bins=q2_bins, density=True, label='Original')
+            axes[axes_index + 1].hist(augmented_q2[:, feature_index], bins=q2_bins, density=True, alpha=0.5, label='Augmented')
+            axes[axes_index + 1].set_title(f'q2 index: {feature_index}')
+        for axes_index in range(n_important + 1):
+            axes[axes_index].set_xlabel('q2_obs')
+        axes[0].legend()
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to}/q2_distributions_{split_group}_{self.aug_params["tag"]}.png')
+        plt.close()

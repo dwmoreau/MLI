@@ -581,6 +581,27 @@ class Regression:
             'kernel_initializer',
             'bias_initializer',
             ]
+
+        self.model_params['variance_model'] = 'alpha_beta'
+        network_keys = ['mean_params', 'alpha_params', 'beta_params']
+        for network_key in network_keys:
+            self.model_params[network_key] = dict.fromkeys(params_keys)
+            self.model_params[network_key]['unit_cell_length'] = self.unit_cell_length
+            for element in params[network_key].split('{')[1].split('}')[0].split(", '"):
+                key = element.replace("'", "").split(':')[0]
+                value = element.replace("'", "").split(':')[1]
+                if key in ['dropout_rate', 'epsilon']:
+                    self.model_params[network_key][key] = float(value)
+                if key == 'layers':
+                    self.model_params[network_key]['layers'] = np.array(
+                        value.split('[')[1].split(']')[0].split(','),
+                        dtype=int
+                        )
+                if key in ['output_activation', 'output_name']:
+                    self.model_params[network_key][key] = value.replace(' ', '')
+            self.model_params[network_key]['kernel_initializer'] = None
+            self.model_params[network_key]['bias_initializer'] = None
+        """
         network_keys = ['mean_params', 'var_params', 'alpha_params', 'beta_params']
         for network_key in network_keys:
             self.model_params[network_key] = dict.fromkeys(params_keys)
@@ -599,7 +620,7 @@ class Regression:
                     self.model_params[network_key][key] = value.replace(' ', '')
             self.model_params[network_key]['kernel_initializer'] = None
             self.model_params[network_key]['bias_initializer'] = None
-
+        """
         self.build_model()
         self.model.load_weights(
             filepath=f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5',

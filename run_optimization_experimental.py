@@ -11,10 +11,11 @@ from UtilitiesOptimizer import get_optimizers
 from UtilitiesOptimizer import validate_candidate
 
 
-base_dir = '/Users/DWMoreau/MLI/data/experimental_data/SACLA'
 broadening_tag = '1'
-optimization_tag = 'updated'
+optimization_tag = '_0'
 n_top_candidates = 20
+"""
+base_dir = '/Users/DWMoreau/MLI/data/experimental_data/SACLA'
 entry_tags = [
     '1napthyl',
     '2am5cl',
@@ -63,7 +64,17 @@ entry_tags = [
     'Lcys-lowph',
     'thiorene',
     ]
+"""
 
+base_dir = '/Users/DWMoreau/MLI/triplet'
+entry_tags = [
+    #'cybu_rg003',
+    'cyhx_rg003',
+    #'cybu',
+    #'cyhx',
+    #'glu_dehyd',
+    #'homocys',
+    ]
 rng = np.random.default_rng()
 
 comm = MPI.COMM_WORLD
@@ -76,6 +87,10 @@ logger.info('Starting process')
 bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
 manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
 serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+
+#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP', 'aP']
+#manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,    0]
+#serial =           [True, True, True, True, True, True, True,  True,  True,  True,  True,  True,  True, True]
 
 
 mpi_organizers = get_mpi_organizer(comm, bravais_lattices, manager_rank, serial)
