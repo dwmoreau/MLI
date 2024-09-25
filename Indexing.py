@@ -1,38 +1,20 @@
 """
-Readings:
-    - Look more into TREOR
-        https://www.ba.ic.cnr.it/softwareic/expo/ntreor/
-    - Bergmann 2004: Renewed interest in powder diffraction indexing
-        - round robin comparison of existing programs
-            - High quality data is the most important requirement for success
-            - Most programs will find the solution with high quality data
-            - Not a push button task. Need expert knowledge and manual intervention
-            - Trying all available programs is a recommended approach.
-    - Werner 1985: 
-        - Attempt indexing as a 2D crystal first to help with dominant zones
-        - Also used the 
-        - Idea is to assume the Miller index of the first line is known, then try different
-            miller indices for the rest of the pattern.
-    - Werner 1964:
-        - q2 error should be less than 0.0005 for all lines if CuKalpha radiation is used. Citing R. Hesse
-        - Crazy flow diagram
-    - Shirley 2003: Easy if all peaks are known
-    - Altomare 2008: Precision and accuracy in determining peak positions is critical
-    - Oishi-Tomiyasu 2013: Revised M20 scores
-    - Bergmann 2007
-    - Altomare 2009: Index-Heuristics
-    - Tam & Compton (1995)
-    - Paszkowicz 1996
-    - Kariuki 1999
-    - Le Bail 2004
-    - Le Bail 2008
-    - Harris 2000
+Ordered to-do
+    1: Finish Integral filter model:
+        - Implement calibration model within integral filter model
+        - Integral filter generate function
+    2: Regenerate data set
+    3: Train models and evaluate models
+    4: Determine radius of convergence
+    5: Optimize ensemble of models
 
 * Integral filter model
     * Generate function
+        - Train assignment calibration model to get a distribution over HKL
+        - Select Top N predictions and sample from HKL
     - permutation invariance
     - Look at sensitivity analysis
-    - Reindex triclinic in reciprocal space.
+    - Reindex triclinic in reciprocal space
 
 - Regression
     x Re-evaluate hexagonal:
@@ -50,7 +32,7 @@ Readings:
         - Determine radius of convergence for each BL
             - Generate N candidates a radius of R from the correct solution
                 - At what R do all candidates converge to the correct solution?
-        - Optimize emsemble of models to minimize failure rate given a penalty of number of candidates and efficiency
+        - Optimize ensemble of models to minimize failure rate given a penalty of number of candidates and efficiency
     * standardization of monoclinic cells
     - Add mechanism for analysis of failed entries    
     - Is there an optimal number of subsampled peaks
@@ -79,14 +61,41 @@ Readings:
     - https://journals.iucr.org/paper?fe5024
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
-- Augmentation
-    - Volume dependent cov
-- SWE
 - Templating
     - Calibrate templates with a random forest model that converts error at a peak position to a probability.
+- SWE
+- Augmentation
 - Random unit cell generator
 - Indexing.py
-- Assignments
+
+Readings:
+    - Look more into TREOR
+        https://www.ba.ic.cnr.it/softwareic/expo/ntreor/
+    - Bergmann 2004: Renewed interest in powder diffraction indexing
+        - round robin comparison of existing programs
+            - High quality data is the most important requirement for success
+            - Most programs will find the solution with high quality data
+            - Not a push button task. Need expert knowledge and manual intervention
+            - Trying all available programs is a recommended approach.
+    - Werner 1985: 
+        - Attempt indexing as a 2D crystal first to help with dominant zones
+        - Also used the 
+        - Idea is to assume the Miller index of the first line is known, then try different
+            miller indices for the rest of the pattern.
+    - Werner 1964:
+        - q2 error should be less than 0.0005 for all lines if CuKalpha radiation is used. Citing R. Hesse
+        - Crazy flow diagram
+    - Shirley 2003: Easy if all peaks are known
+    - Altomare 2008: Precision and accuracy in determining peak positions is critical
+    - Oishi-Tomiyasu 2013: Revised M20 scores
+    - Bergmann 2007
+    - Altomare 2009: Index-Heuristics
+    - Tam & Compton (1995)
+    - Paszkowicz 1996
+    - Kariuki 1999
+    - Le Bail 2004
+    - Le Bail 2008
+    - Harris 2000
 """
 import joblib
 import matplotlib.patches as patches
@@ -98,7 +107,6 @@ from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
-from Assigner import Assigner
 from Augmentor import Augmentor
 from Evaluations import evaluate_regression
 from Evaluations import evaluate_regression_pitf
@@ -120,12 +128,11 @@ from Utilities import write_params
 
 
 class Indexing:
-    def __init__(self, assign_params=None, aug_params=None, data_params=None, reg_params=None, template_params=None, pitf_params=None, random_params=None, seed=12345, load_bravais_lattice='all'):
+    def __init__(self, aug_params=None, data_params=None, reg_params=None, template_params=None, pitf_params=None, random_params=None, seed=12345, load_bravais_lattice='all'):
         self.random_seed = seed
         self.rng = np.random.default_rng(self.random_seed)
         self.n_generated_points = 60  # This is the peak length of the generated dataset.
-        self.save_to = dict.fromkeys(['results', 'data', 'regression', 'assigner', 'augmentor'])
-        self.assign_params = assign_params
+        self.save_to = dict.fromkeys(['results', 'data', 'regression', 'augmentor'])
         self.aug_params = aug_params
         self.data_params = data_params
         self.random_params = random_params
@@ -136,7 +143,6 @@ class Indexing:
         results_directory = os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'])
         self.save_to = {
             'results': results_directory,
-            'assigner': os.path.join(results_directory, 'assigner'),
             'augmentor': os.path.join(results_directory, 'augmentor'),
             'data': os.path.join(results_directory, 'data'),
             'random': os.path.join(results_directory, 'random'),
@@ -147,8 +153,6 @@ class Indexing:
 
         if not os.path.exists(self.save_to['results']):
             os.mkdir(self.save_to['results'])
-        if not os.path.exists(self.save_to['assigner']):
-            os.mkdir(self.save_to['assigner'])
         if not os.path.exists(self.save_to['augmentor']):
             os.mkdir(self.save_to['augmentor'])
         if not os.path.exists(self.save_to['data']):
@@ -1307,12 +1311,13 @@ class Indexing:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
-                if split_group == 'oP_0_00':
+                if split_group == 'hP_0_00':
                     self.pitf_generator[split_group].load_from_tag()
-                    self.pitf_generator[split_group].evaluate(split_group_data)
+                    self.pitf_generator[split_group].evaluate(split_group_data)    
             else:
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
+                self.pitf_generator[split_group].train_calibration(data=split_group_data)
                 self.pitf_generator[split_group].evaluate(split_group_data)
 
     def inferences_pitf(self):
@@ -1464,74 +1469,3 @@ class Indexing:
             unit_cell_indices=self.data_params['unit_cell_indices'],
             model='trees'
             )
-
-    def setup_assignment(self):
-        # This is here because during optimization, not all bravais lattices are used for the
-        # assignment model
-        for bravais_lattice in self.assign_params.keys():
-            for key in self.assign_params[bravais_lattice].keys():
-                self.assign_params[bravais_lattice][key]['unit_cell_length'] = self.data_params['hkl_ref_length']
-
-        self.assigner = dict.fromkeys(self.data_params['bravais_lattices'])
-        augmented_entries = self.data[self.data['augmented']]
-
-        for bravais_lattice in self.data_params['bravais_lattices']:
-            self.assigner[bravais_lattice] = dict.fromkeys(self.assign_params[bravais_lattice].keys())
-            bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
-            for key in self.assign_params[bravais_lattice].keys():
-                self.assigner[bravais_lattice][key] = Assigner(
-                    self.data_params,
-                    self.assign_params[bravais_lattice][key],
-                    self.hkl_ref[bravais_lattice],
-                    self.q2_scaler,
-                    self.save_to['assigner']
-                    )
-                if self.assign_params[bravais_lattice][key]['load_from_tag']:
-                    self.assigner[bravais_lattice][key].load_from_tag(
-                        self.assign_params[bravais_lattice][key]['tag'],
-                        self.assign_params[bravais_lattice][key]['mode']
-                        )
-                else:
-                    self.assigner[bravais_lattice][key].fit_model(
-                        data=bl_data,
-                        xnn_key='reindexed_xnn',
-                        unit_cell_indices=self.data_params['unit_cell_indices'],
-                        )
-
-    def inferences_assignment(self, keys):
-        for bravais_lattice in self.data_params['bravais_lattices']:
-            bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
-            for key in keys:
-                unaugmented_bl_data = bl_data[~bl_data['augmented']].copy()
-                softmaxes = self.assigner[bravais_lattice][key].do_predictions(
-                    unaugmented_bl_data,
-                    xnn_key='reindexed_xnn',
-                    unit_cell_indices=self.data_params['unit_cell_indices'],
-                    reload_model=False,
-                    batch_size=1024,
-                    )
-                hkl_pred = self.convert_softmax_to_assignments(
-                    softmaxes, self.hkl_ref[bravais_lattice]
-                    )
-                hkl_assign = softmaxes.argmax(axis=2)
-
-                unaugmented_bl_data['hkl_labels_pred'] = list(hkl_assign)
-                unaugmented_bl_data['hkl_pred'] = list(hkl_pred)
-                unaugmented_bl_data['hkl_softmaxes'] = list(softmaxes)
-                self.assigner[bravais_lattice][key].evaluate(
-                    unaugmented_bl_data,
-                    bravais_lattice,
-                    xnn_key='reindexed_xnn',
-                    unit_cell_indices=self.data_params['unit_cell_indices'],
-                    perturb_std=self.assign_params[bravais_lattice][key]['perturb_std']
-                    )
-
-                self.assigner[bravais_lattice][key].calibrate(unaugmented_bl_data)
-
-    def convert_softmax_to_assignments(self, softmaxes, hkl_ref):
-        n_entries = softmaxes.shape[0]
-        hkl_assign = softmaxes.argmax(axis=2)
-        hkl_pred = np.zeros((n_entries, self.data_params['n_peaks'], 3))
-        for entry_index in range(n_entries):
-            hkl_pred[entry_index] = hkl_ref[hkl_assign[entry_index]]
-        return hkl_pred

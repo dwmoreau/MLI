@@ -1,11 +1,6 @@
 """
-- Add regularization
-- Do long training
-
-- Deep model
+Get generate working
 """
-import h5py
-import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -13,16 +8,8 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import scipy.stats
 import scipy.special
-import scipy.optimize
-from sklearn.preprocessing import StandardScaler
 import tensorflow as tf
-from datetime import datetime
-from packaging import version
-import time
 
-from Networks import mlp_model_builder
-from TargetFunctions import IndexingTargetFunction
-from TargetFunctions import LikelihoodLoss
 from Utilities import fix_unphysical
 from Utilities import get_hkl_matrix
 from Utilities import get_unit_cell_from_xnn
@@ -45,19 +32,18 @@ class ExtractionLayer(tf.keras.layers.Layer):
         self.sigma = self.model_params['sigma']
         params_per_filter = self.model_params['filter_length'] * (1 + self.model_params['extraction_peak_length'])
         self.params_per_volume = params_per_filter * self.model_params['n_filters']
-        if self.model_params['init_method'] == 'random':
+        self.volumes = self.add_weight(
+            shape=(self.model_params['n_volumes'], 1, 1),
+            initializer=tf.keras.initializers.Zeros(),
+            dtype=tf.float32,
+            trainable=False,
+            name='volumes'
+            )
+        if q2_obs is None or self.model_params['init_method'] == 'random':
             # q2_obs are all positive since the are divided by a scale factor.
             # q2_filter then should be positive. Hence the NonNeg constraint for volumes and filters
-            #self.volumes = tf.cast(
-            #        np.linspace(0.75, 7, self.model_params['n_volumes']),
-            #        dtype=tf.float32
-            #        )[:, tf.newaxis, tf.newaxis]
-
-            self.volumes = tf.cast(
-                    np.linspace(1, 5, self.model_params['n_volumes']),
-                    dtype=tf.float32
-                    )[:, tf.newaxis, tf.newaxis]
-
+            volumes = np.linspace(1, 5, self.model_params['n_volumes'])
+            self.volumes.assign(tf.cast(volumes, dtype=tf.float32)[:, tf.newaxis, tf.newaxis])
             self.filters = self.add_weight(
                 shape=(1, self.model_params['n_filters'], self.model_params['filter_length']),
                 initializer=tf.keras.initializers.RandomUniform(
@@ -99,9 +85,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
                 0.001, 1, self.model_params['n_volumes']
                 ))
             distribution_volumes = (reciprocal_volume_samples / q2_obs_scale**2)**(2/3)
-            self.volumes = tf.cast(
-                distribution_volumes, dtype=tf.float32
-                )[:, tf.newaxis, tf.newaxis]
+            self.volumes.assign(tf.cast(distribution_volumes, dtype=tf.float32)[:, tf.newaxis, tf.newaxis])
 
             q2_obs_scaled = q2_obs / q2_obs_scale
             q2_obs_scaled_sorted = np.sort(
@@ -343,6 +327,9 @@ class PhysicsInformedModel:
 
         self.lattice_system = self.data_params['lattice_system']
 
+        self.hkl_ref = hkl_ref
+        self.global_q2_scaler = q2_scaler
+        self.global_xnn_scaler = xnn_scaler
         tf.keras.utils.set_random_seed(1)
         tf.config.experimental.enable_op_determinism()
 
@@ -364,16 +351,31 @@ class PhysicsInformedModel:
             'batch_size': 64,
             'loss_type': 'mse',
             'init_method': 'random',
-            'augment': False,
+            'augment': True,
             'model_type': 'metric',
             'metric_type': 'integral',
+            'calibration_params': {
+                'layers': [1000, 500, 100],
+                'dropout_rate': 0.25,
+                'n_components': 5,
+                'n_peaks': self.n_peaks,
+                'epsilon_pds': 0.1,
+                'epochs': 10,
+                'learning_rate': 0.0001,
+                'augment': False,
+                'batch_size': 64,
+                },
             }
 
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
                 self.model_params[key] = model_params_defaults[key]
+        for key in model_params_defaults['calibration_params'].keys():
+            if key not in self.model_params['calibration_params'].keys():
+                self.model_params['calibration_params'][key] = model_params_defaults['calibration_params'][key]
         self.model_params['unit_cell_length'] = self.unit_cell_length
         self.build_model(data=data)
+        self.build_calibration_model()
 
     def save(self):
         write_params(self.model_params, f'{self.save_to_split_group}/{self.split_group}_pitf_params_{self.model_params["tag"]}.csv')
@@ -385,6 +387,11 @@ class PhysicsInformedModel:
         np.save(
             f'{self.save_to_split_group}/{self.split_group}_xnn_scaler_{self.model_params["tag"]}.npy',
             np.array((self.xnn_mean, self.xnn_scale))
+            )
+
+    def save_calibration(self):
+        self.calibration_model.save_weights(
+            f'{self.save_to_split_group}/{self.split_group}_calibration_weights_{self.model_params["tag"]}.h5'
             )
 
     def load_from_tag(self):
@@ -442,14 +449,8 @@ class PhysicsInformedModel:
             self.model_params['augment'] = False
         self.model_params['model_type'] = params['model_type']
         self.model_params['metric_type'] = params['metric_type']
-        self.model_params['sigma'] = float(params['metric_type'])
+        self.model_params['sigma'] = float(params['sigma'])
 
-        self.build_model(data=None)
-        self.compile_model()
-        self.model.load_weights(
-            filepath=f'{self.save_to_split_group}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5',
-            by_name=True
-            )
         self.q2_obs_scale = np.load(
             f'{self.save_to_split_group}/{self.split_group}_q2_obs_scale_{self.model_params["tag"]}.npy',
             )
@@ -457,22 +458,71 @@ class PhysicsInformedModel:
             f'{self.save_to_split_group}/{self.split_group}_xnn_scaler_{self.model_params["tag"]}.npy',
             )
 
+        self.build_model(data=None)
+        self.compile_model()
+        self.model.load_weights(
+            filepath=f'{self.save_to_split_group}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5',
+            by_name=True
+            )
+
+        calibration_params_keys = [
+            'layers',
+            'dropout_rate',
+            'n_components',
+            'n_peaks',
+            'epsilon_pds',
+            'epochs',
+            'learning_rate',
+            'augment',
+            'batch_size'
+            ]
+        self.model_params['calibration_params'] = dict.fromkeys(params_keys)
+        for element in params['calibration_params'].split('{')[1].split('}')[0].split(", '"):
+            key = element.replace("'", "").split(':')[0]
+            value = element.replace("'", "").split(':')[1]
+            if key in ['dropout_rate', 'epsilon_pds', 'learning_rate']:
+                self.model_params['calibration_params'][key] = float(value)
+            elif key == 'layers':
+                self.model_params['calibration_params']['layers'] = np.array(
+                    value.split('[')[1].split(']')[0].split(','),
+                    dtype=int
+                    )
+            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size']:
+                self.model_params['calibration_params'][key] = int(value)
+            elif key == 'augment':
+                if value == 'True':
+                    self.model_params['calibration_params'][key] = True
+                elif value == 'False':
+                    self.model_params['calibration_params'][key] = False
+        self.build_calibration_model()
+        self.compile_calibration_model()
+        self.calibration_model.load_weights(
+            filepath=f'{self.save_to_split_group}/{self.split_group}_calibration_weights_{self.model_params["tag"]}.h5',
+            by_name=True
+            )
+
     def build_model(self, data=None):
-        data = data[data['train']]
-        #data = data[~data['augmented']]
-        q2_obs = np.stack(data['q2'])[:, :self.model_params['extraction_peak_length']]
-        self.q2_obs_scale = q2_obs.std()
-        unit_cell = np.stack(data['reindexed_unit_cell'])[:, self.unit_cell_indices]
-        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
-        reciprocal_unit_cell = reciprocal_uc_conversion(
-            unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        reciprocal_volume = get_unit_cell_volume(
-            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        self.extraction_layer = ExtractionLayer(
-            self.model_params, q2_obs, xnn, reciprocal_volume, self.q2_obs_scale
-            )
+        # Build the integral filter model #
+        if not data is None:
+            data = data[data['train']]
+            #data = data[~data['augmented']]
+            q2_obs = np.stack(data['q2'])[:, :self.model_params['extraction_peak_length']]
+            self.q2_obs_scale = q2_obs.std()
+            unit_cell = np.stack(data['reindexed_unit_cell'])[:, self.unit_cell_indices]
+            xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
+            reciprocal_unit_cell = reciprocal_uc_conversion(
+                unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            reciprocal_volume = get_unit_cell_volume(
+                reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            self.extraction_layer = ExtractionLayer(
+                self.model_params, q2_obs, xnn, reciprocal_volume, self.q2_obs_scale
+                )
+        else:
+            self.extraction_layer = ExtractionLayer(
+                self.model_params, None, None, None, self.q2_obs_scale
+                )
         inputs = {
             'q2_obs_scaled': tf.keras.Input(
                 shape=self.model_params['peak_length'],
@@ -487,7 +537,36 @@ class PhysicsInformedModel:
         elif self.model_params['model_type'] == 'base_line':
             self.model = tf.keras.Model(inputs, self.model_builder_base_line(inputs))
         self.compile_model()
-        self.model.summary()
+        #self.model.summary()
+
+    def build_calibration_model(self):
+        self.pairwise_difference_calculator = PairwiseDifferenceCalculator(
+            lattice_system=self.data_params['lattice_system'],
+            hkl_ref=self.hkl_ref,
+            tensorflow=True,
+            q2_scaler=self.global_q2_scaler,
+            )
+        self.pairwise_difference_calculation_numpy = PairwiseDifferenceCalculator(
+            lattice_system=self.data_params['lattice_system'],
+            hkl_ref=self.hkl_ref,
+            tensorflow=False,
+            q2_scaler=self.global_q2_scaler,
+            )
+        inputs = {
+            'q2_obs_scaled': tf.keras.Input(
+                shape=self.data_params['n_peaks'],
+                name='q2_obs_scaled',
+                dtype=tf.float32,
+                ),
+            'xnn': tf.keras.Input(
+                shape=self.unit_cell_length,
+                name='xnn_scaled',
+                dtype=tf.float32,
+                ),
+            }
+        self.calibration_model = tf.keras.Model(inputs, self.model_builder_calibration(inputs))
+        self.compile_calibration_model()
+        #self.calibration_model.summary()
 
     def model_builder_metric(self, inputs):
         # inputs['q2_obs_scaled']: batch_size, n_peaks
@@ -574,6 +653,81 @@ class PhysicsInformedModel:
             self.model_builder_metric(inputs)
             ))
 
+    def transform_pairwise_differences(self, pairwise_differences_scaled, tensorflow):
+        if tensorflow:
+            abs_func = tf.math.abs
+        else:
+            abs_func = np.abs
+        epsilon = self.model_params['calibration_params']['epsilon_pds']
+        return epsilon / (abs_func(pairwise_differences_scaled) + epsilon)
+
+    def model_builder_calibration(self, inputs):
+        pairwise_differences_scaled, q2_ref = self.pairwise_difference_calculator.get_pairwise_differences(
+            inputs['xnn'], inputs['q2_obs_scaled'], return_q2_ref=True
+            )
+
+        # hkl_logits:               n_batch x n_peaks x hkl_ref_length
+        # pairwise_differences:     n_batch x n_peaks x hkl_ref_length
+        # q2_ref:                   n_batch x hkl_ref_length
+        pairwise_differences_transformed = self.transform_pairwise_differences(
+            pairwise_differences_scaled, True
+            )
+        for index in range(len(self.model_params['calibration_params']['layers'])):
+            dense_layer = tf.keras.layers.Dense(
+                self.model_params['calibration_params']['layers'][index],
+                activation='linear',
+                name=f'dense_{index}',
+                use_bias=False,
+                )
+            if index == 0:
+                x = dense_layer(pairwise_differences_transformed)
+            else:
+                x = dense_layer(x)
+            x = tf.keras.layers.LayerNormalization(
+                name=f'layer_norm_{index}',
+                axis=2
+                )(x)
+            x = tf.keras.activations.gelu(x)
+            x = tf.keras.layers.Dropout(
+                rate=self.model_params['calibration_params']['dropout_rate'],
+                name=f'dropout_{index}'
+                )(x)
+
+        # x: batch_size x n_peaks x units
+        # scaler: batch_size x n_peaks x n_components
+        scaler = tf.keras.layers.Concatenate(
+            axis=1,
+            name='scaler'
+            )([
+            tf.keras.layers.Dense(
+                2*self.model_params['calibration_params']['n_components'] - 2,
+                activation='linear',
+                name=f'calibration_scaler_{index}',
+                use_bias=False,
+                )(x[:, index, :])[:, tf.newaxis, :] for index in range(self.n_peaks)
+            ])
+
+        hkl_logits = scaler[:, :, 0][:, :, tf.newaxis] * tf.ones_like(pairwise_differences_transformed)
+        hkl_logits = tf.keras.layers.Add()([
+            hkl_logits,
+            scaler[:, :, 1][:, :, tf.newaxis] * pairwise_differences_transformed
+            ])
+        for power in range(2, self.model_params['calibration_params']['n_components']):
+            hkl_logits = tf.keras.layers.Add()([
+                hkl_logits,
+                scaler[:, :, power][:, :, tf.newaxis] * pairwise_differences_transformed**power
+                ])
+            hkl_logits = tf.keras.layers.Add()([
+                hkl_logits,
+                scaler[:, :, self.model_params['calibration_params']['n_components'] + power - 2][:, :, tf.newaxis] * pairwise_differences_transformed**(1/power)
+                ])
+
+        hkl_softmax = tf.keras.layers.Softmax(
+            name='hkl_softmax',
+            axis=2
+            )(hkl_logits)
+        return hkl_softmax
+
     def compile_model(self):
         optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])    # loss: 1.4367 - val_loss: 1.2484
 
@@ -596,6 +750,20 @@ class PhysicsInformedModel:
             loss=loss_functions,
             metrics=loss_metrics,
             run_eagerly=False,
+            )
+
+    def compile_calibration_model(self):
+        optimizer = tf.optimizers.legacy.Adam(self.model_params['calibration_params']['learning_rate'])
+        loss_metrics = {
+            'hkl_softmax': 'accuracy',
+            }
+        loss_functions = {
+            'hkl_softmax': tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+            }
+        self.calibration_model.compile(
+            optimizer=optimizer, 
+            loss=loss_functions,
+            metrics=loss_metrics
             )
 
     def train(self, data):
@@ -688,6 +856,79 @@ class PhysicsInformedModel:
         fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
+    def train_calibration(self, data):
+        if self.model_params['calibration_params']['augment'] == False:
+            data = data[~data['augmented']]
+        train = data[data['train']]
+        val = data[~data['train']]
+
+        # Get predictions
+        val_q2_obs = np.stack(val['q2'])[:, :self.model_params['peak_length']]
+        val_q2_obs_scaled = val_q2_obs / self.q2_obs_scale
+        val_inputs = {'q2_obs_scaled': val_q2_obs_scaled}
+        val_pred = self.model.predict(val_inputs)
+        val_all_xnn_scaled_pred = val_pred[:, :, :self.unit_cell_length]
+        val_logits = val_pred[:, :, self.unit_cell_length]
+        val_softmax = scipy.special.softmax(val_logits, axis=1)
+        val_xnn_scaled_pred_top5 = np.take_along_axis(
+            val_all_xnn_scaled_pred,
+            np.argsort(val_softmax, axis=1)[:, ::-1][:, :5, np.newaxis],
+            axis=1
+            )
+        val_xnn_pred_top5 = val_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
+
+        train_q2_obs = np.stack(train['q2'])[:, :self.model_params['peak_length']]
+        train_q2_obs_scaled = train_q2_obs / self.q2_obs_scale
+        train_inputs = {'q2_obs_scaled': train_q2_obs_scaled}
+        train_pred = self.model.predict(train_inputs)
+        train_all_xnn_scaled_pred = train_pred[:, :, :self.unit_cell_length]
+        train_logits = train_pred[:, :, self.unit_cell_length]
+        train_softmax = scipy.special.softmax(train_logits, axis=1)
+        train_xnn_scaled_pred_top5 = np.take_along_axis(
+            train_all_xnn_scaled_pred,
+            np.argsort(train_softmax, axis=1)[:, ::-1][:, :5, np.newaxis],
+            axis=1
+            )
+        train_xnn_pred_top5 = train_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
+
+        train_inputs_calibration = {
+            'q2_obs_scaled': np.stack(train['q2_scaled']),
+            'xnn': train_xnn_pred_top5[:, 0],
+            }
+        val_inputs_calibration = {
+            'q2_obs_scaled': np.stack(val['q2_scaled']),
+            'xnn': val_xnn_pred_top5[:, 0],
+            }
+        train_true_calibration = {
+            'hkl_softmax': np.stack(train['hkl_labels']),
+            }
+        val_true_calibration = {
+            'hkl_softmax': np.stack(val['hkl_labels']),
+            }
+        self.calibration_fit_history = self.calibration_model.fit(
+            x=train_inputs_calibration,
+            y=train_true_calibration,
+            epochs=1,#self.model_params['calibration_params']['epochs'],
+            shuffle=True,
+            batch_size=self.model_params['calibration_params']['batch_size'], 
+            validation_data=(val_inputs_calibration, val_true_calibration),
+            callbacks=None,
+            )
+        self.save_calibration()
+
+        fig, axes = plt.subplots(2, 1, figsize=(6, 5), sharex=True)
+        axes[0].plot(self.calibration_fit_history.history['loss'], label='Training', marker='.')
+        axes[0].plot(self.calibration_fit_history.history['val_loss'], label='Validation', marker='.')
+        axes[1].plot(self.calibration_fit_history.history['accuracy'], label='Training', marker='.')
+        axes[1].plot(self.calibration_fit_history.history['val_accuracy'], label='Validation', marker='.')
+        axes[1].set_xlabel('Epochs')
+        axes[0].set_ylabel('Loss')
+        axes[1].set_ylabel('Accuracy')
+        axes[0].legend()
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to_split_group}/{self.split_group}_calibration_training_loss_{self.model_params["tag"]}.png')
+        plt.close()
+
     def evaluate(self, data):
         data = data[~data['augmented']]
         train = data[data['train']]
@@ -709,7 +950,6 @@ class PhysicsInformedModel:
         val_xnn_scaled = (val_xnn - self.xnn_mean) / self.xnn_scale
 
         val_pred = self.model.predict(val_inputs)
-
         val_all_xnn_scaled_pred = val_pred[:, :, :self.unit_cell_length]
         val_logits = val_pred[:, :, self.unit_cell_length]
         val_softmax = scipy.special.softmax(val_logits, axis=1)
@@ -748,6 +988,10 @@ class PhysicsInformedModel:
                 val_softmax[index],
                 index
                 )
+
+        self.evaluate_indexing(
+            train, val, train_xnn_pred_top5[:, 0, :], val_xnn_pred_top5[:, 0, :],
+            )
 
         ##############################
         # Plot unit cell evaluations #
@@ -985,3 +1229,110 @@ class PhysicsInformedModel:
         plt.close()
 
 
+
+
+    def evaluate_indexing(self, train, val, train_xnn, val_xnn):
+        hkl_labels_true_train = np.stack(train['hkl_labels'])
+        hkl_labels_true_val = np.stack(val['hkl_labels'])
+
+        train_inputs_calibration = {
+            'q2_obs_scaled': np.stack(train['q2_scaled']),
+            'xnn': train_xnn,
+            }
+        val_inputs_calibration = {
+            'q2_obs_scaled': np.stack(val['q2_scaled']),
+            'xnn': val_xnn,
+            }
+
+        hkl_softmax_train = self.calibration_model.predict(train_inputs_calibration)
+        hkl_softmax_val = self.calibration_model.predict(val_inputs_calibration)
+        hkl_labels_pred_train = np.argmax(hkl_softmax_train, axis=2)
+        hkl_labels_pred_val = np.argmax(hkl_softmax_val, axis=2)
+
+        # correct shape: n_entries, n_peaks
+        correct_pred_train = hkl_labels_true_train == hkl_labels_pred_train
+        correct_pred_val = hkl_labels_true_val == hkl_labels_pred_val
+        accuracy_pred_train = correct_pred_train.sum() / correct_pred_train.size
+        accuracy_pred_val = correct_pred_val.sum() / correct_pred_val.size
+        # accuracy for each entry
+        accuracy_entry_train = correct_pred_train.sum(axis=1) / self.n_peaks
+        accuracy_entry_val = correct_pred_val.sum(axis=1) / self.n_peaks
+        # accuracy per peak position
+        accuracy_peak_position_train = correct_pred_train.sum(axis=0) / correct_pred_train.shape[0]
+        accuracy_peak_position_val = correct_pred_val.sum(axis=0) / correct_pred_val.shape[0]
+
+        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+        bins = (np.arange(self.n_peaks + 2) - 0.5) / self.n_peaks
+        centers = (bins[1:] + bins[:-1]) / 2
+        dbin = bins[1] - bins[0]
+        hist_train, _ = np.histogram(accuracy_entry_train, bins=bins, density=True)
+        hist_val, _ = np.histogram(accuracy_entry_val, bins=bins, density=True)
+        axes[0].bar(centers, hist_train, width=dbin, label='Predicted: Training')
+        axes[0].bar(centers, hist_val, width=dbin, alpha=0.5, label='Predicted: Validation')
+        axes[1].bar(
+            np.arange(self.n_peaks), accuracy_peak_position_train,
+            width=1, label='Predicted: Training'
+            )
+        axes[1].bar(
+            np.arange(self.n_peaks), accuracy_peak_position_val,
+            width=1, alpha=0.5, label='Predicted: Validation'
+            )
+
+        axes[1].legend(frameon=False)
+        axes[0].set_title(f'Predicted accuracy: {accuracy_pred_train:0.3f}/{accuracy_pred_val:0.3f}')
+
+        axes[0].set_xlabel('Accuracy')
+        axes[1].set_xlabel('Peak Position')
+        axes[0].set_ylabel('Entry Accuracy')
+        axes[1].set_ylabel('Peak Accuracy')
+        axes[1].set_ylim([0, 1])
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to_split_group}/{self.split_group}_calibration_accuracy_{self.model_params["tag"]}.png')
+        plt.close()    
+
+        def calibration_plots(hkl_labels_true, hkl_softmax, n_peaks, n_bins=25):
+            N = hkl_softmax.shape[0]
+            hkl_labels_pred = hkl_softmax.argmax(axis=2)
+            p_pred = np.zeros((N, n_peaks))
+            metrics = np.zeros((n_bins, 4))
+            ece = 0
+            for entry_index in range(N):
+                for point_index in range(n_peaks):
+                    p_pred[entry_index, point_index] = hkl_softmax[
+                        entry_index,
+                        point_index,
+                        hkl_labels_pred[entry_index, point_index]
+                        ]
+
+            bins = np.linspace(p_pred.min(), p_pred.max(), n_bins + 1)
+            centers = (bins[1:] + bins[:-1]) / 2
+            metrics[:, 0] = centers
+            for bin_index in range(n_bins):
+                indices = np.logical_and(
+                    p_pred >= bins[bin_index],
+                    p_pred < bins[bin_index + 1],
+                    )
+                if np.sum(indices) > 0:
+                    p_pred_bin = p_pred[indices]
+                    hkl_labels_pred_bin = hkl_labels_pred[indices]
+                    hkl_labels_true_bin = hkl_labels_true[indices]
+                    metrics[bin_index, 1] = np.sum(hkl_labels_pred_bin == hkl_labels_true_bin) / hkl_labels_true_bin.size
+                    metrics[bin_index, 2] = p_pred_bin.mean()
+                    metrics[bin_index, 3] = p_pred_bin.std()
+                    prefactor = indices.sum() / indices.size
+                    ece += prefactor * np.abs(metrics[bin_index, 2] - metrics[bin_index, 1])
+            return metrics, ece
+
+        metrics_train, ece_train = calibration_plots(hkl_labels_true_train, hkl_softmax_train, self.n_peaks)
+        metrics_val, ece_val = calibration_plots(hkl_labels_true_val, hkl_softmax_val, self.n_peaks)
+        fig, axes = plt.subplots(1, 2, figsize=(6, 3))
+        for i in range(2):
+            axes[i].plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])
+            axes[i].set_xlabel('Confidence')
+        axes[0].errorbar(metrics_train[:, 2], metrics_train[:, 1], yerr=metrics_train[:, 3], marker='.')
+        axes[0].set_title(f'Expected Confidence Error: {ece_train:0.4f}')
+
+        axes[0].set_ylabel('Accuracy')
+        fig.tight_layout()
+        fig.savefig(f'{self.save_to_split_group}/{self.split_group}_calibration_cal_{self.model_params["tag"]}.png')
+        plt.close()
