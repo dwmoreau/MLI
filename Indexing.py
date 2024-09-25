@@ -28,8 +28,14 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 
+* Integral filter model
+    * Generate function
+    - permutation invariance
+    - Look at sensitivity analysis
+    - Reindex triclinic in reciprocal space.
+
 - Regression
-    - Re-evaluate hexagonal:
+    x Re-evaluate hexagonal:
         x Augmentation helps considerably
         x Hard to tell if the alpha_beta model is better.
             x Make the alpha_beta model an option
@@ -37,7 +43,7 @@ Readings:
             x Make the normal target_function an option
         x a bigger model improves predictions without overfitting
     - Retrain regression networks with updates
-    - Look at individual split_groups and retrain overfit networks with smaller models
+    - Look at individual split_groups and retrain overfit / underfit networks
 
 - Optimization
     * Optimize the number of candidates generated per model.    
@@ -64,14 +70,6 @@ Readings:
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 
-* Physics informed model
-    * Integral filter model
-        - https://en.wikipedia.org/wiki/Statistical_distance
-    - permutation invariance
-    - Look at sensitivity analysis
-    - Generatative model
-    - Reindex triclinic in reciprocal space.
-
 - Spacegroup assignments:
     - Put extinction group in the dataset
         - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
@@ -81,10 +79,11 @@ Readings:
     - https://journals.iucr.org/paper?fe5024
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
+- Augmentation
+    - Volume dependent cov
 - SWE
 - Templating
     - Calibrate templates with a random forest model that converts error at a peak position to a probability.
-- Augmentation
 - Random unit cell generator
 - Indexing.py
 - Assignments

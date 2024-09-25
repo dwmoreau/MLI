@@ -68,48 +68,113 @@ class Augmentor:
         # Calculate the number of times each entry is to be augmented
         training_data = data[data['train']]
         n_groups = len(split_groups)
+
+        if self.aug_params['augment_method'] in ['cov', 'pca']:
+            self.volume_bins = dict.fromkeys(split_groups)
+            n_bins = dict.fromkeys(split_groups)
+            for split_group_index, split_group in enumerate(split_groups):
+                split_group_data = training_data[training_data['split_group'] == split_group]
+                unit_cell_volume = np.array(split_group_data['reindexed_volume'])
+                if self.aug_params['n_per_volume'] is None:
+                    n_bins[split_group] = 1
+                    self.volume_bins[split_group] = None
+                else:
+                    n_bins[split_group] = len(split_group_data) // self.aug_params['n_per_volume'] + 1
+                    n_per_bin = int(len(split_group_data) / n_bins[split_group])
+                    sorted_unit_cell_volume = np.sort(unit_cell_volume)
+                    self.volume_bins[split_group] = sorted_unit_cell_volume[::n_per_bin]
+                    if len(split_group_data) % n_bins[split_group] == 0:
+                        self.volume_bins[split_group] = np.concatenate((
+                            self.volume_bins[split_group], [sorted_unit_cell_volume[-1]]
+                            ))
+                    else:
+                        self.volume_bins[split_group][-1] = sorted_unit_cell_volume[-1]
+
         if self.aug_params['augment_method'] == 'random':
             self.perturb_unit_cell = self.perturb_unit_cell_std
 
         elif self.aug_params['augment_method'] == 'cov':
             self.perturb_unit_cell = self.perturb_unit_cell_cov
-            fig, axes = plt.subplots(n_groups, 1, figsize=(6, 2 + 2*n_groups))
             self.cov = dict.fromkeys(split_groups)
             for split_group_index, split_group in enumerate(split_groups):
                 split_group_data = training_data[training_data['split_group'] == split_group]
                 unit_cell_scaled = np.stack(split_group_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
-                self.cov[split_group] = np.cov(unit_cell_scaled.T)
-                cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov[split_group])
-                cov_display.plot(ax=axes[split_group_index], colorbar=False, values_format='0.2f')
-                axes[split_group_index].set_xlabel('')
-                axes[split_group_index].set_ylabel(split_group)
-            axes[0].set_title('Unit cell covariance')
-            fig.tight_layout()
-            fig.savefig(f'{self.save_to}/aug_unit_cell_cov_{self.aug_params["tag"]}.png')
-            plt.close()
+                unit_cell_volume = np.array(split_group_data['reindexed_volume'])
+                if n_bins[split_group] == 1:
+                    self.cov[split_group] = np.cov(unit_cell_scaled.T)
+                    fig, axes = plt.subplots(1, 1, figsize=(4, 3))
+                    cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov[split_group])
+                    cov_display.plot(ax=axes, colorbar=False, values_format='0.2f')
+                    axes.set_xlabel('')
+                    axes.set_ylabel(split_group)
+                    axes.set_title('Unit cell covariance')
+                else:
+                    print(f'Creating {n_bins[split_group]} COVs from {len(split_group_data)} entries for {split_group}')
+                    self.cov[split_group] = [None for _ in range(n_bins[split_group])]
+                    fig, axes = plt.subplots(1, n_bins[split_group], figsize=(2 + 1.5*n_bins[split_group], 3))
+                    for bin_index in range(n_bins[split_group]):
+                        bin_data_indices = np.logical_and(
+                            unit_cell_volume >= self.volume_bins[split_group][bin_index],
+                            unit_cell_volume <= self.volume_bins[split_group][bin_index + 1],
+                            )
+                        bin_unit_cell_scaled = unit_cell_scaled[bin_data_indices]
+                        self.cov[split_group][bin_index] = np.cov(bin_unit_cell_scaled.T)
+                        cov_display = ConfusionMatrixDisplay(confusion_matrix=self.cov[split_group][bin_index])
+                        cov_display.plot(ax=axes[bin_index], colorbar=False, values_format='0.2f')
+                        axes[bin_index].set_xlabel('')
+                        axes[bin_index].set_ylabel('')
+                    axes[0].set_title(f'Unit cell covariance\n{split_group}')
+                fig.tight_layout()
+                fig.savefig(f'{self.save_to}/aug_unit_cell_cov_{split_group}_{self.aug_params["tag"]}.png')
+                plt.close()
 
         elif self.aug_params['augment_method'] == 'pca':
             self.perturb_unit_cell = self.perturb_unit_cell_pca
-
             self.pca = dict.fromkeys(split_groups)
             self.stddev = dict.fromkeys(split_groups)
-            fig, axes = plt.subplots(n_groups, 2, figsize=(6, 2 + 3*n_groups))
             for split_group_index, split_group in enumerate(split_groups):
                 split_group_data = training_data[training_data['split_group'] == split_group]
                 unit_cell_scaled = np.stack(split_group_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
-                self.pca[split_group] = PCA(n_components=self.unit_cell_length).fit(unit_cell_scaled)
-                unit_cell_scaled_transformed = self.pca[split_group].transform(unit_cell_scaled)
-                self.stddev[split_group] = np.std(unit_cell_scaled_transformed, axis=0)
-                pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca[split_group].components_)
-                pca_display.plot(ax=axes[split_group_index, 0], colorbar=False, values_format='0.2f')
-                axes[split_group_index, 1].plot(self.pca[split_group].singular_values_, marker='.')
-                axes[split_group_index, 0].set_xlabel('')
-                axes[split_group_index, 0].set_ylabel(split_group)
-            axes[0, 0].set_title('PCA Components')
-            axes[0, 1].set_title('PCA Singular values')
-            fig.tight_layout()
-            fig.savefig(f'{self.save_to}/aug_unit_cell_pca_{self.aug_params["tag"]}.png')
-            plt.close()
+                unit_cell_volume = np.array(split_group_data['reindexed_volume'])
+                if n_bins[split_group] == 1:
+                    self.pca[split_group] = PCA(n_components=self.unit_cell_length).fit(unit_cell_scaled)
+                    unit_cell_scaled_transformed = self.pca[split_group].transform(unit_cell_scaled)
+                    self.stddev[split_group] = np.std(unit_cell_scaled_transformed, axis=0)
+
+                    fig, axes = plt.subplots(1, 2, figsize=(6, 3))
+                    pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca[split_group].components_)
+                    pca_display.plot(ax=axes[0], colorbar=False, values_format='0.2f')
+                    axes[1].plot(self.pca[split_group].singular_values_, marker='.')
+                    axes[0].set_xlabel('')
+                    axes[0].set_ylabel(split_group)
+                    axes[0].set_title('PCA Components')
+                    axes[1].set_title('PCA Singular values')
+                else:
+                    print(f'Creating {n_bins[split_group]} PCAs from {len(split_group_data)} entries for {split_group}')
+                    self.pca[split_group] = [None for _ in range(n_bins[split_group])]
+                    self.stddev[split_group] = [None for _ in range(n_bins[split_group])]
+                    fig, axes = plt.subplots(n_bins[split_group], 3, figsize=(6, 2 + 1.5*n_bins[split_group]))
+                    for bin_index in range(n_bins[split_group]):
+                        bin_data_indices = np.logical_and(
+                            unit_cell_volume >= self.volume_bins[split_group][bin_index],
+                            unit_cell_volume <= self.volume_bins[split_group][bin_index + 1],
+                            )
+                        bin_unit_cell_scaled = unit_cell_scaled[bin_data_indices]
+                        self.pca[split_group][bin_index] = PCA(n_components=self.unit_cell_length).fit(bin_unit_cell_scaled)
+                        bin_unit_cell_scaled_transformed = self.pca[split_group][bin_index].transform(bin_unit_cell_scaled)
+                        self.stddev[split_group][bin_index] = np.std(bin_unit_cell_scaled_transformed, axis=0)
+                        pca_display = ConfusionMatrixDisplay(confusion_matrix=self.pca[split_group][bin_index].components_)
+                        pca_display.plot(ax=axes[bin_index, 0], colorbar=False, values_format='0.2f')
+                        axes[bin_index, 1].plot(self.pca[split_group][bin_index].singular_values_, marker='.')
+                        axes[bin_index, 2].plot(self.stddev[split_group][bin_index], marker='.')
+                        axes[bin_index, 0].set_xlabel('')
+                        axes[bin_index, 0].set_ylabel(split_group)
+                        axes[bin_index, 0].set_title('PCA Components')
+                        axes[bin_index, 1].set_title('PCA Singular values')
+                        axes[bin_index, 2].set_title('STD of transformation')
+                fig.tight_layout()
+                fig.savefig(f'{self.save_to}/aug_unit_cell_pca_{split_group}_{self.aug_params["tag"]}.png')
+                plt.close()
 
         # calculate the order of the peak in the list of sa peaks
         if self.lattice_system == 'cubic':
@@ -308,9 +373,11 @@ class Augmentor:
         augmented_entry = copy.deepcopy(entry)
         augmented_entry['augmented'] = True
         reindexed_unit_cell_scaled = np.array(augmented_entry['reindexed_unit_cell_scaled'])
+        reindexed_volume = np.array(augmented_entry['reindexed_volume'])
         perturbed_reindexed_unit_cell_scaled = self.perturb_unit_cell_common(
             reindexed_unit_cell_scaled,
-            augmented_entry['split_group']
+            augmented_entry['split_group'],
+            reindexed_volume,
             )
         perturbed_reindexed_unit_cell = np.zeros(6)
         perturbed_reindexed_unit_cell[:3] = perturbed_reindexed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
@@ -369,10 +436,9 @@ class Augmentor:
                 peak_breadth_std = broadening_multiplier * (broadening_params[0] + q2_sa[index]*broadening_params[1])
                 # STD / FWHM conversion
                 # 2.35 = 2*np.sqrt(2*np.log(2))
-                #overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5 # over rejects
+                overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5 # over rejects
                 #overlap_threshold = peak_breadth_std / 2 # over rejects
-                #overlap_threshold = peak_breadth_std / 4 # not run
-                overlap_threshold = 0 # over rejects
+                #overlap_threshold = 0 # over rejects
                 distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
                 # Case 1 will not pass beyond this
                 if distance_previous > overlap_threshold: 
@@ -522,10 +588,18 @@ class Augmentor:
             perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_common(self, unit_cell_scaled, split_group):
+    def perturb_unit_cell_common(self, unit_cell_scaled, split_group, reindexed_volume):
         perturbed_unit_cell_scaled = unit_cell_scaled.copy()
+        if self.aug_params['n_per_volume'] is None:
+            volume_bin_index = None
+        else:
+            volume_bin_index = np.searchsorted(self.volume_bins[split_group], reindexed_volume) - 1
+            if volume_bin_index < 0:
+                volume_bin_index = 0
+            elif volume_bin_index >= len(self.volume_bins[split_group]) - 1:
+                volume_bin_index = len(self.volume_bins[split_group]) - 2
         perturbed_unit_cell_scaled[self.unit_cell_indices] = self.perturb_unit_cell(
-            perturbed_unit_cell_scaled[self.unit_cell_indices], split_group
+            perturbed_unit_cell_scaled[self.unit_cell_indices], split_group, volume_bin_index
             )
         if self.lattice_system == 'cubic':
             perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[0]
@@ -536,7 +610,7 @@ class Augmentor:
             perturbed_unit_cell_scaled[3:] = perturbed_unit_cell_scaled[3]
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_std(self, unit_cell_scaled, split_group):
+    def perturb_unit_cell_std(self, unit_cell_scaled, split_group, volume_bin_index):
         # perturb unit cell
         status = True
         i = 0
@@ -553,13 +627,17 @@ class Augmentor:
             )
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_cov(self, unit_cell_scaled, split_group):
+    def perturb_unit_cell_cov(self, unit_cell_scaled, split_group, volume_bin_index):
         # perturb unit cell
         status = True
+        if volume_bin_index is None:
+            cov = self.cov[split_group]
+        else:
+            cov = self.cov[split_group][volume_bin_index]
         while status:
             perturbed_unit_cell_scaled = self.rng.multivariate_normal(
                 mean=unit_cell_scaled,
-                cov=self.augment_shift**2 * self.cov[split_group],
+                cov=self.augment_shift**2 * cov,
                 size=1
                 )[0]
             if self._check_in_range(perturbed_unit_cell_scaled):
@@ -569,18 +647,24 @@ class Augmentor:
             )
         return perturbed_unit_cell_scaled
 
-    def perturb_unit_cell_pca(self, unit_cell_scaled, split_group):
+    def perturb_unit_cell_pca(self, unit_cell_scaled, split_group, volume_bin_index):
         # perturb unit cell
         status = True
-        unit_cell_scaled_transformed = self.pca[split_group].transform(
+        if volume_bin_index is None:
+            pca = self.pca[split_group]
+            stddev = self.stddev[split_group]
+        else:
+            pca = self.pca[split_group][volume_bin_index]
+            stddev = self.stddev[split_group][volume_bin_index]
+        unit_cell_scaled_transformed = pca.transform(
             unit_cell_scaled[np.newaxis, :]
             )[0]
         while status:
             perturbed_unit_cell_scaled_transformed = self.rng.normal(
                 loc=unit_cell_scaled_transformed,
-                scale=self.augment_shift * self.stddev[split_group],
+                scale=self.augment_shift * stddev,
                 )
-            perturbed_unit_cell_scaled = self.pca[split_group].inverse_transform(
+            perturbed_unit_cell_scaled = pca.inverse_transform(
                 perturbed_unit_cell_scaled_transformed[np.newaxis, :]
                 )[0, :]
             perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
