@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 from mpi4py import MPI
 import numpy as np
 import os
@@ -5,6 +6,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import pandas as pd
 
+from Utilities import get_xnn_from_unit_cell
 from UtilitiesOptimizer import get_cubic_optimizer
 from UtilitiesOptimizer import get_hexagonal_optimizer
 from UtilitiesOptimizer import get_monoclinic_optimizer
@@ -24,30 +26,47 @@ if __name__ == '__main__':
     load_data = True
     broadening_tag = '1'
     error_tag = '1'
-    n_entries = 500
-    #q2_error_params = np.array([0.0001, 0.001]) / 1
-    q2_error_params = np.array([0.000000001, 0])
-    #q2_error_params = np.array([0.000087, 0.00092]) / 1# [9.23692112e-04 8.72845689e-05]
+    n_entries = 50
+    q2_error_params = np.array([0.0001, 0.001]) / 1
+    #q2_error_params = np.array([0.000000001, 0])
+    
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    bravais_lattices = ['aP']
+    #bravais_lattices = ['cF', 'cI', 'cP']
+    #options = {
+    #    'convergence_testing': True,
+    #    'convergence_distances': np.logspace(-5, -1, 50),
+    #    'convergence_candidates': 20,
+    #    }
+    #bravais_lattices = ['hP', 'hR', 'tI', 'tP']
+    #options = {
+    #    'convergence_testing': True,
+    #    'convergence_distances': np.logspace(-5, -1, 50),
+    #    'convergence_candidates': 20,
+    #    }
+    bravais_lattices = ['oC', 'oF', 'oI', 'oP']
+    options = {
+        'convergence_testing': True,
+        'convergence_distances': np.logspace(-5, -1, 50),
+        'convergence_candidates': 20,
+        }
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, split_comm)
+            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
         elif bravais_lattice in ['hP']:
-            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, split_comm)
+            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, split_comm, options)
         elif bravais_lattice in ['hR']:
-            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, split_comm)
+            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, split_comm, options)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, split_comm)
+            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, split_comm, options)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, split_comm)
+            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, split_comm)
+            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
         elif bravais_lattice in ['aP']:
-            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, split_comm)
+            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
 
     if rank == 0:
         if load_data:
@@ -62,6 +81,7 @@ if __name__ == '__main__':
                 f'reindexed_l_{broadening_tag}',
                 'reindexed_spacegroup_symbol_hm',
                 'reindexed_unit_cell',
+                'reindexed_xnn',
                 ]
             drop_columns = [
                 f'q2_{broadening_tag}',
@@ -92,10 +112,10 @@ if __name__ == '__main__':
                 bravais_lattice_data['q2'] = list(q2)
                 bravais_lattice_data['reindexed_hkl'] = list(hkl)
                 bravais_lattice_data.drop(columns=drop_columns, inplace=True)
+                if not n_entries is None and bravais_lattice_data.shape[0] > n_entries:
+                    bravais_lattice_data = bravais_lattice_data.iloc[:n_entries]
                 data.append(bravais_lattice_data)
             data = pd.concat(data)
-            if not n_entries is None and data.shape[0] > n_entries:
-                data = data.iloc[:n_entries]
         for rank_index in range(1, n_ranks):
             comm.send(data.iloc[rank_index::n_ranks], dest=rank_index)
         data = data.iloc[0::n_ranks]
@@ -109,20 +129,25 @@ if __name__ == '__main__':
         'Off by two': 0,
         'Found explainers': 0,
         }
-    for entry_index in range(n_entries):
-        entry = data.iloc[entry_index]
-        print(entry)
-        unit_cell_true = np.array(entry['reindexed_unit_cell'])
-        for bravais_lattice in bravais_lattices:
+
+    print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
+    unit_cell = np.stack(data['reindexed_unit_cell'])
+    xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
+    data['reindexed_xnn'] = list(xnn)
+
+    for bravais_lattice in bravais_lattices:
+        bl_data = data[data['bravais_lattice'] == bravais_lattice]
+        found = np.zeros((len(options['convergence_distances']), len(bl_data)))
+        for entry_index in range(len(bl_data)):
+            entry = bl_data.iloc[entry_index]
+            #print(entry)
+            unit_cell_true = np.array(entry['reindexed_unit_cell'])
             optimizer[bravais_lattice].run(entry=entry, n_top_candidates=n_top_candidates)
-            found = False
-            off_by_two = False
-            found_explainer = False
-            print(np.column_stack((
-                optimizer[bravais_lattice].top_unit_cell,
-                optimizer[bravais_lattice].top_M20,
-                optimizer[bravais_lattice].top_spacegroup
-                )))
+            #print(np.column_stack((
+            #    optimizer[bravais_lattice].top_unit_cell,
+            #    optimizer[bravais_lattice].top_M20,
+            #    optimizer[bravais_lattice].convergence_initial_xnn,
+            #    )))
             for candidate_index in range(optimizer[bravais_lattice].top_unit_cell.shape[0]):
                 correct, off_by_two = validate_candidate_known_bl(
                     unit_cell_true=unit_cell_true,
@@ -130,31 +155,27 @@ if __name__ == '__main__':
                     bravais_lattice_pred=bravais_lattice,
                     )
                 if correct:
-                    found = True
-                if off_by_two:
-                    off_by_two = True
-                if np.any(optimizer[bravais_lattice].top_M20 > 1000):
-                    found_explainer = True
-            if found:
-                report_counts['Found'] += 1
-            elif off_by_two:
-                report_counts['off_by_two'] += 1
-            elif found_explainer:
-                report_counts['Found explainers'] += 1
-            else:
-                report_counts['Not found'] += 1
-            print(report_counts, rank)
-            print()
-    report_counts_gathered = comm.gather(report_counts, root=0)
+                    distance_index = candidate_index // options['convergence_candidates']
+                    found[distance_index, entry_index] += 1
+        found_gathered = comm.gather(found, root=0)
+        if rank == 0:
+            found_gathered = np.concatenate(found_gathered, axis=1)
+            found_rate = found_gathered.mean(axis=1) / options['convergence_candidates']
+            fig, axes = plt.subplots(1, 1, figsize=(6, 3))
+            axes.loglog(options['convergence_distances'], found_rate, marker='.')
+            axes.set_ylabel('Found Rate')
+            axes.set_xlabel('Xnn Perturbation Amount (1/$\mathrm{\AA}^2$)')
+            axes.set_title(bravais_lattice)
 
-    if rank == 0:
-        report_counts_all = {
-            'Not found': 0,
-            'Found': 0,
-            'Off by two': 0,
-            'Found explainers': 0,
-            }
-        for rank_index in range(n_ranks):
-            for key in report_counts_gathered[rank_index].keys():
-                report_counts_all[key] += report_counts_gathered[rank_index][key]
-        print(report_counts_all)
+            xlim = axes.get_xlim()
+            ylim = axes.get_ylim()
+            for n in [5, 10, 25, 50, 100]:
+                radius = options['convergence_distances'][np.argwhere(found_rate < 1/n)[0][0]]
+                axes.plot([xlim[0], radius], 1/n*np.ones(2), linestyle='dotted', color=[0, 0, 0], linewidth=1)
+                axes.plot(radius*np.ones(2), [ylim[0], 1/n], linestyle='dotted', color=[0, 0, 0], linewidth=1)
+                axes.annotate(f'{n:3d} {int(100*1/n)}%: {radius:0.5f}', (2*xlim[0], 1/n), verticalalignment='bottom')
+            axes.set_xlim(xlim)
+            axes.set_ylim(ylim)
+            fig.tight_layout()
+            fig.savefig(f'figures/{bravais_lattice}_radius_of_convergence_err_{error_tag}.png')
+            plt.close()

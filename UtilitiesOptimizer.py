@@ -275,7 +275,7 @@ def get_best_candidates(self, report_counts):
     return report_counts, found
 
 
-def get_cubic_optimizer(bravais_lattice, broadening_tag, comm):
+def get_cubic_optimizer(bravais_lattice, broadening_tag, comm, options=None):
     data_params = {
         'tag': f'cubic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -304,11 +304,15 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, comm):
         'iteration_info': iteration_info,
         'max_neighbors': 10,
         'neighbor_radius': 0.00005,
+        'convergence_testing': False,
         }
+    if not options is None:
+        for key in options.keys():
+            opt_params[key] = options[key]
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm):
+def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm, options=None):
     data_params = {
         'tag': f'tetragonal_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -359,10 +363,13 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm):
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         }
+    if not options is None:
+        for key in options.keys():
+            opt_params[key] = options[key]
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_hexagonal_optimizer(bravais_lattice, broadening_tag, comm):
+def get_hexagonal_optimizer(bravais_lattice, broadening_tag, comm, options=None):
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -433,10 +440,13 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, comm):
         'max_neighbors': 20,
         'neighbor_radius': 0.0005,
         }
+    if not options is None:
+        for key in options.keys():
+            opt_params[key] = options[key]
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, comm):
+def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, comm, options=None):
     data_params = {
         'tag': f'rhombohedral_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -477,10 +487,13 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, comm):
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         }
+    if not options is None:
+        for key in options.keys():
+            opt_params[key] = options[key]
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, comm):
+def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, comm, options=None):
     data_params = {
         'tag': f'orthorhombic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -612,10 +625,13 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, comm):
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         }
+    if not options is None:
+        for key in options.keys():
+            opt_params[key] = options[key]
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_monoclinic_optimizer(bravais_lattice, broadening_tag, comm):
+def get_monoclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None):
     data_params = {
         'tag': f'monoclinic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -719,10 +735,13 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, comm):
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         }
+    if not options is None:
+        for key in options.keys():
+            opt_params[key] = options[key]
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
 
 
-def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm):
+def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None):
     data_params = {
         'tag': f'triclinic_{broadening_tag}',
         'base_directory': '/Users/DWMoreau/MLI',
@@ -759,8 +778,10 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm):
         'max_neighbors': 50,
         'neighbor_radius': 0.003
         }
+    if not options is None:
+        for key in options.keys():
+            opt_params[key] = options[key]
     return OptimizerManager(data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm)
-
 
 
 def get_logger(comm, optimization_tag):

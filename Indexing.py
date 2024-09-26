@@ -10,7 +10,6 @@ Ordered to-do
 
 * Integral filter model
     * Generate function
-        - Train assignment calibration model to get a distribution over HKL
         - Select Top N predictions and sample from HKL
     - permutation invariance
     - Look at sensitivity analysis
@@ -28,11 +27,9 @@ Ordered to-do
     - Look at individual split_groups and retrain overfit / underfit networks
 
 - Optimization
-    * Optimize the number of candidates generated per model.    
-        - Determine radius of convergence for each BL
-            - Generate N candidates a radius of R from the correct solution
-                - At what R do all candidates converge to the correct solution?
-        - Optimize ensemble of models to minimize failure rate given a penalty of number of candidates and efficiency
+    * Optimize the number of candidates generated per model.
+        * Determine radius of convergence for each BL
+        * Optimize ensemble of models to minimize failure rate given a penalty of number of candidates and efficiency
     * standardization of monoclinic cells
     - Add mechanism for analysis of failed entries    
     - Is there an optimal number of subsampled peaks
@@ -1317,7 +1314,7 @@ class Indexing:
             else:
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
-                self.pitf_generator[split_group].train_calibration(data=split_group_data)
+                #self.pitf_generator[split_group].train_calibration(data=split_group_data)
                 self.pitf_generator[split_group].evaluate(split_group_data)
 
     def inferences_pitf(self):

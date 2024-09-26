@@ -335,7 +335,11 @@ class OptimizerBase:
         candidates.correct_off_by_two()
         candidates.assign_extinction_group()
         candidates.calculate_peaks_indexed()
-        self.downsample_candidates(candidates, n_top_candidates)
+        if self.opt_params['convergence_testing']:
+            self.convergence_testing(candidates)
+        else:
+            self.downsample_candidates(candidates, n_top_candidates)
+
 
 class OptimizerWorker(OptimizerBase):
     def __init__(self, comm):
@@ -362,6 +366,11 @@ class OptimizerWorker(OptimizerBase):
         self.comm.Send(candidates.best_xnn, dest=self.root)
         self.comm.Send(candidates.n_indexed, dest=self.root)
         self.comm.send(candidates.best_spacegroup, dest=self.root)
+
+    def convergence_testing(self, candidates):
+        self.comm.Send(candidates.best_M20, dest=self.root)
+        self.comm.Send(candidates.best_xnn, dest=self.root)
+
 
 class OptimizerManager(OptimizerBase):
     def __init__(self, data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm, seed=12345):
@@ -435,33 +444,57 @@ class OptimizerManager(OptimizerBase):
             self.q2_obs = q2[:self.n_peaks]
         elif q2 is None:
             self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
+            if self.opt_params['convergence_testing']:
+                self.xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['unit_cell_indices']]
         self.run_common(n_top_candidates=n_top_candidates)
 
     def generate_candidates_rank(self):
         candidate_unit_cells_all = []
-        for generator_info in self.opt_params['generator_info']:
-            if generator_info['generator'] in ['nn', 'trees']:
-                generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
-                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                    batch_size=1,
-                    model=generator_info['generator'],
-                    q2_scaler=self.indexer.q2_scaler,
+        if self.opt_params['convergence_testing']:
+            size = (self.opt_params['convergence_candidates'], self.indexer.data_params['unit_cell_length'])
+            convergence_initial_xnn = []
+            for distance in self.opt_params['convergence_distances']:
+                perturbations = self.rng.uniform(low=-1, high=1, size=size)
+                perturbations = distance * perturbations / np.linalg.norm(perturbations, axis=1)[:, np.newaxis]
+                perturbed_xnn = self.xnn_true[np.newaxis] + perturbations
+                perturbed_xnn = fix_unphysical(
+                    xnn=perturbed_xnn,
+                    rng=self.rng,
+                    minimum_unit_cell=self.opt_params['minimum_uc'],
+                    maximum_unit_cell=self.opt_params['maximum_uc'],
+                    lattice_system=self.lattice_system
                     )
-            elif generator_info['generator'] == 'templates':
-                generator_unit_cells = self.indexer.miller_index_templator[self.bravais_lattice].generate(
-                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                    )
-            elif generator_info['generator'] == 'pitf':
-                generator_unit_cells = self.indexer.pitf_generator[generator_info['split_group']].generate(
-                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                    batch_size=1,
-                    )
-            elif generator_info['generator'] in ['random', 'distribution_volume', 'predicted_volume']:
-                generator_unit_cells = self.indexer.random_unit_cell_generator[self.bravais_lattice].generate(
-                    generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                    model=generator_info['generator'],
-                    )
-            candidate_unit_cells_all.append(generator_unit_cells)
+                convergence_initial_xnn.append(perturbed_xnn)
+                candidate_unit_cells_all.append(get_unit_cell_from_xnn(
+                    perturbed_xnn,
+                    partial_unit_cell=True,
+                    lattice_system=self.lattice_system
+                    ))
+            self.convergence_initial_xnn = np.concatenate(convergence_initial_xnn, axis=0)
+        else:
+            for generator_info in self.opt_params['generator_info']:
+                if generator_info['generator'] in ['nn', 'trees']:
+                    generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
+                        generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                        batch_size=1,
+                        model=generator_info['generator'],
+                        q2_scaler=self.indexer.q2_scaler,
+                        )
+                elif generator_info['generator'] == 'templates':
+                    generator_unit_cells = self.indexer.miller_index_templator[self.bravais_lattice].generate(
+                        generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                        )
+                elif generator_info['generator'] == 'pitf':
+                    generator_unit_cells = self.indexer.pitf_generator[generator_info['split_group']].generate(
+                        generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                        batch_size=1,
+                        )
+                elif generator_info['generator'] in ['random', 'distribution_volume', 'predicted_volume']:
+                    generator_unit_cells = self.indexer.random_unit_cell_generator[self.bravais_lattice].generate(
+                        generator_info['n_unit_cells'], self.rng, self.q2_obs,
+                        model=generator_info['generator'],
+                        )
+                candidate_unit_cells_all.append(generator_unit_cells)
         candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
 
         candidate_unit_cells_all = fix_unphysical(
@@ -482,7 +515,8 @@ class OptimizerManager(OptimizerBase):
             partial_unit_cell=True,
             lattice_system=self.lattice_system
             )
-        candidate_xnn_all = self.redistribute_xnn(candidate_xnn_all)
+        if self.opt_params['convergence_testing'] == False:
+            candidate_xnn_all = self.redistribute_xnn(candidate_xnn_all)
 
         self.sent_candidates = np.zeros(self.n_ranks, dtype=int)
         for rank_index in range(self.n_ranks):
@@ -692,6 +726,27 @@ class OptimizerManager(OptimizerBase):
         self.top_M20 = M20_downsampled[sort_indices]
         self.top_n_indexed = n_indexed_downsampled[sort_indices]
         self.top_spacegroup = [spacegroup_downsampled[i] for i in sort_indices]
+        self.top_unit_cell = get_unit_cell_from_xnn(
+            self.top_xnn,
+            partial_unit_cell=True,
+            lattice_system=self.lattice_system,
+            )
+
+    def convergence_testing(self, candidates):
+        n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])
+        self.top_M20 = np.zeros(n_candidates)
+        self.top_xnn = np.zeros((n_candidates, self.indexer.data_params['unit_cell_length']))
+        for rank_index in range(self.n_ranks):
+            if rank_index == self.root:
+                self.top_M20[rank_index::self.n_ranks] = candidates.best_M20
+                self.top_xnn[rank_index::self.n_ranks] = candidates.best_xnn
+            else:
+                best_M20_rank = np.zeros(self.sent_candidates[rank_index])
+                best_xnn_rank = np.zeros((self.sent_candidates[rank_index], self.unit_cell_length))
+                self.comm.Recv(best_M20_rank, source=rank_index)
+                self.comm.Recv(best_xnn_rank, source=rank_index)
+                self.top_M20[rank_index::self.n_ranks] = best_M20_rank
+                self.top_xnn[rank_index::self.n_ranks] = best_xnn_rank
         self.top_unit_cell = get_unit_cell_from_xnn(
             self.top_xnn,
             partial_unit_cell=True,

@@ -857,6 +857,8 @@ class PhysicsInformedModel:
         plt.close()
 
     def train_calibration(self, data):
+        if self.model_params['model_type'] == 'base_line':
+            return None
         if self.model_params['calibration_params']['augment'] == False:
             data = data[~data['augmented']]
         train = data[data['train']]
@@ -908,7 +910,7 @@ class PhysicsInformedModel:
         self.calibration_fit_history = self.calibration_model.fit(
             x=train_inputs_calibration,
             y=train_true_calibration,
-            epochs=1,#self.model_params['calibration_params']['epochs'],
+            epochs=self.model_params['calibration_params']['epochs'],
             shuffle=True,
             batch_size=self.model_params['calibration_params']['batch_size'], 
             validation_data=(val_inputs_calibration, val_true_calibration),
@@ -960,9 +962,14 @@ class PhysicsInformedModel:
             )
         val_xnn_pred_top5 = val_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
         val_unit_cell_pred_top5 = np.zeros(val_xnn_pred_top5.shape)
-        for index in range(5):
-            val_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
-                val_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+        if self.model_params['model_type'] in ['metric', 'combined']:
+            for index in range(5):
+                val_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
+                    val_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+                    )
+        else:
+            val_unit_cell_pred_top5[:, 0, :] = get_unit_cell_from_xnn(
+                val_xnn_pred_top5[:, 0, :], partial_unit_cell=True, lattice_system=self.lattice_system
                 )
 
         train_pred = self.model.predict(train_inputs)
@@ -976,9 +983,14 @@ class PhysicsInformedModel:
             )
         train_xnn_pred_top5 = train_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
         train_unit_cell_pred_top5 = np.zeros(train_xnn_pred_top5.shape)
-        for index in range(5):
-            train_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
-                train_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+        if self.model_params['model_type'] in ['metric', 'combined']:
+            for index in range(5):
+                train_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
+                    train_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+                    )
+        else:
+            train_unit_cell_pred_top5[:, 0, :] = get_unit_cell_from_xnn(
+                train_xnn_pred_top5[:, 0, :], partial_unit_cell=True, lattice_system=self.lattice_system
                 )
 
         for index in range(10):
@@ -989,9 +1001,10 @@ class PhysicsInformedModel:
                 index
                 )
 
-        self.evaluate_indexing(
-            train, val, train_xnn_pred_top5[:, 0, :], val_xnn_pred_top5[:, 0, :],
-            )
+        if self.model_params['model_type'] in ['metric', 'combined']:
+            self.evaluate_indexing(
+                train, val, train_xnn_pred_top5[:, 0, :], val_xnn_pred_top5[:, 0, :],
+                )
 
         ##############################
         # Plot unit cell evaluations #
@@ -1227,9 +1240,6 @@ class PhysicsInformedModel:
         fig.tight_layout()
         fig.savefig(f'{self.save_to_split_group}/{self.split_group}_pitf_example_{index}_{self.model_params["tag"]}.png')
         plt.close()
-
-
-
 
     def evaluate_indexing(self, train, val, train_xnn, val_xnn):
         hkl_labels_true_train = np.stack(train['hkl_labels'])
