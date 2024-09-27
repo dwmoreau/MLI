@@ -4,7 +4,9 @@ import multiprocessing
 import numpy as np
 import os
 import scipy.spatial
+import sklearn.ensemble
 import sklearn.linear_model
+import sklearn.preprocessing
 from tqdm import tqdm
 
 from Utilities import fix_unphysical
@@ -461,12 +463,12 @@ class MITemplates_calibrated(MITemplates):
         super().__init__(group, data_params, template_params, hkl_ref, save_to, seed)
         template_params_defaults = {
             'parallelization': 'multiprocessing',
-            'n_processes': 4,
-            'inverse_regularization_strength': 1,
-            'radius': 0.003,
-            'q2_error_params': [0.0001, 0.001],
+            'n_processes': 2,
+            'radius': 0.01,
             'n_train': 100,
-            'M20_evals': 3,
+            'max_depth': 4,
+            'min_samples_leaf': 100,
+            'l2_regularization': 10,
             }
 
         for key in template_params_defaults.keys():
@@ -476,7 +478,7 @@ class MITemplates_calibrated(MITemplates):
     def save(self):
         self._save_common()
         joblib.dump(
-            self.logistic_regression,
+            self.hgbc_classifier,
             f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
             )
 
@@ -489,14 +491,12 @@ class MITemplates_calibrated(MITemplates):
         self.template_params['parallelization'] = params['parallelization']
         self.template_params['n_processes'] = int(params['n_processes'])
         self.template_params['n_train'] = int(params['n_train'])
-        self.template_params['inverse_regularization_strength'] = \
-            float(params['inverse_regularization_strength'])
         self.template_params['radius'] = float(params['radius'])
-        self.template_params['q2_error_params'] = np.array(
-            params['q2_error_params'].split('[')[1].split(']')[0].split(',')
-            )
+        self.template_params['max_depth'] = int(params['max_depth'])
+        self.template_params['min_samples_leaf'] = int(params['min_samples_leaf'])
+        self.template_params['l2_regularization'] = float(params['l2_regularization'])
 
-    def generate_xnn_M20(self, q2_obs):
+    def generate_xnn_error(self, q2_obs):
         xnn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
         order = np.arange(self.n_peaks)
         hkl2_all = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
@@ -551,86 +551,109 @@ class MITemplates_calibrated(MITemplates):
         q2_ref_calc = xnn @ hkl2_ref.T
         q2_calc = np.sum(xnn[:, np.newaxis, :] * hkl2_pred, axis=2)
 
-        # Need to add some error to the peak positions to calculate M20.
-        # Otherwise the observed discrepancy (M20 denominator) can be zero.
-        M20 = np.zeros((self.template_params['n_templates'], 3, self.template_params['M20_evals']))
-        scale = self.template_params['q2_error_params'][0] + q2_obs*self.template_params['q2_error_params'][1]
-        for M20_iteration in range(self.template_params['M20_evals']):
-            q2_obs_err = q2_obs + self.rng.normal(loc=0, scale=scale)
-            M20[:, 0, M20_iteration], M20[:, 1, M20_iteration], M20[:, 2, M20_iteration] = \
-                get_M20_sym_reversed(q2_obs_err, xnn, hkl_pred, self.hkl_ref, self.lattice_system)
-        M20 = M20.mean(axis=2)
-        return xnn, M20
+        delta_q2 = np.abs(q2_obs - q2_calc)
+        sigma = np.sqrt(q2_obs * delta_q2)
+        return xnn, delta_q2
 
     def _get_inputs_worker(self, inputs):
         q2_obs = inputs[0]
         xnn_true = inputs[1]
-        xnn, M20 = self.generate_xnn_M20(q2_obs)
-        normalized_M20 = M20# / M20.max(axis=1)[:, np.newaxis]
+        xnn, q2_error = self.generate_xnn_error(q2_obs)
         distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])
         neighbor = (distance < self.template_params['radius']).astype(int)[:, 0]
-        return normalized_M20, neighbor
+        return q2_error, neighbor
 
-    def get_inputs(self, data):
-        unaugmented_data = data[~data['augmented']]
-        training_data = unaugmented_data[unaugmented_data['train']]
-        n_entries = len(training_data)
-        q2_obs = np.stack(training_data['q2'])
-        xnn_true = np.stack(training_data['reindexed_xnn'])[:, self.unit_cell_indices]
+    def get_inputs(self, data, n_entries):
+        q2_obs = np.stack(data['q2'])
+        xnn_true = np.stack(data['reindexed_xnn'])[:, self.unit_cell_indices]
 
-        normalized_M20 = []
+        q2_error = []
         neighbor = []
-        if self.template_params['n_train'] is None:
-            n_train = len(training_data)
+        if n_entries is None:
+            n_entries = len(data)
+            indices = np.arange(n_entries)
         else:
-            n_train = min(self.template_params['n_train'], len(training_data))
+            n_entries = min(n_entries, len(data))
+            indices = self.rng.choice(len(data), n_entries, replace=False)
 
         if self.template_params['parallelization'] is None:
-            print(f'Setting up {n_train} entries serially')
-            for i in tqdm(range(n_train)):
-                normalized_M20_entry, neighbor_entry = \
-                    self._get_inputs_worker([q2_obs[i], xnn_true[i]])
-                normalized_M20.append(normalized_M20_entry)
+            print(f'Setting up {n_entries} entries serially')
+            for index in tqdm(indices):
+                q2_error_entry, neighbor_entry = \
+                    self._get_inputs_worker([q2_obs[index], xnn_true[index]])
+                q2_error.append(q2_error_entry)
                 neighbor.append(neighbor_entry)
         elif self.template_params['parallelization'] == 'multiprocessing':
-            print(f'Setting up {n_train} entries using multiprocessing')
+            print(f'Setting up {n_entries} entries using multiprocessing')
             with multiprocessing.Pool(self.template_params['n_processes']) as p:
-                outputs = p.map(self._get_inputs_worker, zip(q2_obs[:n_train], xnn_true[:n_train]))
-            for i in range(n_train):
-                normalized_M20.append(outputs[i][0])
+                outputs = p.map(self._get_inputs_worker, zip(q2_obs[indices], xnn_true[indices]))
+            for i in range(n_entries):
+                q2_error.append(outputs[i][0])
                 neighbor.append(outputs[i][1])
 
-        normalized_M20 = np.row_stack(normalized_M20)
+        q2_error = np.row_stack(q2_error)
         neighbor = np.concatenate(neighbor)
-        return normalized_M20, neighbor
+        return q2_error, neighbor
 
     def fit_model(self, data):
-        normalized_M20, neighbor = self.get_inputs(data)        
-        self.logistic_regression = sklearn.linear_model.LogisticRegression(
-            C=self.template_params['inverse_regularization_strength'], verbose=0
-            )
-        self.logistic_regression.fit(normalized_M20, neighbor)
-        probability = self.logistic_regression.predict_proba(normalized_M20)
-        score = self.logistic_regression.score(normalized_M20, neighbor)
-        print(score)
+        unaugmented_data = data[~data['augmented']]
+        training_data = unaugmented_data[unaugmented_data['train']]
+        val_data = unaugmented_data[~unaugmented_data['train']]
+        q2_error_train, neighbor_train = self.get_inputs(training_data, self.template_params['n_train'])
+        q2_error_val, neighbor_val = self.get_inputs(val_data, int(0.2*self.template_params['n_train']))
+        #np.save('MICal_test_q2_error_train.npy', q2_error_train)
+        #np.save('MICal_test_neighbor_train.npy', neighbor_train)
+        #np.save('MICal_test_q2_error_val.npy', q2_error_val)
+        #np.save('MICal_test_neighbor_val.npy', neighbor_val)
+        #q2_error_train = np.load('MICal_test_q2_error_train.npy')
+        #neighbor_train = np.load('MICal_test_neighbor_train.npy')
+        #q2_error_val = np.load('MICal_test_q2_error_val.npy')
+        #neighbor_val = np.load('MICal_test_neighbor_val.npy')
 
-        normalized_M20_close = normalized_M20[neighbor.astype(bool)]
-        normalized_M20_far = normalized_M20[~neighbor.astype(bool)]
-        probability_close = probability[neighbor.astype(bool)]
-        probability_far = probability[~neighbor.astype(bool)]
-        fig, axes = plt.subplots(1, 2, figsize=(5, 3))
-        axes[0].boxplot(normalized_M20_close, positions=[0, 1, 2])
-        axes[0].boxplot(normalized_M20_far, positions=[0.25, 1.25, 2.25])
-        axes[0].set_xticks([0, 0.25, 1, 1.25, 2, 2.25])
-        axes[0].set_xticklabels([
-            'M20 - close', 'M20 - far',
-            'M20 sym - close', 'M20 sym - far',
-            'M20 rev - close', 'M20 rev - far',
-            ], rotation=90)
-        axes[1].boxplot(probability_close[:, 1], positions=[0])
-        axes[1].boxplot(probability_far[:, 1], positions=[0.25])
-        axes[1].set_xticks([0, 0.25])
-        axes[1].set_xticklabels([ 'Prob - close', 'Prob - far'], rotation=90)
+        print('Fitting Hist Boosting Model')  
+        self.hgbc_classifier = sklearn.ensemble.HistGradientBoostingClassifier(
+            max_depth=self.template_params['max_depth'],
+            min_samples_leaf=self.template_params['min_samples_leaf'],
+            class_weight='balanced',
+            l2_regularization=self.template_params['l2_regularization'],
+            )
+        self.hgbc_classifier.fit(q2_error_train, neighbor_train)
+        probability_train = self.hgbc_classifier.predict_proba(q2_error_train)
+        score_train = self.hgbc_classifier.score(q2_error_train, neighbor_train)
+        probability_val = self.hgbc_classifier.predict_proba(q2_error_val)
+        score_val = self.hgbc_classifier.score(q2_error_val, neighbor_val)
+        print(score_train)
+        print(score_val)
+
+        q2_error_close_train = q2_error_train[neighbor_train.astype(bool)]
+        q2_error_far_train = q2_error_train[~neighbor_train.astype(bool)]
+        q2_error_close_val = q2_error_val[neighbor_val.astype(bool)]
+        q2_error_far_val = q2_error_val[~neighbor_val.astype(bool)]
+        probability_close_train = probability_train[neighbor_train.astype(bool)]
+        probability_far_train = probability_train[~neighbor_train.astype(bool)]
+        probability_close_val = probability_val[neighbor_val.astype(bool)]
+        probability_far_val = probability_val[~neighbor_val.astype(bool)]
+
+        fig, axes = plt.subplots(1, 2, figsize=(5, 5))
+        axes[0].boxplot(np.linalg.norm(q2_error_close_train, axis=1), positions=[0.00])
+        axes[0].boxplot(np.linalg.norm(q2_error_far_train, axis=1), positions=[0.25])
+        axes[0].boxplot(np.linalg.norm(q2_error_close_val, axis=1), positions=[1.00])
+        axes[0].boxplot(np.linalg.norm(q2_error_far_val, axis=1), positions=[1.25])
+        axes[0].set_xticks([0, 0.25, 1.00, 1.25])
+        axes[0].set_xticklabels(
+            ['q2_err_close Train', 'q2_err_close Val', 'q2_err_far Train', 'q2_err_far Val'],
+            rotation=90
+            )
+        axes[1].boxplot(probability_close_train[:, 1], positions=[0.00])
+        axes[1].boxplot(probability_close_val[:, 1], positions=[0.25])
+        axes[1].boxplot(probability_far_train[:, 1], positions=[1.00])
+        axes[1].boxplot(probability_far_val[:, 1], positions=[1.25])
+        axes[1].set_xticks([0, 0.25, 1.00, 1.25])
+        axes[1].set_xticklabels(
+            ['P(close) Train', 'P(close) Val', 'P(far) Train', 'P(far) Val'],
+            rotation=90
+            )
+        axes[1].set_title(f'Score (Train / Val)\n{score_train:0.3f} / {score_val:0.3f}')
         fig.tight_layout()
         fig.savefig(f'{self.save_to}/{self.group}_features_neighbors_{self.template_params["tag"]}.png')
         #plt.show()
