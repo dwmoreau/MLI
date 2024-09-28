@@ -78,6 +78,7 @@ class PeakListCreator:
         self.known_unit_cell = known_unit_cell
         self.known_space_group = known_space_group
         self.error = None
+        self.triplets_obs = None
 
     def _run_combine_experiments(self, expt_file_names, refl_file_names, run_str):
         command = ['dials.combine_experiments']
@@ -574,6 +575,7 @@ class PeakListCreator:
             'secondary_peaks': self.q2_peaks_secondary,
             'primary_hist': np.column_stack((self.q2_centers, self.q2_hist)),
             'secondary_hist': np.column_stack((self.q2_diff_centers, self.q2_diff_hist)),
+            'triplet_obs': self.triplets_obs,
             'broadening_params': self.broadening_params,
             'error': self.error,
             'note': note,
@@ -803,25 +805,78 @@ class PeakListCreator:
             if len(self.triplets[key]) > 0:
                 self.triplets[key] = np.row_stack(self.triplets[key])
 
-    def plot_triplets(self, hkl=None, xnn=None, lattice_system=None):
+    def pick_triplets(self, prominence_factor=5, hkl=None, xnn=None, lattice_system=None):
         triplet_keys = list(self.triplets.keys())
+        triplets_obs = []
         for key_index, key in enumerate(triplet_keys):
             if len(self.triplets[key]) > 0:
+                triplets_obs_pair = []
                 fig, axes = plt.subplots(1, 1, figsize=(10, 3), sharex=False)
-                bins = np.linspace(0, np.pi/2, 201)
-                centers = (bins[1:] + bins[:-1]) / 2
+                bins_full = np.linspace(0, np.pi, 401)
+                centers_full = (bins_full[1:] + bins_full[:-1]) / 2
+                bins_half = np.linspace(0, np.pi/2, 201)
+                centers_half = (bins_half[1:] + bins_half[:-1]) / 2
+                
                 q20 = self.triplets[key][0, 0]
                 q21 = self.triplets[key][0, 1]
-                cos_angles = np.abs((q20 + q21 - self.triplets[key][:, 2]) / (2 * np.sqrt(q20 * q21)))
+
+                cos_angles_peaks = (q20 + q21 - self.q2_peaks) / (2 * np.sqrt(q20 * q21))
+                good = np.logical_and(cos_angles_peaks > -1, cos_angles_peaks < 1)
+                angles_peaks = np.arccos(cos_angles_peaks[good])
+                
+                not_overlapping = self.triplets[key][:, 2] > 0.0001
+                q0_q1_2 = self.triplets[key][not_overlapping, 2]
+                cos_angles = (q20 + q21 - q0_q1_2) / (2 * np.sqrt(q20 * q21))
                 angles = np.zeros(cos_angles.size)
                 lower = cos_angles > 1
                 upper = cos_angles < -1
                 both = np.logical_or(lower, upper)
-                angles[~both] = np.arccos(cos_angles[~both])
+                angles[~both] = np.arccos(np.abs(cos_angles[~both]))
                 angles[lower] = 0
-                angles[upper] = np.pi
-                hist, _ = np.histogram(angles, bins=bins)
-                axes.bar(centers, hist, width=bins[1] - bins[0])
+                angles[upper] = 0
+                hist_half, _ = np.histogram(angles, bins=bins_half)
+                hist_full, _ = np.histogram(np.arccos(cos_angles[~both]), bins=bins_full)
+                axes.bar(centers_half, hist_half, width=bins_half[1] - bins_half[0])
+                axes.bar(centers_full, hist_full, width=bins_full[1] - bins_full[0], alpha=0.5)
+                ylim = axes.get_ylim()
+                diff_peak_indices, _ = scipy.signal.find_peaks(hist_half, prominence=prominence_factor*hist_half.std())
+                if hist_half[0] > prominence_factor*hist_half.std():
+                    diff_peak_indices = np.concatenate([diff_peak_indices, [0]])
+                if hist_half[hist_half.size - 1] > prominence_factor*hist_half.std():
+                    diff_peak_indices = np.concatenate([diff_peak_indices, [hist_half.size - 1]])
+                if diff_peak_indices.size > 0:
+                    diff_peaks = centers_half[diff_peak_indices]
+                    for p in diff_peaks:
+                        selection = np.logical_and(
+                            angles > p - 0.02,
+                            angles < p + 0.02,
+                            )
+                        median = np.median(angles[selection])
+                        median_difference = q20 + q21 - 2*np.sqrt(q20*q21)*np.cos(median)
+                        triplets_obs_pair.append([key[0], key[1], median_difference, median])
+                        axes.plot(
+                            [median, median], ylim, color=[1, 0, 0], linestyle='dashed'
+                            )
+                        axes.annotate(
+                            np.round(median, decimals=4),
+                            xy=[median, ylim[1]*0.85],
+                            )
+                        axes.plot(
+                            [np.pi - median, np.pi - median], ylim, color=[1, 0, 0], linestyle='dashed'
+                            )
+                        axes.annotate(
+                            np.round(np.pi - median, decimals=4),
+                            xy=[np.pi - median, ylim[1]*0.85],
+                            )
+                    axes.set_ylim(ylim)
+                for peak_angle in angles_peaks:
+                    axes.plot(
+                        [peak_angle, peak_angle], [ylim[0], 0.25*ylim[1]], color=[0, 0, 0]
+                        )
+                    axes.plot(
+                        [np.pi - peak_angle, np.pi - peak_angle], [ylim[0], 0.25*ylim[1]], color=[0, 0, 0]
+                        )
+
                 if hkl is None:
                     axes.set_ylabel(
                         str(key)
@@ -834,25 +889,31 @@ class PeakListCreator:
                         + f'\n{np.round(q20, decimals=5)} {np.round(q21, decimals=5)}'
                         + f'\n{hkl[key[0]]}, {hkl[key[1]]}'
                         )
-                    ylim = axes.get_ylim()
+                    
                     mi_sym = [[1, 1, 1], [1, 1, -1], [1, -1, 1], [-1, 1, 1]]
                     for i in range(len(mi_sym)):
                         for j in range(len(mi_sym)):
                             hkl_diff = mi_sym[i]*hkl[key[0]] - mi_sym[j]*hkl[key[1]]
                             hkl2_diff = get_hkl_matrix(hkl_diff[np.newaxis], lattice_system)
                             q2_diff_calc = np.sum(xnn * hkl2_diff, axis=1)[0]
-                            cos_angle_diff_calc = np.abs((q20 + q21 - q2_diff_calc) / (2 * np.sqrt(q20 * q21)))
+                            cos_angle_diff_calc = (q20 + q21 - q2_diff_calc) / (2 * np.sqrt(q20 * q21))
                             if cos_angle_diff_calc > 1:
                                 angle_diff_calc = 0
                             elif cos_angle_diff_calc < -1:
                                 angle_diff_calc = np.pi
                             else:
                                 angle_diff_calc = np.arccos(cos_angle_diff_calc)
-                            axes.plot([angle_diff_calc, angle_diff_calc], ylim, color=[1, 0, 0], linestyle='dotted')
+                            axes.plot([angle_diff_calc, angle_diff_calc], [ylim[0], 0.5*ylim[1]], color=[0, 0.8, 0], linestyle='dotted')
                             axes.annotate(
                                 np.round(angle_diff_calc, decimals=4),
-                                xy=[angle_diff_calc, ylim[1]*0.75],
+                                xy=[angle_diff_calc, ylim[1]*0.5],
                                 )
                     axes.set_ylim()
                 fig.tight_layout()
-                plt.show()
+                plt.show(block=False)
+                for index in range(len(triplets_obs_pair)):
+                    accept = input(f'Accept triplet at angle {triplets_obs_pair[index][3]:0.4f} with y') 
+                    if accept == 'y':
+                        triplets_obs.append(triplets_obs_pair[index])
+                plt.close()
+        self.triplets_obs = np.stack(triplets_obs)

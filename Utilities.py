@@ -611,8 +611,8 @@ def get_M20_likelihood_from_xnn(q2_obs, xnn, hkl, lattice_system, bravais_lattic
     q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
     reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
     reciprocal_volume = get_unit_cell_volume(reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system)
-    log_likelihood, probability = get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume)
-    return log_likelihood, probability
+    log_likelihood, probability, M = get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume)
+    return log_likelihood, probability, M
 
 
 def get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
@@ -624,7 +624,8 @@ def get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
     observed_difference2 = (np.sqrt(q2_obs[np.newaxis]) - np.sqrt(q2_calc))**2
     arg = 8*np.pi*q2_obs * np.sqrt(observed_difference2) / (reciprocal_volume[:, np.newaxis] * mu)
     probability = 1/(1 + arg)
-    return -np.sum(np.log(probability), axis=1), probability
+    M = -1/np.log(2) * np.sum(np.log(1 - np.exp(-arg)), axis=1)
+    return -np.sum(np.log(probability), axis=1), probability, M
 
 
 def get_multiplicity_taupin88(bravais_lattice):

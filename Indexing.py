@@ -1,12 +1,14 @@
 """
+2D Indexing
+    - Calculate triplets for SACLA data
+    - Implement FOM with triplets
+    - Figure out how to assign Miller indices
+
 Ordered to-do
     1: Finish Integral filter model:
-        - Implement calibration model within integral filter model
         - Integral filter generate function
-    2: Regenerate data set
-    3: Train models and evaluate models
-    4: Determine radius of convergence
-    5: Optimize ensemble of models
+    2: Train models and evaluate models
+    3: Optimize ensemble of models
 
 * Integral filter model
     * Generate function
@@ -27,9 +29,8 @@ Ordered to-do
     - Look at individual split_groups and retrain overfit / underfit networks
 
 - Optimization
-    * Optimize the number of candidates generated per model.
-        * Determine radius of convergence for each BL
-        * Optimize ensemble of models to minimize failure rate given a penalty of number of candidates and efficiency
+    - Optimize the number of candidates generated per model.
+        - Optimize ensemble of models to minimize failure rate given a penalty of number of candidates and efficiency
     * standardization of monoclinic cells
     - Add mechanism for analysis of failed entries    
     - Is there an optimal number of subsampled peaks
@@ -59,7 +60,6 @@ Ordered to-do
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
 - Templating
-    - Calibrate templates with a random forest model that converts error at a peak position to a probability.
 - SWE
 - Augmentation
 - Random unit cell generator
@@ -110,7 +110,6 @@ from Evaluations import evaluate_regression_pitf
 from Evaluations import calibrate_regression
 from Evaluations import calibrate_regression_pitf
 from MITemplates import MITemplates
-from MITemplates import MITemplates_calibrated
 from PhysicsInformedModel import PhysicsInformedModel
 from RandomGenerator import RandomGenerator
 from Regression import Regression
@@ -1201,6 +1200,12 @@ class Indexing:
                 self.random_unit_cell_generator[bravais_lattice].train(bl_data)
 
     def setup_miller_index_templates(self):
+        from Utilities import get_xnn_from_unit_cell
+        print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
+        unit_cell = np.stack(self.data['reindexed_unit_cell'])
+        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
+        self.data['reindexed_xnn'] = list(xnn)
+
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             self.miller_index_templator[bravais_lattice] = MITemplates(
@@ -1215,27 +1220,6 @@ class Indexing:
                 self.miller_index_templator[bravais_lattice].load_from_tag()
             else:
                 self.miller_index_templator[bravais_lattice].setup(
-                    self.data[self.data['bravais_lattice'] == bravais_lattice]
-                    )
-
-    def setup_miller_index_templates_calibrated(self):
-        self.miller_index_templator_calibrated = dict.fromkeys(self.data_params['bravais_lattices'])
-        for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
-            self.miller_index_templator_calibrated[bravais_lattice] = MITemplates_calibrated(
-                group=bravais_lattice,
-                data_params=self.data_params,
-                template_params=self.template_params[bravais_lattice],
-                hkl_ref=self.hkl_ref[bravais_lattice],
-                save_to=self.save_to['template'],
-                seed=self.random_seed
-                )
-            if self.template_params[bravais_lattice]['load_from_tag']:
-                self.miller_index_templator_calibrated[bravais_lattice].load_from_tag()
-            else:
-                self.miller_index_templator_calibrated[bravais_lattice].setup_templates(
-                    self.data[self.data['bravais_lattice'] == bravais_lattice]
-                    )
-                self.miller_index_templator_calibrated[bravais_lattice].fit_model(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
                     )
 
@@ -1291,7 +1275,7 @@ class Indexing:
         print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
         unit_cell = np.stack(self.data['reindexed_unit_cell'])
         xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
-        self.data['reindexed_xnn'] = np.stack(xnn)
+        self.data['reindexed_xnn'] = list(xnn)
 
         self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):

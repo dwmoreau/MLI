@@ -26,29 +26,18 @@ if __name__ == '__main__':
     load_data = True
     broadening_tag = '1'
     error_tag = '1'
-    n_entries = 50
+    n_entries = 100
     q2_error_params = np.array([0.0001, 0.001]) / 1
     #q2_error_params = np.array([0.000000001, 0])
     
-    n_top_candidates = 20
+    n_top_candidates = 100
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     #bravais_lattices = ['cF', 'cI', 'cP']
-    #options = {
-    #    'convergence_testing': True,
-    #    'convergence_distances': np.logspace(-5, -1, 50),
-    #    'convergence_candidates': 20,
-    #    }
-    #bravais_lattices = ['hP', 'hR', 'tI', 'tP']
-    #options = {
-    #    'convergence_testing': True,
-    #    'convergence_distances': np.logspace(-5, -1, 50),
-    #    'convergence_candidates': 20,
-    #    }
-    bravais_lattices = ['oC', 'oF', 'oI', 'oP']
+    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     options = {
         'convergence_testing': True,
-        'convergence_distances': np.logspace(-5, -1, 50),
-        'convergence_candidates': 20,
+        'convergence_distances': np.logspace(-4, -1.5, 50),
+        'convergence_candidates': 100,
         }
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng(0)
@@ -95,7 +84,8 @@ if __name__ == '__main__':
                     f'/Users/DWMoreau/MLI/data/GeneratedDatasets/dataset_{bravais_lattice}.parquet',
                     columns=read_columns
                     )
-                bravais_lattice_data = bravais_lattice_data.loc[~bravais_lattice_data['train']]
+                # SELECT THE TRAINING DATA FOR RADIUS OF CONVERGENCE 
+                bravais_lattice_data = bravais_lattice_data.loc[bravais_lattice_data['train']]
                 peaks = bravais_lattice_data[f'q2_{broadening_tag}']
                 bravais_lattice_data = bravais_lattice_data.loc[peaks.apply(len) >= n_peaks]
                 peaks = bravais_lattice_data[f'q2_{broadening_tag}']
@@ -113,7 +103,7 @@ if __name__ == '__main__':
                 bravais_lattice_data['reindexed_hkl'] = list(hkl)
                 bravais_lattice_data.drop(columns=drop_columns, inplace=True)
                 if not n_entries is None and bravais_lattice_data.shape[0] > n_entries:
-                    bravais_lattice_data = bravais_lattice_data.iloc[:n_entries]
+                    bravais_lattice_data = bravais_lattice_data.sample(n=n_entries, random_state=rng)
                 data.append(bravais_lattice_data)
             data = pd.concat(data)
         for rank_index in range(1, n_ranks):
@@ -143,11 +133,6 @@ if __name__ == '__main__':
             #print(entry)
             unit_cell_true = np.array(entry['reindexed_unit_cell'])
             optimizer[bravais_lattice].run(entry=entry, n_top_candidates=n_top_candidates)
-            #print(np.column_stack((
-            #    optimizer[bravais_lattice].top_unit_cell,
-            #    optimizer[bravais_lattice].top_M20,
-            #    optimizer[bravais_lattice].convergence_initial_xnn,
-            #    )))
             for candidate_index in range(optimizer[bravais_lattice].top_unit_cell.shape[0]):
                 correct, off_by_two = validate_candidate_known_bl(
                     unit_cell_true=unit_cell_true,
@@ -163,19 +148,33 @@ if __name__ == '__main__':
             found_rate = found_gathered.mean(axis=1) / options['convergence_candidates']
             fig, axes = plt.subplots(1, 1, figsize=(6, 3))
             axes.loglog(options['convergence_distances'], found_rate, marker='.')
-            axes.set_ylabel('Found Rate')
+            axes.set_ylabel('Success Rate')
             axes.set_xlabel('Xnn Perturbation Amount (1/$\mathrm{\AA}^2$)')
             axes.set_title(bravais_lattice)
 
             xlim = axes.get_xlim()
             ylim = axes.get_ylim()
-            for n in [5, 10, 25, 50, 100]:
-                radius = options['convergence_distances'][np.argwhere(found_rate < 1/n)[0][0]]
-                axes.plot([xlim[0], radius], 1/n*np.ones(2), linestyle='dotted', color=[0, 0, 0], linewidth=1)
-                axes.plot(radius*np.ones(2), [ylim[0], 1/n], linestyle='dotted', color=[0, 0, 0], linewidth=1)
-                axes.annotate(f'{n:3d} {int(100*1/n)}%: {radius:0.5f}', (2*xlim[0], 1/n), verticalalignment='bottom')
+            radius = np.zeros((5, 2))
+            radius[:, 0] = [5, 10, 25, 50, 100]
+            for radius_index in range(5):
+                n = int(radius[radius_index, 0])
+                radius[radius_index, 1] = options['convergence_distances'][np.argwhere(found_rate < 1/n)[0][0]]
+                axes.plot(
+                    [xlim[0], radius[radius_index, 1]], 1/n*np.ones(2),
+                    linestyle='dotted', color=[0, 0, 0], linewidth=1
+                    )
+                axes.plot(
+                    radius[radius_index, 1]*np.ones(2), [ylim[0], 1/n],
+                    linestyle='dotted', color=[0, 0, 0], linewidth=1
+                    )
+                axes.annotate(
+                    f'{n:3d} {int(100*1/n)}%: {radius[radius_index, 1]:0.5f}',
+                    (2*xlim[0], 1/n),
+                    verticalalignment='bottom'
+                    )
             axes.set_xlim(xlim)
             axes.set_ylim(ylim)
             fig.tight_layout()
             fig.savefig(f'figures/{bravais_lattice}_radius_of_convergence_err_{error_tag}.png')
             plt.close()
+            np.save(f'data/radius_of_convergence_{error_tag}_{bravais_lattice}.npy', radius)

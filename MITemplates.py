@@ -41,16 +41,34 @@ class MITemplates:
         self.seed = seed
         self.rng = np.random.default_rng(self.seed)
 
-    def _save_common(self):
+        template_params_defaults = {
+            'templates_per_dominant_zone_bin': 2000,
+            'calibrate': False,
+            'parallelization': 'multiprocessing',
+            'n_processes': 2,
+            'radius': 0.01,
+            'n_train': 100,
+            'max_depth': 4,
+            'min_samples_leaf': 100,
+            'l2_regularization': 10,
+            }
+
+        for key in template_params_defaults.keys():
+            if key not in self.template_params.keys():
+                self.template_params[key] = template_params_defaults[key]
+
+    def save(self):
         write_params(
             self.template_params,
             f'{self.save_to}/{self.group}_template_params_{self.template_params["tag"]}.csv'
             )
+        if self.template_params['calibrate']:
+            joblib.dump(
+                self.hgbc_classifier,
+                f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
+                )
 
-    def save(self):
-        self._save_common()
-
-    def _load_from_tag_common(self):
+    def load_from_tag(self):
         self.miller_index_templates = np.load(
             f'{self.save_to}/{self.group}_miller_index_templates_{self.template_params["tag"]}.npy'
             )
@@ -61,15 +79,34 @@ class MITemplates:
         params_keys = [
             'tag',
             'templates_per_dominant_zone_bin',
-            'n_templates'
+            'calibrate',
+            'n_templates',
+            'parallelization',
+            'n_processes',
+            'n_train',
+            'radius',
+            'max_depth',
+            'min_samples_leaf',
+            'l2_regularization',
             ]
         self.template_params = dict.fromkeys(params_keys)
         self.template_params['tag'] = params['tag']
         self.template_params['templates_per_dominant_zone_bin'] = int(params['templates_per_dominant_zone_bin'])
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
-
-    def load_from_tag(self):
-        self._load_from_tag_common()
+        if params['calibrate'] == 'True':
+            self.template_params['calibrate'] = True
+        else:
+            self.template_params['calibrate'] = False
+        self.hgbc_classifier = joblib.load(
+            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
+            )
+        self.template_params['parallelization'] = params['parallelization']
+        self.template_params['n_processes'] = int(params['n_processes'])
+        self.template_params['n_train'] = int(params['n_train'])
+        self.template_params['radius'] = float(params['radius'])
+        self.template_params['max_depth'] = int(params['max_depth'])
+        self.template_params['min_samples_leaf'] = int(params['min_samples_leaf'])
+        self.template_params['l2_regularization'] = float(params['l2_regularization'])
 
     def setup_templates(self, data):
         def get_counts(hkl_labels_func, hkl_ref_length):
@@ -328,10 +365,12 @@ class MITemplates:
 
     def setup(self, data):
         self.setup_templates(data)
+        if self.template_params['calibrate']:
+            self.calibrate_templates(data)
         self.save()
 
     def generate_xnn_fast(self, q2_obs, indices=None):
-        # This is still slow
+        # This is still slow, but about 2 times faster than the other method
         # original I just did linear least squares iteratively until q2_calc was ordered (1st for loop)
         # It is faster to use Gauss-Newton non-linear least squares (2nd for loop)
         # This is mostly copied from TargetFunctions.py
@@ -370,10 +409,10 @@ class MITemplates:
             delta_gn = np.zeros((n_templates, self.unit_cell_length))
             delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
-        loss = np.linalg.norm(1 - q2_calc/q2_obs[np.newaxis], axis=1)
+        residuals = np.abs(q2_calc - q2_obs[np.newaxis])
         
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
-        return xnn, loss
+        return xnn, residuals
 
     def generate_xnn(self, q2_obs, indices=None):
         # This is slower
@@ -385,7 +424,7 @@ class MITemplates:
             n_templates = indices.size
 
         xnn = np.zeros((n_templates, self.unit_cell_length))
-        loss = np.zeros(n_templates)
+        residuals = np.zeros((n_templates, self.n_peaks))
         order = np.arange(self.n_peaks)
         
         for template_index in range(n_templates):
@@ -414,11 +453,11 @@ class MITemplates:
                     status = False
                 i += 1
             xnn[template_index] = xnn_current
-            loss[template_index] = np.linalg.norm(1 - q2_calc/q2_obs)
+            residuals[template_index] = delta_q2
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
-        return xnn, loss
+        return xnn, residuals
 
-    def generate(self, n_templates, rng, q2_obs):
+    def generate_uncalibrated(self, n_templates, rng, q2_obs):
         # This is primary used to generate candidates for the optimizer, which expects that the
         # sum of the template and sampled candidates to be the same. This is why n_samples gets
         # changed
@@ -427,7 +466,7 @@ class MITemplates:
         elif n_templates < self.template_params['n_templates']:
             # requesting fewer templates than in the set
             # subsample
-            indices = self.rng.choice(
+            indices = rng.choice(
                 self.template_params['n_templates'],
                 size=n_templates,
                 replace=False,
@@ -444,7 +483,7 @@ class MITemplates:
                 replace = True
             else:
                 replace = False
-            indices = self.rng.choice(
+            indices = rng.choice(
                 self.template_params['n_templates'],
                 size=difference,
                 replace=replace,
@@ -457,111 +496,53 @@ class MITemplates:
             )
         return unit_cell_templates
 
-
-class MITemplates_calibrated(MITemplates):
-    def __init__(self, group, data_params, template_params, hkl_ref, save_to, seed):
-        super().__init__(group, data_params, template_params, hkl_ref, save_to, seed)
-        template_params_defaults = {
-            'parallelization': 'multiprocessing',
-            'n_processes': 2,
-            'radius': 0.01,
-            'n_train': 100,
-            'max_depth': 4,
-            'min_samples_leaf': 100,
-            'l2_regularization': 10,
-            }
-
-        for key in template_params_defaults.keys():
-            if key not in self.template_params.keys():
-                self.template_params[key] = template_params_defaults[key]
-
-    def save(self):
-        self._save_common()
-        joblib.dump(
-            self.hgbc_classifier,
-            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
+    def generate_calibrated(self, n_templates, rng, q2_obs):
+        xnn_templates_all, q2_error = self.generate_xnn_fast(q2_obs)
+        probability_templates = self.hgbc_classifier.predict_proba(
+            q2_error[:, :self.template_params['calibration_n_peaks']]
             )
-
-    def load_from_tag(self):
-        self._load_from_tag_common()
-        self.logistic_regression = joblib.load(
-            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
-            )
-        params = read_params(f'{self.save_to}/{self.group}_template_params_{self.template_params["tag"]}.csv')
-        self.template_params['parallelization'] = params['parallelization']
-        self.template_params['n_processes'] = int(params['n_processes'])
-        self.template_params['n_train'] = int(params['n_train'])
-        self.template_params['radius'] = float(params['radius'])
-        self.template_params['max_depth'] = int(params['max_depth'])
-        self.template_params['min_samples_leaf'] = int(params['min_samples_leaf'])
-        self.template_params['l2_regularization'] = float(params['l2_regularization'])
-
-    def generate_xnn_error(self, q2_obs):
-        xnn = np.zeros((self.template_params['n_templates'], self.unit_cell_length))
-        order = np.arange(self.n_peaks)
-        hkl2_all = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
-        for template_index in range(self.template_params['n_templates']):
-            sigma = q2_obs
-            hkl2 = hkl2_all[template_index]
-            status = True
-            i = 0
-            xnn_last = np.zeros(self.unit_cell_length)
-            while status:
-                # Using this is only slightly faster than np.linalg.lstsq
-                xnn_current, r, rank, s = np.linalg.lstsq(
-                    hkl2 / sigma[:, np.newaxis], q2_obs / sigma,
-                    rcond=None
-                    )
-                q2_calc = hkl2 @ xnn_current
-                if np.all(q2_calc[1:] >= q2_calc[:-1]):
-                    delta_q2 = np.abs(q2_obs - q2_calc)
-                    if np.linalg.norm(xnn_current - xnn_last) < 0.01:
-                        status = False
-                else:
-                    sort_indices = np.argsort(q2_calc)
-                    hkl2 = hkl2[sort_indices]
-                    delta_q2 = np.abs(q2_obs - q2_calc[sort_indices])
-                sigma = np.sqrt(q2_obs * (delta_q2 + 1e-10))
-                xnn_last = xnn_current
-                if i == 10:
-                    status = False
-                i += 1
-            xnn[template_index] = xnn_current
-
-        xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
-
-        hkl2_ref = get_hkl_matrix(self.hkl_ref, self.lattice_system)
-        q2_ref_calc = xnn @ hkl2_ref.T
-        pairwise_differences = scipy.spatial.distance.cdist(
-            q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-            ).reshape((self.n_peaks, xnn.shape[0], self.hkl_ref_length))
-        hkl_assign = pairwise_differences.argmin(axis=2).T
-        hkl_pred = np.take(self.hkl_ref, hkl_assign, axis=0)
-        hkl2_pred = get_hkl_matrix(hkl_pred, self.lattice_system)
-        q2_calc = np.sum(xnn[:, np.newaxis, :] * hkl2_pred, axis=2)
-        delta_q2 = np.abs(q2_obs - q2_calc)
-        sigma = np.sqrt(q2_obs * (delta_q2 + 1e-10))
-        for template_index in range(self.template_params['n_templates']):
-            xnn[template_index], r, rank, s = np.linalg.lstsq(
-                hkl2_pred[template_index] / sigma[template_index, :, np.newaxis],
-                q2_obs / sigma[template_index],
-                rcond=None
+        if n_templates == 'all':
+            xnn_templates = xnn_templates_all
+        elif n_templates < self.template_params['n_templates']:
+            # The output of the classification is
+            #   col 0: in far category (False)
+            #   col 1: in close category (True)
+            top_n_indices = np.argsort(probability_templates[:, 0])[:n_templates]
+            xnn_templates = xnn_templates_all[top_n_indices]
+        elif n_templates > self.template_params['n_templates']:
+            # requesting more templates than in the set
+            # Just sample multiple times
+            print('WARNING: Requesting more templates than available. Duplicates will be returned')
+            difference = n_templates - self.template_params['n_templates']
+            if difference > self.template_params['n_templates']:
+                replace = True
+            else:
+                replace = False
+            indices = rng.choice(
+                self.template_params['n_templates'],
+                size=difference,
+                replace=replace,
+                p=self.miller_index_templates_prob,
                 )
+            xnn_templates =  np.concatenate((xnn_templates_all, xnn_templates_all[indices]), axis=0)
+        unit_cell_templates = get_unit_cell_from_xnn(
+            xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        return unit_cell_templates
 
-        q2_ref_calc = xnn @ hkl2_ref.T
-        q2_calc = np.sum(xnn[:, np.newaxis, :] * hkl2_pred, axis=2)
-
-        delta_q2 = np.abs(q2_obs - q2_calc)
-        sigma = np.sqrt(q2_obs * delta_q2)
-        return xnn, delta_q2
+    def generate(self, n_templates, rng, q2_obs):
+        if self.template_params['calibrate']:
+            return self.generate_calibrated(n_templates, rng, q2_obs)
+        else:
+            return self.generate_uncalibrated(n_templates, rng, q2_obs)
 
     def _get_inputs_worker(self, inputs):
         q2_obs = inputs[0]
         xnn_true = inputs[1]
-        xnn, q2_error = self.generate_xnn_error(q2_obs)
+        xnn, q2_error = self.generate_xnn_fast(q2_obs)
         distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])
         neighbor = (distance < self.template_params['radius']).astype(int)[:, 0]
-        return q2_error, neighbor
+        return q2_error, neighbor, distance
 
     def get_inputs(self, data, n_entries):
         q2_obs = np.stack(data['q2'])
@@ -569,6 +550,7 @@ class MITemplates_calibrated(MITemplates):
 
         q2_error = []
         neighbor = []
+        distance = []
         if n_entries is None:
             n_entries = len(data)
             indices = np.arange(n_entries)
@@ -579,10 +561,11 @@ class MITemplates_calibrated(MITemplates):
         if self.template_params['parallelization'] is None:
             print(f'Setting up {n_entries} entries serially')
             for index in tqdm(indices):
-                q2_error_entry, neighbor_entry = \
+                q2_error_entry, neighbor_entry, distance_entry = \
                     self._get_inputs_worker([q2_obs[index], xnn_true[index]])
                 q2_error.append(q2_error_entry)
                 neighbor.append(neighbor_entry)
+                distance.append(distance_entry)
         elif self.template_params['parallelization'] == 'multiprocessing':
             print(f'Setting up {n_entries} entries using multiprocessing')
             with multiprocessing.Pool(self.template_params['n_processes']) as p:
@@ -590,25 +573,36 @@ class MITemplates_calibrated(MITemplates):
             for i in range(n_entries):
                 q2_error.append(outputs[i][0])
                 neighbor.append(outputs[i][1])
+                distance.append(outputs[i][2])
 
         q2_error = np.row_stack(q2_error)
         neighbor = np.concatenate(neighbor)
-        return q2_error, neighbor
+        distance = np.concatenate(distance)
+        return q2_error, neighbor, distance
 
-    def fit_model(self, data):
+    def calibrate_templates(self, data):
         unaugmented_data = data[~data['augmented']]
         training_data = unaugmented_data[unaugmented_data['train']]
         val_data = unaugmented_data[~unaugmented_data['train']]
-        q2_error_train, neighbor_train = self.get_inputs(training_data, self.template_params['n_train'])
-        q2_error_val, neighbor_val = self.get_inputs(val_data, int(0.2*self.template_params['n_train']))
+        q2_error_train, neighbor_train, distance_train = self.get_inputs(
+            training_data, self.template_params['n_train']
+            )
+        q2_error_val, neighbor_val, distance_val = self.get_inputs(
+            val_data, int(0.2*self.template_params['n_train'])
+            )
         #np.save('MICal_test_q2_error_train.npy', q2_error_train)
-        #np.save('MICal_test_neighbor_train.npy', neighbor_train)
         #np.save('MICal_test_q2_error_val.npy', q2_error_val)
+        #np.save('MICal_test_neighbor_train.npy', neighbor_train)
         #np.save('MICal_test_neighbor_val.npy', neighbor_val)
-        #q2_error_train = np.load('MICal_test_q2_error_train.npy')
-        #neighbor_train = np.load('MICal_test_neighbor_train.npy')
-        #q2_error_val = np.load('MICal_test_q2_error_val.npy')
-        #neighbor_val = np.load('MICal_test_neighbor_val.npy')
+        #np.save('MICal_test_distance_train.npy', distance_train)
+        #np.save('MICal_test_distance_val.npy', distance_val)
+
+        #q2_error_train = np.load('MICal_test_q2_error_train.npy') 
+        #q2_error_val = np.load('MICal_test_q2_error_val.npy') 
+        #neighbor_train = np.load('MICal_test_neighbor_train.npy') 
+        #neighbor_val = np.load('MICal_test_neighbor_val.npy') 
+        #distance_train = np.load('MICal_test_distance_train.npy') 
+        #distance_val = np.load('MICal_test_distance_val.npy') 
 
         print('Fitting Hist Boosting Model')  
         self.hgbc_classifier = sklearn.ensemble.HistGradientBoostingClassifier(
@@ -617,45 +611,72 @@ class MITemplates_calibrated(MITemplates):
             class_weight='balanced',
             l2_regularization=self.template_params['l2_regularization'],
             )
-        self.hgbc_classifier.fit(q2_error_train, neighbor_train)
-        probability_train = self.hgbc_classifier.predict_proba(q2_error_train)
-        score_train = self.hgbc_classifier.score(q2_error_train, neighbor_train)
-        probability_val = self.hgbc_classifier.predict_proba(q2_error_val)
-        score_val = self.hgbc_classifier.score(q2_error_val, neighbor_val)
-        print(score_train)
-        print(score_val)
-
-        q2_error_close_train = q2_error_train[neighbor_train.astype(bool)]
-        q2_error_far_train = q2_error_train[~neighbor_train.astype(bool)]
-        q2_error_close_val = q2_error_val[neighbor_val.astype(bool)]
-        q2_error_far_val = q2_error_val[~neighbor_val.astype(bool)]
-        probability_close_train = probability_train[neighbor_train.astype(bool)]
-        probability_far_train = probability_train[~neighbor_train.astype(bool)]
-        probability_close_val = probability_val[neighbor_val.astype(bool)]
-        probability_far_val = probability_val[~neighbor_val.astype(bool)]
-
-        fig, axes = plt.subplots(1, 2, figsize=(5, 5))
-        axes[0].boxplot(np.linalg.norm(q2_error_close_train, axis=1), positions=[0.00])
-        axes[0].boxplot(np.linalg.norm(q2_error_far_train, axis=1), positions=[0.25])
-        axes[0].boxplot(np.linalg.norm(q2_error_close_val, axis=1), positions=[1.00])
-        axes[0].boxplot(np.linalg.norm(q2_error_far_val, axis=1), positions=[1.25])
-        axes[0].set_xticks([0, 0.25, 1.00, 1.25])
-        axes[0].set_xticklabels(
-            ['q2_err_close Train', 'q2_err_close Val', 'q2_err_far Train', 'q2_err_far Val'],
-            rotation=90
+        self.hgbc_classifier.fit(
+            q2_error_train[:, :self.template_params['calibration_n_peaks']],
+            neighbor_train
             )
-        axes[1].boxplot(probability_close_train[:, 1], positions=[0.00])
-        axes[1].boxplot(probability_close_val[:, 1], positions=[0.25])
-        axes[1].boxplot(probability_far_train[:, 1], positions=[1.00])
-        axes[1].boxplot(probability_far_val[:, 1], positions=[1.25])
-        axes[1].set_xticks([0, 0.25, 1.00, 1.25])
-        axes[1].set_xticklabels(
-            ['P(close) Train', 'P(close) Val', 'P(far) Train', 'P(far) Val'],
-            rotation=90
+        probability_train = self.hgbc_classifier.predict_proba(
+            q2_error_train[:, :self.template_params['calibration_n_peaks']]
             )
-        axes[1].set_title(f'Score (Train / Val)\n{score_train:0.3f} / {score_val:0.3f}')
+        score_train = self.hgbc_classifier.score(
+            q2_error_train[:, :self.template_params['calibration_n_peaks']],
+            neighbor_train
+            )
+        probability_val = self.hgbc_classifier.predict_proba(
+            q2_error_val[:, :self.template_params['calibration_n_peaks']]
+            )
+        score_val = self.hgbc_classifier.score(
+            q2_error_val[:, :self.template_params['calibration_n_peaks']],
+            neighbor_val
+            )
+
+        alpha = 0.5
+        ms = 0.5
+        top_n = 200
+
+        distance_close_train = distance_train[neighbor_train.astype(bool)]
+        distance_far_train = distance_train[~neighbor_train.astype(bool)]
+        distance_close_val = distance_val[neighbor_val.astype(bool)]
+        distance_far_val = distance_val[~neighbor_val.astype(bool)]
+
+        probability_close_train = probability_train[neighbor_train.astype(bool)][:, 1]
+        probability_far_train = probability_train[~neighbor_train.astype(bool)][:, 1]
+        probability_close_val = probability_val[neighbor_val.astype(bool)][:, 1]
+        probability_far_val = probability_val[~neighbor_val.astype(bool)][:, 1]
+
+        rng = np.random.default_rng(0)
+        if distance_train.size > 100000:
+            indices_train = rng.choice(distance_train.size, size=100000, replace=False)
+        else:
+            indices_train = np.arange(distance_train.size)
+        if distance_val.size > 100000:
+            indices_val = rng.choice(distance_val.size, size=100000, replace=False)
+        else:
+            indices_val = np.arange(distance_val.size)
+
+        top_n_indices_train = np.argsort(probability_train[:, 0])[:top_n]
+        top_n_distance_train = np.median(distance_train[top_n_indices_train])
+
+        top_n_indices_val = np.argsort(probability_val[:, 0])[:top_n]
+        top_n_distance_val = np.median(distance_val[top_n_indices_val])
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True, sharex=True)
+        axes[0].plot(
+            probability_train[indices_train, 1], distance_train[indices_train],
+            linestyle='none', marker='.', alpha=alpha, markersize=ms
+            )
+        axes[1].plot(
+            probability_val[indices_val, 1], distance_val[indices_val],
+            linestyle='none', marker='.', alpha=alpha, markersize=ms
+            )
+        axes[0].set_title(f'TRAIN Score: {score_train:0.3f}\nMedian distance (top {top_n} / all) {top_n_distance_train:0.5f} / {np.median(distance_train):0.5f}')
+        axes[1].set_title(f'Val Score: {score_val:0.3f}\nMedian distance (top {top_n} / all) {top_n_distance_val:0.5f} / {np.median(distance_val):0.5f}')
+        axes[0].set_ylim([-0.001, 0.05])
+        xlim = axes[0].get_xlim()
+        for i in range(2):
+            axes[i].set_xlabel('Probability in convergence radius')
+            axes[i].plot(xlim, self.template_params['radius']*np.ones(2), color=[0, 0, 0])
+        axes[0].set_ylabel('Xnn distance')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.group}_features_neighbors_{self.template_params["tag"]}.png')
-        #plt.show()
+        fig.savefig(f'{self.save_to}/{self.group}_calibration_{self.template_params["tag"]}.png')
         plt.close()
-        self.save()

@@ -141,7 +141,7 @@ class Candidates:
         self.best_hkl[improved_M20] = self.hkl[improved_M20]
 
     def refine_cell(self):
-        _, probability = get_M20_likelihood_from_xnn(
+        _, probability, _ = get_M20_likelihood_from_xnn(
             q2_obs=self.q2_obs,
             xnn=self.best_xnn,
             hkl=self.best_hkl,
@@ -275,7 +275,7 @@ class Candidates:
             )
 
     def calculate_peaks_indexed(self):
-        _, probability = get_M20_likelihood_from_xnn(
+        _, probability, _ = get_M20_likelihood_from_xnn(
             q2_obs=self.q2_obs,
             xnn=self.best_xnn,
             hkl=self.best_hkl,

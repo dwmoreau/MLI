@@ -234,7 +234,7 @@ def evaluate_regression(optimizer, data, candidates_per_model, N_entries, n_cand
 
 if __name__ == '__main__':
     load_data = True
-    broadening_tag = '0.5'
+    broadening_tag = '1'
     error_tag = '0.1'
     q2_error_params = np.array([0.0001, 0.001]) / 1
     n_top_candidates = 20
@@ -243,51 +243,51 @@ if __name__ == '__main__':
     #bravais_lattices = ['cF', 'cI', 'cP']
     #candidates_per_model = 200
     #N_entries = 100
-    #mult_factor = 1
+    #conv_radius = 0.001
     
     #bravais_lattices = ['tI', 'tP']
     #candidates_per_model = 500
     #N_entries = 100
-    #mult_factor = 5
+    #conv_radius = 0.001
 
     #bravais_lattices = ['hP', 'hR']
     #candidates_per_model = 500
     #N_entries = 100
-    #mult_factor = 5
+    #conv_radius = 0.001
 
-    #bravais_lattices = ['oC', 'oF', 'oI', 'oP']
-    #candidates_per_model = 500
-    #N_entries = 20
-    #mult_factor = 5
+    bravais_lattices = ['oC', 'oF', 'oI', 'oP']
+    candidates_per_model = 500
+    N_entries = 20
+    conv_radius = 0.001
 
     #bravais_lattices = ['mC', 'mP']
     #candidates_per_model = 1000
     #N_entries = 20
-    #mult_factor = 10
+    #conv_radius = 0.001
 
-    bravais_lattices = ['aP']
-    candidates_per_model = 800
-    N_entries = 100
-    mult_factor = 17
+    #bravais_lattices = ['aP']
+    #candidates_per_model = 800
+    #N_entries = 100
+    #conv_radius = 0.001
 
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng()
     for bravais_lattice in bravais_lattices:
         print(f'Loading optimizer for {bravais_lattice}')
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, error_tag, MPI.COMM_WORLD)
+            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, MPI.COMM_WORLD)
         elif bravais_lattice in ['hP']:
-            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, error_tag, MPI.COMM_WORLD)
+            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, MPI.COMM_WORLD)
         elif bravais_lattice in ['hR']:
-            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, error_tag, MPI.COMM_WORLD)
+            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, MPI.COMM_WORLD)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, error_tag, MPI.COMM_WORLD)
+            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, MPI.COMM_WORLD)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, error_tag, MPI.COMM_WORLD)
+            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, MPI.COMM_WORLD)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, error_tag, MPI.COMM_WORLD)
+            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, MPI.COMM_WORLD)
         elif bravais_lattice in ['aP']:
-            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, error_tag, MPI.COMM_WORLD)
+            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, MPI.COMM_WORLD)
 
     if load_data:
         data = []
@@ -334,6 +334,10 @@ if __name__ == '__main__':
             bravais_lattice_data.drop(columns=drop_columns, inplace=True)
             data.append(bravais_lattice_data)
         data = pd.concat(data)
+        print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
+        unit_cell = np.stack(data['reindexed_unit_cell'])
+        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
+        data['reindexed_xnn'] = list(xnn)
     
     for bravais_lattice in bravais_lattices:
         evaluate_regression(
@@ -343,5 +347,5 @@ if __name__ == '__main__':
             N_entries=N_entries,
             n_candidates_steps=20,
             n_evaluations=10,
-            threshold=mult_factor*optimizer[bravais_lattice].opt_params['neighbor_radius']
+            threshold=conv_radius
             )
