@@ -69,10 +69,10 @@ entry_tags = [
 base_dir = '/Users/DWMoreau/MLI/triplet'
 entry_tags = [
     #'cybu_rg003',
-    'cyhx_rg003',
+    #'cyhx_rg003',
     #'cybu',
     #'cyhx',
-    #'glu_dehyd',
+    'glu_dehyd',
     #'homocys',
     ]
 rng = np.random.default_rng()
@@ -84,14 +84,21 @@ logger = get_logger(comm, optimization_tag)
 logger.info('Starting process')
 
 
-bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+#manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+
+#bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
+#manager_rank =     [    0,     0,     1,     1]
+#serial =           [False, False, False, False]
+
+bravais_lattices = ['oP']
+manager_rank =     [   0]
+serial =           [True]
 
 #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP', 'aP']
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,    0]
 #serial =           [True, True, True, True, True, True, True,  True,  True,  True,  True,  True,  True, True]
-
 
 mpi_organizers = get_mpi_organizer(comm, bravais_lattices, manager_rank, serial)
 
@@ -106,6 +113,7 @@ optimizer = get_optimizers(rank, mpi_organizers, broadening_tag, logger=logger)
 for entry_tag in entry_tags:
     logger.info(f'Starting entry {entry_tag}')
     peak_list = np.load(base_dir + f'/{entry_tag}/{entry_tag}_peak_list.npy')[:20]
+    triplet_obs = np.load(base_dir + f'/{entry_tag}/{entry_tag}_triplets.npy')
     # The next portion is the optimization of a single entry
     # rank 0 will be the rank that compares results from all bravais lattices. 
     if rank == 0:
@@ -122,7 +130,7 @@ for entry_tag in entry_tags:
                 role = 'worker'
             mpi_organizers[bravais_lattice].split_comm.barrier()
             logger.info(f'Starting optimization of {bravais_lattice} {role}')
-            optimizer[bravais_lattice].run(q2=peak_list, n_top_candidates=n_top_candidates)
+            optimizer[bravais_lattice].run(q2=peak_list, triplets=triplet_obs, n_top_candidates=n_top_candidates)
             logger.info(f'Finishing optimization of {bravais_lattice} {role}')
     comm.barrier()
 
@@ -190,6 +198,7 @@ for entry_tag in entry_tags:
                     'beta': unit_cell[4],
                     'gamma': unit_cell[5],
                     })
+                print(output_data[-1])
         output_df = pd.DataFrame(output_data)
         output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
         output_df.to_json(base_dir + f'/{entry_tag}/{entry_tag}_indexing_results_{optimization_tag}.json')

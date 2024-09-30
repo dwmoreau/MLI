@@ -1,14 +1,17 @@
 """
-2D Indexing
-    - Calculate triplets for SACLA data
-    - Implement FOM with triplets
-    - Figure out how to assign Miller indices
+* 2D Indexing
+    * Implement FOM with triplets
+        * Make triplets from glu_dehyd that can be put into the optimizer
+        * Use triplet FOM in optimizer
+    * Calculate triplets for SACLA data
+    * Figure out how to assign Miller indices
 
 Ordered to-do
     1: Finish Integral filter model:
         - Integral filter generate function
-    2: Train models and evaluate models
-    3: Optimize ensemble of models
+    2: Test new generators
+    3: Train models and evaluate models
+    4: Optimize ensemble of models
 
 * Integral filter model
     * Generate function
@@ -1200,11 +1203,11 @@ class Indexing:
                 self.random_unit_cell_generator[bravais_lattice].train(bl_data)
 
     def setup_miller_index_templates(self):
-        from Utilities import get_xnn_from_unit_cell
-        print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
-        unit_cell = np.stack(self.data['reindexed_unit_cell'])
-        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
-        self.data['reindexed_xnn'] = list(xnn)
+        #from Utilities import get_xnn_from_unit_cell
+        #print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
+        #unit_cell = np.stack(self.data['reindexed_unit_cell'])
+        #xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
+        #self.data['reindexed_xnn'] = list(xnn)
 
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):

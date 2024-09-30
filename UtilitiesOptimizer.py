@@ -362,6 +362,7 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm, options=None
         'iteration_info': iteration_info,
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
+        'convergence_testing': False,
         }
     if not options is None:
         for key in options.keys():
@@ -439,6 +440,7 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, comm, options=None)
         'iteration_info': iteration_info,
         'max_neighbors': 20,
         'neighbor_radius': 0.0005,
+        'convergence_testing': False,
         }
     if not options is None:
         for key in options.keys():
@@ -486,6 +488,7 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, comm, options=No
         'iteration_info': iteration_info,
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
+        'convergence_testing': False,
         }
     if not options is None:
         for key in options.keys():
@@ -624,6 +627,7 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, comm, options=No
         'iteration_info': iteration_info,
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
+        'convergence_testing': False,
         }
     if not options is None:
         for key in options.keys():
@@ -734,6 +738,7 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None
         'iteration_info': iteration_info,
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
+        'convergence_testing': False,
         }
     if not options is None:
         for key in options.keys():
@@ -776,7 +781,8 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None)
         'generator_info': generator_info,
         'iteration_info': iteration_info,
         'max_neighbors': 50,
-        'neighbor_radius': 0.003
+        'neighbor_radius': 0.0005,
+        'convergence_testing': False,
         }
     if not options is None:
         for key in options.keys():

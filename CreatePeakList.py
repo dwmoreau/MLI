@@ -808,13 +808,14 @@ class PeakListCreator:
     def pick_triplets(self, prominence_factor=5, hkl=None, xnn=None, lattice_system=None):
         triplet_keys = list(self.triplets.keys())
         triplets_obs = []
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         for key_index, key in enumerate(triplet_keys):
             if len(self.triplets[key]) > 0:
                 triplets_obs_pair = []
                 fig, axes = plt.subplots(1, 1, figsize=(10, 3), sharex=False)
-                bins_full = np.linspace(0, np.pi, 401)
+                bins_full = np.linspace(0, np.pi, 201)
                 centers_full = (bins_full[1:] + bins_full[:-1]) / 2
-                bins_half = np.linspace(0, np.pi/2, 201)
+                bins_half = np.linspace(0, np.pi/2, 101)
                 centers_half = (bins_half[1:] + bins_half[:-1]) / 2
                 
                 q20 = self.triplets[key][0, 0]
@@ -836,9 +837,10 @@ class PeakListCreator:
                 angles[upper] = 0
                 hist_half, _ = np.histogram(angles, bins=bins_half)
                 hist_full, _ = np.histogram(np.arccos(cos_angles[~both]), bins=bins_full)
-                axes.bar(centers_half, hist_half, width=bins_half[1] - bins_half[0])
-                axes.bar(centers_full, hist_full, width=bins_full[1] - bins_full[0], alpha=0.5)
+                axes.bar(centers_half, hist_half, width=bins_half[1] - bins_half[0], color=colors[0], alpha=0.9, label='Obs Differences')
+                axes.bar(centers_full, hist_full, width=bins_full[1] - bins_full[0], color=colors[0], alpha=0.5)
                 ylim = axes.get_ylim()
+                ylim = [ylim[0], ylim[1]*1.1]
                 diff_peak_indices, _ = scipy.signal.find_peaks(hist_half, prominence=prominence_factor*hist_half.std())
                 if hist_half[0] > prominence_factor*hist_half.std():
                     diff_peak_indices = np.concatenate([diff_peak_indices, [0]])
@@ -846,7 +848,7 @@ class PeakListCreator:
                     diff_peak_indices = np.concatenate([diff_peak_indices, [hist_half.size - 1]])
                 if diff_peak_indices.size > 0:
                     diff_peaks = centers_half[diff_peak_indices]
-                    for p in diff_peaks:
+                    for p_index, p in enumerate(diff_peaks):
                         selection = np.logical_and(
                             angles > p - 0.02,
                             angles < p + 0.02,
@@ -854,29 +856,25 @@ class PeakListCreator:
                         median = np.median(angles[selection])
                         median_difference = q20 + q21 - 2*np.sqrt(q20*q21)*np.cos(median)
                         triplets_obs_pair.append([key[0], key[1], median_difference, median])
+                        if p_index == 0:
+                            label = 'Found Differences'
+                        else:
+                            label=None
                         axes.plot(
-                            [median, median], ylim, color=[1, 0, 0], linestyle='dashed'
+                            [median, median], ylim, color=colors[1], alpha=0.75, label=label
                             )
                         axes.annotate(
-                            np.round(median, decimals=4),
+                            np.round(median, decimals=3),
                             xy=[median, ylim[1]*0.85],
                             )
                         axes.plot(
-                            [np.pi - median, np.pi - median], ylim, color=[1, 0, 0], linestyle='dashed'
+                            [np.pi - median, np.pi - median], ylim, color=colors[1], alpha=0.5
                             )
                         axes.annotate(
-                            np.round(np.pi - median, decimals=4),
+                            np.round(np.pi - median, decimals=3),
                             xy=[np.pi - median, ylim[1]*0.85],
                             )
                     axes.set_ylim(ylim)
-                for peak_angle in angles_peaks:
-                    axes.plot(
-                        [peak_angle, peak_angle], [ylim[0], 0.25*ylim[1]], color=[0, 0, 0]
-                        )
-                    axes.plot(
-                        [np.pi - peak_angle, np.pi - peak_angle], [ylim[0], 0.25*ylim[1]], color=[0, 0, 0]
-                        )
-
                 if hkl is None:
                     axes.set_ylabel(
                         str(key)
@@ -891,6 +889,7 @@ class PeakListCreator:
                         )
                     
                     mi_sym = [[1, 1, 1], [1, 1, -1], [1, -1, 1], [-1, 1, 1]]
+                    make_label = True
                     for i in range(len(mi_sym)):
                         for j in range(len(mi_sym)):
                             hkl_diff = mi_sym[i]*hkl[key[0]] - mi_sym[j]*hkl[key[1]]
@@ -903,12 +902,29 @@ class PeakListCreator:
                                 angle_diff_calc = np.pi
                             else:
                                 angle_diff_calc = np.arccos(cos_angle_diff_calc)
-                            axes.plot([angle_diff_calc, angle_diff_calc], [ylim[0], 0.5*ylim[1]], color=[0, 0.8, 0], linestyle='dotted')
+                            if make_label:
+                                label = 'Pred Diff'
+                            else:
+                                label = None
+                            axes.plot([angle_diff_calc, angle_diff_calc], [ylim[0], 0.5*ylim[1]], color=[0, 0.8, 0], label=label)
                             axes.annotate(
-                                np.round(angle_diff_calc, decimals=4),
-                                xy=[angle_diff_calc, ylim[1]*0.5],
+                                np.round(angle_diff_calc, decimals=3),
+                                xy=[angle_diff_calc, ylim[1]*0.4],
                                 )
-                    axes.set_ylim()
+                            make_label = False
+                for p_index, peak_angle in enumerate(angles_peaks):
+                    if p_index == 0:
+                        label = 'Obs Peaks'
+                    else:
+                        label=None
+                    axes.plot(
+                        [peak_angle, peak_angle], [ylim[0], 0.25*ylim[1]], color=[0, 0, 0], label=label
+                        )
+                    axes.plot(
+                        [np.pi - peak_angle, np.pi - peak_angle], [ylim[0], 0.25*ylim[1]], color=[0, 0, 0]
+                        )
+                axes.set_ylim()
+                axes.legend(frameon=False)
                 fig.tight_layout()
                 plt.show(block=False)
                 for index in range(len(triplets_obs_pair)):

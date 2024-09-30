@@ -93,20 +93,23 @@ class MITemplates:
         self.template_params['tag'] = params['tag']
         self.template_params['templates_per_dominant_zone_bin'] = int(params['templates_per_dominant_zone_bin'])
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
-        if params['calibrate'] == 'True':
-            self.template_params['calibrate'] = True
+        if 'calibrate' in params.keys():
+            if params['calibrate'] == 'True':
+                self.template_params['calibrate'] = True
+                self.hgbc_classifier = joblib.load(
+                    f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
+                    )
+                self.template_params['parallelization'] = params['parallelization']
+                self.template_params['n_processes'] = int(params['n_processes'])
+                self.template_params['n_train'] = int(params['n_train'])
+                self.template_params['radius'] = float(params['radius'])
+                self.template_params['max_depth'] = int(params['max_depth'])
+                self.template_params['min_samples_leaf'] = int(params['min_samples_leaf'])
+                self.template_params['l2_regularization'] = float(params['l2_regularization'])
+            else:
+                self.template_params['calibrate'] = False
         else:
             self.template_params['calibrate'] = False
-        self.hgbc_classifier = joblib.load(
-            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
-            )
-        self.template_params['parallelization'] = params['parallelization']
-        self.template_params['n_processes'] = int(params['n_processes'])
-        self.template_params['n_train'] = int(params['n_train'])
-        self.template_params['radius'] = float(params['radius'])
-        self.template_params['max_depth'] = int(params['max_depth'])
-        self.template_params['min_samples_leaf'] = int(params['min_samples_leaf'])
-        self.template_params['l2_regularization'] = float(params['l2_regularization'])
 
     def setup_templates(self, data):
         def get_counts(hkl_labels_func, hkl_ref_length):

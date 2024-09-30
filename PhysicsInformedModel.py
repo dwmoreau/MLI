@@ -931,6 +931,78 @@ class PhysicsInformedModel:
         fig.savefig(f'{self.save_to_split_group}/{self.split_group}_calibration_training_loss_{self.model_params["tag"]}.png')
         plt.close()
 
+    """
+    def predict_xnn(self, data=None, inputs=None, q2_obs=None, batch_size=None):
+        if not data is None:
+            q2_obs = np.stack(data['q2'])[:, :self.model_params['peak_length']]
+        elif not inputs is None:
+            q2_obs = np.array(inputs['q2'])[:self.model_params['peak_length']]
+        elif not q2_obs is None
+            q2_obs = q2_obs[:self.model_params['peak_length']]
+        q2_obs_scaled = q2_obs / self.q2_obs_scale
+
+        #print(f'\n Regression inferences for {self.split_group}')
+        if batch_size is None:
+            batch_size = self.model_params['batch_size']
+
+        # predict_on_batch helps with a memory leak...
+        N = q2_scaled.shape[0]
+        n_batches = N // batch_size
+        left_over = N % batch_size
+
+        xnn_pred_scaled = np.zeros((N, self.model_params['n_volumes'], self.unit_cell_length))
+        logits_pred = np.zeros((N, self.model_params['n_volumes']))
+
+        for batch_index in range(n_batches + 1):
+            start = batch_index * batch_size
+            if batch_index == n_batches:
+                batch_inputs = {'q2_obs_scaled': np.zeros((batch_size, self.n_peaks))}
+                batch_inputs['q2_obs_scaled'][:left_over] = q2_obs_scaled[start: start + left_over]
+                batch_inputs['q2_obs_scaled'][left_over:] = q2_obs_scaled[0]
+            else:
+                batch_inputs = {'q2_obs_scaled': q2_scaled[start: start + batch_size]}
+
+            outputs = self.model.predict_on_batch(batch_inputs)
+
+            if batch_index == n_batches:
+                xnn_pred_scaled[start:] = outputs[:left_over, :, :self.unit_cell_length]
+                logits_pred[start:] = outputs[:left_over, :, self.unit_cell_length]
+            else:
+                xnn_pred_scaled[start: start + batch_size] = outputs[:, :, :self.unit_cell_length]
+                logits_pred[start: start + batch_size] = outputs[:, :, self.unit_cell_length]
+        softmax_pred = scipy.special.softmax(logits_pred, axis=1)
+        xnn_pred = xnn_pred_scaled*self.xnn_scale + self.xnn_mean
+        xnn_pred = fix_unphysical(xnn=xnn_pred, lattice_system=self.data_params['lattice_system'], rng=self.rng)
+        return xnn_pred, softmax_pred
+
+    def predict_hkl(self, data=None, inputs=None, q2_obs=None, batch_size=None):
+        if not data is None:
+            q2_obs_scaled = np.stack(data['q2_scaled'])[:, :self.model_params['peak_length']]
+        elif not inputs is None:
+            q2_obs_scaled = np.array(inputs['q2_scaled'])[:self.model_params['peak_length']]
+        elif not q2_obs is None
+            q2_obs = q2_obs[:self.model_params['peak_length']]
+            q2_obs_scaled = (q2_obs - self.global_q2_scaler.mean_[0]) / self.global_q2_scaler.scale_[0]
+
+        #print(f'\n Regression inferences for {self.split_group}')
+        if batch_size is None:
+            batch_size = self.model_params['batch_size']
+
+        # predict_on_batch helps with a memory leak...
+        N = q2_scaled.shape[0]
+        n_batches = N // batch_size
+        left_over = N % batch_size
+
+
+    def generate(self, n_unit_cells, rng, q2_obs, top_n=5, batch_size=None):
+        xnn_pred, softmax_pred = self.predict_xnn(q2_obs=q2_obs, batch_size=batch_size)
+        xnn_pred_top_n = np.take_along_axis(
+            xnn_pred,
+            np.argsort(softmax_pred, axis=1)[:, ::-1][:, :top_n, np.newaxis],
+            axis=1
+            )
+    """
+
     def evaluate(self, data):
         data = data[~data['augmented']]
         train = data[data['train']]

@@ -25,6 +25,8 @@ from Utilities import get_M20
 from Utilities import get_M20_from_xnn
 from Utilities import get_M20_likelihood
 from Utilities import get_M20_likelihood_from_xnn
+from Utilities import get_M20_triplet
+from Utilities import get_M20_triplet_from_xnn
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_xnn_from_unit_cell
@@ -36,7 +38,7 @@ from Utilities import fast_assign
 
 
 class Candidates:
-    def __init__(self, q2_obs, xnn, hkl_ref, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell):
+    def __init__(self, q2_obs, triplets, xnn, hkl_ref, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell):
         self.lattice_system = lattice_system
         self.bravais_lattice = bravais_lattice
         self.minimum_unit_cell = minimum_unit_cell
@@ -47,9 +49,11 @@ class Candidates:
 
         self.q2_obs = q2_obs
         self.n_peaks = self.q2_obs.size
+        self.triplets = triplets
         self.xnn = xnn
-        self.best_xnn = self.xnn.copy()
         self.n = self.xnn.shape[0]
+        self.best_xnn = self.xnn.copy()
+        self.best_M20 = np.zeros(self.n)
         self.candidate_index = np.arange(self.n)
         self.update_unit_cell_from_xnn()
 
@@ -61,7 +65,6 @@ class Candidates:
             )
         # self.assign_hkls() calculates the current M20 score
         self.assign_hkls()
-        self.best_M20 = self.M20.copy()
         self.best_hkl = self.hkl.copy()
 
     def fix_bad_conversions(self):
@@ -109,10 +112,19 @@ class Candidates:
         q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-
-        hkl2 = get_hkl_matrix(self.hkl, self.lattice_system)
-        q2_calc = np.sum(hkl2 * self.xnn[:, np.newaxis, :], axis=2)
-        self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+        if self.triplets is None:
+            self.M20 = get_M20_from_xnn(
+                self.q2_obs, self.xnn, self.hkl, self.hkl_ref, self.lattice_system
+                )
+        else:
+            self.M20 = get_M20_triplet(
+                self.q2_obs,
+                self.triplets,
+                self.hkl,
+                self.xnn,
+                self.lattice_system,
+                self.bravais_lattice
+                )
 
     def random_subsampling(self, iteration_info):
         if type(iteration_info['n_drop']) == list:
@@ -174,10 +186,19 @@ class Candidates:
         q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-
-        hkl2 = get_hkl_matrix(refined_hkl, self.lattice_system)
-        q2_calc = np.sum(hkl2 * refined_xnn[:, np.newaxis, :], axis=2)
-        refined_M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+        if self.triplets is None:
+            refined_M20 = get_M20_from_xnn(
+                self.q2_obs, refined_xnn, refined_hkl, self.hkl_ref, self.lattice_system
+                )
+        else:
+            refined_M20 = get_M20_triplet(
+                self.q2_obs,
+                self.triplets,
+                refined_hkl,
+                refined_xnn,
+                self.lattice_system,
+                self.bravais_lattice
+                )
 
         update = refined_M20 > self.best_M20
         self.best_hkl[update] = refined_hkl[update]
@@ -242,9 +263,20 @@ class Candidates:
             q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
             hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
-            hkl2 = get_hkl_matrix(hkl[:, mf_index], self.lattice_system)
-            q2_calc_mult = np.sum(hkl2 * xnn_mult[:, np.newaxis, :], axis=2)
-            M20[:, mf_index] = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
+            if self.triplets is None:
+                M20[:, mf_index] = get_M20_from_xnn(
+                    self.q2_obs, xnn_mult, hkl[:, mf_index], self.hkl_ref, self.lattice_system
+                    )
+            else:
+                M20[:, mf_index] = get_M20_triplet(
+                    self.q2_obs,
+                    self.triplets,
+                    hkl[:, mf_index],
+                    xnn_mult,
+                    self.lattice_system,
+                    self.bravais_lattice
+                    )
+
         best_index = np.argmax(M20, axis=1)
         final_mult_factor = np.take(mult_factors, best_index, axis=0)        
         self.best_xnn[test_indices] *= final_mult_factor**2
@@ -269,6 +301,7 @@ class Candidates:
         self.best_M20, self.best_spacegroup = get_extinction_group(
             xnn=self.best_xnn,
             q2_obs=self.q2_obs,
+            triplets_obs=self.triplets,
             hkl_ref_bl=self.hkl_ref,
             bravais_lattice=self.bravais_lattice,
             lattice_system=self.lattice_system
@@ -302,6 +335,7 @@ class OptimizerBase:
     def generate_candidates_common(self, xnn_rank):
         candidates = Candidates(
             q2_obs=self.q2_obs,
+            triplets=self.triplets,
             xnn=xnn_rank,
             hkl_ref=self.hkl_ref,
             lattice_system=self.lattice_system,
@@ -313,6 +347,7 @@ class OptimizerBase:
 
     def run_common(self, n_top_candidates):
         self.comm.Bcast(self.q2_obs, root=self.root)
+        self.triplets = self.comm.bcast(self.triplets, root=self.root)
         candidates = self.generate_candidates_rank()
         for iteration_info in self.opt_params['iteration_info']:
             for iter_index in range(iteration_info['n_iterations']):
@@ -353,8 +388,9 @@ class OptimizerWorker(OptimizerBase):
         self.rng = np.random.default_rng()
         super().__init__(comm)
         
-    def run(self, entry=None, q2=None, n_top_candidates=20):
+    def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20):
         self.q2_obs = np.zeros(self.n_peaks)
+        self.triplets = None
         self.run_common(n_top_candidates=None)
 
     def generate_candidates_rank(self):
@@ -439,13 +475,14 @@ class OptimizerManager(OptimizerBase):
         self.unit_cell_length = self.indexer.data_params['unit_cell_length']
         super().__init__(comm)
 
-    def run(self, entry=None, q2=None, n_top_candidates=20):
+    def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20):
         if entry is None:
             self.q2_obs = q2[:self.n_peaks]
         elif q2 is None:
             self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
             if self.opt_params['convergence_testing']:
                 self.xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['unit_cell_indices']]
+        self.triplets = triplets
         self.run_common(n_top_candidates=n_top_candidates)
 
     def generate_candidates_rank(self):

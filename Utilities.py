@@ -624,7 +624,7 @@ def get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
     observed_difference2 = (np.sqrt(q2_obs[np.newaxis]) - np.sqrt(q2_calc))**2
     arg = 8*np.pi*q2_obs * np.sqrt(observed_difference2) / (reciprocal_volume[:, np.newaxis] * mu)
     probability = 1/(1 + arg)
-    M = -1/np.log(2) * np.sum(np.log(1 - np.exp(-arg)), axis=1)
+    M = -1/np.log(2) * np.sum(np.log(1 - np.exp(-arg) + 1e-10), axis=1)
     return -np.sum(np.log(probability), axis=1), probability, M
 
 
@@ -701,6 +701,108 @@ def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
     M20_reversed = expected_discrepancy_reversed / discrepancy_reversed
     M20_sym = M20 * M20_reversed
     return M20, M20_sym, M20_reversed
+
+
+def get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system):
+    mi_sym = np.stack([
+        np.eye(3),
+        np.array([
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, -1],
+            ]),
+        np.array([
+            [1, 0, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            ]),
+        np.array([
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+            ])
+        ],
+        axis=0
+        )
+    if lattice_system in ['hexagonal', 'tetragonal', 'cubic', 'rhombohedral']:
+        # abc
+        # bac
+        mi_permutations = [
+            np.eye(3),
+            np.array([
+                [0, 1, 0],
+                [1, 0, 0],
+                [0, 0, 1],
+            ])
+            ]
+    if lattice_system in ['cubic', 'rhombohedral']:
+        # acb
+        # bca
+        # cba
+        # cab
+        mi_permutations += [
+            np.array([
+                [1, 0, 0],
+                [0, 0, 1],
+                [0, 1, 0],
+                ]),
+            np.array([
+                [0, 0, 1],
+                [1, 0, 0],
+                [0, 1, 0],
+                ]),
+            np.array([
+                [0, 0, 1],
+                [0, 1, 0],
+                [1, 0, 0],
+                ]),
+            np.array([
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 0, 0],
+                ]),
+            ]
+    if lattice_system in ['hexagonal', 'tetragonal', 'cubic', 'rhombohedral']:
+        mi_permutations = np.stack(mi_permutations, axis=0)
+        mi_sym_extra = np.matmul(mi_sym[:, np.newaxis, :, :], mi_permutations[np.newaxis, :, :, :])
+        mi_sym = mi_sym_extra.reshape((mi_sym_extra.shape[0] * mi_sym_extra.shape[1], 3, 3))
+    
+    hkl0 = np.take(hkl, triplets_obs[:, 0].astype(int), axis=1)
+    hkl1 = np.take(hkl, triplets_obs[:, 1].astype(int), axis=1)
+    hkl0_sym = np.matmul(mi_sym, hkl0[:, :, np.newaxis, :, np.newaxis])[:, :, :, :, 0]
+    hkl_diff = hkl0_sym - hkl1[:, :, np.newaxis, :]
+    hkl2_diff = get_hkl_matrix(hkl_diff, lattice_system)
+    q2_diff_calc_sym = np.sum(xnn[:, np.newaxis, np.newaxis, :] * hkl2_diff, axis=3)
+    difference = np.abs(triplets_obs[:, 2][np.newaxis, :, np.newaxis] - q2_diff_calc_sym)
+    q2_diff_calc_index = np.argmin(difference, axis=2)
+    q2_diff_calc = np.take_along_axis(q2_diff_calc_sym, q2_diff_calc_index[:, :, np.newaxis], axis=2)[:, :, 0]
+    return q2_diff_calc
+
+
+def get_M20_triplet_from_xnn(triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
+    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
+    reciprocal_volume = get_unit_cell_volume(reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system)
+    _, _, M20_triplet = get_M20_likelihood(triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume)    
+    return M20_triplet
+
+
+def get_M20_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
+    _, _, M20_primary = get_M20_likelihood_from_xnn(
+        q2_obs, xnn, hkl, lattice_system, bravais_lattice
+        )
+
+    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+        xnn, partial_unit_cell=True, lattice_system=lattice_system
+        )
+    reciprocal_volume = get_unit_cell_volume(
+        reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system
+        )
+    _, _, M20_triplet = get_M20_likelihood(
+        triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume
+        )
+    return M20_primary + M20_triplet
 
 
 def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
@@ -803,7 +905,7 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
     return hkl_ref_sg
 
 
-def get_extinction_group(xnn, q2_obs, hkl_ref_bl, bravais_lattice, lattice_system):
+def get_extinction_group(xnn, q2_obs, triplets_obs, hkl_ref_bl, bravais_lattice, lattice_system):
     hkl_ref_sg = get_spacegroup_hkl_ref(hkl_ref_bl, bravais_lattice=bravais_lattice)
     spacegroups = list(hkl_ref_sg.keys())
     M20 = np.zeros((xnn.shape[0], len(spacegroups)))
@@ -825,10 +927,19 @@ def get_extinction_group(xnn, q2_obs, hkl_ref_bl, bravais_lattice, lattice_syste
             ).reshape((n_peaks, n, hkl_ref_length))
         hkl_assign = pairwise_differences.argmin(axis=2).T
         hkl = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
-        hkl2 = get_hkl_matrix(hkl, lattice_system)
-        q2_calc = np.sum(hkl2 * xnn[:, np.newaxis], axis=2)
-
-        M20[:, spacegroup_index] = get_M20(q2_obs, q2_calc, q2_ref_calc)
+        if triplets_obs is None:
+            M20[:, spacegroup_index] = get_M20_from_xnn(
+                q2_obs, xnn, hkl, hkl_ref_bl, lattice_system
+                )
+        else:
+            M20[:, spacegroup_index] = get_M20_triplet(
+                q2_obs,
+                triplets_obs,
+                hkl,
+                xnn,
+                lattice_system,
+                bravais_lattice
+                )
 
     best_indices = np.argmax(M20, axis=1)
     best_spacegroup = list(np.take(spacegroups, best_indices))
@@ -1032,6 +1143,7 @@ def map_spacegroup_to_extinction_group(spacegroup_symbol_hm):
             return row['Extinction Group'], row['Code']
     else:
         print(f'{spacegroup_symbol_hm} {spacegroup_symbol} Not in lookup')
+
 
 class Q2Calculator:
     def __init__(self, lattice_system, hkl, tensorflow, representation):
