@@ -1,8 +1,5 @@
 """
 * 2D Indexing
-    * Implement FOM with triplets
-        * Make triplets from glu_dehyd that can be put into the optimizer
-        * Use triplet FOM in optimizer
     * Calculate triplets for SACLA data
     * Figure out how to assign Miller indices
 

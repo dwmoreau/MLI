@@ -50,6 +50,7 @@ class Candidates:
         self.q2_obs = q2_obs
         self.n_peaks = self.q2_obs.size
         self.triplets = triplets
+        self.n_triplets = triplets.shape[0]
         self.xnn = xnn
         self.n = self.xnn.shape[0]
         self.best_xnn = self.xnn.copy()
@@ -117,6 +118,8 @@ class Candidates:
                 self.q2_obs, self.xnn, self.hkl, self.hkl_ref, self.lattice_system
                 )
         else:
+            hkl_assign_triplets = fast_assign(self.triplets[:, 2], q2_ref_calc)
+            self.hkl_triplets = np.take(self.hkl_ref, hkl_assign_triplets, axis=0)
             self.M20 = get_M20_triplet(
                 self.q2_obs,
                 self.triplets,
@@ -126,17 +129,15 @@ class Candidates:
                 self.bravais_lattice
                 )
 
-    def random_subsampling(self, iteration_info):
-        if type(iteration_info['n_drop']) == list:
-            n_drop = self.rng.choice(iteration_info['n_drop'], size=1)[0]
-        else:
-            n_drop = iteration_info['n_drop']
-        n_keep = self.n_peaks - n_drop
+    def random_subsampling_original(self, iteration_info):
+        n_keep = self.n_peaks - iteration_info['n_drop']
         subsampled_indices = self.rng.permuted(
             np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
             axis=1
             )[:, :n_keep]
-        hkl_subsampled = np.take_along_axis(self.hkl, subsampled_indices[:, :, np.newaxis], axis=1)
+        hkl_subsampled = np.take_along_axis(
+            self.hkl, subsampled_indices[:, :, np.newaxis], axis=1
+            )
         q2_subsampled = np.take(self.q2_obs, subsampled_indices)
 
         target_function = CandidateOptLoss(
@@ -144,6 +145,56 @@ class Candidates:
             lattice_system=self.lattice_system,
             )
         target_function.update(hkl_subsampled, self.xnn)
+
+        self.xnn += target_function.gauss_newton_step(self.xnn)
+        self.fix_out_of_range_candidates()
+        self.assign_hkls()
+        improved_M20 = self.M20 > self.best_M20
+        self.best_M20[improved_M20] = self.M20[improved_M20]
+        self.best_xnn[improved_M20] = self.xnn[improved_M20]
+        self.best_hkl[improved_M20] = self.hkl[improved_M20]
+
+    def random_subsampling(self, iteration_info):
+        n_keep = self.n_peaks - iteration_info['n_drop']
+        subsampled_indices = self.rng.permuted(
+            np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
+            axis=1
+            )[:, :n_keep]
+        hkl_subsampled = np.take_along_axis(
+            self.hkl, subsampled_indices[:, :, np.newaxis], axis=1
+            )
+        q2_subsampled = np.take(self.q2_obs, subsampled_indices)
+
+        if self.triplets is None:
+            target_function = CandidateOptLoss(
+                q2_subsampled, 
+                lattice_system=self.lattice_system,
+                )
+            target_function.update(hkl_subsampled, self.xnn)
+        else:
+            n_keep_triplets = int(np.round(n_keep / self.n_peaks * self.n_triplets))
+            subsampled_indices_triplets = self.rng.permuted(
+                np.repeat(np.arange(self.n_triplets)[np.newaxis], self.n, axis=0),
+                axis=1
+                )[:, :n_keep_triplets]
+            hkl_subsampled_triplets = np.take_along_axis(
+                self.hkl_triplets, subsampled_indices_triplets[:, :, np.newaxis], axis=1
+                )
+            q2_subsampled_triplets = np.take(self.triplets[:, 2], subsampled_indices_triplets)
+
+            hkl_subsampled_both = np.concatenate(
+                (hkl_subsampled, hkl_subsampled_triplets), axis=1
+                )
+            q2_subsampled_both = np.concatenate(
+                (q2_subsampled, q2_subsampled_triplets), axis=1
+                )
+
+            target_function = CandidateOptLoss(
+                q2_subsampled_both, 
+                lattice_system=self.lattice_system,
+                )
+            target_function.update(hkl_subsampled_both, self.xnn)
+
         self.xnn += target_function.gauss_newton_step(self.xnn)
         self.fix_out_of_range_candidates()
         self.assign_hkls()

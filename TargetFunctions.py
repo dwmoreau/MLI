@@ -229,6 +229,7 @@ class CandidateOptLoss:
     def linear_least_squares(self):
         # Weighted linear least squares
         # Results are identical to the gauss newton step - not extensively tested though
+        # np.linalg.lstsq default solver uses SVD
         # q2 = H @ xnn <- crystallography equation
         # b  = a @ x   <- np.linalg.lstsq equation
         xnn = np.zeros((self.n_entries, self.uc_length))

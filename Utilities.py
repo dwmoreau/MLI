@@ -1496,20 +1496,52 @@ def best_assign_nocommon(softmaxes):
 
 from numba import jit
 @jit(fastmath=True)
-def fast_assign(a, b):
-    na = a.size
-    nb0 = b.shape[0]
-    nb1 = b.shape[1]
-    out = np.zeros((nb0, na), dtype=np.uint16)
-    for i_b0 in range(nb0):
-        for i_a in range(na):
+def fast_assign(q2_obs, q2_ref):
+    n_obs = q2_obs.size
+    n_candidates = q2_ref.shape[0]
+    n_ref = q2_ref.shape[1]
+    hkl_assign = np.zeros((n_candidates, n_obs), dtype=np.uint16)
+    for candidate_index in range(n_candidates):
+        for obs_index in range(n_obs):
             current_min = 100
             current_min_index = None
-            for i_b1 in range(nb1):
-                diff = a[i_a] - b[i_b0, i_b1]
-                diff_abs = abs(diff)
-                if diff_abs < current_min:
-                    current_min = diff_abs
-                    current_min_index = i_b1
-            out[i_b0, i_a] = current_min_index
-    return out
+            for ref_index in range(n_ref):
+                diff = abs(q2_obs[obs_index] - q2_ref[candidate_index, ref_index])
+                if diff < current_min:
+                    current_min = diff
+                    current_min_index = ref_index
+            hkl_assign[candidate_index, obs_index] = current_min_index
+    return hkl_assign
+
+@jit(fastmath=True)
+def fast_assign_top_n(q2_obs, q2_ref, top_n):
+    n_obs = q2_obs.size
+    n_candidates = q2_ref.shape[0]
+    n_ref = q2_ref.shape[1]
+    hkl_assign = np.zeros((n_candidates, n_obs, top_n), dtype=np.uint16)
+    for candidate_index in range(1):
+        for obs_index in range(n_obs):
+            current_min = [100 for _ in range(top_n)]
+            current_min_index = [0 for _ in range(top_n)]
+            for ref_index in range(n_ref):
+                diff = abs(q2_obs[obs_index] - q2_ref[candidate_index, ref_index])
+                # bisect.bisect_left could be used here, but it is not supported by numba
+                status = True
+                bisect_index = top_n - 1
+                diff_index = top_n
+                # Most reference peaks are far away, so look through array backwards
+                while status:
+                    if diff < current_min[bisect_index]:
+                        diff_index = bisect_index
+                    else:
+                        status = False                        
+                    bisect_index -= 1
+                    if bisect_index < 0:
+                        status = False
+                if diff_index < top_n:
+                    current_min.insert(diff_index, diff)
+                    current_min.pop()
+                    current_min_index.insert(diff_index, ref_index)
+                    current_min_index.pop()
+            hkl_assign[candidate_index, obs_index, :] = current_min_index
+    return hkl_assign
