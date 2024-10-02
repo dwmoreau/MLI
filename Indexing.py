@@ -1,14 +1,17 @@
 """
-* 2D Indexing
-    * Calculate triplets for SACLA data
-    * Figure out how to assign Miller indices
-
 Ordered to-do
     1: Finish Integral filter model:
         - Integral filter generate function
     2: Test new generators
     3: Train models and evaluate models
     4: Optimize ensemble of models
+
+* 2D Indexing
+    * Which FOM performs best to identify:
+        - Off by two errors
+        - Extinction group
+    * Calculate triplets for SACLA data
+    - Figure out a better way to incorporate 2D data
 
 * Integral filter model
     * Generate function

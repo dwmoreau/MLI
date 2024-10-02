@@ -1,5 +1,6 @@
 """
 Get generate working
+Deep model
 """
 import matplotlib.pyplot as plt
 import numpy as np
@@ -932,7 +933,7 @@ class PhysicsInformedModel:
         plt.close()
 
     """
-    def predict_xnn(self, data=None, inputs=None, q2_obs=None, batch_size=None):
+    def predict_xnn(self, top_n, data=None, inputs=None, q2_obs=None, batch_size=None):
         if not data is None:
             q2_obs = np.stack(data['q2'])[:, :self.model_params['peak_length']]
         elif not inputs is None:
@@ -941,12 +942,11 @@ class PhysicsInformedModel:
             q2_obs = q2_obs[:self.model_params['peak_length']]
         q2_obs_scaled = q2_obs / self.q2_obs_scale
 
-        #print(f'\n Regression inferences for {self.split_group}')
         if batch_size is None:
             batch_size = self.model_params['batch_size']
 
         # predict_on_batch helps with a memory leak...
-        N = q2_scaled.shape[0]
+        N = q2_obs_scaled.shape[0]
         n_batches = N // batch_size
         left_over = N % batch_size
 
@@ -960,7 +960,7 @@ class PhysicsInformedModel:
                 batch_inputs['q2_obs_scaled'][:left_over] = q2_obs_scaled[start: start + left_over]
                 batch_inputs['q2_obs_scaled'][left_over:] = q2_obs_scaled[0]
             else:
-                batch_inputs = {'q2_obs_scaled': q2_scaled[start: start + batch_size]}
+                batch_inputs = {'q2_obs_scaled': q2_obs_scaled[start: start + batch_size]}
 
             outputs = self.model.predict_on_batch(batch_inputs)
 
@@ -971,36 +971,76 @@ class PhysicsInformedModel:
                 xnn_pred_scaled[start: start + batch_size] = outputs[:, :, :self.unit_cell_length]
                 logits_pred[start: start + batch_size] = outputs[:, :, self.unit_cell_length]
         softmax_pred = scipy.special.softmax(logits_pred, axis=1)
-        xnn_pred = xnn_pred_scaled*self.xnn_scale + self.xnn_mean
-        xnn_pred = fix_unphysical(xnn=xnn_pred, lattice_system=self.data_params['lattice_system'], rng=self.rng)
-        return xnn_pred, softmax_pred
+        xnn_pred_scaled_top_n = np.take_along_axis(
+            xnn_pred_scaled,
+            np.argsort(softmax_pred, axis=1)[:, ::-1][:, :top_n, np.newaxis],
+            axis=1
+            )
+        softmax_pred_top_n = np.sort(softmax_pred, axis=1)[:, ::-1][:, :top_n]
+        xnn_pred_top_n = xnn_pred_scaled_top_n*self.xnn_scale[:, np.newaxis] + self.xnn_mean[:, np.newaxis]
+        for index in range(top_n):
+            xnn_pred_top_n[:, index, :] = fix_unphysical(
+                xnn=xnn_pred_top_n[:, index, :],
+                lattice_system=self.data_params['lattice_system'],
+                rng=self.rng
+                )
+        return xnn_pred_top_n, softmax_pred_top_n
 
-    def predict_hkl(self, data=None, inputs=None, q2_obs=None, batch_size=None):
-        if not data is None:
-            q2_obs_scaled = np.stack(data['q2_scaled'])[:, :self.model_params['peak_length']]
-        elif not inputs is None:
-            q2_obs_scaled = np.array(inputs['q2_scaled'])[:self.model_params['peak_length']]
-        elif not q2_obs is None
-            q2_obs = q2_obs[:self.model_params['peak_length']]
-            q2_obs_scaled = (q2_obs - self.global_q2_scaler.mean_[0]) / self.global_q2_scaler.scale_[0]
+    def predict_hkl(self, q2_obs, xnn, batch_size=None):
+        q2_obs_scaled = (q2_obs - self.global_q2_scaler.mean_[0]) / self.global_q2_scaler.scale_[0]
 
         #print(f'\n Regression inferences for {self.split_group}')
         if batch_size is None:
             batch_size = self.model_params['batch_size']
 
         # predict_on_batch helps with a memory leak...
-        N = q2_scaled.shape[0]
+        N = q2_obs_scaled.shape[0]
         n_batches = N // batch_size
         left_over = N % batch_size
 
+        hkl_softmax = np.zeros((N, self.data_params['n_peaks'], self.hkl_ref.size))
+
+        for batch_index in range(n_batches + 1):
+            start = batch_index * batch_size
+            if batch_index == n_batches:
+                batch_inputs = {
+                    'q2_obs_scaled': np.zeros((batch_size, self.data_params['n_peaks'])),
+                    'xnn': np.zeros((batch_size, self.unit_cell_length))
+                    }
+                batch_inputs['q2_obs_scaled'][:left_over] = q2_obs_scaled[start: start + left_over]
+                batch_inputs['q2_obs_scaled'][left_over:] = q2_obs_scaled[0]
+                batch_inputs['xnn'][:left_over] = xnn[start: start + left_over]
+                batch_inputs['xnn'][left_over:] = xnn[0]
+            else:
+                batch_inputs = {
+                    'q2_obs_scaled': q2_obs_scaled[start: start + batch_size],
+                    'xnn': xnn[start: start + batch_size]
+                    }
+
+            outputs = self.model.predict_on_batch(batch_inputs)
+
+            if batch_index == n_batches:
+                hkl_softmax[start:] = outputs[:left_over]
+            else:
+                hkl_softmax[start: start + batch_size] = outputs
+        return hkl_softmax
 
     def generate(self, n_unit_cells, rng, q2_obs, top_n=5, batch_size=None):
-        xnn_pred, softmax_pred = self.predict_xnn(q2_obs=q2_obs, batch_size=batch_size)
-        xnn_pred_top_n = np.take_along_axis(
-            xnn_pred,
-            np.argsort(softmax_pred, axis=1)[:, ::-1][:, :top_n, np.newaxis],
-            axis=1
-            )
+        xnn_gen = np.zeros((n_unit_cells, self.unit_cell_length))
+        hkl_assign = np.zeros((n_unit_cells, self.data_params['n_peaks']))
+        n_unit_cells_per_pred = n_unit_cells // top_n
+        extra = n_unit_cells % top_n
+        # If top_n == 5, then self.predict_xnn generates 5 unit cells
+        xnn_pred, _ = self.predict_xnn(top_n, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
+        xnn_gen[:top_n] = xnn_pred[0, :]
+        start = top_n
+        # Resampling needs to generate n_unit_cells_per_pred - 1 unit cells from each prediction
+        for pred_index in range(top_n):
+            hkl_softmax = self.predict_hkl(q2_obs[np.newaxis], xnn_pred[0, pred_index], batch_size=batch_size)
+            for gen_index in range(n_unit_cells_per_pred - 1):
+                # This generates top_n unit cells per iteration
+                hkl_assign[start: start + top_n], _ = vectorized_resampling(hkl_softmax, rng)
+                start += top_n
     """
 
     def evaluate(self, data):

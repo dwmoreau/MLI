@@ -25,9 +25,10 @@ from Utilities import get_M20
 from Utilities import get_M20_from_xnn
 from Utilities import get_M20_likelihood
 from Utilities import get_M20_likelihood_from_xnn
-from Utilities import get_M20_triplet
-from Utilities import get_M20_triplet_from_xnn
+from Utilities import get_M_triplet
+from Utilities import get_M_triplet_from_xnn
 from Utilities import get_reciprocal_unit_cell_from_xnn
+from Utilities import get_spacegroup_hkl_ref
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_xnn_from_unit_cell
 from Utilities import get_unit_cell_from_xnn
@@ -55,6 +56,8 @@ class Candidates:
         self.n = self.xnn.shape[0]
         self.best_xnn = self.xnn.copy()
         self.best_M20 = np.zeros(self.n)
+        if not self.triplets is None:
+            self.best_M_triplets = np.zeros((self.n, 2))
         self.candidate_index = np.arange(self.n)
         self.update_unit_cell_from_xnn()
 
@@ -64,9 +67,10 @@ class Candidates:
             tensorflow=False,
             representation='xnn'
             )
-        # self.assign_hkls() calculates the current M20 score
         self.assign_hkls()
         self.best_hkl = self.hkl.copy()
+        if not self.triplets is None:
+            self.best_hkl_triplets = self.hkl_triplets.copy()
 
     def fix_bad_conversions(self):
         bad_conversions = np.sum(np.isnan(self.reciprocal_unit_cell), axis=1) > 0
@@ -113,14 +117,13 @@ class Candidates:
         q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-        if self.triplets is None:
-            self.M20 = get_M20_from_xnn(
-                self.q2_obs, self.xnn, self.hkl, self.hkl_ref, self.lattice_system
-                )
-        else:
+        self.M20 = get_M20_from_xnn(
+            self.q2_obs, self.xnn, self.hkl, self.hkl_ref, self.lattice_system
+            )
+        if not self.triplets is None:
             hkl_assign_triplets = fast_assign(self.triplets[:, 2], q2_ref_calc)
             self.hkl_triplets = np.take(self.hkl_ref, hkl_assign_triplets, axis=0)
-            self.M20 = get_M20_triplet(
+            self.M_triplets = get_M_triplet(
                 self.q2_obs,
                 self.triplets,
                 self.hkl,
@@ -198,12 +201,18 @@ class Candidates:
         self.xnn += target_function.gauss_newton_step(self.xnn)
         self.fix_out_of_range_candidates()
         self.assign_hkls()
-        improved_M20 = self.M20 > self.best_M20
-        self.best_M20[improved_M20] = self.M20[improved_M20]
-        self.best_xnn[improved_M20] = self.xnn[improved_M20]
-        self.best_hkl[improved_M20] = self.hkl[improved_M20]
+        if self.triplets is None:
+            improved = self.M20 > self.best_M20
+        else:
+            improved = self.M_triplets.sum(axis=1) > self.best_M_triplets.sum(axis=1)
+            self.best_M_triplets[improved] = self.M_triplets[improved]
+            self.best_hkl_triplets[improved] = self.hkl_triplets[improved]
+        self.best_M20[improved] = self.M20[improved]
+        self.best_xnn[improved] = self.xnn[improved]
+        self.best_hkl[improved] = self.hkl[improved]
 
     def refine_cell(self):
+        # This updates the unit cell only with the peaks assigned at > 50% probability.
         _, probability, _ = get_M20_likelihood_from_xnn(
             q2_obs=self.q2_obs,
             xnn=self.best_xnn,
@@ -237,12 +246,13 @@ class Candidates:
         q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-        if self.triplets is None:
-            refined_M20 = get_M20_from_xnn(
-                self.q2_obs, refined_xnn, refined_hkl, self.hkl_ref, self.lattice_system
-                )
-        else:
-            refined_M20 = get_M20_triplet(
+        refined_M20 = get_M20_from_xnn(
+            self.q2_obs, refined_xnn, refined_hkl, self.hkl_ref, self.lattice_system
+            )
+        if not self.triplets is None:
+            refined_hkl_assign_triplets = fast_assign(self.triplets[:, 2], q2_ref_calc)
+            refined_hkl_triplets = np.take(self.hkl_ref, refined_hkl_assign_triplets, axis=0)
+            refined_M_triplets = get_M_triplet(
                 self.q2_obs,
                 self.triplets,
                 refined_hkl,
@@ -251,10 +261,15 @@ class Candidates:
                 self.bravais_lattice
                 )
 
-        update = refined_M20 > self.best_M20
-        self.best_hkl[update] = refined_hkl[update]
-        self.best_M20[update] = refined_M20[update]
-        self.best_xnn[update] = refined_xnn[update]
+        if self.triplets is None:
+            improved = refined_M20 > self.best_M20
+        else:
+            improved = refined_M_triplets.sum(axis=1) > self.best_M_triplets.sum(axis=1)
+            self.best_M_triplets[improved] = refined_M_triplets[improved]
+            self.best_hkl_triplets[improved] = refined_hkl_triplets[improved]
+        self.best_hkl[improved] = refined_hkl[improved]
+        self.best_M20[improved] = refined_M20[improved]
+        self.best_xnn[improved] = refined_xnn[improved]
 
     def correct_off_by_two(self):
         # These do a quick standardization of monoclinic and triclinic candidates. It is just a
@@ -305,21 +320,26 @@ class Candidates:
                             mult_factors[mf_index, 5] = np.sqrt(mf0 * mf1)
                         mf_index += 1
 
+        # This is really slow. So only look at the top 5% of candidates.
         n_test = int(0.05 * self.n)
         test_indices = np.argsort(self.best_M20)[::-1][:n_test]
         M20 = np.zeros([n_test, mult_factors.shape[0]])
         hkl = np.zeros([n_test, mult_factors.shape[0], self.n_peaks, 3])
+        if not self.triplets is None:
+            hkl_triplets = np.zeros([n_test, mult_factors.shape[0], self.n_triplets, 3])
+            M_triplets = np.zeros([n_test, mult_factors.shape[0], 2])
         for mf_index in range(mult_factors.shape[0]):
             xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn[test_indices]
             q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
             hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
-            if self.triplets is None:
-                M20[:, mf_index] = get_M20_from_xnn(
-                    self.q2_obs, xnn_mult, hkl[:, mf_index], self.hkl_ref, self.lattice_system
-                    )
-            else:
-                M20[:, mf_index] = get_M20_triplet(
+            M20[:, mf_index] = get_M20_from_xnn(
+                self.q2_obs, xnn_mult, hkl[:, mf_index], self.hkl_ref, self.lattice_system
+                )
+            if not self.triplets is None:
+                hkl_assign_triplets = fast_assign(self.triplets[:, 2], q2_ref_calc_mult)
+                hkl_triplets[:, mf_index] = np.take(self.hkl_ref, hkl_assign_triplets, axis=0)
+                M_triplets[:, mf_index, :] = get_M_triplet(
                     self.q2_obs,
                     self.triplets,
                     hkl[:, mf_index],
@@ -328,11 +348,23 @@ class Candidates:
                     self.bravais_lattice
                     )
 
+        # Use the M20 score to check for off by two errors even if there are triplets.
         best_index = np.argmax(M20, axis=1)
         final_mult_factor = np.take(mult_factors, best_index, axis=0)        
         self.best_xnn[test_indices] *= final_mult_factor**2
-        self.best_M20[test_indices] = np.take_along_axis(M20, best_index[:, np.newaxis], axis=1)[:, 0]
-        self.best_hkl[test_indices] = np.take_along_axis(hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1)[:, 0]
+        self.best_M20[test_indices] = np.take_along_axis(
+            M20, best_index[:, np.newaxis], axis=1
+            )[:, 0]
+        self.best_hkl[test_indices] = np.take_along_axis(
+            hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
+            )[:, 0]
+        if not self.triplets is None:
+            self.best_M_triplets[test_indices] = np.take_along_axis(
+                M_triplets, best_index[:, np.newaxis, np.newaxis], axis=1
+                )[:, 0]
+            self.best_hkl_triplets[test_indices] = np.take_along_axis(
+                hkl_triplets, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
+                )[:, 0]
 
         # do quick reindexing to enforce constraints
         reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
@@ -349,14 +381,57 @@ class Candidates:
             )
 
     def assign_extinction_group(self):
-        self.best_M20, self.best_spacegroup = get_extinction_group(
-            xnn=self.best_xnn,
-            q2_obs=self.q2_obs,
-            triplets_obs=self.triplets,
-            hkl_ref_bl=self.hkl_ref,
-            bravais_lattice=self.bravais_lattice,
-            lattice_system=self.lattice_system
-            )
+        hkl_ref_sg = get_spacegroup_hkl_ref(self.hkl_ref, bravais_lattice=self.bravais_lattice)
+        spacegroups = list(hkl_ref_sg.keys())
+        M20 = np.zeros((self.n, len(spacegroups)))
+        hkl = np.zeros([self.n, self.n_peaks, 3, len(spacegroups)])
+        if not self.triplets is None:
+            M_triplets = np.zeros((self.n, 2, len(spacegroups)))
+            hkl_triplets = np.zeros([self.n, self.n_triplets, 3, len(spacegroups)])
+        for spacegroup_index, spacegroup in enumerate(spacegroups):
+            q2_ref_calc = Q2Calculator(
+                lattice_system=self.lattice_system,
+                hkl=hkl_ref_sg[spacegroup],
+                tensorflow=False,
+                representation='xnn'
+                ).get_q2(self.best_xnn)
+
+            hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
+            hkl[:, :, :, spacegroup_index] = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
+            M20[:, spacegroup_index] = get_M20_from_xnn(
+                self.q2_obs,
+                self.best_xnn,
+                hkl[:, :, :, spacegroup_index],
+                hkl_ref_sg[spacegroup],
+                self.lattice_system
+                )
+            if not self.triplets is None:
+                hkl_assign_triplets = fast_assign(self.triplets[:, 2], q2_ref_calc)
+                hkl_triplets[:, :, :, spacegroup_index] = np.take(
+                    hkl_ref_sg[spacegroup], hkl_assign_triplets, axis=0
+                    )
+                M_triplets[:, :, spacegroup_index] = get_M_triplet(
+                    self.q2_obs,
+                    self.triplets,
+                    hkl[:, :, :, spacegroup_index],
+                    self.best_xnn,
+                    self.lattice_system,
+                    self.bravais_lattice
+                    )
+
+        best_indices = np.argmax(M20, axis=1)
+        self.best_spacegroup = list(np.take(spacegroups, best_indices))
+        self.best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
+        self.best_hkl = np.take_along_axis(
+            hkl, best_indices[:, np.newaxis, np.newaxis, np.newaxis], axis=3
+            )[:, :, :, 0]
+        if not self.triplets is None:
+            self.best_M_triplets = np.take_along_axis(
+                M_triplets, best_indices[:, np.newaxis, np.newaxis], axis=2
+                )[:, :, 0]
+            self.best_hkl_triplets = np.take_along_axis(
+                hkl_triplets, best_indices[:, np.newaxis, np.newaxis, np.newaxis], axis=3
+                )[:, :, :, 0]
 
     def calculate_peaks_indexed(self):
         _, probability, _ = get_M20_likelihood_from_xnn(
@@ -367,6 +442,17 @@ class Candidates:
             bravais_lattice=self.bravais_lattice,
             )
         self.n_indexed = np.sum(probability > 0.5, axis=1)
+        if self.triplets is None:
+            self.n_indexed_triplets = None
+        else:
+            _, probability, _ = get_M20_likelihood_from_xnn(
+                q2_obs=self.triplets[:, 2],
+                xnn=self.best_xnn,
+                hkl=self.best_hkl_triplets,
+                lattice_system=self.lattice_system,
+                bravais_lattice=self.bravais_lattice,
+                )
+            self.n_indexed_triplets = np.sum(probability > 0.5, axis=1)
 
 
 class OptimizerBase:
@@ -453,6 +539,9 @@ class OptimizerWorker(OptimizerBase):
         self.comm.Send(candidates.best_xnn, dest=self.root)
         self.comm.Send(candidates.n_indexed, dest=self.root)
         self.comm.send(candidates.best_spacegroup, dest=self.root)
+        if not self.triplets is None:
+            self.comm.Send(candidates.n_indexed_triplets, dest=self.root)
+            self.comm.Send(candidates.best_M_triplets, dest=self.root)
 
     def convergence_testing(self, candidates):
         self.comm.Send(candidates.best_M20, dest=self.root)
@@ -534,6 +623,14 @@ class OptimizerManager(OptimizerBase):
             if self.opt_params['convergence_testing']:
                 self.xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['unit_cell_indices']]
         self.triplets = triplets
+        if not self.triplets is None:
+            good_indices = np.all(np.column_stack((
+                self.triplets[:, 0] < self.n_peaks,
+                self.triplets[:, 1] < self.n_peaks,
+                )),
+                axis=1
+                )
+            self.triplets = self.triplets[good_indices]
         self.run_common(n_top_candidates=n_top_candidates)
 
     def generate_candidates_rank(self):
@@ -715,12 +812,18 @@ class OptimizerManager(OptimizerBase):
         best_xnn_all = []
         best_n_indexed_all = []
         best_spacegroup_all = []
+        if not self.triplets is None:
+            best_n_indexed_triplets_all = []
+            best_M_triplets_all = []
         for rank_index in range(self.n_ranks):
             if rank_index == self.root:
                 best_M20_all.append(candidates.best_M20)
                 best_xnn_all.append(candidates.best_xnn)
                 best_n_indexed_all.append(candidates.n_indexed)
                 best_spacegroup_all += candidates.best_spacegroup
+                if not self.triplets is None:
+                    best_n_indexed_triplets_all.append(candidates.n_indexed_triplets)
+                    best_M_triplets_all.append(candidates.best_M_triplets)
             else:
                 best_M20_rank = np.zeros(self.sent_candidates[rank_index])
                 best_xnn_rank = np.zeros((self.sent_candidates[rank_index], self.unit_cell_length))
@@ -729,6 +832,15 @@ class OptimizerManager(OptimizerBase):
                 self.comm.Recv(best_xnn_rank, source=rank_index)
                 self.comm.Recv(best_n_indexed_rank, source=rank_index)
                 best_spacegroup_rank = self.comm.recv(source=rank_index)
+                if not self.triplets is None:
+                    best_n_indexed_triplets_rank = np.zeros(self.sent_candidates[rank_index])
+                    self.comm.Recv(best_n_indexed_triplets_rank, source=rank_index)
+                    best_n_indexed_triplets_all.append(best_n_indexed_triplets_rank)
+
+                    best_M_triplets_rank = np.zeros((self.sent_candidates[rank_index], 2))
+                    self.comm.Recv(best_M_triplets_rank, source=rank_index)
+                    best_M_triplets_all.append(best_M_triplets_rank)
+
                 best_M20_all.append(best_M20_rank)
                 best_xnn_all.append(best_xnn_rank)
                 best_n_indexed_all.append(best_n_indexed_rank)
@@ -736,6 +848,9 @@ class OptimizerManager(OptimizerBase):
         best_M20_all = np.concatenate(best_M20_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
+        if not self.triplets is None:
+            best_n_indexed_triplets_all = np.concatenate(best_n_indexed_triplets_all, axis=0)
+            best_M_triplets_all = np.concatenate(best_M_triplets_all, axis=0)
 
         # Next remove nearly identical xnn's by selecting the xnn within an arbitrary radius
         # with the highest M20 score. The candidates are sorted by reciprocal volume so the
@@ -749,6 +864,9 @@ class OptimizerManager(OptimizerBase):
         best_M20_all = best_M20_all[sort_indices]
         best_n_indexed_all = best_n_indexed_all[sort_indices]
         best_spacegroup_all = [best_spacegroup_all[i] for i in sort_indices]
+        if not self.triplets is None:
+            best_n_indexed_triplets_all = best_n_indexed_triplets_all[sort_indices]
+            best_M_triplets_all = best_M_triplets_all[sort_indices]
         chunk_size = 1000
         n_chunks = best_xnn_all.shape[0] // chunk_size + 1
 
@@ -756,6 +874,9 @@ class OptimizerManager(OptimizerBase):
         xnn_downsampled = []
         M20_downsampled = []
         n_indexed_downsampled = []
+        if not self.triplets is None:
+            n_indexed_triplets_downsampled = []
+            M_triplets_downsampled = []
         spacegroup_downsampled = []
         for chunk_index in range(n_chunks):
             if chunk_index == n_chunks - 1:
@@ -763,11 +884,17 @@ class OptimizerManager(OptimizerBase):
                 M20_chunk = best_M20_all[chunk_index * chunk_size:]
                 n_indexed_chunk = best_n_indexed_all[chunk_index * chunk_size:]
                 spacegroup_chunk = best_spacegroup_all[chunk_index * chunk_size:]
+                if not self.triplets is None:
+                    n_indexed_triplets_chunk = best_n_indexed_triplets_all[chunk_index * chunk_size:]
+                    M_triplets_chunk = best_M_triplets_all[chunk_index * chunk_size:]
             else:
                 xnn_chunk = best_xnn_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 M20_chunk = best_M20_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 n_indexed_chunk = best_n_indexed_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 spacegroup_chunk = best_spacegroup_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+                if not self.triplets is None:
+                    n_indexed_triplets_chunk = best_n_indexed_triplets_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+                    M_triplets_chunk = best_M_triplets_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
             status = True
             while status:
                 distance = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk)
@@ -780,8 +907,10 @@ class OptimizerManager(OptimizerBase):
                     xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
                     M20_best_neighbor = M20_chunk[neighbor_indices][best_neighbor]
                     n_indexed_best_neighbor = n_indexed_chunk[neighbor_indices][best_neighbor]
-                    #spacegroup_best_neighbor = spacegroup_chunk[neighbor_indices][best_neighbor]
                     spacegroup_best_neighbor = [spacegroup_chunk[i] for i in neighbor_indices][best_neighbor]
+                    if not self.triplets is None:
+                        n_indexed_triplets_best_neighbor = n_indexed_triplets_chunk[neighbor_indices][best_neighbor]
+                        M_triplets_best_neighbor = M_triplets_chunk[neighbor_indices][best_neighbor]
                     xnn_chunk = np.row_stack((
                         np.delete(xnn_chunk, neighbor_indices, axis=0), 
                         xnn_best_neighbor
@@ -794,6 +923,15 @@ class OptimizerManager(OptimizerBase):
                         np.delete(n_indexed_chunk, neighbor_indices), 
                         [n_indexed_best_neighbor]
                         ))
+                    if not self.triplets is None:
+                        n_indexed_triplets_chunk = np.concatenate((
+                            np.delete(n_indexed_triplets_chunk, neighbor_indices), 
+                            [n_indexed_triplets_best_neighbor]
+                            ))
+                        M_triplets_chunk = np.row_stack((
+                            np.delete(M_triplets_chunk, neighbor_indices, axis=0), 
+                            M_triplets_best_neighbor
+                            ))
                     # neighbor indices are sorted in increasing order and must be reversed
                     # for this pop to remove them correctly.
                     for i in neighbor_indices[::-1]:
@@ -804,15 +942,24 @@ class OptimizerManager(OptimizerBase):
             xnn_downsampled.append(xnn_chunk)
             M20_downsampled.append(M20_chunk)
             n_indexed_downsampled.append(n_indexed_chunk)
+            if not self.triplets is None:
+                n_indexed_triplets_downsampled.append(n_indexed_triplets_chunk)
+                M_triplets_downsampled.append(M_triplets_chunk)
             spacegroup_downsampled += spacegroup_chunk
         xnn_downsampled = np.row_stack(xnn_downsampled)
         M20_downsampled = np.concatenate(M20_downsampled)
         n_indexed_downsampled = np.concatenate(n_indexed_downsampled)
+        if not self.triplets is None:
+            n_indexed_triplets_downsampled = np.concatenate(n_indexed_triplets_downsampled)
+            M_triplets_downsampled = np.row_stack(M_triplets_downsampled)
 
         sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
         self.top_M20 = M20_downsampled[sort_indices]
         self.top_n_indexed = n_indexed_downsampled[sort_indices]
+        if not self.triplets is None:
+            self.top_n_indexed_triplets = n_indexed_triplets_downsampled[sort_indices]
+            self.top_M_triplets = M_triplets_downsampled[sort_indices]
         self.top_spacegroup = [spacegroup_downsampled[i] for i in sort_indices]
         self.top_unit_cell = get_unit_cell_from_xnn(
             self.top_xnn,

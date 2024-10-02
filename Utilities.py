@@ -779,7 +779,7 @@ def get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system):
     return q2_diff_calc
 
 
-def get_M20_triplet_from_xnn(triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
+def get_M_triplet_from_xnn(triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
     q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
     reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
     reciprocal_volume = get_unit_cell_volume(reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system)
@@ -787,8 +787,8 @@ def get_M20_triplet_from_xnn(triplets_obs, hkl, xnn, lattice_system, bravais_lat
     return M20_triplet
 
 
-def get_M20_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
-    _, _, M20_primary = get_M20_likelihood_from_xnn(
+def get_M_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
+    _, _, M_likelihood_primary = get_M20_likelihood_from_xnn(
         q2_obs, xnn, hkl, lattice_system, bravais_lattice
         )
 
@@ -799,10 +799,10 @@ def get_M20_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_latt
     reciprocal_volume = get_unit_cell_volume(
         reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system
         )
-    _, _, M20_triplet = get_M20_likelihood(
+    _, _, M_likelihood_triplet = get_M20_likelihood(
         triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume
         )
-    return M20_primary + M20_triplet
+    return np.column_stack((M_likelihood_primary, M_likelihood_triplet))
 
 
 def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
@@ -929,7 +929,7 @@ def get_extinction_group(xnn, q2_obs, triplets_obs, hkl_ref_bl, bravais_lattice,
         hkl = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
         if triplets_obs is None:
             M20[:, spacegroup_index] = get_M20_from_xnn(
-                q2_obs, xnn, hkl, hkl_ref_bl, lattice_system
+                q2_obs, xnn, hkl, hkl_ref_sg[spacegroup], lattice_system
                 )
         else:
             M20[:, spacegroup_index] = get_M20_triplet(
