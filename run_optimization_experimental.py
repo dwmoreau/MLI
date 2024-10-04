@@ -68,11 +68,12 @@ entry_tags = [
 
 base_dir = '/Users/DWMoreau/MLI/triplet'
 entry_tags = [
+    '26dimethyl',
     #'cybu_rg003',
     #'cyhx_rg003',
     #'cybu',
     #'cyhx',
-    'glu_dehyd',
+    #'glu_dehyd',
     #'homocys',
     ]
 rng = np.random.default_rng()
@@ -83,17 +84,25 @@ n_ranks = comm.Get_size()
 logger = get_logger(comm, optimization_tag)
 logger.info('Starting process')
 
+#bravais_lattices = ['cP', 'hP', 'hR', 'tP', 'oP', 'mP', 'aP']
+#manager_rank =     [   0,    0,    0,    0,    0,    0,    0]
+#serial =           [True, True, True, True, True, True, True]
+
 #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
 #manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
 #serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
-bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
-manager_rank =     [    0,     0,     1,     1]
-serial =           [False, False, False, False]
+#bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
+#manager_rank =     [    0,     0,     1,     1]
+#serial =           [False, False, False, False]
 
 #bravais_lattices = ['oP']
 #manager_rank =     [   0]
 #serial =           [True]
+
+bravais_lattices = [ 'mP']
+manager_rank =     [    0]
+serial =           [False]
 
 #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP', 'aP']
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,    0]

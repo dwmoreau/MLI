@@ -136,6 +136,7 @@ class Augmentor:
                 split_group_data = training_data[training_data['split_group'] == split_group]
                 unit_cell_scaled = np.stack(split_group_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
                 unit_cell_volume = np.array(split_group_data['reindexed_volume'])
+                print(f'Creating {n_bins[split_group]} PCAs from {len(split_group_data)} entries for {split_group}')
                 if n_bins[split_group] == 1:
                     self.pca[split_group] = PCA(n_components=self.unit_cell_length).fit(unit_cell_scaled)
                     unit_cell_scaled_transformed = self.pca[split_group].transform(unit_cell_scaled)
@@ -150,7 +151,6 @@ class Augmentor:
                     axes[0].set_title('PCA Components')
                     axes[1].set_title('PCA Singular values')
                 else:
-                    print(f'Creating {n_bins[split_group]} PCAs from {len(split_group_data)} entries for {split_group}')
                     self.pca[split_group] = [None for _ in range(n_bins[split_group])]
                     self.stddev[split_group] = [None for _ in range(n_bins[split_group])]
                     fig, axes = plt.subplots(n_bins[split_group], 3, figsize=(6, 2 + 1.5*n_bins[split_group]))
@@ -591,6 +591,9 @@ class Augmentor:
     def perturb_unit_cell_common(self, unit_cell_scaled, split_group, reindexed_volume):
         perturbed_unit_cell_scaled = unit_cell_scaled.copy()
         if self.aug_params['n_per_volume'] is None:
+            volume_bin_index = None
+        elif len(self.volume_bins[split_group]) == 2:
+            # This catches the case were there is only one volume bin
             volume_bin_index = None
         else:
             volume_bin_index = np.searchsorted(self.volume_bins[split_group], reindexed_volume) - 1

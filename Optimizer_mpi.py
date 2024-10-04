@@ -18,6 +18,7 @@ from Reindexing import monoclinic_standardization
 from Reindexing import reindex_entry_basic
 from Reindexing import selling_reduction
 from TargetFunctions import CandidateOptLoss
+from Utilities import assign_hkl_triplets
 from Utilities import fix_unphysical
 from Utilities import get_extinction_group
 from Utilities import get_hkl_matrix
@@ -29,6 +30,7 @@ from Utilities import get_M_triplet
 from Utilities import get_M_triplet_from_xnn
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_spacegroup_hkl_ref
+from Utilities import get_triplet_hkl_ref
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_xnn_from_unit_cell
 from Utilities import get_unit_cell_from_xnn
@@ -36,10 +38,11 @@ from Utilities import get_unit_cell_volume
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 from Utilities import fast_assign
+from Utilities import fast_assign_top_n
 
 
 class Candidates:
-    def __init__(self, q2_obs, triplets, xnn, hkl_ref, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell):
+    def __init__(self, q2_obs, triplets, xnn, hkl_ref, triplet_hkl_ref, lattice_system, bravais_lattice, minimum_unit_cell, maximum_unit_cell):
         self.lattice_system = lattice_system
         self.bravais_lattice = bravais_lattice
         self.minimum_unit_cell = minimum_unit_cell
@@ -47,6 +50,8 @@ class Candidates:
         self.rng = np.random.default_rng()
         self.hkl_ref = hkl_ref
         self.hkl_ref_length = hkl_ref.shape[0]
+        self.triplet_hkl_ref = triplet_hkl_ref
+        self.top_n_assignments_triplets = 2
 
         self.q2_obs = q2_obs
         self.n_peaks = self.q2_obs.size
@@ -132,7 +137,28 @@ class Candidates:
                 self.bravais_lattice
                 )
 
-    def random_subsampling_original(self, iteration_info):
+    def assign_hkls_triplets_new(self):
+        q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
+        hkl_assign_top_n = fast_assign_top_n(self.q2_obs, q2_ref_calc, self.top_n_assignments_triplets)
+        self.hkl = np.take(self.hkl_ref, hkl_assign_top_n[:, :, 0], axis=0)
+        self.M20 = get_M20_from_xnn(
+            self.q2_obs, self.xnn, self.hkl, self.hkl_ref, self.lattice_system
+            )
+        if not self.triplets is None:
+            hkl_assign_triplets = assign_hkl_triplets(
+                self.triplets, hkl_assign_top_n, self.triplet_hkl_ref, q2_ref_calc
+                )
+            self.hkl_triplets = np.take(self.hkl_ref, hkl_assign_triplets, axis=0)
+            self.M_triplets = get_M_triplet(
+                self.q2_obs,
+                self.triplets,
+                self.hkl,
+                self.xnn,
+                self.lattice_system,
+                self.bravais_lattice
+                )
+
+    def random_subsampling(self, iteration_info):
         n_keep = self.n_peaks - iteration_info['n_drop']
         subsampled_indices = self.rng.permuted(
             np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
@@ -148,16 +174,20 @@ class Candidates:
             lattice_system=self.lattice_system,
             )
         target_function.update(hkl_subsampled, self.xnn)
-
         self.xnn += target_function.gauss_newton_step(self.xnn)
         self.fix_out_of_range_candidates()
         self.assign_hkls()
-        improved_M20 = self.M20 > self.best_M20
-        self.best_M20[improved_M20] = self.M20[improved_M20]
-        self.best_xnn[improved_M20] = self.xnn[improved_M20]
-        self.best_hkl[improved_M20] = self.hkl[improved_M20]
+        if self.triplets is None:
+            improved = self.M20 > self.best_M20
+        else:
+            improved = self.M_triplets.sum(axis=1) > self.best_M_triplets.sum(axis=1)
+            self.best_M_triplets[improved] = self.M_triplets[improved]
+            self.best_hkl_triplets[improved] = self.hkl_triplets[improved]
+        self.best_M20[improved] = self.M20[improved]
+        self.best_xnn[improved] = self.xnn[improved]
+        self.best_hkl[improved] = self.hkl[improved]
 
-    def random_subsampling(self, iteration_info):
+    def random_subsampling_new(self, iteration_info):
         n_keep = self.n_peaks - iteration_info['n_drop']
         subsampled_indices = self.rng.permuted(
             np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
@@ -176,6 +206,7 @@ class Candidates:
             target_function.update(hkl_subsampled, self.xnn)
         else:
             n_keep_triplets = int(np.round(n_keep / self.n_peaks * self.n_triplets))
+
             subsampled_indices_triplets = self.rng.permuted(
                 np.repeat(np.arange(self.n_triplets)[np.newaxis], self.n, axis=0),
                 axis=1
@@ -465,8 +496,9 @@ class OptimizerBase:
         self.opt_params = self.comm.bcast(self.opt_params, root=self.root)
         self.hkl_ref_length = self.comm.bcast(self.hkl_ref_length, root=self.root)
         if self.rank != self.root:
-            self.hkl_ref = np.zeros(self.hkl_ref_length)
-        self.hkl_ref = self.comm.bcast(self.hkl_ref, root=self.root)
+            self.hkl_ref = np.zeros((self.hkl_ref_length, 3))
+        self.comm.Bcast(self.hkl_ref, root=self.root)
+        self.triplet_hkl_ref = self.comm.bcast(self.triplet_hkl_ref, root=self.root)
         self.n_peaks = self.comm.bcast(self.n_peaks, root=self.root)
 
     def generate_candidates_common(self, xnn_rank):
@@ -475,6 +507,7 @@ class OptimizerBase:
             triplets=self.triplets,
             xnn=xnn_rank,
             hkl_ref=self.hkl_ref,
+            triplet_hkl_ref=self.triplet_hkl_ref,
             lattice_system=self.lattice_system,
             bravais_lattice=self.bravais_lattice,
             minimum_unit_cell=self.opt_params['minimum_uc'],
@@ -520,6 +553,7 @@ class OptimizerWorker(OptimizerBase):
         self.bravais_lattice = None
         self.opt_params = None
         self.hkl_ref = None
+        self.triplet_hkl_ref = None
         self.n_peaks = None
         self.hkl_ref_length = None
         self.rng = np.random.default_rng()
@@ -611,6 +645,7 @@ class OptimizerManager(OptimizerBase):
         self.lattice_system = self.indexer.data_params['lattice_system']
         self.hkl_ref = self.indexer.hkl_ref[self.bravais_lattice]
         self.hkl_ref_length = self.indexer.data_params['hkl_ref_length']
+        self.triplet_hkl_ref = get_triplet_hkl_ref(self.hkl_ref, self.lattice_system)
         self.n_peaks = self.indexer.data_params['n_peaks']
         self.unit_cell_length = self.indexer.data_params['unit_cell_length']
         super().__init__(comm)

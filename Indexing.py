@@ -7,15 +7,22 @@ Ordered to-do
     4: Optimize ensemble of models
 
 * 2D Indexing
+    * Calculate triplets for SACLA data
+        - Does this actually work???
     * Which FOM performs best to identify:
         - Off by two errors
         - Extinction group
-    * Calculate triplets for SACLA data
     - Figure out a better way to incorporate 2D data
 
 * Integral filter model
+    - More informative initialization
+        - Sum metric over volumes
+        - Take maximum metric over entries
+        - Regenerate filters that are uninformative
+        - Iterate evaluating metric on entries without informative metrics.
     * Generate function
         - Select Top N predictions and sample from HKL
+    - Try a deep model again where the subsequent layers only have amplitudes predicted
     - permutation invariance
     - Look at sensitivity analysis
     - Reindex triclinic in reciprocal space

@@ -532,55 +532,6 @@ def fix_unphysical_monoclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_c
         return unit_cell
 
 
-def get_hkl_matrix(hkl, lattice_system):
-    last_axis = len(hkl.shape) - 1
-    # hkl shape:
-    # last_axis = 1: n_peaks, 3
-    # last_axis = 2: n_entries, n_peaks, 3
-    if lattice_system == 'triclinic':
-        hkl_matrix = np.concatenate((
-            hkl[..., :3]**2,
-            (hkl[..., 1] * hkl[..., 2])[..., np.newaxis],
-            (hkl[..., 0] * hkl[..., 2])[..., np.newaxis],
-            (hkl[..., 0] * hkl[..., 1])[..., np.newaxis],
-            ),
-            axis=last_axis
-            )
-    elif lattice_system == 'monoclinic':
-        hkl_matrix = np.concatenate((
-            hkl[..., :3]**2,
-            (hkl[..., 0] * hkl[..., 2])[..., np.newaxis],
-            ),
-            axis=last_axis
-            )
-    elif lattice_system == 'orthorhombic':
-        hkl_matrix = hkl**2
-    elif lattice_system == 'tetragonal':
-        hkl_matrix = np.stack((
-            np.sum(hkl[..., :2]**2, axis=last_axis),
-            hkl[..., 2]**2,
-            ),
-            axis=last_axis
-            )
-    elif lattice_system == 'hexagonal':
-        hkl_matrix = np.stack((
-            hkl[..., 0]**2 + hkl[..., 0]*hkl[..., 1] + hkl[..., 1]**2,
-            hkl[..., 2]**2,
-            ),
-            axis=last_axis
-            )
-    elif lattice_system == 'rhombohedral':
-        hkl_matrix = np.stack((
-            np.sum(hkl**2, axis=last_axis),
-            hkl[..., 0]*hkl[..., 1] + hkl[..., 0]*hkl[..., 2] + hkl[..., 1]*hkl[..., 2],
-            ),
-            axis=last_axis
-            )
-    elif lattice_system == 'cubic':
-        hkl_matrix = np.sum(hkl**2, axis=last_axis)[..., np.newaxis]
-    return hkl_matrix
-
-
 def get_M20_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system):
     hkl2 = get_hkl_matrix(hkl, lattice_system)
     q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
@@ -704,6 +655,46 @@ def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
 
 
 def get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system):
+    mi_sym = get_hkl_triplet_symmetry(lattice_system)
+    hkl0 = np.take(hkl, triplets_obs[:, 0].astype(int), axis=1)
+    hkl1 = np.take(hkl, triplets_obs[:, 1].astype(int), axis=1)
+    hkl0_sym = np.matmul(mi_sym, hkl0[:, :, np.newaxis, :, np.newaxis])[:, :, :, :, 0]
+    hkl_diff = hkl0_sym - hkl1[:, :, np.newaxis, :]
+    hkl2_diff = get_hkl_matrix(hkl_diff, lattice_system)
+    q2_diff_calc_sym = np.sum(xnn[:, np.newaxis, np.newaxis, :] * hkl2_diff, axis=3)
+    difference = np.abs(triplets_obs[:, 2][np.newaxis, :, np.newaxis] - q2_diff_calc_sym)
+    q2_diff_calc_index = np.argmin(difference, axis=2)
+    q2_diff_calc = np.take_along_axis(q2_diff_calc_sym, q2_diff_calc_index[:, :, np.newaxis], axis=2)[:, :, 0]
+    return q2_diff_calc
+
+
+def get_M_triplet_from_xnn(triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
+    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
+    reciprocal_volume = get_unit_cell_volume(reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system)
+    _, _, M20_triplet = get_M20_likelihood(triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume)    
+    return M20_triplet
+
+
+def get_M_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
+    _, _, M_likelihood_primary = get_M20_likelihood_from_xnn(
+        q2_obs, xnn, hkl, lattice_system, bravais_lattice
+        )
+
+    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+        xnn, partial_unit_cell=True, lattice_system=lattice_system
+        )
+    reciprocal_volume = get_unit_cell_volume(
+        reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system
+        )
+    _, _, M_likelihood_triplet = get_M20_likelihood(
+        triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume
+        )
+    return np.column_stack((M_likelihood_primary, M_likelihood_triplet))
+
+
+def get_hkl_triplet_symmetry(lattice_system):
     mi_sym = np.stack([
         np.eye(3),
         np.array([
@@ -766,43 +757,151 @@ def get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system):
         mi_permutations = np.stack(mi_permutations, axis=0)
         mi_sym_extra = np.matmul(mi_sym[:, np.newaxis, :, :], mi_permutations[np.newaxis, :, :, :])
         mi_sym = mi_sym_extra.reshape((mi_sym_extra.shape[0] * mi_sym_extra.shape[1], 3, 3))
-    
-    hkl0 = np.take(hkl, triplets_obs[:, 0].astype(int), axis=1)
-    hkl1 = np.take(hkl, triplets_obs[:, 1].astype(int), axis=1)
-    hkl0_sym = np.matmul(mi_sym, hkl0[:, :, np.newaxis, :, np.newaxis])[:, :, :, :, 0]
-    hkl_diff = hkl0_sym - hkl1[:, :, np.newaxis, :]
-    hkl2_diff = get_hkl_matrix(hkl_diff, lattice_system)
-    q2_diff_calc_sym = np.sum(xnn[:, np.newaxis, np.newaxis, :] * hkl2_diff, axis=3)
-    difference = np.abs(triplets_obs[:, 2][np.newaxis, :, np.newaxis] - q2_diff_calc_sym)
-    q2_diff_calc_index = np.argmin(difference, axis=2)
-    q2_diff_calc = np.take_along_axis(q2_diff_calc_sym, q2_diff_calc_index[:, :, np.newaxis], axis=2)[:, :, 0]
-    return q2_diff_calc
+    return mi_sym
 
 
-def get_M_triplet_from_xnn(triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
-    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
-    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
-    reciprocal_volume = get_unit_cell_volume(reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system)
-    _, _, M20_triplet = get_M20_likelihood(triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume)    
-    return M20_triplet
+def get_triplet_hkl_ref(hkl_ref, lattice_system):
+    def pairing(k1, k2):
+        k1 = k1 + 1000
+        k2 = k2 + 1000
+        return (k1 + k2)*(k1 + k2 + 1)/2 + k2
+    # mi_sym:           n_sym x 3 x 3
+    # hkl_ref:          n_ref x 3
+    # hkl_ref_sym:      n_ref x n_sym x 3
+    # triplet_hkl_diff: n_ref, n_ref, n_sym, 3
+    n_ref = hkl_ref.shape[0]
+    mi_sym = get_hkl_triplet_symmetry(lattice_system)
+    hkl_ref_sym = np.matmul(mi_sym[np.newaxis], hkl_ref[:, np.newaxis, :, np.newaxis])[:, :, :, 0]
+    triplet_hkl_diff = hkl_ref_sym[:, np.newaxis, :, :] - hkl_ref[np.newaxis, :, np.newaxis, :]
+    triplet_hkl2_diff = get_hkl_matrix(triplet_hkl_diff, lattice_system)
+    hkl2_ref = get_hkl_matrix(hkl_ref, lattice_system)
+    if lattice_system == 'cubic':
+        hash_triplet_diff = triplet_hkl2_diff[:, :, :, 0]
+        hash_ref = hkl2_ref[:, 0]
+    elif lattice_system in ['hexagonal', 'tetragonal', 'rhombohedral']:
+        hash_triplet_diff = pairing(
+            triplet_hkl2_diff[:, :, :, 0], triplet_hkl2_diff[:, :, :, 1]
+            )
+        hash_ref = pairing(hkl2_ref[:, 0], hkl2_ref[:, 1])
+    elif lattice_system == 'orthorhombic':
+        hash_triplet_diff = pairing(
+            triplet_hkl2_diff[:, :, :, 0],
+            pairing(
+                triplet_hkl2_diff[:, :, :, 1], triplet_hkl2_diff[:, :, :, 2]
+                )
+            )
+        hash_ref = pairing(hkl2_ref[:, 0], pairing(hkl2_ref[:, 1], hkl2_ref[:, 2]))
+    elif lattice_system == 'monoclinic':
+        hash_triplet_diff = pairing(
+            triplet_hkl2_diff[:, :, :, 0],
+            pairing(
+                triplet_hkl2_diff[:, :, :, 1],
+                pairing(
+                    triplet_hkl2_diff[:, :, :, 2], triplet_hkl2_diff[:, :, :, 3]
+                    )
+                )
+            )
+        hash_ref = pairing(
+            hkl2_ref[:, 0], 
+            pairing(
+                hkl2_ref[:, 1],
+                pairing(
+                    hkl2_ref[:, 2], hkl2_ref[:, 3]
+                    )
+                )
+            )
+    elif lattice_system == 'triclinic':
+        hash_triplet_diff = pairing(
+            triplet_hkl2_diff[:, :, :, 0],
+            pairing(
+                triplet_hkl2_diff[:, :, :, 1],
+                pairing(
+                    triplet_hkl2_diff[:, :, :, 2],
+                    pairing(
+                        triplet_hkl2_diff[:, :, :, 3],
+                        pairing(
+                            triplet_hkl2_diff[:, :, :, 4], triplet_hkl2_diff[:, :, :, 5]
+                            )
+                        )
+                    )
+                )
+            )
+        hash_ref = pairing(
+            hkl2_ref[:, 0], 
+            pairing(
+                hkl2_ref[:, 1],
+                pairing(
+                    hkl2_ref[:, 2],
+                    pairing(
+                        hkl2_ref[:, 3],
+                        pairing(
+                            hkl2_ref[:, 4], hkl2_ref[:, 5],
+                            )
+                        )
+                    )
+                )
+            )
+
+    triplet_hkl_ref = [ [ None for _ in range(n_ref)] for _ in range(n_ref)]
+    same = hash_triplet_diff[:, :, :, np.newaxis] == hash_ref[np.newaxis, np.newaxis, np.newaxis, :]
+    for i in range(n_ref - 1):
+        for j in range(i + 1, n_ref):
+            indices = []
+            for k in range(mi_sym.shape[0]):
+                indices_here = np.argwhere(same[i, j, k])
+                if indices_here.size > 0:
+                    indices.append(indices_here[0][0])
+            triplet_hkl_ref[i][j] = list(set(indices))
+    return triplet_hkl_ref
 
 
-def get_M_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
-    _, _, M_likelihood_primary = get_M20_likelihood_from_xnn(
-        q2_obs, xnn, hkl, lattice_system, bravais_lattice
-        )
-
-    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
-    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-        xnn, partial_unit_cell=True, lattice_system=lattice_system
-        )
-    reciprocal_volume = get_unit_cell_volume(
-        reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system
-        )
-    _, _, M_likelihood_triplet = get_M20_likelihood(
-        triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume
-        )
-    return np.column_stack((M_likelihood_primary, M_likelihood_triplet))
+def get_hkl_matrix(hkl, lattice_system):
+    last_axis = len(hkl.shape) - 1
+    # hkl shape:
+    # last_axis = 1: n_peaks, 3
+    # last_axis = 2: n_entries, n_peaks, 3
+    if lattice_system == 'triclinic':
+        hkl_matrix = np.concatenate((
+            hkl[..., :3]**2,
+            (hkl[..., 1] * hkl[..., 2])[..., np.newaxis],
+            (hkl[..., 0] * hkl[..., 2])[..., np.newaxis],
+            (hkl[..., 0] * hkl[..., 1])[..., np.newaxis],
+            ),
+            axis=last_axis
+            )
+    elif lattice_system == 'monoclinic':
+        hkl_matrix = np.concatenate((
+            hkl[..., :3]**2,
+            (hkl[..., 0] * hkl[..., 2])[..., np.newaxis],
+            ),
+            axis=last_axis
+            )
+    elif lattice_system == 'orthorhombic':
+        hkl_matrix = hkl**2
+    elif lattice_system == 'tetragonal':
+        hkl_matrix = np.stack((
+            np.sum(hkl[..., :2]**2, axis=last_axis),
+            hkl[..., 2]**2,
+            ),
+            axis=last_axis
+            )
+    elif lattice_system == 'hexagonal':
+        hkl_matrix = np.stack((
+            hkl[..., 0]**2 + hkl[..., 0]*hkl[..., 1] + hkl[..., 1]**2,
+            hkl[..., 2]**2,
+            ),
+            axis=last_axis
+            )
+    elif lattice_system == 'rhombohedral':
+        hkl_matrix = np.stack((
+            np.sum(hkl**2, axis=last_axis),
+            hkl[..., 0]*hkl[..., 1] + hkl[..., 0]*hkl[..., 2] + hkl[..., 1]*hkl[..., 2],
+            ),
+            axis=last_axis
+            )
+    elif lattice_system == 'cubic':
+        hkl_matrix = np.sum(hkl**2, axis=last_axis)[..., np.newaxis]
+    return hkl_matrix
 
 
 def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
@@ -1494,6 +1593,34 @@ def best_assign_nocommon(softmaxes):
     return hkl_assign, softmax_assign
 
 
+def assign_hkl_triplets(triplets_obs, hkl_assign, triplet_hkl_ref, q2_ref_calc):
+    top_n = hkl_assign.shape[2]
+    n_candidates = hkl_assign.shape[0]
+    n_triplets = triplets_obs.shape[0]
+    hkl_assign_triplets = np.zeros((n_candidates, n_triplets), dtype=np.uint16)
+    for candidate_index in range(n_candidates):
+        hkl_assign_candidate = hkl_assign[candidate_index]
+        q2_ref_calc_candidate = q2_ref_calc[candidate_index]
+        for triplet_index in range(n_triplets): 
+            triplet_loop = triplets_obs[triplet_index]
+            hkl_assign_0_top_n = hkl_assign_candidate[int(triplet_loop[0])]
+            hkl_assign_1_top_n = hkl_assign_candidate[int(triplet_loop[1])]
+            hkl_assign_pair = []
+            for top_n_index_0 in range(top_n):
+                hkl_assign_0 = hkl_assign_0_top_n[top_n_index_0]
+                for top_n_index_1 in range(top_n):
+                    hkl_assign_1 = hkl_assign_1_top_n[top_n_index_1]
+                    if hkl_assign_0 < hkl_assign_1:
+                        hkl_assign_pair += triplet_hkl_ref[hkl_assign_0][hkl_assign_1]
+                    elif hkl_assign_0 > hkl_assign_1:
+                        hkl_assign_pair += triplet_hkl_ref[hkl_assign_1][hkl_assign_0]
+            if len(hkl_assign_pair) > 0:
+                diff = np.abs(triplet_loop[2] - q2_ref_calc_candidate[hkl_assign_pair])
+                min_index = np.argmin(diff)
+                hkl_assign_triplets[candidate_index, triplet_index] = hkl_assign_pair[min_index]
+    return hkl_assign_triplets
+
+
 from numba import jit
 @jit(fastmath=True)
 def fast_assign(q2_obs, q2_ref):
@@ -1512,6 +1639,7 @@ def fast_assign(q2_obs, q2_ref):
                     current_min_index = ref_index
             hkl_assign[candidate_index, obs_index] = current_min_index
     return hkl_assign
+
 
 @jit(fastmath=True)
 def fast_assign_top_n(q2_obs, q2_ref, top_n):
