@@ -305,15 +305,15 @@ def get_split_group(lattice_system, unit_cell=None, reciprocal_reindexed_unit_ce
             elif reciprocal_reindexed_unit_cell[0] >= reciprocal_reindexed_unit_cell[2]:
                 split = 1 # bca* (acb)
             else:
-                split = 2 # bac* (cab)
+                split = 2 # bac* (cab) # This should not occur
         else:
             # a* < b*
             if reciprocal_reindexed_unit_cell[1] <= reciprocal_reindexed_unit_cell[2]:
-                split = 3 # abc* (cba)
+                split = 3 # abc* (cba) # This should not occur
             elif reciprocal_reindexed_unit_cell[0] >= reciprocal_reindexed_unit_cell[2]:
                 split = 4 # cab* (bac)
             else:
-                split = 5 # acb* (bca)
+                split = 5 # acb* (bca) # This should not occur
     elif lattice_system == 'orthorhombic':
         if reindexed_spacegroup_symbol_hm[0] in ['P', 'I', 'F']:
             split = 0

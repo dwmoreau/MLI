@@ -66,15 +66,37 @@ entry_tags = [
     ]
 """
 
+"""
 base_dir = '/Users/DWMoreau/MLI/triplet'
 entry_tags = [
-    '26dimethyl',
+    '3hydroxy',
+    #'26dimethyl',
     #'cybu_rg003',
     #'cyhx_rg003',
     #'cybu',
     #'cyhx',
     #'glu_dehyd',
     #'homocys',
+    ]
+"""
+
+base_dir = '/Users/DWMoreau/MLI/data/experimental_data/MFXP10033'
+entry_tags = [
+    #'MI2-68',
+    #'MI2-39',
+    #'MI2-58',
+    #'MI2-109',
+    #'MI2-67',
+    #'MI2-56',
+    #'MI2-104',
+    #'MI2-102',
+    #'MI2-73',
+    'MI2-75',
+    #'MI2-76',
+    #'MI2-103',
+    #'MI2-60_rg026',
+    #'MI2-60_rg026_filtered',
+    #'MI2-06',
     ]
 rng = np.random.default_rng()
 
@@ -88,9 +110,9 @@ logger.info('Starting process')
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0]
 #serial =           [True, True, True, True, True, True, True]
 
-#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-#manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
 #bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
 #manager_rank =     [    0,     0,     1,     1]
@@ -100,9 +122,9 @@ logger.info('Starting process')
 #manager_rank =     [   0]
 #serial =           [True]
 
-bravais_lattices = [ 'mP']
-manager_rank =     [    0]
-serial =           [False]
+#bravais_lattices = [ 'mP']
+#manager_rank =     [    0]
+#serial =           [False]
 
 #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP', 'aP']
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,    0]
@@ -220,11 +242,17 @@ for entry_tag in entry_tags:
                     n_indexed_triplets = 0
                 else:
                     n_indexed_triplets = top_n_indexed_triplets[bravais_lattice][result_index]
+                if triplet_obs is None:
+                    M_triplet_output = None
+                    n_indexed_triplets_output = None
+                else:
+                    M_triplet_output = list(top_M_triplets[bravais_lattice][result_index])
+                    n_indexed_triplets_output = n_indexed_triplets
                 output_data.append({
                     'M20': top_M20[bravais_lattice][result_index],
                     'n_indexed': top_n_indexed[bravais_lattice][result_index],
-                    'M_triplet': list(top_M_triplets[bravais_lattice][result_index]),
-                    'n_indexed_triplet': n_indexed_triplets,
+                    'M_triplet': M_triplet_output,
+                    'n_indexed_triplet': n_indexed_triplets_output,
                     'bravais_lattice': bravais_lattice,
                     'spacegroup': top_spacegroup[bravais_lattice][result_index],
                     'a': unit_cell[0],
@@ -235,6 +263,7 @@ for entry_tag in entry_tags:
                     'gamma': unit_cell[5],
                     })
                 print(output_data[-1])
+                print()
         output_df = pd.DataFrame(output_data)
         output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
         output_df.to_json(base_dir + f'/{entry_tag}/{entry_tag}_indexing_results_{optimization_tag}.json')

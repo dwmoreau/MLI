@@ -27,6 +27,7 @@ class PeakListCreator:
         input_path_template=None,
         suffix='_strong.expt',
         min_reflections_per_experiment=3,
+        max_reflections_per_experiment=100,
         known_unit_cell=None, 
         known_space_group=None,
         ):
@@ -40,6 +41,7 @@ class PeakListCreator:
             self.runs = np.arange(run_limits[0], run_limits[1] + 1)
         else:
             self.runs = runs
+        self.max_reflections_per_experiment = max_reflections_per_experiment
         self.min_reflections_per_experiment = min_reflections_per_experiment
         self.input_path_template = input_path_template
         self.suffix = suffix
@@ -86,6 +88,7 @@ class PeakListCreator:
         command += refl_file_names
         command += [
             'reference_from_experiment.detector=0',
+            f'max_reflections_per_experiment={self.max_reflections_per_experiment}',
             f'min_reflections_per_experiment={self.min_reflections_per_experiment}',
             f'output.experiments_filename={self.tag}_combined_{run_str}.expt',
             f'output.reflections_filename={self.tag}_combined_{run_str}.refl',
@@ -261,7 +264,7 @@ class PeakListCreator:
         found_peaks = np.delete(found_peaks[:exclude_max], exclude_list)
         peaks = np.sort(np.concatenate((found_peaks, add_peaks)))
     
-        fig, axes = plt.subplots(1, 1, figsize=(10, 6))
+        fig, axes = plt.subplots(1, 1, figsize=(30, 6))
         axes.plot(self.q2_centers, self.q2_hist, label='Histogram')
         for p_index, p in enumerate(peaks):
             if p_index in shift.keys():
@@ -518,56 +521,90 @@ class PeakListCreator:
             q2.append(self._get_q2_spacing(s1_normed, s0))
         self.q2_obs = np.concatenate(q2)
 
-    """
-    def filter_peaks(self, max_difference=0.001, n_peaks=20):
+    def filter_peaks(self, n_peaks=20, max_difference=None, delta=None, max_refl_counts=None, threshold=0.50):
         # assign peaks and get distances
-        differences_all = np.abs(self.q2_primary[:, 0][:, np.newaxis] - self.q2_primary_picked[np.newaxis, :n_peaks + 1])
+        # The :n_peaks+1 appears unnecessary, but is important
+        # If the peak gets assigned to the n_peaks index, it is probably out of the range of diffraction
+        # This catches those cases for them to be ignored
+        differences_all = np.abs(self.q2_obs[:, np.newaxis] - self.q2_peaks[np.newaxis, :n_peaks + 1])
         assignment = np.argmin(differences_all, axis=1)
         differences = np.take_along_axis(differences_all, assignment[:, np.newaxis], axis=1)[:, 0]
-        out_of_range = assignment == n_peaks
 
-        fig, axes = plt.subplots(1, 2, figsize=(5, 3))
-        axes[0].hist(differences[~out_of_range], bins=100)
-        ylim = axes[0].get_ylim()
-        axes[0].set_ylim(ylim)
-        axes[0].plot([max_difference, max_difference], ylim, color=[0.8, 0, 0])
-        axes[1].hist(assignment[~out_of_range], bins=n_peaks)
+        joint_occurances = np.zeros((n_peaks, n_peaks))
+        ind_occurances = np.zeros(n_peaks)
+        start = 0
+        n_experiments = 0
+        for expt_index, refl_counts in enumerate(self.refl_counts):
+            if max_refl_counts is None or refl_counts < max_refl_counts:
+                assignment_expt = assignment[start: start + refl_counts]
+                if not max_difference is None:
+                    differences_expt = differences[start: start + refl_counts]
+                    assignment_expt = assignment_expt[differences_expt < max_difference]
+                elif not delta is None:
+                    differences_expt = differences[start: start + refl_counts]
+                    peak_breadths = np.take(self.q2_breadths, assignment_expt)
+                    tolerance = delta * peak_breadths
+                    assignment_expt = assignment_expt[differences_expt < tolerance]
+                    
+                unique_assignments = np.sort(np.unique(assignment_expt))
+                if unique_assignments.size > 0 and unique_assignments[-1] == n_peaks:
+                    unique_assignments = unique_assignments[:-1]
+                #print(unique_assignments)
+                if unique_assignments.size > 0:
+                    n_experiments += 1
+                    for peak_index_0 in range(n_peaks):
+                        if peak_index_0 in unique_assignments:
+                            ind_occurances[peak_index_0] += 1
+                            for peak_index_1 in range(n_peaks):
+                                if peak_index_1 in unique_assignments:
+                                    joint_occurances[peak_index_0, peak_index_1] += 1
+                #print(ind_occurances)
+                #print(joint_occurances)
+                #print()
+            start += refl_counts
+
+        joint_prob = joint_occurances / n_experiments
+        ind_prob = ind_occurances / n_experiments
+        separated_prob = 1/2*(ind_occurances[np.newaxis] + ind_occurances[:, np.newaxis]) / n_experiments
+
+        ratio = joint_prob/separated_prob
+        ratio[np.arange(n_peaks), np.arange(n_peaks)] = np.nan
+        paired = ratio > threshold
+
+        print('Paired Peaks')
+        for peak_index_0 in range(n_peaks):
+            for peak_index_1 in range(peak_index_0, n_peaks):
+                if paired[peak_index_0, peak_index_1]:
+                    print(peak_index_0, peak_index_1)
+
+        fig, axes = plt.subplots(1, 1, figsize=(10, 3))
+        axes.bar(np.arange(n_peaks), ind_prob, width=1)
+        axes.set_xlabel('Peak index')
+        axes.set_ylabel('Occurance Probability')
+        plt.show()
+
+        cmap = 'binary'
+        fig, axes = plt.subplots(2, 2, figsize=(20, 20))
+        
+        separated_disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=separated_prob)
+        separated_disp.plot(include_values=False, ax=axes[0, 0], cmap=cmap)
+        
+        joint_disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=joint_prob)
+        joint_disp.plot(include_values=False, ax=axes[0, 1], cmap=cmap)
+
+        ratio_disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=ratio)
+        ratio_disp.plot(include_values=False, ax=axes[1, 0], cmap=cmap)
+        
+        paired_disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=paired)
+        paired_disp.plot(include_values=False, ax=axes[1, 1], cmap=cmap)
+
+        axes[0, 0].set_title('Separated Probability')
+        axes[0, 1].set_title('Joint Probability')
+        axes[1, 0].set_title('Joint/Separated Probability')
+        axes[1, 1].set_title(f'Joint/Separated Probability > {threshold}')
+
         fig.tight_layout()
         plt.show()
-    
-        close_indices = differences < max_difference
-        q2_primary = self.q2_primary[close_indices]
-        assignment = assignment[close_indices]
-        
-        occurance_frequency = np.zeros((n_peaks, n_peaks))
-        for peak0_index, peak0 in enumerate(self.q2_primary_picked[:n_peaks]):
-            experiments = q2_primary[assignment == peak0_index, 1]
-            experiments = np.unique(experiments)
-            n_experiments_peak0 = experiments.size
-            if n_experiments_peak0 > 0:
-                common_experiment_indices = np.isin(q2_primary[:, 1], experiments)
-                assignment_common_experiment = assignment[common_experiment_indices]
-                q2_primary_common_experiment = q2_primary[common_experiment_indices]
-                for peak1_index, peak1 in enumerate(self.q2_primary_picked[:n_peaks]):
-                    peak1_common_experiments = q2_primary_common_experiment[assignment_common_experiment == peak1_index, 1]
-                    n_experiments_peak1 = np.unique(peak1_common_experiments).size
-                    occurance_frequency[peak0_index, peak1_index] = n_experiments_peak1 / n_experiments_peak0
-    
-        fig, axes = plt.subplots(2, 1, figsize=(7, 7))
-        disp = sklearn.metrics.ConfusionMatrixDisplay(confusion_matrix=occurance_frequency)
-        disp.plot(include_values=False, ax=axes[0])
-        axes[0].set_xlabel('Probability Peak Y also occurs')
-        axes[0].set_ylabel('Given Peak X occurs')
-        axes[0].set_title('Frequency of common occurances')
-        axes[1].plot(self.primary_centers_q2, self.primary_hist_q2)
-        ylim = axes[1].get_ylim()
-        for p_index, p in enumerate(self.q2_primary_picked[:n_peaks]):
-            axes[1].plot([p, p], ylim, color=[0.8, 0, 0], linewidth=1, linestyle='dotted')
-            axes[1].annotate(p_index, xy=(p, self.primary_hist_q2.max()))
-        axes[1].set_ylim(ylim)
-        axes[1].set_xlim([self.primary_centers_q2[0], self.q2_primary_picked[n_peaks + 1]])
-        plt.show()
-    """
 
     def output_json(self, note=None, extra_file_name=None):
         output = {
@@ -630,7 +667,6 @@ class PeakListCreator:
 
         fig, axes = plt.subplots(1, 1, figsize=(40, 5))
         axes.plot(self.q2_diff_centers, self.q2_diff_hist)
-        plt.show()
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_q2_diff_hist.npy'),
             np.column_stack((self.q2_diff_centers, self.q2_diff_hist))
@@ -716,6 +752,31 @@ class PeakListCreator:
             1/np.sqrt(np.array(self.q2_peaks_secondary))
             )
         print(repr(1/np.sqrt(self.q2_peaks_secondary)))
+
+    def plot_known_unit_cell(self, q2_max=0.5, unit_cell=None, space_group=None):
+        if unit_cell is None:
+            unit_cell = uctbx.unit_cell(parameters=self.known_unit_cell)
+        else:
+            unit_cell = uctbx.unit_cell(parameters=unit_cell)
+        if space_group is None:
+            sym = symmetry(unit_cell=unit_cell, space_group=self.known_space_group)
+        else:
+            sym = symmetry(unit_cell=unit_cell, space_group=space_group)
+
+        hkl_list = cctbx.miller.build_set(sym, False, d_min=1/np.sqrt(q2_max))
+        dspacings = unit_cell.d(hkl_list.indices()).as_numpy_array()
+        q2_known = 1 / dspacings**2
+   
+        fig, axes = plt.subplots(1, 1, figsize=(40, 4), sharex=True)
+        axes.plot(self.q2_centers, self.q2_hist)
+        ylim0 = axes.get_ylim()
+        for p in q2_known:
+            axes.plot([p, p], ylim0, color=[0.8, 0, 0], linestyle='dotted', linewidth=2)
+        for p_index, p in enumerate(self.q2_peaks):
+            axes.plot([p, p], [ylim0[0], 0.75*ylim0[1]], color=[0, 0, 0], linestyle='dotted', linewidth=2)
+        axes.set_ylim(ylim0)
+        fig.tight_layout()
+        plt.show()
 
     def make_triplets(self, triplet_peak_indices, delta=1, max_difference=None, min_separation=None, max_refl_counts=None):
         start = 0
@@ -933,3 +994,4 @@ class PeakListCreator:
                         triplets_obs.append(triplets_obs_pair[index])
                 plt.close()
         self.triplets_obs = np.stack(triplets_obs)
+

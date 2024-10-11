@@ -44,6 +44,7 @@ class ProcessEntry:
         self.unit_cell = np.zeros(6)
         self.volume = None
 
+        self.reindexed_extinction_group = None
         self.reindexed_spacegroup_symbol_hall = None
         self.reindexed_spacegroup_symbol_hm = None
 
@@ -90,6 +91,7 @@ class ProcessEntry:
             'spacegroup_symbol_hall': self.spacegroup_symbol_hall,
             'spacegroup_symbol_hm': self.spacegroup_symbol_hm,
             'unit_cell': self.unit_cell,
+            'reindexed_extinction_group': self.reindexed_extinction_group,
             'reindexed_spacegroup_symbol_hall': self.reindexed_spacegroup_symbol_hall,
             'reindexed_spacegroup_symbol_hm': self.reindexed_spacegroup_symbol_hm,
             'reindexed_unit_cell': self.reindexed_unit_cell,
@@ -104,7 +106,7 @@ class ProcessEntry:
             'r_factor': self.r_factor,
             'status': self.status,
             'reason': self.reason,
-        }
+            }
 
     def verify_reindexing_orthorhombic(self):
         q2_calculator = Q2Calculator(
@@ -196,7 +198,6 @@ class ProcessEntry:
         check_reciprocal = np.isclose(q2, reciprocal_reindexed_q2).all()
         check = check_direct & check_reciprocal
         #print('triclinic ', check_direct, check_reciprocal)
-        #print(check, check_direct, check_reciprocal)
         #print(self.reciprocal_reindexed_unit_cell)
         #print(self.reciprocal_hkl_reindexer)
         #print(np.column_stack((q2, reindexed_q2, reciprocal_reindexed_q2)))
@@ -409,6 +410,9 @@ class ProcessEntry:
             """
             self.reindexed_unit_cell, self.hkl_reindexer = \
                 reindex_entry_triclinic(self.unit_cell, space='direct')
+            self.reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(
+                self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
+                )[0]
             self.reindexed_volume = get_unit_cell_volume(self.reindexed_unit_cell)
             self.reindexed_spacegroup_symbol_hm = self.spacegroup_symbol_hm
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
@@ -444,7 +448,7 @@ class ProcessEntry:
             self.reindexed_spacegroup_symbol_hall = self.spacegroup_symbol_hall
 
         # This still needs some work...
-        #self.reindexed_extinction_group, _ = map_spacegroup_to_extinction_group(self.reindexed_spacegroup_symbol_hm)
+        self.reindexed_extinction_group, _ = map_spacegroup_to_extinction_group(self.reindexed_spacegroup_symbol_hm)
         self.reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(
             self.reindexed_unit_cell[np.newaxis], partial_unit_cell=False
             )[0]
@@ -465,7 +469,7 @@ class ProcessEntry:
                 if self.split in [2, 3, 5]:
                     self.reason = 'Monoclinic Reindexing Error - unit cell did not get reordered'
                     self.status = False
-                    print(f'{self.reason} {self.unit_cell} {self.reindexed_unit_cell} {self.spacegroup_symbol_hm}')
+                    print(f'{self.reason} {self.split} {self.spacegroup_symbol_hm}\n   {self.unit_cell}\n   {self.reindexed_unit_cell}\n   {self.reciprocal_reindexed_unit_cell}')
                     return None
 
 
@@ -548,9 +552,14 @@ class ProcessCSDEntry(ProcessEntry):
             return None
 
         # I write cif files so I can load them with cctbx to generate powder patterns
-        self.cif_file_name = os.path.join(
-            '/Users/DWMoreau/csd_cifs', str(self.spacegroup_number), f'{self.identifier}.cif'
+        cif_directory = os.path.join(
+            '/Users/DWMoreau/csd_cifs', str(self.spacegroup_number)
             )
+        self.cif_file_name = os.path.join(
+            cif_directory, f'{self.identifier}.cif'
+            )
+        if not os.path.exists(cif_directory):
+            os.mkdir(cif_directory)
         if not os.path.exists(self.cif_file_name):
             with CrystalWriter(self.cif_file_name, append=False) as crystal_writer:
                 crystal_writer.write(csd_entry.crystal)

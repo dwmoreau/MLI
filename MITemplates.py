@@ -17,6 +17,8 @@ from Utilities import read_params
 from Utilities import write_params
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import reciprocal_uc_conversion
+from Utilities import Q2Calculator
+from Utilities import fast_assign
 
 
 class MITemplates:
@@ -88,6 +90,7 @@ class MITemplates:
             'max_depth',
             'min_samples_leaf',
             'l2_regularization',
+            'calibration_n_peaks',
             ]
         self.template_params = dict.fromkeys(params_keys)
         self.template_params['tag'] = params['tag']
@@ -106,6 +109,7 @@ class MITemplates:
                 self.template_params['max_depth'] = int(params['max_depth'])
                 self.template_params['min_samples_leaf'] = int(params['min_samples_leaf'])
                 self.template_params['l2_regularization'] = float(params['l2_regularization'])
+                self.template_params['calibration_n_peaks'] = int(params['calibration_n_peaks'])
             else:
                 self.template_params['calibrate'] = False
         else:
@@ -399,10 +403,25 @@ class MITemplates:
         sigma = q2_obs[np.newaxis]
         hessian_prefactor = (1 / sigma**2)[:, :, np.newaxis, np.newaxis]
         for index in range(5):
-            q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
-            sort_indices = q2_calc.argsort(axis=1)
-            q2_calc = np.take_along_axis(q2_calc, sort_indices, axis=1)
-            hkl2 = np.take_along_axis(hkl2, sort_indices[:, :, np.newaxis], axis=1)
+            if index == 4:
+                q2_calculator = Q2Calculator(
+                    lattice_system=self.lattice_system,
+                    hkl=self.hkl_ref,
+                    tensorflow=False,
+                    representation='xnn'
+                    )
+                q2_ref_calc = q2_calculator.get_q2(xnn)
+                hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+                hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+                hkl2 = get_hkl_matrix(hkl, self.lattice_system)
+                q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
+                q2_calc_max = q2_calc.max(axis=1)
+                N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
+            else:
+                q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
+                sort_indices = q2_calc.argsort(axis=1)
+                q2_calc = np.take_along_axis(q2_calc, sort_indices, axis=1)
+                hkl2 = np.take_along_axis(hkl2, sort_indices[:, :, np.newaxis], axis=1)
             residuals = (q2_calc - q2_obs[np.newaxis]) / sigma
             dlikelihood_dq2_pred = residuals / sigma
             dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * hkl2, axis=1)
@@ -415,7 +434,7 @@ class MITemplates:
         residuals = np.abs(q2_calc - q2_obs[np.newaxis])
         
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
-        return xnn, residuals
+        return xnn, residuals, N_pred, q2_calc_max
 
     def generate_xnn(self, q2_obs, indices=None):
         # This is slower
@@ -500,10 +519,21 @@ class MITemplates:
         return unit_cell_templates
 
     def generate_calibrated(self, n_templates, rng, q2_obs):
-        xnn_templates_all, q2_error = self.generate_xnn_fast(q2_obs)
-        probability_templates = self.hgbc_classifier.predict_proba(
-            q2_error[:, :self.template_params['calibration_n_peaks']]
+        xnn_templates_all, q2_error, N_pred, q2_calc_max = self.generate_xnn_fast(q2_obs)
+        _, unique_indices = np.unique(
+            np.round(xnn_templates_all, decimals=6), return_index=True, axis=0
             )
+        xnn_templates_all = xnn_templates_all[unique_indices]
+        q2_error = q2_error[unique_indices]
+        N_pred = N_pred[unique_indices]
+        q2_calc_max = q2_calc_max[unique_indices]
+
+        inputs = np.concatenate((
+            q2_error[:, :self.template_params['calibration_n_peaks']],
+            N_pred[:, np.newaxis],
+            q2_calc_max[:, np.newaxis],
+            ), axis=1)
+        probability_templates = self.hgbc_classifier.predict_proba(inputs)
         if n_templates == 'all':
             xnn_templates = xnn_templates_all
         elif n_templates < self.template_params['n_templates']:
@@ -535,6 +565,7 @@ class MITemplates:
 
     def generate(self, n_templates, rng, q2_obs):
         if self.template_params['calibrate']:
+            print('Generating Calibrated Candidates')
             return self.generate_calibrated(n_templates, rng, q2_obs)
         else:
             return self.generate_uncalibrated(n_templates, rng, q2_obs)
@@ -542,33 +573,39 @@ class MITemplates:
     def _get_inputs_worker(self, inputs):
         q2_obs = inputs[0]
         xnn_true = inputs[1]
-        xnn, q2_error = self.generate_xnn_fast(q2_obs)
+        xnn, q2_error, N_pred, q2_calc_max = self.generate_xnn_fast(q2_obs)
         distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])
         neighbor = (distance < self.template_params['radius']).astype(int)[:, 0]
-        return q2_error, neighbor, distance
+        return q2_error, neighbor, distance, xnn, N_pred, q2_calc_max
 
     def get_inputs(self, data, n_entries):
         q2_obs = np.stack(data['q2'])
-        xnn_true = np.stack(data['reindexed_xnn'])[:, self.unit_cell_indices]
+        
 
         q2_error = []
         neighbor = []
         distance = []
+        xnn = []
+        N_pred = []
+        q2_calc_max = []
         if n_entries is None:
             n_entries = len(data)
             indices = np.arange(n_entries)
         else:
             n_entries = min(n_entries, len(data))
             indices = self.rng.choice(len(data), n_entries, replace=False)
-
+        xnn_true = np.stack(data['reindexed_xnn'])[:, self.unit_cell_indices]
         if self.template_params['parallelization'] is None:
             print(f'Setting up {n_entries} entries serially')
             for index in tqdm(indices):
-                q2_error_entry, neighbor_entry, distance_entry = \
+                q2_error_entry, neighbor_entry, distance_entry, xnn_entry, N_pred_entry, q2_calc_max_entry = \
                     self._get_inputs_worker([q2_obs[index], xnn_true[index]])
                 q2_error.append(q2_error_entry)
                 neighbor.append(neighbor_entry)
                 distance.append(distance_entry)
+                xnn.append(xnn_entry)
+                N_pred.append(N_pred_entry)
+                q2_calc_max.append(q2_calc_max_entry)
         elif self.template_params['parallelization'] == 'multiprocessing':
             print(f'Setting up {n_entries} entries using multiprocessing')
             with multiprocessing.Pool(self.template_params['n_processes']) as p:
@@ -577,28 +614,35 @@ class MITemplates:
                 q2_error.append(outputs[i][0])
                 neighbor.append(outputs[i][1])
                 distance.append(outputs[i][2])
+                xnn.append(outputs[i][3])
+                N_pred.append(outputs[i][4])
+                q2_calc_max.append(outputs[i][5])
 
         q2_error = np.row_stack(q2_error)
         neighbor = np.concatenate(neighbor)
         distance = np.concatenate(distance)
-        return q2_error, neighbor, distance
+        xnn = np.stack(xnn, axis=0)
+        N_pred = np.concatenate(N_pred)
+        q2_calc_max = np.concatenate(q2_calc_max)
+        return q2_error, neighbor, distance, xnn, xnn_true[indices], N_pred, q2_calc_max
 
     def calibrate_templates(self, data):
         unaugmented_data = data[~data['augmented']]
         training_data = unaugmented_data[unaugmented_data['train']]
         val_data = unaugmented_data[~unaugmented_data['train']]
-        q2_error_train, neighbor_train, distance_train = self.get_inputs(
-            training_data, self.template_params['n_train']
-            )
-        q2_error_val, neighbor_val, distance_val = self.get_inputs(
-            val_data, int(0.2*self.template_params['n_train'])
-            )
+        n_val = int(0.2*self.template_params['n_train'])
+        q2_error_train, neighbor_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train = \
+            self.get_inputs(training_data, self.template_params['n_train'])
+        q2_error_val, neighbor_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val = \
+            self.get_inputs(val_data, n_val)
         #np.save('MICal_test_q2_error_train.npy', q2_error_train)
         #np.save('MICal_test_q2_error_val.npy', q2_error_val)
         #np.save('MICal_test_neighbor_train.npy', neighbor_train)
         #np.save('MICal_test_neighbor_val.npy', neighbor_val)
         #np.save('MICal_test_distance_train.npy', distance_train)
         #np.save('MICal_test_distance_val.npy', distance_val)
+        #np.save('MICal_test_xnn_train_pred.npy', xnn_train_pred)
+        #np.save('MICal_test_xnn_val_pred.npy', xnn_val_pred)
 
         #q2_error_train = np.load('MICal_test_q2_error_train.npy') 
         #q2_error_val = np.load('MICal_test_q2_error_val.npy') 
@@ -606,7 +650,19 @@ class MITemplates:
         #neighbor_val = np.load('MICal_test_neighbor_val.npy') 
         #distance_train = np.load('MICal_test_distance_train.npy') 
         #distance_val = np.load('MICal_test_distance_val.npy') 
+        #xnn_train_pred = np.load('MICal_test_xnn_train_pred.npy')
+        #xnn_val_pred = np.load('MICal_test_xnn_val_pred.npy')
 
+        train_inputs = np.concatenate((
+            q2_error_train[:, :self.template_params['calibration_n_peaks']],
+            N_pred_train[:, np.newaxis],
+            q2_calc_max_train[:, np.newaxis],
+            ), axis=1)
+        val_inputs = np.concatenate((
+            q2_error_val[:, :self.template_params['calibration_n_peaks']],
+            N_pred_val[:, np.newaxis],
+            q2_calc_max_val[:, np.newaxis],
+            ), axis=1)
         print('Fitting Hist Boosting Model')  
         self.hgbc_classifier = sklearn.ensemble.HistGradientBoostingClassifier(
             max_depth=self.template_params['max_depth'],
@@ -614,24 +670,19 @@ class MITemplates:
             class_weight='balanced',
             l2_regularization=self.template_params['l2_regularization'],
             )
-        self.hgbc_classifier.fit(
-            q2_error_train[:, :self.template_params['calibration_n_peaks']],
-            neighbor_train
+        self.hgbc_classifier.fit(train_inputs, neighbor_train)
+        joblib.dump(
+            self.hgbc_classifier,
+            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
             )
-        probability_train = self.hgbc_classifier.predict_proba(
-            q2_error_train[:, :self.template_params['calibration_n_peaks']]
+        self.hgbc_classifier = joblib.load(
+            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
             )
-        score_train = self.hgbc_classifier.score(
-            q2_error_train[:, :self.template_params['calibration_n_peaks']],
-            neighbor_train
-            )
-        probability_val = self.hgbc_classifier.predict_proba(
-            q2_error_val[:, :self.template_params['calibration_n_peaks']]
-            )
-        score_val = self.hgbc_classifier.score(
-            q2_error_val[:, :self.template_params['calibration_n_peaks']],
-            neighbor_val
-            )
+
+        probability_train = self.hgbc_classifier.predict_proba(train_inputs)
+        score_train = self.hgbc_classifier.score(train_inputs, neighbor_train)
+        probability_val = self.hgbc_classifier.predict_proba(val_inputs)
+        score_val = self.hgbc_classifier.score(val_inputs, neighbor_val)
 
         alpha = 0.5
         ms = 0.5
@@ -683,3 +734,179 @@ class MITemplates:
         fig.tight_layout()
         fig.savefig(f'{self.save_to}/{self.group}_calibration_{self.template_params["tag"]}.png')
         plt.close()
+
+        ##############################
+        # Plot unit cell evaluations #
+        ##############################
+        val_xnn = xnn_val_true
+        val_unit_cell = get_unit_cell_from_xnn(
+            val_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        probability_val = probability_val[:, 1].reshape((
+            n_val, self.template_params['n_templates']
+            ))
+        val_xnn_pred_top5 = np.take_along_axis(
+            xnn_val_pred,
+            np.argsort(probability_val, axis=1)[:, ::-1][:, :5, np.newaxis],
+            axis=1
+            )
+        val_unit_cell_pred_top5 = np.zeros(val_xnn_pred_top5.shape)
+        for index in range(5):
+            val_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
+                val_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+
+        train_xnn = xnn_train_true
+        train_unit_cell = get_unit_cell_from_xnn(
+            train_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        probability_train = probability_train[:, 1].reshape((
+            self.template_params['n_train'], self.template_params['n_templates']
+            ))
+        train_xnn_pred_top5 = np.take_along_axis(
+            xnn_train_pred,
+            np.argsort(probability_train, axis=1)[:, ::-1][:, :5, np.newaxis],
+            axis=1
+            )
+        train_unit_cell_pred_top5 = np.zeros(train_xnn_pred_top5.shape)
+        for index in range(5):
+            train_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
+                train_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+
+        figsize = (self.unit_cell_length*2 + 2, 6)
+        fig, axes = plt.subplots(2, self.unit_cell_length, figsize=figsize)
+        unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
+        xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+        alpha = 0.1
+        markersize = 0.5
+        for plot_index in range(2):
+            if plot_index == 0:
+                val_xnn_pred = val_xnn_pred_top5[:, 0, :]
+                val_unit_cell_pred = val_unit_cell_pred_top5[:, 0, :]
+                train_xnn_pred = train_xnn_pred_top5[:, 0, :]
+                train_unit_cell_pred = train_unit_cell_pred_top5[:, 0, :]
+                save_label = 'most_probable'
+            elif plot_index == 1:
+                val_diff = np.linalg.norm(val_xnn_pred_top5 - val_xnn[:, np.newaxis, :], axis=2)
+                val_xnn_pred = np.take_along_axis(
+                    val_xnn_pred_top5,
+                    np.argmin(val_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+                val_unit_cell_pred = np.take_along_axis(
+                    val_unit_cell_pred_top5,
+                    np.argmin(val_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+
+                train_diff = np.linalg.norm(train_xnn_pred_top5 - train_xnn[:, np.newaxis, :], axis=2)
+                train_xnn_pred = np.take_along_axis(
+                    train_xnn_pred_top5,
+                    np.argmin(train_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+                train_unit_cell_pred = np.take_along_axis(
+                    train_unit_cell_pred_top5,
+                    np.argmin(train_diff, axis=1)[:, np.newaxis, np.newaxis],
+                    axis=1
+                    )[:, 0, :]
+                save_label = 'best'
+
+            train_unit_cell_error = np.abs(train_unit_cell_pred - train_unit_cell)
+            val_unit_cell_error = np.abs(val_unit_cell_pred - val_unit_cell)
+            train_xnn_error = np.abs(train_xnn_pred - train_xnn)
+            val_xnn_error = np.abs(val_xnn_pred - val_xnn)
+            for uc_index in range(self.unit_cell_length):
+                sorted_unit_cell = np.sort(train_unit_cell[:, uc_index])
+                lower_unit_cell = sorted_unit_cell[int(0.005*sorted_unit_cell.size)]
+                upper_unit_cell = sorted_unit_cell[int(0.995*sorted_unit_cell.size)]
+                if upper_unit_cell > lower_unit_cell:
+                    axes[0, uc_index].plot(
+                        train_unit_cell[:, uc_index], train_unit_cell_pred[:, uc_index],
+                        color=[0, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[0, uc_index].plot(
+                        val_unit_cell[:, uc_index], val_unit_cell_pred[:, uc_index],
+                        color=[0.8, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[0, uc_index].plot(
+                        [lower_unit_cell, upper_unit_cell], [lower_unit_cell, upper_unit_cell],
+                        color=[0.7, 0, 0], linestyle='dotted'
+                        )
+                    axes[0, uc_index].set_xlim([lower_unit_cell, upper_unit_cell])
+                    axes[0, uc_index].set_ylim([lower_unit_cell, upper_unit_cell])
+
+                error_train = np.sort(train_unit_cell_error[:, uc_index])
+                error_train = error_train[~np.isnan(error_train)]
+                unit_cell_p25_train = error_train[int(0.25 * error_train.size)]
+                unit_cell_p50_train = error_train[int(0.50 * error_train.size)]
+                unit_cell_p75_train = error_train[int(0.75 * error_train.size)]
+                unit_cell_rmse_train = np.sqrt(1/error_train.size * np.linalg.norm(error_train)**2)
+                error_val = np.sort(val_unit_cell_error[:, uc_index])
+                error_val = error_val[~np.isnan(error_val)]
+                unit_cell_p25_val = error_val[int(0.25 * error_val.size)]
+                unit_cell_p50_val = error_val[int(0.50 * error_val.size)]
+                unit_cell_p75_val = error_val[int(0.75 * error_val.size)]
+                unit_cell_rmse_val = np.sqrt(1/error_val.size * np.linalg.norm(error_val)**2)
+                unit_cell_error_titles = [
+                    unit_cell_titles[uc_index],
+                    f'RMSE: {unit_cell_rmse_train:0.2f} / {unit_cell_rmse_val:0.2f}',
+                    f'25%: {unit_cell_p25_train:0.2f} / {unit_cell_p25_val:0.2f}',
+                    f'50%: {unit_cell_p50_train:0.2f} / {unit_cell_p50_val:0.2f}',
+                    f'75%: {unit_cell_p75_train:0.2f} / {unit_cell_p75_val:0.2f}',
+                    ]
+                axes[0, uc_index].set_title('\n'.join(unit_cell_error_titles), fontsize=12)
+
+                sorted_xnn = np.sort(train_xnn[:, uc_index])
+                lower_xnn = sorted_xnn[int(0.005*sorted_xnn.size)]
+                upper_xnn = sorted_xnn[int(0.995*sorted_xnn.size)]
+
+                if upper_xnn > lower_xnn:
+                    axes[1, uc_index].plot(
+                        train_xnn[:, uc_index], train_xnn_pred[:, uc_index],
+                        color=[0, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[1, uc_index].plot(
+                        val_xnn[:, uc_index], val_xnn_pred[:, uc_index],
+                        color=[0.8, 0, 0], alpha=alpha,
+                        linestyle='none', marker='.', markersize=markersize,
+                        )
+                    axes[1, uc_index].plot(
+                        [lower_xnn, upper_xnn], [lower_xnn, upper_xnn],
+                        color=[0.7, 0, 0], linestyle='dotted'
+                        )
+                    axes[1, uc_index].set_xlim([lower_xnn, upper_xnn])
+                    axes[1, uc_index].set_ylim([lower_xnn, upper_xnn])
+
+                error_train = np.sort(train_xnn_error[:, uc_index])
+                error_train = error_train[~np.isnan(error_train)]
+                xnn_p25_train = error_train[int(0.25 * error_train.size)]
+                xnn_p50_train = error_train[int(0.50 * error_train.size)]
+                xnn_p75_train = error_train[int(0.75 * error_train.size)]
+                xnn_rmse_train = np.sqrt(1/error_train.size * np.linalg.norm(error_train)**2)
+                error_val = np.sort(val_xnn_error[:, uc_index])
+                error_val = error_val[~np.isnan(error_val)]
+                xnn_p25_val = error_val[int(0.25 * error_val.size)]
+                xnn_p50_val = error_val[int(0.50 * error_val.size)]
+                xnn_p75_val = error_val[int(0.75 * error_val.size)]
+                xnn_rmse_val = np.sqrt(1/error_val.size * np.linalg.norm(error_val)**2)
+                xnn_error_titles = [
+                    xnn_titles[uc_index],
+                    f'RMSE: {100 * xnn_rmse_train:0.4f} / {100 * xnn_rmse_val:0.4f}',
+                    f'25%: {100 * xnn_p25_train:0.4f} / {100 * xnn_p25_val:0.4f}',
+                    f'50%: {100 * xnn_p50_train:0.4f} / {100 * xnn_p50_val:0.4f}',
+                    f'75%: {100 * xnn_p75_train:0.4f} / {100 * xnn_p75_val:0.4f}',
+                    ]
+                axes[1, uc_index].set_title('\n'.join(xnn_error_titles), fontsize=12)
+
+                axes[0, uc_index].set_xlabel('True')
+                axes[1, uc_index].set_xlabel('True')
+            axes[0, 0].set_ylabel('Predicted')
+            axes[1, 0].set_ylabel('Predicted')
+            fig.tight_layout()
+            fig.savefig(f'{self.save_to}/{self.group}_template_reg_eval_{self.template_params["tag"]}_{save_label}.png')
+            plt.close()

@@ -1,28 +1,20 @@
 """
 Ordered to-do
-    1: Finish Integral filter model:
-        - Integral filter generate function
-    2: Test new generators
-    3: Train models and evaluate models
-    4: Optimize ensemble of models
+    0: Regenerate dataset
+    1: Train and evaluate models
+    2: Optimize ensemble of models
 
 * 2D Indexing
-    * Calculate triplets for SACLA data
-        - Does this actually work???
-    * Which FOM performs best to identify:
-        - Off by two errors
-        - Extinction group
+    - Diagnose why this isn't necesarily helpful
+    - It seems like this FOM favors high-symmetry predictions - WTF
     - Figure out a better way to incorporate 2D data
 
 * Integral filter model
-    - More informative initialization
-        - Sum metric over volumes
-        - Take maximum metric over entries
-        - Regenerate filters that are uninformative
-        - Iterate evaluating metric on entries without informative metrics.
-    * Generate function
-        - Select Top N predictions and sample from HKL
-    - Try a deep model again where the subsequent layers only have amplitudes predicted
+    * Deep network
+        - Predict initial amplitudes
+            - Compare to using these as weights
+        - Predict a second set of metrics
+        - Down sample volumes
     - permutation invariance
     - Look at sensitivity analysis
     - Reindex triclinic in reciprocal space
@@ -61,8 +53,6 @@ Ordered to-do
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 
 - Spacegroup assignments:
-    - Put extinction group in the dataset
-        - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
     - https://www.markvardsen.net/projects/ExtSym/main.html
     - https://journals.iucr.org/paper?S0021889808031087
     - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
@@ -74,6 +64,7 @@ Ordered to-do
 - Augmentation
 - Random unit cell generator
 - Indexing.py
+
 
 Readings:
     - Look more into TREOR
@@ -1210,11 +1201,11 @@ class Indexing:
                 self.random_unit_cell_generator[bravais_lattice].train(bl_data)
 
     def setup_miller_index_templates(self):
-        #from Utilities import get_xnn_from_unit_cell
-        #print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
-        #unit_cell = np.stack(self.data['reindexed_unit_cell'])
-        #xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
-        #self.data['reindexed_xnn'] = list(xnn)
+        from Utilities import get_xnn_from_unit_cell
+        print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
+        unit_cell = np.stack(self.data['reindexed_unit_cell'])
+        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
+        self.data['reindexed_xnn'] = list(xnn)
 
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
@@ -1228,6 +1219,14 @@ class Indexing:
                 )
             if self.template_params[bravais_lattice]['load_from_tag']:
                 self.miller_index_templator[bravais_lattice].load_from_tag()
+                unit_cell_templates = self.miller_index_templator[bravais_lattice].generate(
+                    102,
+                    self.rng,
+                    np.array(self.data.iloc[0]['q2'])
+                    )
+                print(self.data.iloc[0]['reindexed_unit_cell'])
+                for i in range(unit_cell_templates.shape[0]):
+                    print(unit_cell_templates[i])
             else:
                 self.miller_index_templator[bravais_lattice].setup(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
@@ -1302,13 +1301,12 @@ class Indexing:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
-                if split_group == 'hP_0_00':
-                    self.pitf_generator[split_group].load_from_tag()
-                    self.pitf_generator[split_group].evaluate(split_group_data)    
+                self.pitf_generator[split_group].load_from_tag()
+                self.pitf_generator[split_group].evaluate(split_group_data)
             else:
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
-                #self.pitf_generator[split_group].train_calibration(data=split_group_data)
+                self.pitf_generator[split_group].train_calibration(data=split_group_data)
                 self.pitf_generator[split_group].evaluate(split_group_data)
 
     def inferences_pitf(self):

@@ -74,6 +74,32 @@ def rename_spacegroup_for_gemmi(spacegroup_symbol):
         spacegroup_symbol = 'I2mb'
     elif spacegroup_symbol == 'I2am':
         spacegroup_symbol = 'I2cm'
+    elif spacegroup_symbol == 'Pm3n':
+        spacegroup_symbol = 'P m -3 n'
+    elif spacegroup_symbol == 'Pm3':
+        spacegroup_symbol = 'P m -3'
+    elif spacegroup_symbol == 'Pb3':
+        spacegroup_symbol = 'P b -3'
+    elif spacegroup_symbol == 'Fm3':
+        spacegroup_symbol = 'F m -3'
+    elif spacegroup_symbol == 'Fd3':
+        spacegroup_symbol = 'F d -3'
+    elif spacegroup_symbol == 'Fd3c':
+        spacegroup_symbol = 'F d -3 c'
+    elif spacegroup_symbol == 'Im3m':
+        spacegroup_symbol = 'I m -3 m'
+    elif spacegroup_symbol == 'Im3':
+        spacegroup_symbol = 'I m -3'
+    elif spacegroup_symbol == 'Fm3c':
+        spacegroup_symbol = 'F m -3 c'
+        
+
+    """
+    elif spacegroup_symbol == 'P41,3':
+        spacegroup_symbol = 'P41'
+    elif spacegroup_symbol == 'P62,6':
+        spacegroup_symbol = 'P62'
+    """
     return spacegroup_symbol
 
 
