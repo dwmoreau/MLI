@@ -13,6 +13,8 @@ from Utilities import fix_unphysical
 from Utilities import get_hkl_matrix
 from Utilities import get_M20_sym_reversed
 from Utilities import get_unit_cell_from_xnn
+from Utilities import get_unit_cell_volume
+from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import read_params
 from Utilities import write_params
 from Utilities import get_reciprocal_unit_cell_from_xnn
@@ -33,7 +35,6 @@ class MITemplates:
                 self.template_params[key] = template_params_defaults[key]
 
         self.lattice_system = data_params['lattice_system']
-        self.n_peaks = data_params['n_peaks']
         self.unit_cell_length = data_params['unit_cell_length']
         self.unit_cell_indices = data_params['unit_cell_indices']
         self.hkl_ref_length = data_params['hkl_ref_length']
@@ -53,8 +54,8 @@ class MITemplates:
             'max_depth': 4,
             'min_samples_leaf': 100,
             'l2_regularization': 10,
+            'n_peaks': data_params['n_peaks'],
             }
-
         for key in template_params_defaults.keys():
             if key not in self.template_params.keys():
                 self.template_params[key] = template_params_defaults[key]
@@ -91,11 +92,17 @@ class MITemplates:
             'min_samples_leaf',
             'l2_regularization',
             'calibration_n_peaks',
+            'n_peaks',
             ]
         self.template_params = dict.fromkeys(params_keys)
         self.template_params['tag'] = params['tag']
         self.template_params['templates_per_dominant_zone_bin'] = int(params['templates_per_dominant_zone_bin'])
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
+        #self.template_params['n_peaks'] = int(params['n_peaks'])
+        if self.lattice_system == 'cubic':
+            self.template_params['n_peaks'] = 10
+        else:
+            self.template_params['n_peaks'] = 20
         if 'calibrate' in params.keys():
             if params['calibrate'] == 'True':
                 self.template_params['calibrate'] = True
@@ -151,7 +158,7 @@ class MITemplates:
             # Cubic and rhombohedral do not have dominant zones
             miller_index_templates = make_sets(
                 self.template_params['templates_per_dominant_zone_bin'],
-                self.n_peaks,
+                self.template_params['n_peaks'],
                 hkl_labels_all,
                 self.hkl_ref_length,
                 self.rng
@@ -198,7 +205,7 @@ class MITemplates:
                             )
                         mi_sets.append(make_sets(
                             self.template_params['templates_per_dominant_zone_bin'],
-                            self.n_peaks,
+                            self.template_params['n_peaks'],
                             hkl_labels_bin,
                             self.hkl_ref_length,
                             self.rng
@@ -222,7 +229,7 @@ class MITemplates:
                             )
                         mi_sets.append(make_sets(
                             self.template_params['templates_per_dominant_zone_bin'],
-                            self.n_peaks,
+                            self.template_params['n_peaks'],
                             hkl_labels_bin,
                             self.hkl_ref_length,
                             self.rng
@@ -241,7 +248,7 @@ class MITemplates:
 
             reindexed_hkl = np.stack(training_data['reindexed_hkl'])
             hkl_information = np.sum(reindexed_hkl != 0, axis=1).min(axis=1)
-            hkl_information_hist = np.bincount(hkl_information, minlength=self.n_peaks)
+            hkl_information_hist = np.bincount(hkl_information, minlength=self.template_params['n_peaks'])
 
             unit_cell_volume = np.array(training_data['reindexed_volume'])
             sorted_unit_cell_volume = np.sort(unit_cell_volume)
@@ -251,23 +258,23 @@ class MITemplates:
                 11
                 )
 
-            mean_ratio = np.zeros((self.n_peaks, 2, 2))
-            for i in range(self.n_peaks):
+            mean_ratio = np.zeros((self.template_params['n_peaks'], 2, 2))
+            for i in range(self.template_params['n_peaks']):
                 mean_ratio[i, 0, 0] = np.mean(ratio_xnn[hkl_information == i])
                 mean_ratio[i, 1, 0] = np.std(ratio_xnn[hkl_information == i])
                 mean_ratio[i, 0, 1] = np.mean(ratio_unit_cell[hkl_information == i])
                 mean_ratio[i, 1, 1] = np.std(ratio_unit_cell[hkl_information == i])
 
             fig, axes = plt.subplots(1, 5, figsize=(12, 3))
-            axes[0].hist(ratio_xnn, bins=np.linspace(0, 1, self.n_peaks + 1))
-            axes[1].hist(ratio_unit_cell, bins=np.linspace(0, 1, self.n_peaks + 1))
-            axes[2].hist(ratio_rec_unit_cell, bins=np.linspace(0, 1, self.n_peaks + 1))
-            axes[3].bar(np.arange(self.n_peaks), hkl_information_hist, width=1)
+            axes[0].hist(ratio_xnn, bins=np.linspace(0, 1, self.template_params['n_peaks'] + 1))
+            axes[1].hist(ratio_unit_cell, bins=np.linspace(0, 1, self.template_params['n_peaks'] + 1))
+            axes[2].hist(ratio_rec_unit_cell, bins=np.linspace(0, 1, self.template_params['n_peaks'] + 1))
+            axes[3].bar(np.arange(self.template_params['n_peaks']), hkl_information_hist, width=1)
             axes[4].plot(
                 hkl_information, ratio_unit_cell,
                 marker='.', linestyle='none', markersize=0.25, alpha=0.5
                 )
-            axes[4].errorbar(np.arange(self.n_peaks), mean_ratio[:, 0, 1], mean_ratio[:, 1, 1])
+            axes[4].errorbar(np.arange(self.template_params['n_peaks']), mean_ratio[:, 0, 1], mean_ratio[:, 1, 1])
 
             axes[0].set_xlabel('Dominant zone ratio\n(Min/Max Xnn)')
             axes[1].set_xlabel('Dominant zone ratio\n(Min/Max Unit Cell)')
@@ -291,7 +298,7 @@ class MITemplates:
             ratio_bins = np.linspace(0, 1, n_ratio_bins + 1)
             templates_per_information_bin = self.template_params['templates_per_dominant_zone_bin']
             templates_per_dominant_zone_bin = int(self.template_params['templates_per_dominant_zone_bin'] / n_ratio_bins)
-            for i in range(self.n_peaks):
+            for i in range(self.template_params['n_peaks']):
                 indices = hkl_information == i
                 if np.sum(indices) > 0:
                     hkl_labels_bin = hkl_labels_all[indices]
@@ -322,7 +329,7 @@ class MITemplates:
                                         )
                                     mi_sets.append(make_sets(
                                         templates_per_dominant_zone_bin,
-                                        self.n_peaks,
+                                        self.template_params['n_peaks'],
                                         hkl_labels_bin,
                                         self.hkl_ref_length,
                                         self.rng
@@ -347,7 +354,7 @@ class MITemplates:
                             )
                         mi_sets.append(make_sets(
                             self.template_params['templates_per_dominant_zone_bin'],
-                            self.n_peaks,
+                            self.template_params['n_peaks'],
                             hkl_labels_bin,
                             self.hkl_ref_length,
                             self.rng
@@ -393,7 +400,7 @@ class MITemplates:
         # Calculate initial values for xnn using linear least squares methods
         xnn = np.zeros((n_templates, self.unit_cell_length))
         A = hkl2 / q2_obs[np.newaxis, :, np.newaxis]
-        b = np.ones(self.n_peaks)
+        b = np.ones(self.template_params['n_peaks'])
         for template_index in range(n_templates):
             xnn[template_index], r, rank, s = np.linalg.lstsq(
                 A[template_index], b, rcond=None
@@ -415,8 +422,6 @@ class MITemplates:
                 hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
                 hkl2 = get_hkl_matrix(hkl, self.lattice_system)
                 q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
-                q2_calc_max = q2_calc.max(axis=1)
-                N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
             else:
                 q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
                 sort_indices = q2_calc.argsort(axis=1)
@@ -432,8 +437,31 @@ class MITemplates:
             delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
         residuals = np.abs(q2_calc - q2_obs[np.newaxis])
-        
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
+
+        # Downsampling removes redundant unit cells
+        # Downsampling happens in chunks of xnn sorted by reciprocal space volume.
+        # If the chunk size is large, downsampling is extremely slow.
+        # If the chunk size is small, not enough redundant lattices get removed
+        # Running it twice with a small chunk size removes more lattices
+        # while also being reasonably fast.
+        for _ in range(2):
+            xnn = self.downsample_candidates(xnn, residuals)
+            q2_calculator = Q2Calculator(
+                lattice_system=self.lattice_system,
+                hkl=self.hkl_ref,
+                tensorflow=False,
+                representation='xnn'
+                )
+            q2_ref_calc = q2_calculator.get_q2(xnn)
+            hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+            hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+            hkl2 = get_hkl_matrix(hkl, self.lattice_system)
+            q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
+            residuals = np.abs(q2_calc - q2_obs[np.newaxis])
+
+        q2_calc_max = q2_calc.max(axis=1)
+        N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
         return xnn, residuals, N_pred, q2_calc_max
 
     def generate_xnn(self, q2_obs, indices=None):
@@ -446,8 +474,8 @@ class MITemplates:
             n_templates = indices.size
 
         xnn = np.zeros((n_templates, self.unit_cell_length))
-        residuals = np.zeros((n_templates, self.n_peaks))
-        order = np.arange(self.n_peaks)
+        residuals = np.zeros((n_templates, self.template_params['n_peaks']))
+        order = np.arange(self.template_params['n_peaks'])
         
         for template_index in range(n_templates):
             sigma = q2_obs
@@ -570,6 +598,52 @@ class MITemplates:
         else:
             return self.generate_uncalibrated(n_templates, rng, q2_obs)
 
+    def downsample_candidates(self, xnn, residuals):
+        chunk_size = 250
+        n_chunks = xnn.shape[0] // chunk_size + 1
+        radius = self.template_params['radius'] / 100
+
+        reciprocal_volume = get_unit_cell_volume(get_reciprocal_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            ), partial_unit_cell=True, lattice_system=self.lattice_system)
+        sort_indices = np.argsort(reciprocal_volume)
+        xnn = xnn[sort_indices]
+        residuals = residuals[sort_indices]
+        error = np.linalg.norm(residuals, axis=1)
+
+        xnn_downsampled = []
+        for chunk_index in range(n_chunks):
+            if chunk_index == n_chunks - 1:
+                xnn_chunk = xnn[chunk_index * chunk_size:]
+                error_chunk = error[chunk_index * chunk_size:]
+            else:
+                xnn_chunk = xnn[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+                error_chunk = error[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+            status = True
+            while status:
+                distance = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk)
+                neighbor_array = distance < radius
+                neighbor_count = np.sum(neighbor_array, axis=1)
+                if neighbor_count.size > 0 and neighbor_count.max() > 1:
+                    highest_density_index = np.argmax(neighbor_count)
+                    neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
+                    best_neighbor = np.argmin(error[neighbor_indices])
+                    xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
+                    error_best_neighbor = error_chunk[neighbor_indices][best_neighbor]
+                    xnn_chunk = np.row_stack((
+                        np.delete(xnn_chunk, neighbor_indices, axis=0), 
+                        xnn_best_neighbor
+                        ))
+                    error_chunk = np.concatenate((
+                        np.delete(error_chunk, neighbor_indices), 
+                        [error_best_neighbor]
+                        ))
+                else:
+                    status = False
+            xnn_downsampled.append(xnn_chunk)
+        xnn_downsampled = np.row_stack(xnn_downsampled)
+        return xnn_downsampled
+
     def _get_inputs_worker(self, inputs):
         q2_obs = inputs[0]
         xnn_true = inputs[1]
@@ -580,8 +654,6 @@ class MITemplates:
 
     def get_inputs(self, data, n_entries):
         q2_obs = np.stack(data['q2'])
-        
-
         q2_error = []
         neighbor = []
         distance = []
@@ -621,37 +693,21 @@ class MITemplates:
         q2_error = np.row_stack(q2_error)
         neighbor = np.concatenate(neighbor)
         distance = np.concatenate(distance)
-        xnn = np.stack(xnn, axis=0)
+        n_templates_entry = [xnn_entry.shape[0] for xnn_entry in xnn]
+        xnn = np.row_stack(xnn)
         N_pred = np.concatenate(N_pred)
         q2_calc_max = np.concatenate(q2_calc_max)
-        return q2_error, neighbor, distance, xnn, xnn_true[indices], N_pred, q2_calc_max
+        return q2_error, neighbor, distance, xnn, xnn_true[indices], N_pred, q2_calc_max, n_templates_entry
 
     def calibrate_templates(self, data):
         unaugmented_data = data[~data['augmented']]
         training_data = unaugmented_data[unaugmented_data['train']]
         val_data = unaugmented_data[~unaugmented_data['train']]
         n_val = int(0.2*self.template_params['n_train'])
-        q2_error_train, neighbor_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train = \
+        q2_error_train, neighbor_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train, n_templates_entry_train = \
             self.get_inputs(training_data, self.template_params['n_train'])
-        q2_error_val, neighbor_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val = \
+        q2_error_val, neighbor_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val, n_templates_entry_val = \
             self.get_inputs(val_data, n_val)
-        #np.save('MICal_test_q2_error_train.npy', q2_error_train)
-        #np.save('MICal_test_q2_error_val.npy', q2_error_val)
-        #np.save('MICal_test_neighbor_train.npy', neighbor_train)
-        #np.save('MICal_test_neighbor_val.npy', neighbor_val)
-        #np.save('MICal_test_distance_train.npy', distance_train)
-        #np.save('MICal_test_distance_val.npy', distance_val)
-        #np.save('MICal_test_xnn_train_pred.npy', xnn_train_pred)
-        #np.save('MICal_test_xnn_val_pred.npy', xnn_val_pred)
-
-        #q2_error_train = np.load('MICal_test_q2_error_train.npy') 
-        #q2_error_val = np.load('MICal_test_q2_error_val.npy') 
-        #neighbor_train = np.load('MICal_test_neighbor_train.npy') 
-        #neighbor_val = np.load('MICal_test_neighbor_val.npy') 
-        #distance_train = np.load('MICal_test_distance_train.npy') 
-        #distance_val = np.load('MICal_test_distance_val.npy') 
-        #xnn_train_pred = np.load('MICal_test_xnn_train_pred.npy')
-        #xnn_val_pred = np.load('MICal_test_xnn_val_pred.npy')
 
         train_inputs = np.concatenate((
             q2_error_train[:, :self.template_params['calibration_n_peaks']],
@@ -675,9 +731,6 @@ class MITemplates:
             self.hgbc_classifier,
             f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
             )
-        self.hgbc_classifier = joblib.load(
-            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
-            )
 
         probability_train = self.hgbc_classifier.predict_proba(train_inputs)
         score_train = self.hgbc_classifier.score(train_inputs, neighbor_train)
@@ -687,6 +740,26 @@ class MITemplates:
         alpha = 0.5
         ms = 0.5
         top_n = 200
+        # Get the fraction within convergence radius for all and predicted entries
+        xy_fractions_train = np.zeros((len(n_templates_entry_train), 2))
+        start = 0
+        for entry_index in range(len(n_templates_entry_train)):
+            n_templates_entry = n_templates_entry_train[entry_index]
+            neighbor_entry = neighbor_train[start: start + n_templates_entry]
+            pred_indices = probability_train[start: start + n_templates_entry, 1] > 0.5
+            xy_fractions_train[entry_index, 0] = neighbor_entry.mean()
+            xy_fractions_train[entry_index, 1] = neighbor_entry[pred_indices].mean()
+            start += n_templates_entry
+
+        xy_fractions_val = np.zeros((len(n_templates_entry_val), 2))
+        start = 0
+        for entry_index in range(len(n_templates_entry_val)):
+            n_templates_entry = n_templates_entry_val[entry_index]
+            neighbor_entry = neighbor_val[start: start + n_templates_entry]
+            pred_indices = probability_val[start: start + n_templates_entry, 1] > 0.5
+            xy_fractions_val[entry_index, 0] = neighbor_entry.mean()
+            xy_fractions_val[entry_index, 1] = neighbor_entry[pred_indices].mean()
+            start += n_templates_entry
 
         distance_close_train = distance_train[neighbor_train.astype(bool)]
         distance_far_train = distance_train[~neighbor_train.astype(bool)]
@@ -714,7 +787,7 @@ class MITemplates:
         top_n_indices_val = np.argsort(probability_val[:, 0])[:top_n]
         top_n_distance_val = np.median(distance_val[top_n_indices_val])
 
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True, sharex=True)
+        fig, axes = plt.subplots(1, 3, figsize=(10, 4), sharey=False, sharex=True)
         axes[0].plot(
             probability_train[indices_train, 1], distance_train[indices_train],
             linestyle='none', marker='.', alpha=alpha, markersize=ms
@@ -723,14 +796,28 @@ class MITemplates:
             probability_val[indices_val, 1], distance_val[indices_val],
             linestyle='none', marker='.', alpha=alpha, markersize=ms
             )
-        axes[0].set_title(f'TRAIN Score: {score_train:0.3f}\nMedian distance (top {top_n} / all) {top_n_distance_train:0.5f} / {np.median(distance_train):0.5f}')
-        axes[1].set_title(f'Val Score: {score_val:0.3f}\nMedian distance (top {top_n} / all) {top_n_distance_val:0.5f} / {np.median(distance_val):0.5f}')
+        axes[2].plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])
+        axes[2].plot(
+            xy_fractions_train[:, 0], xy_fractions_train[:, 1],
+            linestyle='none', marker='.'
+            )
+        axes[2].plot(
+            xy_fractions_val[:, 0], xy_fractions_val[:, 1],
+            linestyle='none', marker='.'
+            )
+        axes[0].set_title(f'TRAIN Score: {score_train:0.3f}\nMedian distance (top {top_n} / all)\n{top_n_distance_train:0.5f} / {np.median(distance_train):0.5f}')
+        axes[1].set_title(f'Val Score: {score_val:0.3f}\nMedian distance (top {top_n} / all)\n{top_n_distance_val:0.5f} / {np.median(distance_val):0.5f}')
         axes[0].set_ylim([-0.001, 0.05])
+        axes[1].set_ylim([-0.001, 0.05])
         xlim = axes[0].get_xlim()
         for i in range(2):
             axes[i].set_xlabel('Probability in convergence radius')
             axes[i].plot(xlim, self.template_params['radius']*np.ones(2), color=[0, 0, 0])
         axes[0].set_ylabel('Xnn distance')
+        axes[1].set_ylabel('Xnn distance')
+
+        axes[2].set_xlabel('Fraction of all entries within CR')
+        axes[2].set_ylabel('Fraction of predicted entries within CR')
         fig.tight_layout()
         fig.savefig(f'{self.save_to}/{self.group}_calibration_{self.template_params["tag"]}.png')
         plt.close()
@@ -738,6 +825,7 @@ class MITemplates:
         ##############################
         # Plot unit cell evaluations #
         ##############################
+        """
         val_xnn = xnn_val_true
         val_unit_cell = get_unit_cell_from_xnn(
             val_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
@@ -776,6 +864,9 @@ class MITemplates:
 
         figsize = (self.unit_cell_length*2 + 2, 6)
         fig, axes = plt.subplots(2, self.unit_cell_length, figsize=figsize)
+        if self.unit_cell_length == 1:
+            # cubic case, axes.shape = 2, -> 2, 1
+            axes = axes[:, np.newaxis]
         unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
         xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
         alpha = 0.1
@@ -910,3 +1001,4 @@ class MITemplates:
             fig.tight_layout()
             fig.savefig(f'{self.save_to}/{self.group}_template_reg_eval_{self.template_params["tag"]}_{save_label}.png')
             plt.close()
+        """

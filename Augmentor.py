@@ -679,6 +679,13 @@ class Augmentor:
 
     def evaluate(self, data, split_group):
         train = data[data['train']]
+        train_unaugmented = train[~train['augmented']]
+        train_augmented = train[train['augmented']]
+        # There are usually an order of magnitude more augmented datasets than unaugmented
+        # Downsample the augmented data so the balance is reasonable.
+        if len(train_augmented) > len(train_unaugmented):
+            train_augmented = train_augmented.sample(n=len(train_unaugmented), replace=False)
+            train = pd.concat((train_unaugmented, train_augmented), ignore_index=True)
         train_uc = np.stack(train['reindexed_unit_cell'])[:, self.unit_cell_indices]
         train_uc_volume = get_unit_cell_volume(
             train_uc, partial_unit_cell=True, lattice_system=self.lattice_system
@@ -687,6 +694,11 @@ class Augmentor:
         train_q2_obs = np.stack(train['q2'])
 
         val = data[~data['train']]
+        val_unaugmented = val[~val['augmented']]
+        val_augmented = val[val['augmented']]
+        if len(val_augmented) > len(val_unaugmented):
+            val_augmented = val_augmented.sample(n=len(val_unaugmented), replace=False)
+            val = pd.concat((val_unaugmented, val_augmented), ignore_index=True)
         val_uc = np.stack(val['reindexed_unit_cell'])[:, self.unit_cell_indices]
         val_uc_volume = get_unit_cell_volume(
             val_uc, partial_unit_cell=True, lattice_system=self.lattice_system

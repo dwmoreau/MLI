@@ -1,33 +1,20 @@
 """
 Ordered to-do
-    0: Regenerate dataset
-    1: Train and evaluate models
-    2: Optimize ensemble of models
-
-* 2D Indexing
-    - Diagnose why this isn't necesarily helpful
-    - It seems like this FOM favors high-symmetry predictions - WTF
-    - Figure out a better way to incorporate 2D data
+    0: Train and evaluate models
+        - cubic
+        - tetragonal
+        - hexagonal
+        - rhombohedral
+            - PITF Fails
+        - orthorhombic
+        - monoclinic
+        - tetragonal
+    1: Optimize ensemble of models
 
 * Integral filter model
-    * Deep network
-        - Predict initial amplitudes
-            - Compare to using these as weights
-        - Predict a second set of metrics
-        - Down sample volumes
-    - permutation invariance
-    - Look at sensitivity analysis
-    - Reindex triclinic in reciprocal space
+    - Run baseline for comparison
 
 - Regression
-    x Re-evaluate hexagonal:
-        x Augmentation helps considerably
-        x Hard to tell if the alpha_beta model is better.
-            x Make the alpha_beta model an option
-        x The LogCosh target function helps
-            x Make the normal target_function an option
-        x a bigger model improves predictions without overfitting
-    - Retrain regression networks with updates
     - Look at individual split_groups and retrain overfit / underfit networks
 
 - Optimization
@@ -38,6 +25,11 @@ Ordered to-do
     - Is there an optimal number of subsampled peaks
     - Add a validation for the correct extinction group
 
+* 2D Indexing
+    - Diagnose why this isn't necesarily helpful
+    - It seems like this FOM favors high-symmetry predictions
+    - Figure out a better way to incorporate 2D data
+
 - Documentation
     - Rewrite starting at the optimization
     - Edit
@@ -45,7 +37,7 @@ Ordered to-do
     - github README.md
 
 - Experimental Data
-    * peak list
+    - peak list
         - Triplets
         - LCLS data
     - GSASII tutorials
@@ -64,7 +56,8 @@ Ordered to-do
 - Augmentation
 - Random unit cell generator
 - Indexing.py
-
+- Data
+    - Reindex triclinic in reciprocal space
 
 Readings:
     - Look more into TREOR
@@ -1201,12 +1194,6 @@ class Indexing:
                 self.random_unit_cell_generator[bravais_lattice].train(bl_data)
 
     def setup_miller_index_templates(self):
-        from Utilities import get_xnn_from_unit_cell
-        print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
-        unit_cell = np.stack(self.data['reindexed_unit_cell'])
-        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
-        self.data['reindexed_xnn'] = list(xnn)
-
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             self.miller_index_templator[bravais_lattice] = MITemplates(
@@ -1219,14 +1206,14 @@ class Indexing:
                 )
             if self.template_params[bravais_lattice]['load_from_tag']:
                 self.miller_index_templator[bravais_lattice].load_from_tag()
-                unit_cell_templates = self.miller_index_templator[bravais_lattice].generate(
-                    102,
-                    self.rng,
-                    np.array(self.data.iloc[0]['q2'])
-                    )
-                print(self.data.iloc[0]['reindexed_unit_cell'])
-                for i in range(unit_cell_templates.shape[0]):
-                    print(unit_cell_templates[i])
+                #unit_cell_templates = self.miller_index_templator[bravais_lattice].generate(
+                #    102,
+                #    self.rng,
+                #    np.array(self.data.iloc[0]['q2'])
+                #    )
+                #print(self.data.iloc[0]['reindexed_unit_cell'])
+                #for i in range(unit_cell_templates.shape[0]):
+                #    print(unit_cell_templates[i])
             else:
                 self.miller_index_templator[bravais_lattice].setup(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
@@ -1280,12 +1267,6 @@ class Indexing:
         self.data['reindexed_unit_cell_pred_var_trees'] = list(reindexed_uc_pred_var_trees)
 
     def setup_pitf(self):
-        from Utilities import get_xnn_from_unit_cell
-        print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
-        unit_cell = np.stack(self.data['reindexed_unit_cell'])
-        xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
-        self.data['reindexed_xnn'] = list(xnn)
-
         self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
@@ -1308,56 +1289,6 @@ class Indexing:
                 self.pitf_generator[split_group].train(data=split_group_data)
                 self.pitf_generator[split_group].train_calibration(data=split_group_data)
                 self.pitf_generator[split_group].evaluate(split_group_data)
-
-    def inferences_pitf(self):
-        reindexed_xnn_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))
-        reindexed_xnn_pred_var = np.zeros((len(self.data), self.data_params['unit_cell_length']))
-        hkl_softmax_pred = np.zeros((len(self.data), self.data_params['n_peaks'], self.data_params['hkl_ref_length']))
-
-        for split_group_index, split_group in enumerate(self.data_params['split_groups']):
-            bravais_lattice = split_group[:2]
-            split_group_data = self.data[self.data['split_group'] == split_group]
-            unaugmented_split_group_data = split_group_data[~split_group_data['augmented']].copy()
-
-            reindexed_xnn_pred, reindexed_xnn_pred_var, hkl_softmax_pred = \
-                self.pitf_generator[split_group].predict(data=unaugmented_split_group_data, batch_size=1024)
-
-            hkl_pred = self.convert_softmax_to_assignments(
-                hkl_softmax_pred, self.hkl_ref[bravais_lattice]
-                )
-            hkl_assign = hkl_softmax_pred.argmax(axis=2)
-            unaugmented_split_group_data['hkl_labels_pred'] = list(hkl_assign)
-            unaugmented_split_group_data['hkl_pred'] = list(hkl_pred)
-            unaugmented_split_group_data['hkl_softmaxes'] = list(hkl_softmax_pred)
-            unaugmented_split_group_data['reindexed_xnn_pred_pitf'] = list(reindexed_xnn_pred)
-            unaugmented_split_group_data['reindexed_xnn_pred_pitf_var'] = list(reindexed_xnn_pred_var)
-
-            unaugmented_split_group_data['reindexed_unit_cell_pred_pitf'] = list(get_unit_cell_from_xnn(
-                reindexed_xnn_pred,
-                partial_unit_cell=True, 
-                lattice_system=self.data_params['lattice_system'],
-                ))
-
-            evaluate_regression_pitf(
-                data=unaugmented_split_group_data,
-                unit_cell_length=self.data_params['unit_cell_length'],
-                save_to_name=f'{self.save_to["pitf"]}/{split_group}_reg_pitf.png',
-                unit_cell_indices=self.data_params['unit_cell_indices'],
-                )
-            calibrate_regression_pitf(
-                data=unaugmented_split_group_data,
-                unit_cell_length=self.data_params['unit_cell_length'],
-                unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["pitf"]}/{split_group}_reg_calibration_pitf.png',
-                unit_cell_indices=self.data_params['unit_cell_indices']
-                )
-            self.pitf_generator[split_group].evaluate_indexing(
-                unaugmented_split_group_data,
-                xnn_key='reindexed_xnn',
-                unit_cell_indices=self.data_params['unit_cell_indices'],
-                )
-
-            self.pitf_generator[split_group].calibrate_indexing(unaugmented_split_group_data)
 
     def evaluate_regression(self):
         for bravais_lattice in self.data_params['bravais_lattices']:

@@ -82,6 +82,8 @@ entry_tags = [
 
 base_dir = '/Users/DWMoreau/MLI/data/experimental_data/MFXP10033'
 entry_tags = [
+    'MI2-46',
+    'MI2-59',
     #'MI2-68',
     #'MI2-39',
     #'MI2-58',
@@ -91,7 +93,7 @@ entry_tags = [
     #'MI2-104',
     #'MI2-102',
     #'MI2-73',
-    'MI2-75',
+    #'MI2-75',
     #'MI2-76',
     #'MI2-103',
     #'MI2-60_rg026',
