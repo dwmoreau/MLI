@@ -655,16 +655,25 @@ def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
 
 
 def get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system):
+    # This gets symmetry operations for a given lattice system
     mi_sym = get_hkl_triplet_symmetry(lattice_system)
-    hkl0 = np.take(hkl, triplets_obs[:, 0].astype(int), axis=1)
-    hkl1 = np.take(hkl, triplets_obs[:, 1].astype(int), axis=1)
+
+    # triplets_obs columns are: peak_0 index, peak_1 index, |q0 - q1|**2, ???
+    # triplets_obs is a float array, so round before casting to integer
+    hkl0 = np.take(hkl, np.round(triplets_obs[:, 0], decimals=0).astype(int), axis=1)
+    hkl1 = np.take(hkl, np.round(triplets_obs[:, 1], decimals=0).astype(int), axis=1)
     hkl0_sym = np.matmul(mi_sym, hkl0[:, :, np.newaxis, :, np.newaxis])[:, :, :, :, 0]
+
+    # q0 - q1 is calculated from hkl_0 - hkl_1
     hkl_diff = hkl0_sym - hkl1[:, :, np.newaxis, :]
     hkl2_diff = get_hkl_matrix(hkl_diff, lattice_system)
     q2_diff_calc_sym = np.sum(xnn[:, np.newaxis, np.newaxis, :] * hkl2_diff, axis=3)
     difference = np.abs(triplets_obs[:, 2][np.newaxis, :, np.newaxis] - q2_diff_calc_sym)
-    q2_diff_calc_index = np.argmin(difference, axis=2)
-    q2_diff_calc = np.take_along_axis(q2_diff_calc_sym, q2_diff_calc_index[:, :, np.newaxis], axis=2)[:, :, 0]
+    q2_diff_calc = np.take_along_axis(
+        q2_diff_calc_sym,
+        np.argmin(difference, axis=2)[:, :, np.newaxis],
+        axis=2
+        )[:, :, 0]
     return q2_diff_calc
 
 
@@ -681,6 +690,8 @@ def get_M_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattic
         q2_obs, xnn, hkl, lattice_system, bravais_lattice
         )
 
+    # q2_diff_calc is the magnitude of the calculated difference between q0 and q1
+    # It is the calculated value of triplet_obs[:, 2]
     q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
     reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
         xnn, partial_unit_cell=True, lattice_system=lattice_system

@@ -305,6 +305,8 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, comm, options=None):
         'max_neighbors': 10,
         'neighbor_radius': 0.00005,
         'convergence_testing': False,
+        'downsample_radius': 0.002,
+        'assignment_threshold': 0.80,
         }
     if not options is None:
         for key in options.keys():
@@ -363,6 +365,8 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm, options=None
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         'convergence_testing': False,
+        'downsample_radius': 0.0001,
+        'assignment_threshold': 0.80,
         }
     if not options is None:
         for key in options.keys():
@@ -441,6 +445,8 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, comm, options=None)
         'max_neighbors': 20,
         'neighbor_radius': 0.0005,
         'convergence_testing': False,
+        'downsample_radius': 0.0001,
+        'assignment_threshold': 0.80,
         }
     if not options is None:
         for key in options.keys():
@@ -489,6 +495,8 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, comm, options=No
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         'convergence_testing': False,
+        'downsample_radius': 0.0001,
+        'assignment_threshold': 0.80,
         }
     if not options is None:
         for key in options.keys():
@@ -628,6 +636,8 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, comm, options=No
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         'convergence_testing': False,
+        'downsample_radius': 0.0001,
+        'assignment_threshold': 0.80,
         }
     if not options is None:
         for key in options.keys():
@@ -739,6 +749,8 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None
         'max_neighbors': 100,
         'neighbor_radius': 0.0005,
         'convergence_testing': False,
+        'downsample_radius': 0.0001,
+        'assignment_threshold': 0.80,
         }
     if not options is None:
         for key in options.keys():
@@ -783,6 +795,8 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None)
         'max_neighbors': 50,
         'neighbor_radius': 0.0005,
         'convergence_testing': False,
+        'downsample_radius': 0.0001,
+        'assignment_threshold': 0.80,
         }
     if not options is None:
         for key in options.keys():

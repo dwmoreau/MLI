@@ -80,6 +80,7 @@ entry_tags = [
     ]
 """
 
+"""
 base_dir = '/Users/DWMoreau/MLI/data/experimental_data/MFXP10033'
 entry_tags = [
     'MI2-46',
@@ -100,6 +101,27 @@ entry_tags = [
     #'MI2-60_rg026_filtered',
     #'MI2-06',
     ]
+"""
+
+base_dir = '/Users/DWMoreau/MLI/data/experimental_data/MFXL10398'
+entry_tags = [
+    #'s3',
+    #'s4',
+    #'s5',
+    #'s6',
+    #'s7',
+    #'s8',
+    #'s13',
+    #'s14',
+    #'s16',
+    #'s23',
+    #'s24',
+    #'s25_chip4',
+    #'s27',
+    's40',
+    #'s42',
+    #'s49',
+    ]
 rng = np.random.default_rng()
 
 comm = MPI.COMM_WORLD
@@ -112,17 +134,21 @@ logger.info('Starting process')
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0]
 #serial =           [True, True, True, True, True, True, True]
 
-bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+#manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
 #bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
 #manager_rank =     [    0,     0,     1,     1]
 #serial =           [False, False, False, False]
 
-#bravais_lattices = ['oP']
-#manager_rank =     [   0]
+#bravais_lattices = [ 'cP']
+#manager_rank =     [    0]
 #serial =           [True]
+
+bravais_lattices = ['oP']
+manager_rank =     [   0]
+serial =           [True]
 
 #bravais_lattices = [ 'mP']
 #manager_rank =     [    0]

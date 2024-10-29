@@ -61,6 +61,7 @@ class PeakListCreator:
             self._combine_expt_refl_files()
             self._parse_refl_file()
         else:
+            self._parse_refl_file()
             self.q2_obs = np.load(
                 os.path.join(self.save_to_directory, f'{self.tag}_q2_obs.npy'),
                 )
@@ -189,32 +190,33 @@ class PeakListCreator:
         print('Parsing Reflection File')
         for expt_index, expt in enumerate(expts):
             refls_expt = refls.select(refls['id'] == expt_index)
-            wavelength = expt.beam.get_wavelength()
-            s0_lattice = expt.beam.get_s0() #|s0| = 1/wavelength
-            # s1 is the vector going from the interaction point to the crystal
-            # s1_normed has magnitude 1/wavelength
-            s1_normed_lattice = []
-            s1_lattice = []
-            for panel_index, panel in enumerate(expt.detector):
-                refls_panel = refls_expt.select(refls_expt['panel'] == panel_index)
-                if len(refls_panel) > 0:
-                    s1_normed_panel, s1_panel = self._get_s1_from_xyz(
-                        panel, 
-                        flumpy.to_numpy(refls_panel['xyzobs.px.value']), 
-                        wavelength,
-                        )
-                    s1_normed_lattice.append(s1_normed_panel)
-                    s1_lattice.append(s1_panel)
-            s1_lattice = np.row_stack(s1_lattice)
-            refl_counts.append(s1_lattice.shape[0])
-            # s0 and s1 are retained for constructing secondary peaks and beam center optimization
-            s1.append(np.row_stack(s1_lattice))
-            s0.append(s0_lattice)
-            expt_indices.append(expt_index*np.ones(s1_lattice.shape[0], dtype=int))
-            # q2_lattice is the magnitude**2 of the scattering vector
-            q2.append(self._get_q2_spacing(
-                np.row_stack(s1_normed_lattice), s0_lattice)
-                )
+            if len(refls_expt) > 0:
+                wavelength = expt.beam.get_wavelength()
+                s0_lattice = expt.beam.get_s0() #|s0| = 1/wavelength
+                # s1 is the vector going from the interaction point to the crystal
+                # s1_normed has magnitude 1/wavelength
+                s1_normed_lattice = []
+                s1_lattice = []
+                for panel_index, panel in enumerate(expt.detector):
+                    refls_panel = refls_expt.select(refls_expt['panel'] == panel_index)
+                    if len(refls_panel) > 0:
+                        s1_normed_panel, s1_panel = self._get_s1_from_xyz(
+                            panel, 
+                            flumpy.to_numpy(refls_panel['xyzobs.px.value']), 
+                            wavelength,
+                            )
+                        s1_normed_lattice.append(s1_normed_panel)
+                        s1_lattice.append(s1_panel)
+                s1_lattice = np.row_stack(s1_lattice)
+                refl_counts.append(s1_lattice.shape[0])
+                # s0 and s1 are retained for constructing secondary peaks and beam center optimization
+                s1.append(np.row_stack(s1_lattice))
+                s0.append(s0_lattice)
+                expt_indices.append(expt_index*np.ones(s1_lattice.shape[0], dtype=int))
+                # q2_lattice is the magnitude**2 of the scattering vector
+                q2.append(self._get_q2_spacing(
+                    np.row_stack(s1_normed_lattice), s0_lattice)
+                    )
         self.q2_obs = np.concatenate(q2)
         self.refl_counts = np.array(refl_counts)
         self.expt_indices = np.concatenate(expt_indices)

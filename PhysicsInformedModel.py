@@ -5,6 +5,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import scipy.stats
 import scipy.special
+import scipy.ndimage
 import tensorflow as tf
 
 from Utilities import fix_unphysical
@@ -27,13 +28,12 @@ class ExtractionLayer(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.model_params = model_params
         self.seed = 0
-        self.sigma = self.model_params['sigma']
-
         self.volumes = self.add_weight(
             shape=(self.model_params['n_volumes'], 1, 1),
             initializer=tf.keras.initializers.Zeros(),
             dtype=tf.float32,
             trainable=False,
+            constraint=tf.keras.constraints.NonNeg(),
             name='volumes'
             )
         self.filters = self.add_weight(
@@ -41,33 +41,49 @@ class ExtractionLayer(tf.keras.layers.Layer):
             initializer=tf.keras.initializers.Zeros(),
             dtype=tf.float32,
             trainable=True,
-            regularizer=None,
             constraint=tf.keras.constraints.NonNeg(),
             name='filters'
             )
+
+        self.sigma = self.add_weight(
+            shape=(),
+            initializer=tf.keras.initializers.Zeros(),
+            dtype=tf.float32,
+            trainable=True,
+            constraint=tf.keras.constraints.NonNeg(),
+            name='sigma'
+            )
+
         if self.model_params['model_type'] == 'deep':
             # If the .call method is not used, then the model
             # weights will not load properly.
             self.call = self.deep_model_call
-        else:
+        elif self.model_params['model_type'] == 'metric':
             self.call = self.basic_model_call
 
         if not q2_obs is None:
             rng = np.random.default_rng(self.seed)
             reciprocal_volume_sorted = np.sort(reciprocal_volume)
-            upper_volume_limit = reciprocal_volume_sorted[int(0.999*reciprocal_volume_sorted.size)]
-            bins_vol = np.linspace(0, upper_volume_limit, 401)
+            upper_volume_limit = reciprocal_volume_sorted[int(0.990*reciprocal_volume_sorted.size)]
+            lower_volume_limit = reciprocal_volume_sorted[int(0.005*reciprocal_volume_sorted.size)]
+            bins_vol = np.linspace(lower_volume_limit, upper_volume_limit, 401)
             centers_vol = (bins_vol[1:] + bins_vol[:-1]) / 2
             reciprocal_volume_hist, _ = np.histogram(reciprocal_volume, bins=bins_vol, density=True)
-            reciprocal_volume_hist = scipy.signal.medfilt(reciprocal_volume_hist, kernel_size=3)
+            reciprocal_volume_hist = scipy.ndimage.gaussian_filter1d(
+                reciprocal_volume_hist, sigma=3, mode='constant'
+                )
             reciprocal_volume_rv = scipy.stats.rv_histogram(
                 (reciprocal_volume_hist, bins_vol), density=True
                 )
             reciprocal_volume_samples = reciprocal_volume_rv.ppf(np.linspace(
-                0.001, 1, self.model_params['n_volumes']
+                0.001, 0.999, self.model_params['n_volumes']
                 ))
             distribution_volumes = (reciprocal_volume_samples / q2_obs_scale**2)**(2/3)
             self.volumes.assign(tf.cast(distribution_volumes, dtype=tf.float32)[:, tf.newaxis, tf.newaxis])
+
+            volume_differences = distribution_volumes[1:] - distribution_volumes[:-1]
+            sigma = min(max(np.median(volume_differences), 0.015), 0.035)
+            self.sigma = tf.cast(sigma, dtype=tf.float32)
 
             q2_obs_scaled = q2_obs / q2_obs_scale
             q2_obs_scaled_sorted = np.sort(
@@ -101,6 +117,8 @@ class ExtractionLayer(tf.keras.layers.Layer):
                 q2_filters = q2_filters[np.argsort(peak_position_sum)]
             self.filters.assign(tf.cast(q2_filters, dtype=tf.float32)[tf.newaxis])
             self.filters_init = self.filters.numpy()[0]
+        else:
+            self.filters_init = None
 
     def basic_model_call(self, q2_obs_scaled, amplitude_logits, **kwargs):
         # filters:     1, n_filters, filter_length
@@ -116,13 +134,11 @@ class ExtractionLayer(tf.keras.layers.Layer):
             amplitude_logits,
             axis=4
             ) # peak axis
-        distances = amplitudes * tf.math.exp(-1/2 * (difference / self.sigma)**2)
+        # Adding 0.001 to self.sigma prevents NaNs
+        distances = amplitudes * tf.math.exp(-1/2 * (difference / (self.sigma + 0.001))**2)
         # distances: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
         # metric:    batch_size, n_volumes, n_filters
-        if self.model_params['metric_type'] == 'integral':
-            metric = tf.reduce_sum(distances, axis=(3, 4))
-        elif self.model_params['metric_type'] == 'kl_div':
-            metric = tf.reduce_prod(tf.reduce_sum(distances, axis=4), axis=3)
+        metric = tf.reduce_sum(distances, axis=(3, 4))
         return metric
 
     def deep_model_call(self, q2_obs_scaled, **kwargs):
@@ -133,7 +149,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
         # difference:  batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
         q2_filters = (self.volumes * self.filters)[tf.newaxis, :, :, :, tf.newaxis]
         difference = q2_filters - q2_obs_scaled[:, tf.newaxis, tf.newaxis, tf.newaxis, :]
-        return tf.math.exp(-1/2 * (difference / self.sigma)**2)
+        return tf.math.exp(-1/2 * (difference / (self.sigma + 0.001))**2)
 
     def loss_function_common(self, y_true, y_pred):
         # y_true: batch_size, unit_cell_length
@@ -175,7 +191,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
                     q2_obs[start:stop, :self.model_params['extraction_peak_length']],
                     amplitude_logits
                     )
-            else:
+            elif self.model_params['model_type'] == 'deep':
                 metric = self.call(
                     q2_obs[start:stop, :self.model_params['extraction_peak_length']],
                     )
@@ -186,7 +202,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
                 q2_obs[start:, :self.model_params['extraction_peak_length']],
                 amplitude_logits
                 )
-        else:
+        elif self.model_params['model_type'] == 'deep':
             metric = self.call(q2_obs[start:, :self.model_params['extraction_peak_length']])
         metric_max[start:] = metric.numpy().max(axis=(1, 2))
 
@@ -198,35 +214,63 @@ class ExtractionLayer(tf.keras.layers.Layer):
         fig.savefig(f'{save_to}/{split_group}_pitf_metric_max_{tag}.png')
         plt.close()
 
-        filters_opt = self.filters.numpy()[0]
-        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        alpha = 0.75
-        fig, axes = plt.subplots(1, 2, figsize=(6, 3))
-        axes[0].hist(
-            self.filters_init.ravel(), bins=10, color=colors[0], label='Init'
-            )
-        axes[0].hist(
-            filters_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
-            )
-        axes[1].hist(
-            self.filters_init.ravel() - filters_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
-            )
-        axes[0].set_title('Filter Weights')
-        axes[0].set_xlabel('Value')
-        axes[1].set_xlabel('Difference')
-        axes[0].legend()
-        axes[1].legend()
-        fig.tight_layout()
-        fig.savefig(f'{save_to}/{split_group}_pitf_weights_{tag}.png')
-        plt.close()
+        if not self.filters_init is None:
+            filters_opt = self.filters.numpy()[0]
+            colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+            alpha = 0.75
+            fig, axes = plt.subplots(1, 2, figsize=(6, 3))
+            axes[0].hist(
+                self.filters_init.ravel(), bins=10, color=colors[0], label='Init'
+                )
+            axes[0].hist(
+                filters_opt.ravel(), bins=10, color=colors[1], alpha=alpha, label='Optimized'
+                )
+            axes[1].hist(
+                self.filters_init.ravel() - filters_opt.ravel(), bins=10, color=colors[2], label='Init - Optimized'
+                )
+            axes[0].set_title('Filter Weights')
+            axes[0].set_xlabel('Value')
+            axes[1].set_xlabel('Difference')
+            axes[0].legend()
+            axes[1].legend()
+            fig.tight_layout()
+            fig.savefig(f'{save_to}/{split_group}_pitf_weights_{tag}.png')
+            plt.close()
 
     def evaluate_init(self, q2_obs_scaled, save_to, split_group, tag):
         q2_filters = (self.volumes * self.filters).numpy()
         
+        volumes = self.volumes.numpy()[:, 0, 0]
+        volume_differences = volumes[1:] - volumes[:-1]
+        fig, axes = plt.subplots(1, 1, figsize=(5, 3))
+        axes.plot(volume_differences, marker='.')        
+
+        #axes.plot(self.sigma.numpy().ravel(), linestyle='dashed')
+        #xlim = axes.get_xlim()
+
+        xlim = axes.get_xlim()
+        axes.plot(xlim, [self.sigma.numpy(), self.sigma.numpy()], linestyle='dashed')
+
+        axes.plot(xlim, [0.01, 0.01], linestyle='dotted', color=[0, 0, 0])
+        axes.plot(xlim, [0.04, 0.04], linestyle='dotted', color=[0, 0, 0])
+        axes.set_xlim(xlim)
+        axes.set_ylim([0, axes.get_ylim()[1]])
+        axes.set_ylabel('Volume\nDifference')
+        axes.set_xlabel('Volume Index')
+        fig.tight_layout()
+        fig.savefig(f'{save_to}/{split_group}_pitf_volume_diff_{tag}.png')
+        plt.close()
+
         bins = np.linspace(0, 5, 101)
         fig, axes = plt.subplots(1, 1, figsize=(4, 3))
-        axes.hist(q2_obs_scaled.ravel(), bins=bins, label='q2_obs_scaled', density=True)
-        axes.hist(q2_filters.ravel(), bins=bins, alpha=0.75, label='q2_filters', density=True)
+        axes.hist(
+            q2_obs_scaled[:, :self.model_params['extraction_peak_length']].ravel(),
+            bins=bins, label='q2_obs_scaled', density=True
+            )
+        axes.hist(
+            q2_filters.ravel(),
+            bins=bins, alpha=0.75, label='q2_filters', density=True
+            )
         axes.set_xlabel('q2 scaled')
         axes.set_ylabel('distribution')
         axes.legend()
@@ -262,7 +306,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
                     q2_obs_scaled[start:stop, :self.model_params['extraction_peak_length']],
                     amplitude_logits
                     ).numpy()
-            else:
+            elif self.model_params['model_type'] == 'deep':
                 metric = self.call(
                     q2_obs_scaled[start:stop, :self.model_params['extraction_peak_length']],
                     ).numpy()
@@ -318,21 +362,20 @@ class PhysicsInformedModel:
             'filter_length': 3,
             'n_volumes': 200,
             'n_filters': 200,
-            'initial_metric_layers': [400, 200, 100],
-            'metric_layers': [200, 100, 50],
-            'metric_dropout_rate_extraction': 0.0,
-            'metric_dropout_rate': 0.0,
-            'metric_orthogonal_regularization': 0.0,
+            'n_volumes_depth': [256,  64,  16],
+            'n_filters_depth': [200, 200, 200],
+            'depth_layers': [400, 200, 100],
+            'initial_layers': [400, 200, 100],
+            'final_layers': [200, 100, 50],
+            'l1_regularization': 0.0,
             'base_line_layers': [200, 100, 50],
             'base_line_dropout_rate': 0.0,
             'learning_rate': 0.00005,
-            'epochs': 50,
+            'epochs': 20,
             'batch_size': 64,
-            'loss_type': 'mse',
-            'init_method': 'random',
+            'loss_type': 'log_cosh',
             'augment': True,
             'model_type': 'metric',
-            'metric_type': 'integral',
             'calibration_params': {
                 'layers': [1000, 500, 100],
                 'dropout_rate': 0.25,
@@ -354,21 +397,8 @@ class PhysicsInformedModel:
                 self.model_params['calibration_params'][key] = model_params_defaults['calibration_params'][key]
         self.model_params['unit_cell_length'] = self.unit_cell_length
         if self.model_params['model_type'] == 'deep':
-            #self.model_params['n_volumes_series'] = [2**8, 2**7, 2**6] #[256, 128,  64]
-            #self.model_params['n_filters_series'] = [2**6, 2**7, 2**8] #[ 64, 128, 256]
-            #self.model_params['n_volumes_series'] = [2**8, 2**6, 2**4] #[256,  64,  16]
-            #self.model_params['n_filters_series'] = [2**8, 2**8, 2**8] #[ 64, 128, 256]
-            #self.model_params['n_volumes_series'] = [2**8, 2**4]  #[256,  16]
-            #self.model_params['n_filters_series'] = [2**8, 2**8]  #[256, 256]
-            #self.model_params['n_volumes_series'] = [200]
-            #self.model_params['n_filters_series'] = [200]
-            #self.model_params['n_volumes_series'] = [200, 100]
-            #self.model_params['n_filters_series'] = [200, 200]
-            self.model_params['n_volumes_series'] = [256,  64,  16]
-            self.model_params['n_filters_series'] = [200, 200, 200]
-            self.model_params['n_volumes'] = self.model_params['n_volumes_series'][0]
-            self.model_params['n_filters'] = self.model_params['n_filters_series'][-1]
-            self.model_params['depth_metric_layers'] = [400, 200, 100]
+            self.model_params['n_volumes'] = self.model_params['n_volumes_depth'][0]
+            self.model_params['n_filters'] = self.model_params['n_filters_depth'][-1]
         self.build_model(data=data)
         self.build_calibration_model()
 
@@ -398,22 +428,20 @@ class PhysicsInformedModel:
             'filter_length',
             'n_volumes',
             'n_filters',
-            'initial_metric_layers',
-            'metric_layers',
-            'metric_dropout_rate_extraction',
-            'metric_dropout_rate',
-            'metric_orthogonal_regularization',
+            'initial_layers',
+            'final_layers',
+            'l1_regularization',
             'base_line_layers',
             'base_line_dropout_rate',
             'learning_rate',
             'epochs',
             'batch_size',
             'loss_type',
-            'init_method',
             'augment',
             'model_type',
-            'metric_type',
-            'sigma',
+            'n_volumes_depth',
+            'n_filters_depth',
+            'depth_layers',
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
@@ -422,34 +450,37 @@ class PhysicsInformedModel:
         self.model_params['filter_length'] = int(params['filter_length'])
         self.model_params['n_volumes'] = int(params['n_volumes'])
         self.model_params['n_filters'] = int(params['n_filters'])
-        self.model_params['initial_metric_layers'] = np.array(
-            params['initial_metric_layers'].split('[')[1].split(']')[0].split(','),
+        self.model_params['initial_layers'] = np.array(
+            params['initial_layers'].split('[')[1].split(']')[0].split(','),
             dtype=int
             )
-        self.model_params['metric_layers'] = np.array(
-            params['metric_layers'].split('[')[1].split(']')[0].split(','),
+        self.model_params['final_layers'] = np.array(
+            params['final_layers'].split('[')[1].split(']')[0].split(','),
+            dtype=int
+            )
+        self.model_params['n_volumes_depth'] = np.array(
+            params['n_volumes_depth'].split('[')[1].split(']')[0].split(','),
+            dtype=int
+            )
+        self.model_params['n_filters_depth'] = np.array(
+            params['n_filters_depth'].split('[')[1].split(']')[0].split(','),
             dtype=int
             )
         self.model_params['base_line_layers'] = np.array(
             params['base_line_layers'].split('[')[1].split(']')[0].split(','),
             dtype=int
             )
-        self.model_params['metric_dropout_rate_extraction'] = float(params['metric_dropout_rate_extraction'])
-        self.model_params['metric_dropout_rate'] = float(params['metric_dropout_rate'])
-        self.model_params['metric_orthogonal_regularization'] = float(params['metric_orthogonal_regularization'])
+        self.model_params['l1_regularization'] = float(params['l1_regularization'])
         self.model_params['base_line_dropout_rate'] = float(params['base_line_dropout_rate'])
         self.model_params['learning_rate'] = float(params['learning_rate'])
         self.model_params['epochs'] = int(params['epochs'])
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['loss_type'] = params['loss_type']
-        self.model_params['init_method'] = params['init_method']
         if self.model_params['augment'] == 'True':
             self.model_params['augment'] = True
         else:
             self.model_params['augment'] = False
         self.model_params['model_type'] = params['model_type']
-        self.model_params['metric_type'] = params['metric_type']
-        self.model_params['sigma'] = float(params['sigma'])
 
         self.q2_obs_scale = np.load(
             f'{self.save_to_split_group}/{self.split_group}_q2_obs_scale_{self.model_params["tag"]}.npy',
@@ -606,9 +637,9 @@ class PhysicsInformedModel:
         # Initial Dense layers that predict amplitudes #
         ################################################
         x_initial = inputs['q2_obs_scaled']
-        for index in range(len(self.model_params['initial_metric_layers'])):
+        for index in range(len(self.model_params['initial_layers'])):
             x_initial = tf.keras.layers.Dense(
-                self.model_params['initial_metric_layers'][index],
+                self.model_params['initial_layers'][index],
                 activation=tf.keras.activations.gelu,
                 name=f'initial_metric_dense_{index}',
                 use_bias=False,
@@ -633,23 +664,22 @@ class PhysicsInformedModel:
         #####################
         # Metric prediction #
         #####################
-        metric = self.extraction_layer(
+        x = self.extraction_layer(
             inputs['q2_obs_scaled'][:, :self.model_params['extraction_peak_length']],
             amplitude_logits
             )
 
-        x = metric
         #################
         # Hidden layers #
         #################
-        for index in range(len(self.model_params['metric_layers'])):
+        for index in range(len(self.model_params['final_layers'])):
             x = tf.keras.layers.Dense(
-                self.model_params['metric_layers'][index],
+                self.model_params['final_layers'][index],
                 activation=tf.keras.activations.gelu,
                 name=f'metric_dense_{index}',
                 use_bias=False,
                 kernel_regularizer=tf.keras.regularizers.L1(
-                    l1=self.model_params['metric_orthogonal_regularization']
+                    l1=self.model_params['l1_regularization']
                     ),
                 kernel_initializer=tf.keras.initializers.HeUniform
                 )(x)
@@ -670,16 +700,16 @@ class PhysicsInformedModel:
         # Initial Dense layers that predict amplitudes #
         ################################################
         x_initial = inputs['q2_obs_scaled']
-        for index in range(len(self.model_params['initial_metric_layers'])):
+        for index in range(len(self.model_params['initial_layers'])):
             x_initial = tf.keras.layers.Dense(
-                self.model_params['initial_metric_layers'][index],
+                self.model_params['initial_layers'][index],
                 activation=tf.keras.activations.gelu,
                 name=f'initial_metric_dense_{index}',
                 use_bias=False,
                 kernel_initializer=tf.keras.initializers.HeUniform
                 )(x_initial)
         amplitude_logits = tf.keras.layers.Dense(
-            self.model_params['n_filters_series'][0]*self.model_params['filter_length']*self.model_params['extraction_peak_length'],
+            self.model_params['n_filters_depth'][0]*self.model_params['filter_length']*self.model_params['extraction_peak_length'],
             activation='linear',
             name='initial_amplitude_logits',
             use_bias=False,
@@ -688,7 +718,7 @@ class PhysicsInformedModel:
         amplitude_logits = tf.keras.layers.Reshape(
             (
                 1,
-                self.model_params['n_filters_series'][0],
+                self.model_params['n_filters_depth'][0],
                 self.model_params['filter_length'],
                 self.model_params['extraction_peak_length']
                 )
@@ -706,57 +736,57 @@ class PhysicsInformedModel:
             inputs['q2_obs_scaled'][:, :self.model_params['extraction_peak_length']],
             )
         metric = tf.reduce_sum(
-            amplitude * unweighted_metric[:, :, :self.model_params['n_filters_series'][0], :, :],
+            amplitude * unweighted_metric[:, :, :self.model_params['n_filters_depth'][0], :, :],
             axis=(3, 4)
             )
-        for depth_index in range(1, len(self.model_params['n_volumes_series'])):
+        for depth_index in range(1, len(self.model_params['n_volumes_depth'])):
             volume_rankings = tf.math.reduce_sum(metric, axis=2)
             volume_sort_indices = tf.argsort(volume_rankings, axis=1, direction='DESCENDING')
             if depth_index == 1:
-                volume_indices = volume_sort_indices[:, :self.model_params['n_volumes_series'][depth_index]]
+                volume_indices = volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]]
             else:
                 volume_indices = tf.gather(
                     params=volume_indices,
-                    indices=volume_sort_indices[:, :self.model_params['n_volumes_series'][depth_index]],
+                    indices=volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]],
                     axis=1,
                     batch_dims=1
                     )
             metric = tf.gather(
                 params=metric,
-                indices=volume_sort_indices[:, :self.model_params['n_volumes_series'][depth_index]],
+                indices=volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]],
                 axis=1,
                 batch_dims=1,
                 )
             # unweighted_metric: bs, n_volumes, n_filters, filter_length, peak_extraction_length
             unweighted_metric = tf.gather(
                 params=unweighted_metric,
-                indices=volume_sort_indices[:, :self.model_params['n_volumes_series'][depth_index]],
+                indices=volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]],
                 axis=1,
                 batch_dims=1,
                 )
             x_depth = metric
-            for index in range(len(self.model_params['depth_metric_layers'])):
+            for index in range(len(self.model_params['depth_layers'])):
                 x_depth = tf.keras.layers.Dense(
-                    self.model_params['depth_metric_layers'][index],
+                    self.model_params['depth_layers'][index],
                     activation=tf.keras.activations.gelu,
                     name=f'depth_metric_dense_{depth_index}_{index}',
                     use_bias=False,
                     kernel_initializer=tf.keras.initializers.HeUniform
                     )(x_depth)
             amplitude_logits = tf.keras.layers.Dense(
-                self.model_params['n_filters_series'][depth_index]*self.model_params['filter_length']*self.model_params['extraction_peak_length'],
+                self.model_params['n_filters_depth'][depth_index]*self.model_params['filter_length']*self.model_params['extraction_peak_length'],
                 activation='linear',
                 name=f'depth_amplitude_logits_{depth_index}',
                 use_bias=False,
                 kernel_initializer=tf.keras.initializers.HeUniform,
                 kernel_regularizer=tf.keras.regularizers.L1(
-                    l1=self.model_params['metric_orthogonal_regularization']
+                    l1=self.model_params['l1_regularization']
                     ),
                 )(x_depth)
             amplitude_logits = tf.keras.layers.Reshape(
                 (
-                    self.model_params['n_volumes_series'][depth_index],
-                    self.model_params['n_filters_series'][depth_index],
+                    self.model_params['n_volumes_depth'][depth_index],
+                    self.model_params['n_filters_depth'][depth_index],
                     self.model_params['filter_length'],
                     self.model_params['extraction_peak_length']
                     )
@@ -765,12 +795,12 @@ class PhysicsInformedModel:
                 amplitude_logits, axis=4
                 )
             metric = tf.reduce_sum(
-                amplitude * unweighted_metric[:, :, :self.model_params['n_filters_series'][depth_index], :, :],
+                amplitude * unweighted_metric[:, :, :self.model_params['n_filters_depth'][depth_index], :, :],
                 axis=(3, 4)
                 )
         # x_depth:         bs, n_volumes, arb_units
         # volumes_indices: bs, n_volumes
-        if len(self.model_params['n_volumes_series']) == 1:
+        if len(self.model_params['n_volumes_depth']) == 1:
             volume_rankings = tf.math.reduce_sum(metric, axis=2)
             volume_sort_indices = tf.argsort(volume_rankings, axis=1, direction='DESCENDING')
             volume_indices = volume_sort_indices
@@ -780,29 +810,29 @@ class PhysicsInformedModel:
                 axis=1,
                 batch_dims=1,
                 )
-        elif len(self.model_params['n_volumes_series']) > 1:
+        elif len(self.model_params['n_volumes_depth']) > 1:
             volume_embeddings = tf.keras.layers.Embedding(
-                input_dim=self.model_params['n_volumes_series'][0],
+                input_dim=self.model_params['n_volumes_depth'][0],
                 output_dim=1,
                 embeddings_initializer="uniform",
                 embeddings_regularizer=None,
                 input_length=None,
                 sparse=False,
                 )(volume_indices)
-            #volume_embeddings = (volume_indices/self.model_params['n_volumes_series'][0])[:, :, tf.newaxis]
+            #volume_embeddings = (volume_indices/self.model_params['n_volumes_depth'][0])[:, :, tf.newaxis]
             x = tf.keras.layers.Concatenate(axis=2)((metric, volume_embeddings))
 
         ################
         # Hiden layers #
         ################
-        for index in range(len(self.model_params['metric_layers'])):
+        for index in range(len(self.model_params['final_layers'])):
             x = tf.keras.layers.Dense(
-                self.model_params['metric_layers'][index],
+                self.model_params['final_layers'][index],
                 activation=tf.keras.activations.gelu,
                 name=f'metric_dense_{index}',
                 use_bias=False,
                 kernel_regularizer=tf.keras.regularizers.L1(
-                    l1=self.model_params['metric_orthogonal_regularization']
+                    l1=self.model_params['l1_regularization']
                     ),
                 kernel_initializer=tf.keras.initializers.HeUniform
                 )(x)
@@ -938,11 +968,22 @@ class PhysicsInformedModel:
         train_q2_obs_scaled = train_q2_obs / self.q2_obs_scale
         val_q2_obs_scaled = val_q2_obs / self.q2_obs_scale
 
-        train_unit_cell = np.stack(train['reindexed_unit_cell'])[:, self.unit_cell_indices]
-        val_unit_cell = np.stack(val['reindexed_unit_cell'])[:, self.unit_cell_indices]
-        train_xnn = get_xnn_from_unit_cell(train_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
-        val_xnn = get_xnn_from_unit_cell(val_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
-        
+        train_xnn = np.stack(train['reindexed_xnn'])[:, self.unit_cell_indices]
+        val_xnn = np.stack(val['reindexed_xnn'])[:, self.unit_cell_indices]
+
+        if self.lattice_system == 'rhombohedral':
+            # There are very large values of xnn being included for rhombohedral.
+            # These need to be excluded or NaNs will occur in the model.
+            train_indices = np.max(np.abs(train_xnn), axis=1) < 0.05
+            val_indices = np.max(np.abs(val_xnn), axis=1) < 0.05
+            train_xnn = train_xnn[train_indices]
+            train_q2_obs_scaled = train_q2_obs_scaled[train_indices]
+            val_xnn = val_xnn[val_indices]
+            val_q2_obs_scaled = val_q2_obs_scaled[val_indices]
+            train_unaugmented = np.invert(train['augmented'][train_indices])
+        else:
+            train_unaugmented = np.invert(train['augmented'])
+
         self.xnn_mean = np.median(train_xnn, axis=0)[np.newaxis]
         self.xnn_scale = np.median(np.abs(train_xnn - self.xnn_mean), axis=0)[np.newaxis]
         train_xnn_scaled = (train_xnn - self.xnn_mean) / self.xnn_scale
@@ -954,7 +995,10 @@ class PhysicsInformedModel:
         xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
         for index in range(self.unit_cell_length + 1):
             if index == 0:
-                axes[index].hist(train_q2_obs_scaled.ravel(), bins=bins0, density=True)
+                axes[index].hist(
+                    train_q2_obs_scaled[:, self.model_params['extraction_peak_length']].ravel(),
+                    bins=bins0, density=True
+                    )
                 axes[index].plot(bins0, 2/np.sqrt(2*np.pi)*np.exp(-1/2*bins0**2), color=[1, 0, 0])
             else:
                 axes[index].hist(train_xnn_scaled[:, index - 1], bins=bins1, density=True)
@@ -968,12 +1012,14 @@ class PhysicsInformedModel:
         val_true = {f'{self.model_params["model_type"]}_xnn_scaled': val_xnn_scaled}
         train_inputs = {'q2_obs_scaled': train_q2_obs_scaled}
         val_inputs = {'q2_obs_scaled': val_q2_obs_scaled}
-        #self.extraction_layer.evaluate_init(
-        #    train_q2_obs_scaled[~train['augmented']],
-        #    self.save_to_split_group,
-        #    self.split_group,
-        #    self.model_params["tag"]
-        #    )
+
+        if self.model_params['model_type'] != 'base_line':
+            self.extraction_layer.evaluate_init(
+                train_q2_obs_scaled[train_unaugmented],
+                self.save_to_split_group,
+                self.split_group,
+                self.model_params["tag"]
+                )
         self.fit_history = self.model.fit(
             x=train_inputs,
             y=train_true,
@@ -1010,7 +1056,7 @@ class PhysicsInformedModel:
             label='Training', marker='.'
             )
         axes[2].plot(
-            self.fit_history.history['loss_function_mse'], 
+            self.fit_history.history['val_loss_function_mse'], 
             label='Validation', marker='v'
             )
         axes[0].set_ylabel('Loss')
@@ -1259,7 +1305,7 @@ class PhysicsInformedModel:
             )
         val_xnn_pred_top5 = val_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
         val_unit_cell_pred_top5 = np.zeros(val_xnn_pred_top5.shape)
-        if self.model_params['model_type'] in ['metric', 'combined']:
+        if self.model_params['model_type'] == 'metric':
             for index in range(5):
                 val_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
                     val_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
@@ -1280,7 +1326,7 @@ class PhysicsInformedModel:
             )
         train_xnn_pred_top5 = train_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
         train_unit_cell_pred_top5 = np.zeros(train_xnn_pred_top5.shape)
-        if self.model_params['model_type'] in ['metric', 'combined']:
+        if self.model_params['model_type'] == 'metric':
             for index in range(5):
                 train_unit_cell_pred_top5[:, index, :] = get_unit_cell_from_xnn(
                     train_xnn_pred_top5[:, index, :], partial_unit_cell=True, lattice_system=self.lattice_system
@@ -1298,7 +1344,6 @@ class PhysicsInformedModel:
                 index
                 )
 
-        #if self.model_params['model_type'] in ['metric', 'combined']:
         self.evaluate_indexing(
             train, val, train_xnn_pred_top5[:, 0, :], val_xnn_pred_top5[:, 0, :],
             )
@@ -1449,11 +1494,8 @@ class PhysicsInformedModel:
         ##########################
         # Plot branch importance #
         ##########################
-        if self.model_params['model_type'] in ['metric', 'combined']:
-            if self.model_params['model_type'] == 'metric':
-                n_branches = self.model_params['n_volumes']
-            elif self.model_params['model_type'] == 'combined':
-                n_branches = self.model_params['n_volumes'] + 1
+        if self.model_params['model_type'] == 'metric':
+            n_branches = self.model_params['n_volumes']
             # number of times a branch is the most probable
             # number of times a branch is in the top 5, 10
             train_rankings = np.argsort(train_softmax, axis=1)[:, ::-1]

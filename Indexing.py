@@ -1,17 +1,21 @@
 """
 Ordered to-do
-    0: Train and evaluate models
+    - 2D indexing algorithm
+    - PITF model on monoclinic
+    - Train and evaluate models
+        - orthorhombic
+        - monoclinic
+        - triclinic
+    - Optimize ensemble of models
+
+- Integral filter model
+    - Retrain PITF Models with new sigma approach
         - cubic
         - tetragonal
         - hexagonal
         - rhombohedral
-            - PITF Fails
         - orthorhombic
-        - monoclinic
-        - tetragonal
-    1: Optimize ensemble of models
-
-* Integral filter model
+    - Test load_by_tag
     - Run baseline for comparison
 
 - Regression
@@ -26,12 +30,15 @@ Ordered to-do
     - Add a validation for the correct extinction group
 
 * 2D Indexing
+    * new approach for reducing the sigma
+        - Get assignment probability for the triplets (p_assign)
+        - If p_assign > 0.5, reduce sigma by a factor
     - Diagnose why this isn't necesarily helpful
     - It seems like this FOM favors high-symmetry predictions
     - Figure out a better way to incorporate 2D data
 
 - Documentation
-    - Rewrite starting at the optimization
+    - Rewrite
     - Edit
     - One page summary
     - github README.md
@@ -1282,8 +1289,9 @@ class Indexing:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
-                self.pitf_generator[split_group].load_from_tag()
-                self.pitf_generator[split_group].evaluate(split_group_data)
+                print('Doing nothing')
+                #self.pitf_generator[split_group].load_from_tag()
+                #self.pitf_generator[split_group].evaluate(split_group_data)
             else:
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
