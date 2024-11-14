@@ -1,33 +1,18 @@
-import copy
-import matplotlib.pyplot as plt
-from mpi4py import MPI
 import numpy as np
-import os
-import pandas as pd
-pd.options.mode.copy_on_write = True
 import scipy.optimize
 import scipy.spatial
 import scipy.special
-import time
-from tqdm import tqdm
 
 from Indexing import Indexing
-from Reindexing import get_different_monoclinic_settings
-from Reindexing import get_s6_from_unit_cell
 from Reindexing import monoclinic_standardization
 from Reindexing import reindex_entry_basic
 from Reindexing import selling_reduction
 from TargetFunctions import CandidateOptLoss
-from Utilities import assign_hkl_triplets
 from Utilities import fix_unphysical
-from Utilities import get_extinction_group
-from Utilities import get_hkl_matrix
-from Utilities import get_M20
 from Utilities import get_M20_from_xnn
 from Utilities import get_M20_likelihood
 from Utilities import get_M20_likelihood_from_xnn
 from Utilities import get_M_triplet
-from Utilities import get_M_triplet_from_xnn
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_spacegroup_hkl_ref
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -38,7 +23,9 @@ from Utilities import get_q2_calc_triplets
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 from Utilities import fast_assign
-from Utilities import fast_assign_top_n
+from Utilities import get_multiplicity_taupin88
+from Utilities import vectorized_subsampling
+from Utilities import get_hkl_matrix
 
 
 class Candidates:
@@ -136,90 +123,138 @@ class Candidates:
             self.q2_obs, self.xnn, self.hkl, self.hkl_ref, self.lattice_system
             )
 
-    def random_subsampling(self, iteration_info):
-        n_keep = self.n_peaks - iteration_info['n_drop']
-        subsampled_indices = self.rng.permuted(
-            np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
-            axis=1
-            )[:, :n_keep]
-        hkl_subsampled = np.take_along_axis(
-            self.hkl, subsampled_indices[:, :, np.newaxis], axis=1
+    def get_sigma_reduction(self):
+        # Check to see if any of the candidates can predict the triplets
+        q2_diff_calc = get_q2_calc_triplets(
+            self.triplets, self.hkl, self.xnn, self.lattice_system
             )
-        q2_subsampled = np.take(self.q2_obs, subsampled_indices)
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            self.xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        reciprocal_volume = get_unit_cell_volume(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        _, probability, _ = get_M20_likelihood(
+            self.triplets[:, 2], q2_diff_calc, self.bravais_lattice, reciprocal_volume
+            )
+        # indexed_triplets: n_candidates x n_triplets
+        indexed_triplets = probability > self.assignment_threshold
+        sigma_reduction = np.ones((self.n, self.n_peaks))
+        peak_indices = np.round(self.triplets[:, :2], decimals=0).astype(int)
+        for triplet_index in range(self.n_triplets):
+            if np.sum(indexed_triplets[:, triplet_index]) > 0:
+                peak_index_0 = peak_indices[triplet_index, 0]
+                peak_index_1 = peak_indices[triplet_index, 1]
+                sigma_reduction[indexed_triplets[:, triplet_index], peak_index_0] *= 1/2
+                sigma_reduction[indexed_triplets[:, triplet_index], peak_index_1] *= 1/2
+        return sigma_reduction
 
+    def iteration_worker_common(self, target_function):
+        self.xnn += target_function.gauss_newton_step(self.xnn)
+        self.fix_out_of_range_candidates()
+        self.assign_hkls()
+        if self.triplets is None:
+            improved = self.M20 > self.best_M20
+        else:
+            improved = self.M_triplets.sum(axis=1) > self.best_M_triplets.sum(axis=1)
+            self.best_M_triplets[improved] = self.M_triplets[improved]
+        self.best_M20[improved] = self.M20[improved]
+        self.best_xnn[improved] = self.xnn[improved]
+        self.best_hkl[improved] = self.hkl[improved]
+
+    def deterministic(self, iteration_info):
         target_function = CandidateOptLoss(
-            q2_subsampled, 
+            np.repeat(self.q2_obs[np.newaxis], self.n, axis=0), 
             lattice_system=self.lattice_system,
             )
-        target_function.update(hkl_subsampled, self.xnn)
-        self.xnn += target_function.gauss_newton_step(self.xnn)
-        self.fix_out_of_range_candidates()
-        self.assign_hkls()
-        if self.triplets is None:
-            improved = self.M20 > self.best_M20
+        if self.triplets is None or iteration_info['triplet_opt'] == False:
+            target_function.update(self.hkl, self.xnn)
         else:
-            improved = self.M_triplets.sum(axis=1) > self.best_M_triplets.sum(axis=1)
-            self.best_M_triplets[improved] = self.M_triplets[improved]
-        self.best_M20[improved] = self.M20[improved]
-        self.best_xnn[improved] = self.xnn[improved]
-        self.best_hkl[improved] = self.hkl[improved]
+            sigma_reduction = self.get_sigma_reduction()
+            target_function.update(self.hkl, self.xnn, sigma_reduction=sigma_reduction)
+        self.iteration_worker_common(target_function)
 
-    def random_subsampling_triplets(self, iteration_info):
+    def random_subsampling(self, iteration_info):
         n_keep = self.n_peaks - iteration_info['n_drop']
-        subsampled_indices = self.rng.permuted(
-            np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
-            axis=1
-            )[:, :n_keep]
+
+        if iteration_info['uniform_sampling']:
+            subsampled_indices = self.rng.permuted(
+                np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
+                axis=1
+                )[:, :n_keep]
+        else:
+            arg = 1 / self.q2_obs
+            p = np.repeat((arg / np.sum(arg))[np.newaxis], self.n, axis=0)
+            subsampled_indices = vectorized_subsampling(p, n_keep, self.rng)
         hkl_subsampled = np.take_along_axis(
             self.hkl, subsampled_indices[:, :, np.newaxis], axis=1
             )
         q2_subsampled = np.take(self.q2_obs, subsampled_indices)
 
-        if self.triplets is None:
-            target_function = CandidateOptLoss(
-                q2_subsampled, 
-                lattice_system=self.lattice_system,
-                )
+        target_function = CandidateOptLoss(q2_subsampled, lattice_system=self.lattice_system)
+
+        if self.triplets is None or iteration_info['triplet_opt'] == False:
             target_function.update(hkl_subsampled, self.xnn)
         else:
-            n_keep_triplets = int(np.round(n_keep / self.n_peaks * self.n_triplets))
+            sigma_reduction = self.get_sigma_reduction()
+            sigma_reduction_subsampled = np.take_along_axis(
+                sigma_reduction, subsampled_indices, axis=1
+                )
+            target_function.update(
+                hkl_subsampled, self.xnn, power=power, sigma_reduction=sigma_reduction_subsampled
+                )
+        self.iteration_worker_common(target_function)
 
-            subsampled_indices_triplets = self.rng.permuted(
-                np.repeat(np.arange(self.n_triplets)[np.newaxis], self.n, axis=0),
+    def random_subsampling_power(self, iteration_info):
+        n_keep = self.n_peaks - iteration_info['n_drop']
+        if iteration_info['uniform_sampling']:
+            subsampled_indices = self.rng.permuted(
+                np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
                 axis=1
-                )[:, :n_keep_triplets]
-            hkl_subsampled_triplets = np.take_along_axis(
-                self.hkl_triplets, subsampled_indices_triplets[:, :, np.newaxis], axis=1
-                )
-            q2_subsampled_triplets = np.take(self.triplets[:, 2], subsampled_indices_triplets)
-
-            hkl_subsampled_both = np.concatenate(
-                (hkl_subsampled, hkl_subsampled_triplets), axis=1
-                )
-            q2_subsampled_both = np.concatenate(
-                (q2_subsampled, q2_subsampled_triplets), axis=1
-                )
-
-            target_function = CandidateOptLoss(
-                q2_subsampled_both, 
-                lattice_system=self.lattice_system,
-                )
-            target_function.update(hkl_subsampled_both, self.xnn)
-
-        self.xnn += target_function.gauss_newton_step(self.xnn)
-        self.fix_out_of_range_candidates()
-        self.assign_hkls()
-        if self.triplets is None:
-            improved = self.M20 > self.best_M20
+                )[:, :n_keep]
         else:
-            improved = self.M_triplets.sum(axis=1) > self.best_M_triplets.sum(axis=1)
-            self.best_M_triplets[improved] = self.M_triplets[improved]
-        self.best_M20[improved] = self.M20[improved]
-        self.best_xnn[improved] = self.xnn[improved]
-        self.best_hkl[improved] = self.hkl[improved]
+            arg = 1 / self.q2_obs
+            p = np.repeat((arg / np.sum(arg))[np.newaxis], self.n, axis=0)
+            subsampled_indices = vectorized_subsampling(p, n_keep, self.rng)
+        power = -iteration_info['power'] * np.ones((self.n, self.n_peaks))
+        np.put_along_axis(power, subsampled_indices, values=1, axis=1)
+
+        target_function = CandidateOptLoss(
+            np.repeat(self.q2_obs[np.newaxis], self.n, axis=0), 
+            lattice_system=self.lattice_system,
+            )
+        if self.triplets is None or iteration_info['triplet_opt'] == False:
+            target_function.update(self.hkl, self.xnn, power=power)
+        else:
+            sigma_reduction = self.get_sigma_reduction()
+            target_function.update(self.hkl, self.xnn, power=power, sigma_reduction=sigma_reduction)
+        self.iteration_worker_common(target_function)
+
+    def random_power(self, iteration_info):
+        """
+        svd-index:  Whkl = dobs^m |d2theta|, m: 0 <-> 4
+        here:       W = 1 / (q2_obs |dq2|)
+            q2 = 1/dobs
+                    W = d_obs^(2m) / |dq2|   m: 0 <-> 2
+                    W = 1 / (q2_obs^m |dq2|) m: 0 <-> 2
+        """
+        a = iteration_info['power_range'][1] - iteration_info['power_range'][0]
+        b = iteration_info['power_range'][0]
+        power = a*self.rng.random(size=(self.n, self.n_peaks)) + b
+
+        target_function = CandidateOptLoss(
+            np.repeat(self.q2_obs[np.newaxis], self.n, axis=0), 
+            lattice_system=self.lattice_system,
+            )
+        if self.triplets is None or iteration_info['triplet_opt'] == False:
+            target_function.update(self.hkl, self.xnn, power)
+        else:
+            sigma_reduction = self.get_sigma_reduction()
+            target_function.update(self.hkl, self.xnn, power, sigma_reduction=sigma_reduction)
+        self.iteration_worker_common(target_function)
 
     def refine_cell(self):
-        # This updates the unit cell only with the peaks assigned at > 50% probability.
+        # This updates the unit cell only with the peaks assigned at > threshold probability.
         _, probability, _ = get_M20_likelihood_from_xnn(
             q2_obs=self.q2_obs,
             xnn=self.best_xnn,
@@ -485,7 +520,14 @@ class OptimizerBase:
         candidates = self.generate_candidates_rank()
         for iteration_info in self.opt_params['iteration_info']:
             for iter_index in range(iteration_info['n_iterations']):
-                candidates.random_subsampling(iteration_info)
+                if iteration_info['worker'] == 'random_subsampling':
+                    candidates.random_subsampling(iteration_info)
+                elif iteration_info['worker'] == 'random_subsampling_power':
+                    candidates.random_subsampling_power(iteration_info)
+                elif iteration_info['worker'] == 'random_power':
+                    candidates.random_power(iteration_info)
+                elif iteration_info['worker'] == 'deterministic':
+                    candidates.deterministic(iteration_info)
 
         # This meant to be run at the end of optimization to remove very similar candidates
         # If this isn't run, the results will be spammed with many candidates that are nearly
@@ -709,7 +751,6 @@ class OptimizerManager(OptimizerBase):
                 candidate_xnn_rank = candidate_xnn_all[rank_index::self.n_ranks]
             else:
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
-
         return self.generate_candidates_common(candidate_xnn_rank)
 
     def redistribute_xnn(self, xnn):

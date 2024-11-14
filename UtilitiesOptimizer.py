@@ -293,12 +293,20 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, comm, options=None):
         #{'generator': 'distribution_volume', 'n_unit_cells': 100},
         {'generator': 'predicted_volume', 'n_unit_cells': 150},
         ]
-    iteration_info = [{
+    iteration_info = [
+        {
+        'worker': 'deterministic',
+        'n_iterations': 1,
+        'triplet_opt': True,
+        },
+        {
         'worker': 'random_subsampling',
         'n_iterations': 100,
         'n_peaks': 10,
-        'n_drop': 5,
-        }]
+        'n_drop': 6,
+        'triplet_opt': True,
+        }
+        ]
     opt_params = {
         'generator_info': generator_info,
         'iteration_info': iteration_info,
@@ -335,12 +343,6 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm, options=None
         f'{bravais_lattice}_1_01': pitf_group_params,
         }
     random_params = {bravais_lattice: {'tag': f'tetragonal_{broadening_tag}'}}
-    iteration_info = [{
-        'worker': 'random_subsampling',
-        'n_iterations': 100,
-        'n_peaks': 20,
-        'n_drop': 10,
-        }]
     generator_info = [
         #{'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
         #{'generator': 'nn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 100},
@@ -358,6 +360,21 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, comm, options=None
         {'generator': 'random', 'n_unit_cells': 200},
         #{'generator': 'distribution_volume', 'n_unit_cells': 100},
         {'generator': 'predicted_volume', 'n_unit_cells': 200},
+        ]
+    iteration_info = [
+        {
+        'worker': 'deterministic',
+        'n_iterations': 1,
+        'triplet_opt': True,
+        },
+        {
+        'worker': 'random_subsampling',
+        'n_iterations': 100,
+        'n_peaks': 20,
+        'n_drop': 17,
+        'uniform_sampling': False,
+        'triplet_opt': True,
+        }
         ]
     opt_params = {
         'generator_info': generator_info,
@@ -433,12 +450,21 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, comm, options=None)
         #{'generator': 'distribution_volume', 'n_unit_cells': 100},
         {'generator': 'predicted_volume', 'n_unit_cells': 200},
         ]
-    iteration_info = [{
+    iteration_info = [
+        {
+        'worker': 'deterministic',
+        'n_iterations': 1,
+        'triplet_opt': True,
+        },
+        {
         'worker': 'random_subsampling',
         'n_iterations': 100,
         'n_peaks': 20,
-        'n_drop': 10,
-        }]
+        'n_drop': 17,
+        'uniform_sampling': False,
+        'triplet_opt': True,
+        }
+        ]
     opt_params = {
         'generator_info': generator_info,
         'iteration_info': iteration_info,
@@ -483,12 +509,21 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, comm, options=No
         #{'generator': 'distribution_volume', 'n_unit_cells': 100},
         {'generator': 'predicted_volume', 'n_unit_cells': 200},
         ]
-    iteration_info = [{
+    iteration_info = [
+        {
+        'worker': 'deterministic',
+        'n_iterations': 1,
+        'triplet_opt': True,
+        },
+        {
         'worker': 'random_subsampling',
         'n_iterations': 100,
         'n_peaks': 20,
-        'n_drop': 10,
-        }]
+        'n_drop': 17,
+        'uniform_sampling': False,
+        'triplet_opt': True,
+        }
+        ]
     opt_params = {
         'generator_info': generator_info,
         'iteration_info': iteration_info,
@@ -624,12 +659,21 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, comm, options=No
             #{'generator': 'distribution_volume', 'n_unit_cells': int(f*100)},
             {'generator': 'predicted_volume', 'n_unit_cells': int(f*1000)},
             ]
-    iteration_info = [{
+    iteration_info = [
+        {
+        'worker': 'deterministic',
+        'n_iterations': 1,
+        'triplet_opt': True,
+        },
+        {
         'worker': 'random_subsampling',
-        'n_iterations': 20,
+        'n_iterations': 100,
         'n_peaks': 20,
-        'n_drop': 10,
-        }]
+        'n_drop': 16,
+        'uniform_sampling': False,
+        'triplet_opt': True,
+        }
+        ]
     opt_params = {
         'generator_info': generator_info,
         'iteration_info': iteration_info,
@@ -737,12 +781,22 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None
             #{'generator': 'distribution_volume', 'n_unit_cells': int(f * 100)},
             {'generator': 'predicted_volume', 'n_unit_cells': int(f * 500)},
             ]
-    iteration_info = [{
+    iteration_info = [
+        {
+        'worker': 'deterministic',
+        'n_iterations': 1,
+        'n_peaks': 20,
+        'triplet_opt': True,
+        },
+        {
         'worker': 'random_subsampling',
         'n_iterations': 100,
         'n_peaks': 20,
-        'n_drop': 10,
-        }]
+        'n_drop': 14,
+        'uniform_sampling': False,
+        'triplet_opt': True,
+        }
+        ]
     opt_params = {
         'generator_info': generator_info,
         'iteration_info': iteration_info,
@@ -783,12 +837,21 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, comm, options=None)
         #{'generator': 'distribution_volume', 'n_unit_cells': int(f * 100)},
         {'generator': 'predicted_volume', 'n_unit_cells': int(f * 1000)},
         ]
-    iteration_info = [{
+    iteration_info = [
+        {
+        'worker': 'deterministic',
+        'n_iterations': 1,
+        'triplet_opt': True,
+        },
+        {
         'worker': 'random_subsampling',
-        'n_iterations': 100,
+        'n_iterations': 80,
         'n_peaks': 20,
-        'n_drop': 10,
-        }]
+        'n_drop': 12,
+        'uniform_sampling': False,
+        'triplet_opt': True,
+        }
+        ]
     opt_params = {
         'generator_info': generator_info,
         'iteration_info': iteration_info,

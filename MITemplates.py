@@ -21,6 +21,7 @@ from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import reciprocal_uc_conversion
 from Utilities import Q2Calculator
 from Utilities import fast_assign
+from Utilities import get_M20_likelihood_from_xnn
 
 
 class MITemplates:
@@ -462,7 +463,15 @@ class MITemplates:
 
         q2_calc_max = q2_calc.max(axis=1)
         N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
-        return xnn, residuals, N_pred, q2_calc_max
+        _, probability, _ = get_M20_likelihood_from_xnn(
+            q2_obs=q2_obs,
+            xnn=xnn,
+            hkl=hkl,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            )
+        #return xnn, residuals, N_pred, q2_calc_max
+        return xnn, probability, N_pred, q2_calc_max
 
     def generate_xnn(self, q2_obs, indices=None):
         # This is slower

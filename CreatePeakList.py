@@ -1,3 +1,8 @@
+"""
+Improve peak fitting
+    - show difference between fit and data
+    - Plot breadths and asymetry
+"""
 from cctbx import sgtbx
 from cctbx import uctbx
 from cctbx.crystal import symmetry
@@ -31,19 +36,33 @@ class PeakListCreator:
         known_unit_cell=None, 
         known_space_group=None,
         ):
-
+        
+        if type(input_path_template) == str:
+            self.multiple_run_groups = False
+            self.input_path_template = [input_path_template]
+        elif type(input_path_template) == list:
+            self.multiple_run_groups = True
+            self.input_path_template = input_path_template
         if not run_limits_sacla is None:
+            assert False
             self.runs = []
             for run_index in range(run_limits_sacla[0], run_limits_sacla[1] + 1):
                 for sub_run_index in range(3):
                     self.runs.append(f'{run_index}-{sub_run_index}')
         elif not run_limits is None:
-            self.runs = np.arange(run_limits[0], run_limits[1] + 1)
+            if self.multiple_run_groups:
+                self.runs = [np.arange(rl[0], rl[1] + 1) for rl in run_limits]
+            else:
+                self.runs = [np.arange(run_limits[0], run_limits[1] + 1)]
         else:
-            self.runs = runs
+            if self.multiple_run_groups:
+                self.runs = runs
+            else:
+                self.runs = [runs]
+
         self.max_reflections_per_experiment = max_reflections_per_experiment
         self.min_reflections_per_experiment = min_reflections_per_experiment
-        self.input_path_template = input_path_template
+        
         self.suffix = suffix
         self.tag = tag
         self.load_combined = load_combined
@@ -61,7 +80,6 @@ class PeakListCreator:
             self._combine_expt_refl_files()
             self._parse_refl_file()
         else:
-            self._parse_refl_file()
             self.q2_obs = np.load(
                 os.path.join(self.save_to_directory, f'{self.tag}_q2_obs.npy'),
                 )
@@ -78,17 +96,19 @@ class PeakListCreator:
                 os.path.join(self.save_to_directory, f'{self.tag}_s1.npy'),
                 )
         self.beam_delta = np.zeros(2)
+        self.refl_mask = np.ones(self.q2_obs.size, dtype=bool)
         self.known_unit_cell = known_unit_cell
         self.known_space_group = known_space_group
         self.error = None
         self.triplets_obs = None
 
-    def _run_combine_experiments(self, expt_file_names, refl_file_names, run_str):
+    def _run_combine_experiments(self, expt_file_names, refl_file_names, run_str, ref=True):
         command = ['dials.combine_experiments']
         command += expt_file_names
         command += refl_file_names
+        if ref:
+            command += ['reference_from_experiment.detector=0']
         command += [
-            'reference_from_experiment.detector=0',
             f'max_reflections_per_experiment={self.max_reflections_per_experiment}',
             f'min_reflections_per_experiment={self.min_reflections_per_experiment}',
             f'output.experiments_filename={self.tag}_combined_{run_str}.expt',
@@ -127,35 +147,47 @@ class PeakListCreator:
     def _combine_expt_refl_files(self):
         expt_file_names = []
         refl_file_names = []
-        for run in self.runs:
-            expt_file_names_run = []
-            refl_file_names_run = []
-            if type(run) == str:
-                run_str = run
-            else:
-                run_str = f'{run:04d}'
-            input_path = self.input_path_template.replace('!!!!', run_str)
-            if os.path.exists(input_path):
-                for file_name in os.listdir(input_path):
-                    if file_name.endswith(self.suffix):
-                        expt_file_name = os.path.join(input_path, file_name)
-                        refl_file_name = os.path.join(input_path, file_name.replace('.expt', '.refl'))
-                        if os.path.exists(expt_file_name) and os.path.exists(refl_file_name):
-                            expt_file_names_run.append(expt_file_name)
-                            refl_file_names_run.append(refl_file_name)
-                if len(expt_file_names_run) > 0:
-                    refl_counts = self._run_combine_experiments(
-                        expt_file_names_run, refl_file_names_run, run_str
-                        )
-                    if refl_counts > 0:
-                        expt_file_names.append(os.path.join(
-                            self.save_to_directory, f'{self.tag}_combined_{run_str}.expt'
-                            ))
-                        refl_file_names.append(os.path.join(
-                            self.save_to_directory, f'{self.tag}_combined_{run_str}.refl'
-                            ))
+        for rg_index in range(len(self.input_path_template)):
+            expt_file_names_rg = []
+            refl_file_names_rg = []
+            for run in self.runs[rg_index]:
+                expt_file_names_run = []
+                refl_file_names_run = []
+                if type(run) == str:
+                    run_str = run
+                else:
+                    run_str = f'{run:04d}'
+                input_path = self.input_path_template[rg_index].replace('!!!!', run_str)
+                if os.path.exists(input_path):
+                    for file_name in os.listdir(input_path):
+                        if file_name.endswith(self.suffix):
+                            expt_file_name = os.path.join(input_path, file_name)
+                            refl_file_name = os.path.join(input_path, file_name.replace('.expt', '.refl'))
+                            if os.path.exists(expt_file_name) and os.path.exists(refl_file_name):
+                                expt_file_names_run.append(expt_file_name)
+                                refl_file_names_run.append(refl_file_name)
+                    if len(expt_file_names_run) > 0:
+                        refl_counts = self._run_combine_experiments(
+                            expt_file_names_run, refl_file_names_run, run_str, ref=True
+                            )
+                        if refl_counts > 0:
+                            expt_file_names_rg.append(os.path.join(
+                                self.save_to_directory, f'{self.tag}_combined_{run_str}.expt'
+                                ))
+                            refl_file_names_rg.append(os.path.join(
+                                self.save_to_directory, f'{self.tag}_combined_{run_str}.refl'
+                                ))
+            self._run_combine_experiments(
+                expt_file_names_rg, refl_file_names_rg, f'rg_index_{rg_index}', ref=True
+                )
+            expt_file_names.append(os.path.join(
+                self.save_to_directory, f'{self.tag}_combined_rg_index_{rg_index}.expt'
+                ))
+            refl_file_names.append(os.path.join(
+                self.save_to_directory, f'{self.tag}_combined_rg_index_{rg_index}.refl'
+                ))
         self._run_combine_experiments(
-            expt_file_names, refl_file_names, 'all'
+            expt_file_names, refl_file_names, 'all', ref=False
             )
     
     def _get_s1_from_xyz(self, panel, xyz, wavelength):
@@ -243,7 +275,151 @@ class PeakListCreator:
             self.s1
             )
 
-    def make_histogram(self, n_bins=1000, d_min=60, d_max=3.5, q2_min=None, q2_max=None):
+    def quick_mask(self, n_bins=1000, threshold=20, pad=5, llur=None):
+        """
+        Masking algorithm:
+            1: Calculate a 2D histogram of the reflection positions on the detector surface.
+            2: Calculate an azimuthal average of the reflection positions.
+            3: Project the azimuthal average onto the detector surface.
+            4: Mask regions where the histogram is much larger than the azimuthal average.
+        """
+        # Array rows are coordinate y
+        # Array cols are coordinate x
+        bins_x = np.linspace(self.s1[:, 1].min(), self.s1[:, 1].max(), n_bins + 1)
+        bins_y = np.linspace(self.s1[:, 0].min(), self.s1[:, 0].max(), n_bins + 1)
+        centers_x = (bins_x[1:] + bins_x[:-1]) / 2
+        centers_y = (bins_y[1:] + bins_y[:-1]) / 2
+
+        # 2D histogram of the reflection positions
+        hist, _, _ = np.histogram2d(x=self.s1[:, 1], y=self.s1[:, 0], bins=[bins_x, bins_y])
+
+        # This maps the reflections onto the histogram coordinates
+        refl_x = np.searchsorted(bins_x, self.s1[:, 1]) - 1
+        refl_y = np.searchsorted(bins_y, self.s1[:, 0]) - 1
+        refl_x[refl_x == -1] = 0
+        refl_y[refl_y == -1] = 0
+
+        # This should be the correct way to do this, the detector distance should be the average of
+        # the detector distance of the reflections in the xy bin. This does not work though.
+        # Using the same detector distance of 
+        #centers_z, _, _, _ = scipy.stats.binned_statistic_2d(
+        #    x=self.s1[:, 1],
+        #    y=self.s1[:, 0], 
+        #    values=self.s1[:, 2],
+        #    bins=[bins_x, bins_y],
+        #    statistic='mean'
+        #    )
+        #centers_z[np.isnan(centers_z)] = np.nanmean(centers_z)
+        centers_z = self.s1[:, 2].mean()
+
+        # This performs the azimuthal average and projection onto the detector surface.
+        s1_lab_mag_centers = centers_x[np.newaxis, :]**2 + centers_y[:, np.newaxis]**2 + centers_z**2
+        s1_lab_mag_bins = np.linspace(s1_lab_mag_centers.min(), s1_lab_mag_centers.max(), int(n_bins/2) + 1)
+        azimuthal_mean, _, _ = scipy.stats.binned_statistic(
+            x=s1_lab_mag_centers.ravel(), values=hist.ravel(), statistic='mean', bins=s1_lab_mag_bins
+            )
+        indices = np.searchsorted(s1_lab_mag_bins, s1_lab_mag_centers) - 1
+        indices[indices == -1] = 0
+        mean_projection = np.take(azimuthal_mean, indices)
+        # This takes all the zero pixels and makes them nonzero to prevent large amounts of false positives
+        mean_projection[mean_projection < mean_projection.mean()] = mean_projection.mean()
+
+        # Create a detector surface mask and then pad it.
+        mask = hist > threshold*mean_projection
+        mask_indices_minimal = np.column_stack(np.nonzero(mask))
+        mask_indices = []
+        for index in range(mask_indices_minimal.shape[0]):
+            mask_x = mask_indices_minimal[index, 1]
+            mask_y = mask_indices_minimal[index, 0]
+            for pad_x in range(-pad + mask_x, pad + mask_x + 1):
+                for pad_y in range(-pad + mask_y, pad + mask_y + 1):
+                    if 0 <= pad_x < n_bins:
+                        if 0 <= pad_y < n_bins:
+                            mask_indices.append([pad_y, pad_x])
+        mask_indices = np.row_stack((mask_indices))
+        mask[mask_indices[:, 0], mask_indices[:, 1]] = True
+
+
+
+        # Mask for the reflections that fit within the detector mask
+        # self.refl_mask is created in the __init__ method
+        # Remaking it resets the mask
+        self.refl_mask = np.ones(self.q2_obs.size, dtype=bool)
+        for index in range(mask_indices.shape[0]):
+            indices = np.logical_and(
+                refl_x == mask_indices[index, 0],
+                refl_y == mask_indices[index, 1]
+                )
+            self.refl_mask[indices] = False
+        
+        fig, axes = plt.subplots(1, 1, figsize=(8, 8))
+        axes.scatter(
+            self.s1[:, 0], self.s1[:, 1],
+            s=0.01, color=[0, 0, 0], alpha=0.1
+            )
+        axes.imshow(
+            mask, cmap='Reds', alpha=0.4,
+            origin='lower', extent=(centers_x[0], centers_x[-1], centers_y[0], centers_y[-1])
+            )
+        axes.set_xticks([])
+        axes.set_yticks([])
+        axes.set_title('Scatter Plot Of Reflection Coordinates\nMask in red\nThere is a bug and the mask and reflections are offset')
+        fig.tight_layout()
+        plt.show()
+
+        # Make sure the masked reflections actually line up with the mask
+        fig, axes = plt.subplots(1, 1, figsize=(8, 8))
+        axes.scatter(
+            self.s1[self.refl_mask, 0], self.s1[self.refl_mask, 1],
+            s=0.01, color=[0, 0, 0], alpha=0.1
+            )
+        axes.set_xticks([])
+        axes.set_yticks([])
+        axes.set_title('Scatter Plot Of Masked Reflection Coordinates')
+        fig.tight_layout()
+        plt.show()
+        
+        """
+        # Diagnostic plots
+
+        # Make sure the masked reflections actually line up with the mask
+        fig, axes = plt.subplots(1, 1, figsize=(8, 8))
+        axes.scatter(
+            self.s1[self.refl_mask, 0], self.s1[self.refl_mask, 1],
+            s=0.01, color=[0, 0, 0], alpha=0.1
+            )
+        axes.set_xticks([])
+        axes.set_yticks([])
+        axes.set_title('Scatter Plot Of Reflection Coordinates\nCoordindates Masked')
+        fig.tight_layout()
+        plt.show()
+
+        # Azimuthal mean
+        fig, axes = plt.subplots(1, 1, figsize=(7, 3))
+        axes.plot(azimuthal_mean)
+        plt.show()
+
+        # 2D image of the s1_lab
+        fig, axes = plt.subplots(1, 1, figsize=(10, 10))
+        axes.imshow(s1_lab_mag_centers, origin='lower')
+        fig.tight_layout()
+        plt.show()
+
+        # 2D Histogram of the reflections
+        vmax = np.sort(hist.ravel())[int(0.999*hist.size)]
+        fig, axes = plt.subplots(1, 1, figsize=(6, 6))
+        axes.imshow(hist, cmap='gray_r', vmin=0, vmax=vmax, origin='lower')
+        fig.tight_layout()
+        plt.show()
+
+        # Projection of the azimuthal mean onto the detector surface.
+        fig, axes = plt.subplots(1, 1, figsize=(6, 6))
+        axes.imshow(mean_projection, cmap='gray_r', vmin=0, vmax=vmax, origin='lower')
+        fig.tight_layout()
+        plt.show()
+        """
+
+    def make_histogram(self, n_bins=1000, d_min=60, d_max=3.5, q2_min=None, q2_max=None, mask=True):
         if q2_min is None:
             self.d_min = d_min
             self.q2_min = 1 / self.d_min**2
@@ -258,7 +434,10 @@ class PeakListCreator:
             self.d_max = 1/np.sqrt(q2_max)
         self.q2_bins = np.linspace(self.q2_min, self.q2_max, n_bins + 11)
         self.q2_centers = (self.q2_bins[1:] + self.q2_bins[:-1]) / 2
-        self.q2_hist, _ = np.histogram(self.q2_obs, bins=self.q2_bins)
+        if mask:
+            self.q2_hist, _ = np.histogram(self.q2_obs[self.refl_mask], bins=self.q2_bins)
+        else:
+            self.q2_hist, _ = np.histogram(self.q2_obs, bins=self.q2_bins)
 
     def pick_peaks(self, exclude_list=[], exclude_max=20, add_peaks=[], shift={}, prominence=30, plot_kapton_peaks=False, yscale=None):
         found_peak_indices = scipy.signal.find_peaks(self.q2_hist, prominence=prominence)
@@ -456,7 +635,7 @@ class PeakListCreator:
         axes.plot(self.q2_peaks[ind_peak_indices], np.polyval(broadening_params_polyfit, self.q2_peaks[ind_peak_indices]))
         plt.show()
 
-    def optimize_beam_center(self, primary_peak_indices):
+    def optimize_beam_center(self, primary_peak_indices, mask=True):
         def get_q2_spacing(s1, s0):
             wavelength = 1 / np.linalg.norm(s0)
             dot_product = np.matmul(s1, s0)
@@ -479,11 +658,20 @@ class PeakListCreator:
 
         s1 = []
         s0 = []
+        if mask:
+            q2_obs_masked = self.q2_obs[self.refl_mask]
+            s1_masked = self.s1[self.refl_mask]
+            expt_indices_masked = self.expt_indices[self.refl_mask]
+        else:
+            q2_obs_masked = self.q2_obs
+            s1_masked = self.s1
+            expt_indices_masked = self.expt_indices
+
         for peak_index in primary_peak_indices:
-            differences = np.abs(self.q2_obs - self.q2_peaks[peak_index])
+            differences = np.abs(q2_obs_masked - self.q2_peaks[peak_index])
             indices = differences < 3*self.q2_breadths[peak_index]
-            s1.append(self.s1[indices])
-            s0.append(self.s0[self.expt_indices[indices]])
+            s1.append(s1_masked[indices])
+            s0.append(self.s0[expt_indices_masked[indices]])
     
         initial_simplex = np.array([
             [0.05, 0.025],
@@ -523,7 +711,7 @@ class PeakListCreator:
             q2.append(self._get_q2_spacing(s1_normed, s0))
         self.q2_obs = np.concatenate(q2)
 
-    def filter_peaks(self, n_peaks=20, max_difference=None, delta=None, max_refl_counts=None, threshold=0.50):
+    def filter_peaks(self, n_peaks=20, max_difference=None, delta=None, max_refl_counts=None, threshold=0.50, mask=True):
         # assign peaks and get distances
         # The :n_peaks+1 appears unnecessary, but is important
         # If the peak gets assigned to the n_peaks index, it is probably out of the range of diffraction
@@ -537,39 +725,48 @@ class PeakListCreator:
         start = 0
         n_experiments = 0
         for expt_index, refl_counts in enumerate(self.refl_counts):
-            if max_refl_counts is None or refl_counts < max_refl_counts:
+            if mask:
+                expt_refl_mask = self.refl_mask[start: start + refl_counts]
+                assignment_expt = assignment[start: start + refl_counts][expt_refl_mask]
+                differences_expt = differences[start: start + refl_counts][expt_refl_mask]
+                masked_refl_counts = np.sum(expt_refl_mask)
+            else:
                 assignment_expt = assignment[start: start + refl_counts]
-                if not max_difference is None:
-                    differences_expt = differences[start: start + refl_counts]
-                    assignment_expt = assignment_expt[differences_expt < max_difference]
-                elif not delta is None:
-                    differences_expt = differences[start: start + refl_counts]
-                    peak_breadths = np.take(self.q2_breadths, assignment_expt)
-                    tolerance = delta * peak_breadths
-                    assignment_expt = assignment_expt[differences_expt < tolerance]
-                    
-                unique_assignments = np.sort(np.unique(assignment_expt))
-                if unique_assignments.size > 0 and unique_assignments[-1] == n_peaks:
-                    unique_assignments = unique_assignments[:-1]
-                #print(unique_assignments)
-                if unique_assignments.size > 0:
-                    n_experiments += 1
-                    for peak_index_0 in range(n_peaks):
-                        if peak_index_0 in unique_assignments:
-                            ind_occurances[peak_index_0] += 1
-                            for peak_index_1 in range(n_peaks):
-                                if peak_index_1 in unique_assignments:
-                                    joint_occurances[peak_index_0, peak_index_1] += 1
-                #print(ind_occurances)
-                #print(joint_occurances)
-                #print()
+                differences_expt = differences[start: start + refl_counts]
+                masked_refl_counts = refl_counts
+            if masked_refl_counts > 0:
+                if max_refl_counts is None or masked_refl_counts < max_refl_counts:
+                    if not max_difference is None:
+                        assignment_expt = assignment_expt[differences_expt < max_difference]
+                    elif not delta is None:
+                        peak_breadths = np.take(self.q2_breadths, assignment_expt)
+                        tolerance = delta * peak_breadths
+                        assignment_expt = assignment_expt[differences_expt < tolerance]
+                        
+                    unique_assignments = np.sort(np.unique(assignment_expt))
+                    if unique_assignments.size > 0 and unique_assignments[-1] == n_peaks:
+                        unique_assignments = unique_assignments[:-1]
+                    #print(unique_assignments)
+                    if unique_assignments.size > 0:
+                        n_experiments += 1
+                        for peak_index_0 in range(n_peaks):
+                            if peak_index_0 in unique_assignments:
+                                ind_occurances[peak_index_0] += 1
+                                for peak_index_1 in range(n_peaks):
+                                    if peak_index_1 in unique_assignments:
+                                        joint_occurances[peak_index_0, peak_index_1] += 1
+                    #print(ind_occurances)
+                    #print(joint_occurances)
+                    #print()
             start += refl_counts
 
-        joint_prob = joint_occurances / n_experiments
-        ind_prob = ind_occurances / n_experiments
-        separated_prob = 1/2*(ind_occurances[np.newaxis] + ind_occurances[:, np.newaxis]) / n_experiments
+        #joint_prob = joint_occurances / n_experiments
+        #ind_prob = ind_occurances / n_experiments
+        #separated_prob = 1/2*(ind_occurances[np.newaxis] + ind_occurances[:, np.newaxis]) / n_experiments
+        #ratio = joint_prob/separated_prob
 
-        ratio = joint_prob/separated_prob
+        ratio = joint_occurances / (ind_occurances[np.newaxis] * ind_occurances[:, np.newaxis] / n_experiments)
+
         ratio[np.arange(n_peaks), np.arange(n_peaks)] = np.nan
         paired = ratio > threshold
 
@@ -625,40 +822,48 @@ class PeakListCreator:
             file_name = os.path.join(self.save_to_directory, f'{self.tag}_info_{extra_file_name}.json')
         pd.Series(output).to_json(file_name)
 
-    def create_secondary_peaks(self, q2_max=None, max_difference=None, max_refl_counts=None, min_separation=None, n_bins=2000):
+    def create_secondary_peaks(self, q2_max=None, max_difference=None, max_refl_counts=None, min_separation=None, n_bins=2000, mask=True):
         start = 0
         q2_diff = []
         min_separation_obs = []
         for expt_index, refl_counts in enumerate(self.refl_counts):
-            if max_refl_counts is None or refl_counts < max_refl_counts:
+            if mask:
+                expt_refl_mask = self.refl_mask[start: start + refl_counts]
+                q2_obs = self.q2_obs[start: start + refl_counts][expt_refl_mask]
+                s1 = self.s1[start: start + refl_counts][expt_refl_mask]
+                masked_refl_counts = np.sum(expt_refl_mask)
+            else:
                 q2_obs = self.q2_obs[start: start + refl_counts]
                 s1 = self.s1[start: start + refl_counts]
-                s0 = self.s0[expt_index]
-                wavelength = 1 / np.linalg.norm(s0)
-                if not max_difference is None:
-                    min_error = np.min(
-                        np.abs(q2_obs[:, np.newaxis] - self.q2_peaks[np.newaxis]),
-                        axis=1
-                        )
-                    indices = min_error < max_difference
-                    q2_obs = q2_obs[indices]
-                    s1 = s1[indices]
-                if not q2_max is None:
-                    indices = q2_obs < q2_max
-                    q2_obs = q2_obs[indices]
-                    s1 = s1[indices]
+                masked_refl_counts = refl_counts
+            if masked_refl_counts > 0:
+                if max_refl_counts is None or masked_refl_counts < max_refl_counts:
+                    s0 = self.s0[expt_index]
+                    wavelength = 1 / np.linalg.norm(s0)
+                    if not max_difference is None:
+                        min_error = np.min(
+                            np.abs(q2_obs[:, np.newaxis] - self.q2_peaks[np.newaxis]),
+                            axis=1
+                            )
+                        indices = min_error < max_difference
+                        q2_obs = q2_obs[indices]
+                        s1 = s1[indices]
+                    if not q2_max is None:
+                        indices = q2_obs < q2_max
+                        q2_obs = q2_obs[indices]
+                        s1 = s1[indices]
 
-                if q2_obs.size > 1:
-                    s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
-                    q2_diff_all = np.linalg.norm(
-                        s1_normed[np.newaxis, :, :] - s1_normed[:, np.newaxis, :],
-                        axis=2
-                        )**2
-                    indices = np.triu_indices(s1.shape[0], k=1)
-                    q2_diff_lattice = q2_diff_all[indices[0], indices[1]]
-                    min_separation_obs.append(np.min(q2_diff_lattice))
-                    if min_separation is None or np.min(q2_diff_lattice) > min_separation:
-                        q2_diff.append(q2_diff_lattice)
+                    if q2_obs.size > 1:
+                        s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
+                        q2_diff_all = np.linalg.norm(
+                            s1_normed[np.newaxis, :, :] - s1_normed[:, np.newaxis, :],
+                            axis=2
+                            )**2
+                        indices = np.triu_indices(s1.shape[0], k=1)
+                        q2_diff_lattice = q2_diff_all[indices[0], indices[1]]
+                        min_separation_obs.append(np.min(q2_diff_lattice))
+                        if min_separation is None or np.min(q2_diff_lattice) > min_separation:
+                            q2_diff.append(q2_diff_lattice)
             start += refl_counts
         self.q2_diff = np.concatenate(q2_diff)
         min_separation_obs = np.array(min_separation_obs)
@@ -780,7 +985,7 @@ class PeakListCreator:
         fig.tight_layout()
         plt.show()
 
-    def make_triplets(self, triplet_peak_indices, delta=1, max_difference=None, min_separation=None, max_refl_counts=None):
+    def make_triplets(self, triplet_peak_indices, delta=1, max_difference=None, min_separation=None, max_refl_counts=None, mask=True):
         start = 0
         triplet_keys = []
         triplet_peaks = self.q2_peaks[triplet_peak_indices]
@@ -793,75 +998,83 @@ class PeakListCreator:
         for key in triplet_keys:
             self.triplets[key] = []
         for expt_index, refl_counts in enumerate(self.refl_counts):
-            # If there are too many refls on a frame, it might have multiple lattices.
-            if max_refl_counts is None or refl_counts < max_refl_counts:
+            if mask:
+                expt_refl_mask = self.refl_mask[start: start + refl_counts]
+                q2_obs = self.q2_obs[start: start + refl_counts][expt_refl_mask]
+                s1 = self.s1[start: start + refl_counts][expt_refl_mask]
+                masked_refl_counts = np.sum(expt_refl_mask)
+            else:
                 q2_obs = self.q2_obs[start: start + refl_counts]
                 s1 = self.s1[start: start + refl_counts]
-                s0 = self.s0[expt_index]
-                wavelength = 1 / np.linalg.norm(s0)
-                
-                # This removes peaks that are larger than the 1D peak list
-                indices = q2_obs < (self.q2_peaks[-1] + 3*self.q2_breadths[-1])
-                q2_obs = q2_obs[indices]
-                s1 = s1[indices]
-
-                # Only consider peaks close to a peak in the picked peak list.
-                if not max_difference is None:
-                    min_error = np.min(
-                        np.abs(q2_obs[:, np.newaxis] - self.q2_peaks[np.newaxis]),
-                        axis=1
-                        )
-                    indices = min_error < max_difference
+                masked_refl_counts = refl_counts
+            if masked_refl_counts > 0:
+                # If there are too many refls on a frame, it might have multiple lattices.
+                if max_refl_counts is None or masked_refl_counts < max_refl_counts:
+                    s0 = self.s0[expt_index]
+                    wavelength = 1 / np.linalg.norm(s0)
+                    
+                    # This removes peaks that are larger than the 1D peak list
+                    indices = q2_obs < (self.q2_peaks[-1] + 3*self.q2_breadths[-1])
                     q2_obs = q2_obs[indices]
                     s1 = s1[indices]
 
-                if q2_obs.size > 1:
-                    s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
-                    q2_diff_all = np.linalg.norm(
-                        s1_normed[:, np.newaxis, :] - s1_normed[np.newaxis, :, :],
-                        axis=2
-                        )**2
-                    indices = np.triu_indices(s1.shape[0], k=1)
-                    q2_diff_lattice = q2_diff_all[indices[0], indices[1]]
-                    q20_obs = q2_obs[indices[0]]
-                    q21_obs = q2_obs[indices[1]]
-                    # If there are peaks that are very close, it might be a multiple lattice.
-                    if min_separation is None or np.min(q2_diff_lattice) > min_separation:
-                        q20_triplet_index = np.argmin(
-                            np.abs(q20_obs[:, np.newaxis] - triplet_peaks[np.newaxis]),
+                    # Only consider peaks close to a peak in the picked peak list.
+                    if not max_difference is None:
+                        min_error = np.min(
+                            np.abs(q2_obs[:, np.newaxis] - self.q2_peaks[np.newaxis]),
                             axis=1
                             )
-                        q21_triplet_index = np.argmin(
-                            np.abs(q21_obs[:, np.newaxis] - triplet_peaks[np.newaxis]),
-                            axis=1
-                            )
-                        for pair_index in range(q2_diff_lattice.size):
-                            p0 = q20_triplet_index[pair_index]
-                            p1 = q21_triplet_index[pair_index]
-                            key = (
-                                triplet_peak_indices[p0],
-                                triplet_peak_indices[p1]
+                        indices = min_error < max_difference
+                        q2_obs = q2_obs[indices]
+                        s1 = s1[indices]
+
+                    if q2_obs.size > 1:
+                        s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
+                        q2_diff_all = np.linalg.norm(
+                            s1_normed[:, np.newaxis, :] - s1_normed[np.newaxis, :, :],
+                            axis=2
+                            )**2
+                        indices = np.triu_indices(s1.shape[0], k=1)
+                        q2_diff_lattice = q2_diff_all[indices[0], indices[1]]
+                        q20_obs = q2_obs[indices[0]]
+                        q21_obs = q2_obs[indices[1]]
+                        # If there are peaks that are very close, it might be a multiple lattice.
+                        if min_separation is None or np.min(q2_diff_lattice) > min_separation:
+                            q20_triplet_index = np.argmin(
+                                np.abs(q20_obs[:, np.newaxis] - triplet_peaks[np.newaxis]),
+                                axis=1
                                 )
-                            check0 = np.logical_and(
-                                q20_obs[pair_index] > triplet_peaks[p0] - delta*triplet_breadths[p0],
-                                q20_obs[pair_index] < triplet_peaks[p0] + delta*triplet_breadths[p0],
+                            q21_triplet_index = np.argmin(
+                                np.abs(q21_obs[:, np.newaxis] - triplet_peaks[np.newaxis]),
+                                axis=1
                                 )
-                            check1 = np.logical_and(
-                                q21_obs[pair_index] > triplet_peaks[p1] - delta*triplet_breadths[p1],
-                                q21_obs[pair_index] < triplet_peaks[p1] + delta*triplet_breadths[p1],
-                                )
-                            if check0 and check1:
-                                if key[0] < key[1]:
-                                    q20_triplet_peak = triplet_peaks[p0]
-                                    q21_triplet_peak = triplet_peaks[p1]
-                                else:
-                                    key = (key[1], key[0])
-                                    q20_triplet_peak = triplet_peaks[p1]
-                                    q21_triplet_peak = triplet_peaks[p0]
-                                if key[0] != key[1]:
-                                    self.triplets[key].append([
-                                        q20_triplet_peak, q21_triplet_peak, q2_diff_lattice[pair_index]
-                                        ])
+                            for pair_index in range(q2_diff_lattice.size):
+                                p0 = q20_triplet_index[pair_index]
+                                p1 = q21_triplet_index[pair_index]
+                                key = (
+                                    triplet_peak_indices[p0],
+                                    triplet_peak_indices[p1]
+                                    )
+                                check0 = np.logical_and(
+                                    q20_obs[pair_index] > triplet_peaks[p0] - delta*triplet_breadths[p0],
+                                    q20_obs[pair_index] < triplet_peaks[p0] + delta*triplet_breadths[p0],
+                                    )
+                                check1 = np.logical_and(
+                                    q21_obs[pair_index] > triplet_peaks[p1] - delta*triplet_breadths[p1],
+                                    q21_obs[pair_index] < triplet_peaks[p1] + delta*triplet_breadths[p1],
+                                    )
+                                if check0 and check1:
+                                    if key[0] < key[1]:
+                                        q20_triplet_peak = triplet_peaks[p0]
+                                        q21_triplet_peak = triplet_peaks[p1]
+                                    else:
+                                        key = (key[1], key[0])
+                                        q20_triplet_peak = triplet_peaks[p1]
+                                        q21_triplet_peak = triplet_peaks[p0]
+                                    if key[0] != key[1]:
+                                        self.triplets[key].append([
+                                            q20_triplet_peak, q21_triplet_peak, q2_diff_lattice[pair_index]
+                                            ])
 
             start += refl_counts
         for key in triplet_keys:
@@ -887,6 +1100,13 @@ class PeakListCreator:
                 cos_angles_peaks = (q20 + q21 - self.q2_peaks) / (2 * np.sqrt(q20 * q21))
                 good = np.logical_and(cos_angles_peaks > -1, cos_angles_peaks < 1)
                 angles_peaks = np.arccos(cos_angles_peaks[good])
+
+                angles_secondary_peaks = []
+                if len(self.q2_peaks_secondary) > 0:
+                    cos_angles_secondary_peaks = (q20 + q21 - np.array(self.q2_peaks_secondary)) / (2 * np.sqrt(q20 * q21))
+                    good = np.logical_and(cos_angles_secondary_peaks > -1, cos_angles_secondary_peaks < 1)
+                    if np.sum(good) > 0:
+                        angles_secondary_peaks = np.arccos(cos_angles_secondary_peaks[good])
                 
                 not_overlapping = self.triplets[key][:, 2] > 0.0001
                 q0_q1_2 = self.triplets[key][not_overlapping, 2]
@@ -900,8 +1120,9 @@ class PeakListCreator:
                 angles[upper] = 0
                 hist_half, _ = np.histogram(angles, bins=bins_half)
                 hist_full, _ = np.histogram(np.arccos(cos_angles[~both]), bins=bins_full)
-                axes.bar(centers_half, hist_half, width=bins_half[1] - bins_half[0], color=colors[0], alpha=0.9, label='Obs Differences')
-                axes.bar(centers_full, hist_full, width=bins_full[1] - bins_full[0], color=colors[0], alpha=0.5)
+                #axes.bar(centers_half, hist_half, width=bins_half[1] - bins_half[0], color=colors[0], alpha=0.9, label='Obs Differences')
+                #axes.bar(centers_full, hist_full, width=bins_full[1] - bins_full[0], color=colors[0], alpha=0.5)
+                axes.bar(centers_full, hist_full, width=bins_full[1] - bins_full[0], color=colors[0], label='Obs Differences')
                 ylim = axes.get_ylim()
                 ylim = [ylim[0], ylim[1]*1.1]
                 diff_peak_indices, _ = scipy.signal.find_peaks(hist_half, prominence=prominence_factor*hist_half.std())
@@ -985,6 +1206,19 @@ class PeakListCreator:
                         )
                     axes.plot(
                         [np.pi - peak_angle, np.pi - peak_angle], [ylim[0], 0.25*ylim[1]], color=[0, 0, 0]
+                        )
+                for p_index, peak_angle in enumerate(angles_secondary_peaks):
+                    if p_index == 0:
+                        label = 'Secondary Peaks'
+                    else:
+                        label=None
+                    axes.plot(
+                        [peak_angle, peak_angle], [ylim[0], 0.25*ylim[1]],
+                        color=[0, 0, 0], linestyle='dashed', label=label
+                        )
+                    axes.plot(
+                        [np.pi - peak_angle, np.pi - peak_angle], [ylim[0], 0.25*ylim[1]],
+                        color=[0, 0, 0], linestyle='dashed'
                         )
                 axes.set_ylim()
                 axes.legend(frameon=False)

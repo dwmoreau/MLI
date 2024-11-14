@@ -1,3 +1,53 @@
+"""
+# Monoclinic
+n_drop:
+    q2 subsampling
+        mP: 14 n_drop
+        mC: 14 n_drop
+    uniform subsampling
+        mP: 13/14 n_drop
+        mC: 14 n_drop
+
+q2 vs uniform sampling
+    drop n | mC   | mP
+    10     | -    | -
+    12     | -    | -
+    13     | q2   | uni
+    14     | q2   | -
+    15     | q2   | q2
+    16     | q2   | q2
+
+random_power
+    mP: 0 -> 8
+    mC: 0 -> 8
+        - more finely sample, 0 -> 6, 0 -> 10
+
+random power vs subsampling
+    mP: -
+    mC: -
+
+n_iterations
+    mC: 120
+    mP: 100
+
+# hexagonal, rhombohedral, tetragonal
+        n_drop | n_iter
+    hP: 18     | 100
+    hR: 17     | 100
+    tI: 17     |
+    tP: 18     |
+
+# orthorhombic
+        n_drop | n_iter
+    oC: 16     | 80
+    oF: 16     | 120
+    oI: 16     | 100
+    oP: 16     | 100
+
+# triclinic
+    n_drop: 12
+    n_iter: 80
+"""
 import matplotlib.pyplot as plt
 from mpi4py import MPI
 import numpy as np
@@ -5,6 +55,7 @@ import os
 # This supresses the tensorflow message on import
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import pandas as pd
+import sys
 
 from Utilities import get_xnn_from_unit_cell
 from UtilitiesOptimizer import get_cubic_optimizer
@@ -25,19 +76,112 @@ if __name__ == '__main__':
 
     load_data = True
     broadening_tag = '1'
-    error_tag = '1'
-    n_entries = 100
     q2_error_params = np.array([0.0001, 0.001]) / 1
-    #q2_error_params = np.array([0.000000001, 0])
     
-    n_top_candidates = 100
+    n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     #bravais_lattices = ['cF', 'cI', 'cP']
-    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+    #bravais_lattices = ['hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP']
+    #bravais_lattices = ['hP', 'hR', 'tI', 'tP']
+    #bravais_lattices = ['oC', 'oF', 'oI', 'oP']
+    #bravais_lattices = ['oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+    #bravais_lattices = ['hP']
+    #bravais_lattices = ['mP', 'mC', 'aP']
+    #bravais_lattices = ['mP', 'mC']
+    bravais_lattices = ['aP']
+    
+    if sys.argv[1] == 'random_subsampling':
+        if sys.argv[4] == 'uniform':
+            uniform_sampling = True
+        else:
+            uniform_sampling = False
+        iteration_info = [
+            {
+            'worker': 'random_subsampling',
+            'n_iterations': int(sys.argv[2]),
+            'n_peaks': 20,
+            'n_drop': int(sys.argv[3]),
+            'uniform_sampling': uniform_sampling,
+            }
+            ]
+        output_tag_elements = [
+            f'drop{iteration_info[0]["n_drop"]}',
+            f'iter{iteration_info[0]["n_iterations"]}',
+            ]
+        if uniform_sampling:
+           output_tag_elements += ['sampUniform']
+        else:
+           output_tag_elements += ['sampQ2']
+    elif sys.argv[1] == 'random_power':
+        iteration_info = [{
+            'worker': 'random_power',
+            'n_iterations': int(sys.argv[2]),
+            'n_peaks': 20,
+            'power_range': [float(sys.argv[3]), float(sys.argv[4])],
+            }]
+        output_tag_elements = [
+           'random_power',
+           f'{iteration_info[0]["power_range"][0]}',
+           f'{iteration_info[0]["power_range"][1]}',
+           f'iter{iteration_info[0]["n_iterations"]}'
+           ]
+    elif sys.argv[1] == 'random_subsampling_power':
+        if sys.argv[4] == 'uniform':
+            uniform_sampling = True
+        else:
+            uniform_sampling = False
+        iteration_info = [{
+            'worker': 'random_subsampling_power',
+            'n_iterations': int(sys.argv[2]),
+            'n_peaks': 20,
+            'n_drop': int(sys.argv[3]),
+            'uniform_sampling': uniform_sampling,
+            'power': 3,
+            }]
+        output_tag_elements = [
+           f'power{iteration_info[0]["n_drop"]}_{iteration_info[0]["power"]}',
+           f'iter{iteration_info[0]["n_iterations"]}',
+           ]
+        if uniform_sampling:
+           output_tag_elements += ['sampUniform']
+        else:
+           output_tag_elements += ['sampQ2']
+
+    #iteration_info = [{
+    #    'worker': 'random_subsampling',
+    #    'n_iterations': 50,
+    #    'n_peaks': 20,
+    #    'n_drop': 14,
+    #    'uniform_sampling': False,
+    #    }]
+    #output_tag_elements = [
+    #   f'drop{iteration_info[0]["n_drop"]}',
+    #   f'iter{iteration_info[0]["n_iterations"]}',
+    #   ]
+    #if iteration_info[0]['uniform_sampling']:
+    #   output_tag_elements += ['sampUniform']
+    #else:
+    #   output_tag_elements += ['sampQ2']
+    #iteration_info = [{
+    #    'worker': 'random_power',
+    #    'n_iterations': 50,
+    #    'n_peaks': 20,
+    #    'power_range': [0, 16],
+    #    }]
+    #output_tag_elements = [
+    #   'random_power',
+    #   f'{iteration_info[0]["power_range"][0]}',
+    #   f'{iteration_info[0]["power_range"][1]}',
+    #   f'iter{iteration_info[0]["n_iterations"]}'
+    #   ]
+
+    output_tag = '_'.join(output_tag_elements)
+    n_entries = 40
     options = {
         'convergence_testing': True,
-        'convergence_distances': np.logspace(-4, -1.5, 50),
-        'convergence_candidates': 100,
+        'convergence_distances': np.logspace(-4, -1.5, 40),
+        'convergence_candidates': 50,
+        'iteration_info': iteration_info,
         }
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng(0)
@@ -120,17 +264,11 @@ if __name__ == '__main__':
         'Found explainers': 0,
         }
 
-    print('Calculating Xnn from unit cell - delete this line after dataset regeneration')
-    unit_cell = np.stack(data['reindexed_unit_cell'])
-    xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=False)
-    data['reindexed_xnn'] = list(xnn)
-
     for bravais_lattice in bravais_lattices:
         bl_data = data[data['bravais_lattice'] == bravais_lattice]
         found = np.zeros((len(options['convergence_distances']), len(bl_data)))
         for entry_index in range(len(bl_data)):
             entry = bl_data.iloc[entry_index]
-            #print(entry)
             unit_cell_true = np.array(entry['reindexed_unit_cell'])
             optimizer[bravais_lattice].run(entry=entry, n_top_candidates=n_top_candidates)
             for candidate_index in range(optimizer[bravais_lattice].top_unit_cell.shape[0]):
@@ -142,9 +280,13 @@ if __name__ == '__main__':
                 if correct:
                     distance_index = candidate_index // options['convergence_candidates']
                     found[distance_index, entry_index] += 1
-        found_gathered = comm.gather(found, root=0)
+
+        found_gathered = None
         if rank == 0:
-            found_gathered = np.concatenate(found_gathered, axis=1)
+            found_gathered = np.zeros((n_ranks, len(options['convergence_distances']), len(bl_data)))
+        comm.Gather(found, found_gathered, root=0)
+        if rank == 0:
+            found_gathered = np.concatenate([found_gathered[i] for i in range(n_ranks)], axis=1)
             found_rate = found_gathered.mean(axis=1) / options['convergence_candidates']
             fig, axes = plt.subplots(1, 1, figsize=(6, 3))
             axes.loglog(options['convergence_distances'], found_rate, marker='.')
@@ -157,24 +299,31 @@ if __name__ == '__main__':
             radius = np.zeros((5, 2))
             radius[:, 0] = [5, 10, 25, 50, 100]
             for radius_index in range(5):
-                n = int(radius[radius_index, 0])
-                radius[radius_index, 1] = options['convergence_distances'][np.argwhere(found_rate < 1/n)[0][0]]
-                axes.plot(
-                    [xlim[0], radius[radius_index, 1]], 1/n*np.ones(2),
-                    linestyle='dotted', color=[0, 0, 0], linewidth=1
-                    )
-                axes.plot(
-                    radius[radius_index, 1]*np.ones(2), [ylim[0], 1/n],
-                    linestyle='dotted', color=[0, 0, 0], linewidth=1
-                    )
-                axes.annotate(
-                    f'{n:3d} {int(100*1/n)}%: {radius[radius_index, 1]:0.5f}',
-                    (2*xlim[0], 1/n),
-                    verticalalignment='bottom'
-                    )
+                try:
+                    n = int(radius[radius_index, 0])
+                    radius[radius_index, 1] = options['convergence_distances'][np.argwhere(found_rate < 1/n)[0][0]]
+                    axes.plot(
+                        [xlim[0], radius[radius_index, 1]], 1/n*np.ones(2),
+                        linestyle='dotted', color=[0, 0, 0], linewidth=1
+                        )
+                    axes.plot(
+                        radius[radius_index, 1]*np.ones(2), [ylim[0], 1/n],
+                        linestyle='dotted', color=[0, 0, 0], linewidth=1
+                        )
+                    axes.annotate(
+                        f'{n:3d} {int(100*1/n)}%: {radius[radius_index, 1]:0.5f}',
+                        (2*xlim[0], 1/n),
+                        verticalalignment='bottom'
+                        )
+                except:
+                    print('Error in plotting')
             axes.set_xlim(xlim)
             axes.set_ylim(ylim)
             fig.tight_layout()
-            fig.savefig(f'figures/{bravais_lattice}_radius_of_convergence_err_{error_tag}.png')
+            fig.savefig(f'figures/{bravais_lattice}_radius_of_convergence_{output_tag}.png')
             plt.close()
-            np.save(f'data/radius_of_convergence_{error_tag}_{bravais_lattice}.npy', radius)
+
+            np.save(
+                f'figures/data/radius_of_convergence_{output_tag}_{bravais_lattice}.npy',
+                np.row_stack((options['convergence_distances'], found_rate))
+                )

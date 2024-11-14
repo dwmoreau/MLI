@@ -111,15 +111,24 @@ entry_tags = [
     #'s6',
     #'s7',
     #'s8',
-    #'s13',
+    #'s12',
+    's13',
     #'s14',
     #'s16',
     #'s23',
     #'s24',
     #'s25_chip4',
+    #'s25_chips_4_13',
+    #'s26',
     #'s27',
-    's40',
+    #'s31',
+    #'s36',
+    #'s37',
+    #'s38',
+    #'s39',
+    #'s40',
     #'s42',
+    #'s48',
     #'s49',
     ]
 rng = np.random.default_rng()
@@ -134,9 +143,9 @@ logger.info('Starting process')
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0]
 #serial =           [True, True, True, True, True, True, True]
 
-#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-#manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
 #bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
 #manager_rank =     [    0,     0,     1,     1]
@@ -146,9 +155,9 @@ logger.info('Starting process')
 #manager_rank =     [    0]
 #serial =           [True]
 
-bravais_lattices = ['oP']
-manager_rank =     [   0]
-serial =           [True]
+#bravais_lattices = ['oP']
+#manager_rank =     [   0]
+#serial =           [True]
 
 #bravais_lattices = [ 'mP']
 #manager_rank =     [    0]

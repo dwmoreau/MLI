@@ -147,7 +147,7 @@ class CandidateOptLoss:
         elif lattice_system == 'triclinic':
             self.uc_length = 6
 
-    def update(self, hkl, xnn_init):
+    def update(self, hkl, xnn_init, power=None, sigma_reduction=None):
         self.hkl = hkl
         if self.lattice_system == 'triclinic':
             self.hkl2 = np.concatenate((
@@ -193,8 +193,12 @@ class CandidateOptLoss:
 
         q2_pred_init = self.get_q2_pred(xnn_init, jac=False)
         delta_q2 = np.abs(q2_pred_init - self.q2_obs)
-        self.sigma = np.sqrt(self.q2_obs * (delta_q2 + self.delta_q_eps))
-
+        if power is None:
+            self.sigma = np.sqrt(self.q2_obs * (delta_q2 + self.delta_q_eps))
+        else:
+            self.sigma = np.sqrt((self.q2_obs**power) * (delta_q2 + self.delta_q_eps))
+        if not sigma_reduction is None:
+            self.sigma *= sigma_reduction
         self.prefactor = np.log(np.sqrt(2*np.pi) * self.sigma)
         self.hessian_prefactor = (1 / self.sigma**2)[:, :, np.newaxis, np.newaxis]
 

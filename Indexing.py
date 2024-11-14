@@ -1,12 +1,6 @@
 """
-Ordered to-do
-    - 2D indexing algorithm
-    - PITF model on monoclinic
-    - Train and evaluate models
-        - orthorhombic
-        - monoclinic
-        - triclinic
-    - Optimize ensemble of models
+- Model ensemble
+    - minimize failure rate, maximize efficiency, maximize variance
 
 - Integral filter model
     - Retrain PITF Models with new sigma approach
@@ -18,46 +12,39 @@ Ordered to-do
     - Test load_by_tag
     - Run baseline for comparison
 
-- Regression
-    - Look at individual split_groups and retrain overfit / underfit networks
-
 - Optimization
-    - Optimize the number of candidates generated per model.
-        - Optimize ensemble of models to minimize failure rate given a penalty of number of candidates and efficiency
-    * standardization of monoclinic cells
+    - Reprofile
+    - standardization of monoclinic cells
     - Add mechanism for analysis of failed entries    
-    - Is there an optimal number of subsampled peaks
-    - Add a validation for the correct extinction group
 
-* 2D Indexing
-    * new approach for reducing the sigma
-        - Get assignment probability for the triplets (p_assign)
-        - If p_assign > 0.5, reduce sigma by a factor
-    - Diagnose why this isn't necesarily helpful
-    - It seems like this FOM favors high-symmetry predictions
-    - Figure out a better way to incorporate 2D data
+- 2D Indexing
+    * convergence radius testing
+        - regenerate peak lists
+        - Remove the indexing step and just use FOM
+        - Figure out what happened with MI2-58
+    - Start working on 2D specific algorithms using the indexed reflections
+        - Can I decompose frames into basis vectors
 
 - Documentation
     - Rewrite
-    - Edit
     - One page summary
     - github README.md
 
 - Experimental Data
-    - peak list
-        - Triplets
-        - LCLS data
+    - Automate triplet picking
     - GSASII tutorials
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 
 - Spacegroup assignments:
+    - Add a validation
     - https://www.markvardsen.net/projects/ExtSym/main.html
     - https://journals.iucr.org/paper?S0021889808031087
     - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
     - https://journals.iucr.org/paper?fe5024
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
+- Regression
 - Templating
 - SWE
 - Augmentation

@@ -367,7 +367,7 @@ Triclinic lattices are reindexed by applying a Selling reduction (Andrews 2019) 
 
 \bigbreak
 
-Peak lists are created by identifying peaks in diffraction patterns. Diffraction patterns are calculated using the Computation Crystallography Tool box (CCTBX). Each entry is loaded by a cif file and CCTBX is used to produce a peak list of all possible peaks between $2\theta = 2^o -> 60^o$, assuming the Cu K-$\alpha$ wavelength of $\lambda = 1.54$ $\mathrm{\AA}$. This peak list contains the peak's integrated intensity, position in $2\theta$, and Miller indices. Intensities are scaled for the Lorentz-Polarization factor and peak positions are converted to units of $q^2 = 1/d^2 = \left[\frac{2\sin(\theta)}{\lambda}\right]^2$. A breadth is calculated for each peak using the formula $\beta = \beta_0 + \beta_1 q^2$. Peak breadths of experimental smSFX patterns were estimated and the parameterization of $\beta_0 = 0.0001$ and $\beta_1 = 0.005$ represents the average pattern. Three peak lists are created based on broadening of 0.5, 1, and 1.5 times this parameterization. Diffraction patterns are then created by summing gaussians with the amplitudes, locations, and standard deviations equal to the peak list's integrated intensities, peak position in $q^2$, and breadths respectively. The summation axis occurs between $2\theta = 2^o -> 60^o$ in steps 0.01 $2\theta$.
+Peak lists are created by identifying peaks in diffraction patterns. Diffraction patterns are calculated using the Computation Crystallography Tool box (CCTBX) with parameters based on internal datasets collected at SACLA in the fall of 2023 and spring of 2024. Each entry is loaded by a cif file and CCTBX is used to produce a peak list of all possible peaks between $2\theta = 1^o$ to $25^o$, at the wavelength of $\lambda = 0.827$ $\mathrm{\AA}$. This peak list contains the peak's integrated intensity, position in $2\theta$, and Miller indices. Intensities are scaled for the Lorentz-Polarization factor and peak positions are converted to units of $q^2 = 1/d^2 = \left[\frac{2\sin(\theta)}{\lambda}\right]^2$. A breadth is calculated for each peak using the formula $\beta = \beta_0 + \beta_1 q^2$. Peak breadths of experimental smSFX patterns were estimated and the parameterization of $\beta_0 = 0.00007$ and $\beta_1 = 0.002$ represents the average pattern. Three peak lists are created based on broadening of 2/3, 1, and 1.5 times this parameterization. Diffraction patterns are then created by summing gaussians with the amplitudes, locations, and standard deviations equal to the peak list's integrated intensities, peak position in $q^2$, and breadths respectively. The summation axis occurs between $2\theta = 2^o$ to $25^o$ in steps 0.01 $2\theta$.
 
 This diffraction pattern is divided by its total integrated intensity. Then peak positions are found using \textit{scipy.signal.find\_peaks} using a prominence=2 and distance=5. Prominence is the vertical distance between a peak and the lowest point between it and the next peak. Distance is the minimum horizontal distance between peaks with units of x-axis points. A distance of 5 would be equivalent to a separation of $2\theta = 0.05$. The peak positions found by \textit{scipy.signal.find\_peaks} will have positional error due to numerics and slightly overlapping peaks. To remove this error, the closest true peak to the found peak is select. 
 
@@ -405,6 +405,8 @@ Figures 1-4 show examples of diffraction patterns and selected peaks. The blue c
 \end{center}
 \end{figure}
 
+
+
 \subsubsection{Grouping}
 
 Ensembles of machine learning models are created by training multiple models on different groupings of data. These groupings are performed according to the hierarchy:
@@ -435,7 +437,7 @@ Unit cell angle parameters are converted to radians and subtracted by $\pi/2$. T
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/regression_inputs_aP_00.png}
+\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/data/regression_inputs_aP_00.png}
 \caption{Data distributions for the triclinic lattice system. Top row plots the raw parameters for the unaugmented data in blue and augmented data in orange. The bottom row plots the parameters after scaling. The left column are the input peak spacings. The following columns are the unit cell parameters}
 \label{UnitCells}
 \end{center}
@@ -443,7 +445,7 @@ Unit cell angle parameters are converted to radians and subtracted by $\pi/2$. T
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/covariance_inputs.png}
+\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/data/covariance_inputs.png}
 \caption{Covariance of the unit cell parameters for the triclinic lattice system. The left column is the covariance matrix for the raw unit cell parameters. The right column is the covariance after standard scaling has been applied.}
 \label{UnitCells}
 \end{center}
@@ -515,7 +517,7 @@ Then, the list of non-systematically absent peaks is stepped through. There are 
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models/triclinic_1/augmentor/aug_setup_triclinic_1.png}
+\includegraphics[totalheight=6cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/augmentor/aug_setup_triclinic_1.png}
 \caption{Augmentation statistics for the triclinic lattice system determined from the training entries. The left column is the probability distribution for the index of the first observed peak in the list of all non-systematically absent peaks. The top left plot is the PDF and bottom plot is the CDF. The lower right column plots the distribution of spacings between all possible non-systematically absent peaks. The upper right plot is the probability that a peak is observed vs. the separation from its closest neighboring peak. The different colors represent different ranges of absolution peak position. The markers are the observed data and the solid lines are the fit curves.}
 \label{Augmentation}
 \end{center}
@@ -525,12 +527,12 @@ Then, the list of non-systematically absent peaks is stepped through. There are 
 \centering
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/hkl_labels_unaugmented_aP.png}
+  \includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/data/hkl_labels_unaugmented_aP.png}
   \caption{Unaugmented}
 \end{minipage}
 \begin{minipage}{0.45\textwidth}
   \centering
-  \includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models/triclinic_1/data/hkl_labels_augmented_aP.png}
+  \includegraphics[totalheight=13cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/data/hkl_labels_augmented_aP.png}
   \caption{Augmented}
 \end{minipage}
 \begin{center}
@@ -580,7 +582,7 @@ All training occurs with the Adam optimizer using a learning rate of 0.0001 and 
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models/triclinic_1/regression/aP_reg.png}
+\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/regression/aP_reg.png}
 \caption{Regression results for the neural network model. The top row plots the predicted vs true unit cell parameters. The second row plots prediction error vs true parameters. The titles print the RMSD and percentiles for the training and validation sets.}
 \label{NNReg}
 \end{center}
@@ -595,7 +597,7 @@ Some hyperparameter optimization was performed on the triclinic lattice system. 
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models/triclinic_1/regression/aP_reg_tree.png}
+\includegraphics[totalheight=12cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/regression/aP_reg_tree.png}
 \caption{Regression results for the random forest model. The top row plots the predicted vs true unit cell parameters. The second row plots prediction error vs true parameters. The titles print the RMSD and percentiles for the training and validation sets.}
 \label{TreeReg}
 \end{center}
@@ -635,7 +637,7 @@ After all the Miller index templates are generated, only unique templates are re
 
 \begin{figure}
 \begin{center}
-\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models/triclinic_1/template/aP_dominant_zone_ratio_triclinic_1.png}
+\includegraphics[totalheight=4cm]{/Users/DWMoreau/MLI/models_old/triclinic_1/template/aP_dominant_zone_ratio_triclinic_1.png}
 \caption{Dominant zone metrics for triclinic. The left three histograms are metrics for dominant zones based on unit cell values. These are quantified for the ratios of the $x_{nn}$ parameters, the direct unit cell, and the reciprocal unit cell. The fourth plot is the minimum information. The rightmost plot is a scatter plot of dominant zone ratio vs minimum information. While these are correlated on average (orange line), there is considerable deviation from average.}
 \label{DominantZone}
 \end{center}

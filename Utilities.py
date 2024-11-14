@@ -916,62 +916,65 @@ def get_hkl_matrix(hkl, lattice_system):
 
 
 def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
+    # https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
     if bravais_lattice == 'cF':
-        #spacegroups = [196, 202, 203, 209, 210, 216, 219, 225, 226, 227, 228]
-        #spacegroups = [196, 203, 210, 219, 228]
-        spacegroups = ['F 2 3', 'F d -3', 'F 41 3 2', 'F -4 3 c', 'F d -3 c']
+        spacegroups =        ['F 2 3',   'F d -3',  'F 41 3 2', 'F -4 3 c', 'F d -3 c']
+        extinction_groups =  ['F - - -', 'F d - -', 'F 41 - -', 'F - - c',  'F d - c']
     elif bravais_lattice == 'cI':
-        #spacegroups = [197, 199, 204, 206, 211, 214, 217, 220, 229, 230]
-        #spacegroups = [197, 206, 214, 220, 230]
-        spacegroups = ['I 2 3', 'I a -3', 'I 41 3 2', 'I -4 3 d', 'I a -3 d']
+        spacegroups =       ['I 2 3',   'I a -3',  'I 41 3 2', 'I -4 3 d', 'I a -3 d']
+        extinction_groups = ['I - - -', 'I a - -', 'I 41 - -', 'I - - d',  'I a - d']
     elif bravais_lattice == 'cP':
-        #spacegroups = [195, 198, 200, 201, 205, 207, 208, 212, 213, 215, 218, 221, 222, 223, 224]
-        #spacegroups = [195, 198, 201, 205, 212, 218, 222]
-        spacegroups = ['P 2 3', 'P 21 3', 'P n -3', 'P a -3', 'P 43 3 2', 'P -43 n', 'P n -3 n']
-    elif bravais_lattice == 'hR':
-        #spacegroups = [146, 148, 155, 160, 161, 166, 167]
-        #spacegroups = [146, 161]
-        spacegroups = ['R 3', 'R 3 c']
-    elif bravais_lattice == 'hP':
-        #spacegroups = [
-        #    143, 144, 145, 147, 149, 150, 151, 152, 153, 154, 156, 157, 158, 159, 162, 163, 164, 165, 166,
-        #    168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185,
-        #    186, 187, 188, 189, 190, 191, 192, 193, 194
-        #    ]
-        #spacegroups = [143, 144, 158, 159, 169, 173, 184]
-        spacegroups = ['P 3', 'P 31', 'P 3 c 1', 'P 3 1 c', 'P 61', 'P 63', 'P 6 c c']
-    elif bravais_lattice == 'tI':
-        #spacegroups = [79, 80, 82, 87, 88, 97, 98, 107, 108, 109, 110, 119, 120, 121, 122, 139, 140, 141, 142]
-        spacegroups = [79, 80, 88, 108, 109, 110, 141, 142]
         spacegroups = [
-            'I 4', 'I 41', 'I 41/a', 'I 4 c m', 'I 41 m d', 'I 41 c d', 'I 41/a m d', 'I 41/a c d'
+            'P 2 3',   'P 21 3',    'P n -3',  'P a -3',  'P 43 3 2', 'P -43 n', 'P n -3 n'
+            ]
+        extinction_groups = [
+            'P - - -', 'P 21 - -',  'P n - -', 'P a - -', 'P 41 - -', 'P - - n', 'P n - n'
+            ]
+    elif bravais_lattice == 'hR':
+        spacegroups =       ['R 3',     'R 3 c']
+        extinction_groups = ['R - - -', 'R - - c']
+    elif bravais_lattice == 'hP':
+        spacegroups =       [
+            'P 3',     'P 31',     'P 3 c 1', 'P 3 1 c', 'P 61',     'P 62',     'P 63',     'P 6 c c'
+            ]
+        extinction_groups = [
+            'P - - -', 'P 31 - -', 'P - c -', 'P - - c', 'P 61 - -', 'P 62 - -', 'P 63 - -', 'P - c c'
+            ]
+    elif bravais_lattice == 'tI':
+        spacegroups = [
+            'I 4',     'I 41',    'I 41/a',     'I 4 c m', 'I 41 m d', 'I 41 c d', 'I 41/a m d', 'I 41/a c d'
+            ]
+        extinction_groups = [
+            'I - - -', 'I41 - -', 'I 41/a - -', 'I - c -', 'I - - d',  'I - c d',  'I a - d',    'I a c d'
             ]
     elif bravais_lattice == 'tP':
-        #spacegroups = [
-        #    75, 76, 77, 78, 81, 83, 84, 85, 86, 89, 90, 91, 92, 93, 94, 95, 96, 99,
-        #    100, 101, 102, 103, 104, 105, 106, 111, 112, 113, 114, 115, 116, 117, 118,
-        #    123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138
-        #    ]
-        #spacegroups = [
-        #    75, 76, 77, 85, 86, 90, 92, 94,
-        #    100, 101, 102, 103, 104, 105, 106, 114,
-        #    125, 126, 130, 133, 134, 137, 138
-        #    ]
         spacegroups = [
-            'P 4', 'P 41', 'P 42', 'P 4/n', 'P 42/n', 'P 4 21 2', 'P 41 21 2', 'P 42 21 2',
+            'P 4',     'P 41',     'P 42',     'P 4/n',   'P 42/n',     'P 4 21 2', 'P 41 21 2', 'P 42 21 2',
             'P 4 b m', 'P 42 c m', 'P 42 n m', 'P 4 c c', 'P 4 n c', 'P 42 m c', 'P 42 b c', 'P -4 21 c',
             'P 4/n b m', 'P 4/n n c', 'P 4/n c c', 'P 42/n b c', 'P 42/n n m', 'P 42/n m c', 'P 42/n c m'
             ]
+        extinction_groups = [
+            'P - - -', 'P 41 - -', 'P 42 - -', 'P n - -', 'P 42/n - -', 'P - 21 2', 'P 41 21 -', 'P 42 21 2',
+            'P - b -', 'P - c -',  'P - n -',  'P - c c', 'P - n c', 'P - - c',  'P - b c',  'P - c1 c',
+            'P n b -',   'P n n c',   'P n c c',   'P n b c',    'P n n -',    'P n - c',    'P n c -'  
+            ]
     elif bravais_lattice == 'oC':
+        # Do I need to add C m 2 b for example?
         spacegroups = [
             'C 2 2 21', 'C c c 2', 'C c 2 m', 'C 2 c m', 'C c 2 a', 'C 2 c b', 'C c c a', 'C 2 2 2', 'C m 2 a',
             ]
+        extinction_groups = [
+            'C - - 21', 'C c c -', 'C c - -', 'C - c -', 'C c - a', 'C - c b', 'C c c a', 'C - - -', 'C - - a',
+            ]
     elif bravais_lattice == 'oF':
-        #spacegroups = ['F 2 2 2', 'F m m m', 'F m m 2', 'F d d d', 'F 2 d d', 'F d 2 d', 'F d d 2']
-        spacegroups = ['F 2 2 2', 'F d d d', 'F 2 d d', 'F d 2 d', 'F d d 2']
+        spacegroups =       ['F 2 2 2', 'F d d d', 'F 2 d d', 'F d 2 d', 'F d d 2']
+        extinction_groups = ['F - - -', 'F d d d', 'F - d d', 'F d - d', 'F d d -']
     elif bravais_lattice == 'oI':
         spacegroups = [
             'I m m m', 'I b c a', 'I b a 2', 'I 2 c b', 'I c 2 a', 'I b m 2', 'I m a 2', 'I m 2 a',
+            ]
+        extinction_groups = [
+            'I - - -', 'I b c a', 'I b a -', 'I - c b', 'I c - a', 'I b m -', 'I - a -', 'I - - a',
             ]
     elif bravais_lattice == 'oP':
         spacegroups = [
@@ -992,16 +995,38 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
             'P c c n', 'P b n b', 'P n a a',
             'P b c n', 'P c a n', 'P b n a', 'P c n b', 'P n c a', 'P n a b'
             ]
-    elif bravais_lattice == 'mC':
-        spacegroups = [
-            'C 1 2 1', 'C 1 c 1', 'I 1 2 1', 'I 1 a 1', 'A 1 2 1', 'A 1 a 1',
+        extinction_groups = [
+            'P - - -', 'P 21 - -', 'P - 21 -', 'P - - 21',
+            'P - - a', 'P - - b', 'P - c -',
+            'P - a -', 'P b - -', 'P c - -', 
+            'P - a a', 'P b - b', 'P c c -',
+            'P - 21 21', 'P 21 - 21', 'P 21 21 -',
+            'P b c -', 'P c a -', 'P b - a', 'P c - b', 'P - c a', 'P - a b',
+            'P - c b', 'P c - a', 'P b a -',
+            'P n c -', 'P c n -', 'P b - n', 'P n - b', 'P - n a', 'P - a n',
+            'P n - -', 'P - - n', 'P - n -', 
+            'P n c b', 'P c n a', 'P b a n',
+            'P c c b', 'P c c a', 'P b a a', 'P b c b', 'P c a a', 'P b a b',
+            'P 21 21 21', 'P n n n', 'P b c a', 'P c a b',
+            'P n a -', 'P b n -', 'P c - n', 'P n - a', 'P - n b', 'P - c n',
+            'P - n n', 'P n - n', 'P n n -', 'P n n a', 'P n n b', 'P n c n',
+            'P c c n', 'P b n b', 'P n a a',
+            'P b c n', 'P c a n', 'P b n a', 'P c n b', 'P n c a', 'P n a b'
             ]
+    elif bravais_lattice == 'mC':
+        spacegroups =       ['I 1 2 1', 'I 1 a 1']
+        extinction_groups = ['I 1 - 1', 'I 1 a 1']
     elif bravais_lattice == 'mP':
         spacegroups = [
             'P 1 2 1', 'P 1 21 1', 'P 1 c 1', 'P 1 a 1', 'P 1 n 1', 'P 1 21/c 1', 'P 1 21/a 1', 'P 1 21/n 1'
             ]
+        extinction_groups = [
+            'P 1 - 1', 'P 1 21 1', 'P 1 c 1', 'P 1 a 1', 'P 1 n 1', 'P 1 21/c 1', 'P 1 21/a 1', 'P 1 21/n 1'
+            ]
     elif bravais_lattice == 'aP':
-        spacegroups = ['P 1']
+        spacegroups =       ['P 1']
+        extinction_groups = ['P -']
+    """
     hkl_ref_sg = dict.fromkeys(spacegroups)
     for spacegroup in spacegroups:
         if bravais_lattice == 'hR':
@@ -1012,10 +1037,24 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
             ops = gemmi.SpaceGroup(spacegroup).operations()
         systematically_absent = ops.systematic_absences(hkl_ref)
         hkl_ref_sg[spacegroup] = hkl_ref[np.invert(systematically_absent)]
+    """
+    keys = [f'{i} e.g. {j}' for i, j in zip(extinction_groups, spacegroups)]
+    hkl_ref_sg = dict.fromkeys(keys)
+    for index, key in enumerate(keys):
+        if bravais_lattice == 'hR':
+            # gemmi gives the systematic absences for rhombohedral in the hexagonal setting.
+            # The ':R' component tells gemmi to use the rhombohedral setting
+            ops = gemmi.SpaceGroup(f'{spacegroups[index]}:R').operations()
+        else:
+            ops = gemmi.SpaceGroup(spacegroups[index]).operations()
+        systematically_absent = ops.systematic_absences(hkl_ref)
+        hkl_ref_sg[key] = hkl_ref[np.invert(systematically_absent)]
     return hkl_ref_sg
 
-
+"""
 def get_extinction_group(xnn, q2_obs, triplets_obs, hkl_ref_bl, bravais_lattice, lattice_system):
+    # I am not sure where this actually gets used.
+    # It is not called in Optimizer_mpi.py
     hkl_ref_sg = get_spacegroup_hkl_ref(hkl_ref_bl, bravais_lattice=bravais_lattice)
     spacegroups = list(hkl_ref_sg.keys())
     M20 = np.zeros((xnn.shape[0], len(spacegroups)))
@@ -1055,7 +1094,7 @@ def get_extinction_group(xnn, q2_obs, triplets_obs, hkl_ref_bl, bravais_lattice,
     best_spacegroup = list(np.take(spacegroups, best_indices))
     best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
     return best_M20, best_spacegroup
-
+"""
 
 def map_spacegroup_to_extinction_group(spacegroup_symbol_hm):
     # These extinction groups are based on those used by EXPO
