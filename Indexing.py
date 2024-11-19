@@ -1,6 +1,9 @@
 """
+- 10398
+    - Do peak picking with new geo and masks
+
 - Model ensemble
-    - minimize failure rate, maximize efficiency, maximize variance
+    - WTF
 
 - Integral filter model
     - Retrain PITF Models with new sigma approach
@@ -12,30 +15,19 @@
     - Test load_by_tag
     - Run baseline for comparison
 
-- Optimization
-    - Reprofile
-    - standardization of monoclinic cells
-    - Add mechanism for analysis of failed entries    
-
-- 2D Indexing
-    * convergence radius testing
-        - regenerate peak lists
-        - Remove the indexing step and just use FOM
-        - Figure out what happened with MI2-58
-    - Start working on 2D specific algorithms using the indexed reflections
-        - Can I decompose frames into basis vectors
-
 - Documentation
     - Rewrite
-    - One page summary
     - github README.md
+
 
 - Experimental Data
     - Automate triplet picking
     - GSASII tutorials
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
-
+- Optimization
+    - standardization of monoclinic cells
+    - Add mechanism for analysis of failed entries 
 - Spacegroup assignments:
     - Add a validation
     - https://www.markvardsen.net/projects/ExtSym/main.html
@@ -43,7 +35,6 @@
     - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
     - https://journals.iucr.org/paper?fe5024
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
-
 - Regression
 - Templating
 - SWE
@@ -52,6 +43,9 @@
 - Indexing.py
 - Data
     - Reindex triclinic in reciprocal space
+- 2D Indexing
+    - Start working on 2D specific algorithms using the indexed reflections
+        - Can I decompose frames into basis vectors
 
 Readings:
     - Look more into TREOR

@@ -9,10 +9,11 @@ from Reindexing import reindex_entry_basic
 from Reindexing import selling_reduction
 from TargetFunctions import CandidateOptLoss
 from Utilities import fix_unphysical
-from Utilities import get_M20_from_xnn
+from Utilities import get_M20
 from Utilities import get_M20_likelihood
 from Utilities import get_M20_likelihood_from_xnn
 from Utilities import get_M_triplet
+from Utilities import get_M_triplet_old
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_spacegroup_hkl_ref
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -110,18 +111,18 @@ class Candidates:
         q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
         if not self.triplets is None:
             self.M_triplets = get_M_triplet(
                 self.q2_obs,
+                q2_calc,
                 self.triplets,
                 self.hkl,
                 self.xnn,
                 self.lattice_system,
                 self.bravais_lattice
                 )
-        self.M20 = get_M20_from_xnn(
-            self.q2_obs, self.xnn, self.hkl, self.hkl_ref, self.lattice_system
-            )
+        self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
 
     def get_sigma_reduction(self):
         # Check to see if any of the candidates can predict the triplets
@@ -167,16 +168,11 @@ class Candidates:
             np.repeat(self.q2_obs[np.newaxis], self.n, axis=0), 
             lattice_system=self.lattice_system,
             )
-        if self.triplets is None or iteration_info['triplet_opt'] == False:
-            target_function.update(self.hkl, self.xnn)
-        else:
-            sigma_reduction = self.get_sigma_reduction()
-            target_function.update(self.hkl, self.xnn, sigma_reduction=sigma_reduction)
+        target_function.update(self.hkl, self.xnn)
         self.iteration_worker_common(target_function)
 
     def random_subsampling(self, iteration_info):
         n_keep = self.n_peaks - iteration_info['n_drop']
-
         if iteration_info['uniform_sampling']:
             subsampled_indices = self.rng.permuted(
                 np.repeat(np.arange(self.n_peaks)[np.newaxis], self.n, axis=0),
@@ -190,19 +186,8 @@ class Candidates:
             self.hkl, subsampled_indices[:, :, np.newaxis], axis=1
             )
         q2_subsampled = np.take(self.q2_obs, subsampled_indices)
-
         target_function = CandidateOptLoss(q2_subsampled, lattice_system=self.lattice_system)
-
-        if self.triplets is None or iteration_info['triplet_opt'] == False:
-            target_function.update(hkl_subsampled, self.xnn)
-        else:
-            sigma_reduction = self.get_sigma_reduction()
-            sigma_reduction_subsampled = np.take_along_axis(
-                sigma_reduction, subsampled_indices, axis=1
-                )
-            target_function.update(
-                hkl_subsampled, self.xnn, power=power, sigma_reduction=sigma_reduction_subsampled
-                )
+        target_function.update(hkl_subsampled, self.xnn)
         self.iteration_worker_common(target_function)
 
     def random_subsampling_power(self, iteration_info):
@@ -223,11 +208,7 @@ class Candidates:
             np.repeat(self.q2_obs[np.newaxis], self.n, axis=0), 
             lattice_system=self.lattice_system,
             )
-        if self.triplets is None or iteration_info['triplet_opt'] == False:
-            target_function.update(self.hkl, self.xnn, power=power)
-        else:
-            sigma_reduction = self.get_sigma_reduction()
-            target_function.update(self.hkl, self.xnn, power=power, sigma_reduction=sigma_reduction)
+        target_function.update(self.hkl, self.xnn, power=power)
         self.iteration_worker_common(target_function)
 
     def random_power(self, iteration_info):
@@ -246,11 +227,7 @@ class Candidates:
             np.repeat(self.q2_obs[np.newaxis], self.n, axis=0), 
             lattice_system=self.lattice_system,
             )
-        if self.triplets is None or iteration_info['triplet_opt'] == False:
-            target_function.update(self.hkl, self.xnn, power)
-        else:
-            sigma_reduction = self.get_sigma_reduction()
-            target_function.update(self.hkl, self.xnn, power, sigma_reduction=sigma_reduction)
+        target_function.update(self.hkl, self.xnn, power)
         self.iteration_worker_common(target_function)
 
     def refine_cell(self):
@@ -288,8 +265,13 @@ class Candidates:
         q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-        if not self.triplets is None:
-            refined_M_triplets = get_M_triplet(
+        refined_q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+            
+        refined_M20 = get_M20(self.q2_obs, refined_q2_calc, q2_ref_calc)
+        if self.triplets is None:
+            improved = refined_M20 > self.best_M20
+        else:
+            refined_M_triplets = get_M_triplet_old(
                 self.q2_obs,
                 self.triplets,
                 refined_hkl,
@@ -297,12 +279,6 @@ class Candidates:
                 self.lattice_system,
                 self.bravais_lattice
                 )
-        refined_M20 = get_M20_from_xnn(
-            self.q2_obs, refined_xnn, refined_hkl, self.hkl_ref, self.lattice_system
-            )
-        if self.triplets is None:
-            improved = refined_M20 > self.best_M20
-        else:
             improved = refined_M_triplets.sum(axis=1) > self.best_M_triplets.sum(axis=1)
             self.best_M_triplets[improved] = refined_M_triplets[improved]
         self.best_hkl[improved] = refined_hkl[improved]
@@ -374,9 +350,8 @@ class Candidates:
             q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
             hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
-            M20[:, mf_index] = get_M20_from_xnn(
-                self.q2_obs, xnn_mult, hkl[:, mf_index], self.hkl_ref, self.lattice_system
-                )
+            q2_calc_mult = np.take_along_axis(q2_ref_calc_mult, hkl_assign, axis=1)
+            M20[:, mf_index] = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
 
         # Use the M20 score to check for off by two errors even if there are triplets.
         # The M20 score is more sensitive to unindexed peaks than M_triplet is incorrect unit
@@ -391,7 +366,7 @@ class Candidates:
             hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
             )[:, 0]
         if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet(
+            self.best_M_triplets = get_M_triplet_old(
                 self.q2_obs,
                 self.triplets,
                 self.best_hkl,
@@ -417,35 +392,56 @@ class Candidates:
     def assign_extinction_group(self):
         hkl_ref_sg = get_spacegroup_hkl_ref(self.hkl_ref, bravais_lattice=self.bravais_lattice)
         spacegroups = list(hkl_ref_sg.keys())
-        M20 = np.zeros((self.n, len(spacegroups)))
-        hkl = np.zeros([self.n, self.n_peaks, 3, len(spacegroups)])
+
+        if self.bravais_lattice == 'oP':
+            # This is only significantly time consuming for primitive orthorhombic.
+            # So just look at the top 10% of candidates.
+            n_test = int(0.1*self.n)
+            test_indices = np.argsort(self.best_M20)[::-1][:n_test]
+            M20 = np.zeros((n_test, len(spacegroups)))
+            hkl = np.zeros([n_test, self.n_peaks, 3, len(spacegroups)])
+            best_xnn = self.best_xnn[test_indices]
+        else:
+            M20 = np.zeros((self.n, len(spacegroups)))
+            hkl = np.zeros([self.n, self.n_peaks, 3, len(spacegroups)])
+            best_xnn = self.best_xnn
+
         for spacegroup_index, spacegroup in enumerate(spacegroups):
             q2_ref_calc = Q2Calculator(
                 lattice_system=self.lattice_system,
                 hkl=hkl_ref_sg[spacegroup],
                 tensorflow=False,
                 representation='xnn'
-                ).get_q2(self.best_xnn)
+                ).get_q2(best_xnn)
 
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
             hkl[:, :, :, spacegroup_index] = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
-            M20[:, spacegroup_index] = get_M20_from_xnn(
-                self.q2_obs,
-                self.best_xnn,
-                hkl[:, :, :, spacegroup_index],
-                hkl_ref_sg[spacegroup],
-                self.lattice_system
-                )
+            q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+            M20[:, spacegroup_index] = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
 
         # M_triplet is unaffected by unindexed peaks and therefore spacegroup assignment.
         best_indices = np.argmax(M20, axis=1)
-        self.best_spacegroup = list(np.take(spacegroups, best_indices))
-        self.best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
-        self.best_hkl = np.take_along_axis(
+        best_spacegroup = list(np.take(spacegroups, best_indices))
+        best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
+        best_hkl = np.take_along_axis(
             hkl, best_indices[:, np.newaxis, np.newaxis, np.newaxis], axis=3
             )[:, :, :, 0]
+
+        if self.bravais_lattice == 'oP':
+            # The first element of the returned spacegroups should be the lowest symmetry case.
+            # This should be verified
+            self.best_spacegroup = [spacegroups[0] for i in range(self.n)]
+            for index, test_index in enumerate(test_indices):
+                self.best_spacegroup[test_index] = best_spacegroup[index]
+            self.best_M20[test_indices] = best_M20
+            self.best_hkl[test_indices] = best_hkl
+        else:
+            self.best_spacegroup = best_spacegroup
+            self.best_M20 = best_M20
+            self.best_hkl = best_hkl
+
         if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet(
+            self.best_M_triplets = get_M_triplet_old(
                 self.q2_obs,
                 self.triplets,
                 self.best_hkl,
@@ -467,6 +463,7 @@ class Candidates:
             probability > self.assignment_threshold,
             axis=1, dtype=int
             )
+        probability_ = probability.copy()
         if self.triplets is None:
             self.n_indexed_triplets = None
         else:
@@ -702,7 +699,7 @@ class OptimizerManager(OptimizerBase):
                 if generator_info['generator'] in ['nn', 'trees']:
                     generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                        batch_size=1,
+                        batch_size=128,
                         model=generator_info['generator'],
                         q2_scaler=self.indexer.q2_scaler,
                         )
@@ -713,7 +710,7 @@ class OptimizerManager(OptimizerBase):
                 elif generator_info['generator'] == 'pitf':
                     generator_unit_cells = self.indexer.pitf_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                        batch_size=1,
+                        batch_size=128,
                         )
                 elif generator_info['generator'] in ['random', 'distribution_volume', 'predicted_volume']:
                     generator_unit_cells = self.indexer.random_unit_cell_generator[self.bravais_lattice].generate(

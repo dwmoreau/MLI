@@ -685,20 +685,42 @@ def get_M_triplet_from_xnn(triplets_obs, hkl, xnn, lattice_system, bravais_latti
     return M20_triplet
 
 
-def get_M_triplet(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
-    _, _, M_likelihood_primary = get_M20_likelihood_from_xnn(
-        q2_obs, xnn, hkl, lattice_system, bravais_lattice
-        )
-
-    # q2_diff_calc is the magnitude of the calculated difference between q0 and q1
-    # It is the calculated value of triplet_obs[:, 2]
-    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)
+def get_M_triplet_old(q2_obs, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
     reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
         xnn, partial_unit_cell=True, lattice_system=lattice_system
         )
     reciprocal_volume = get_unit_cell_volume(
         reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system
         )
+
+    # This could be simplified
+    _, _, M_likelihood_primary = get_M20_likelihood_from_xnn(
+        q2_obs, xnn, hkl, lattice_system, bravais_lattice
+        )
+
+    # q2_diff_calc is the magnitude of the calculated difference between q0 and q1
+    # It is the calculated value of triplet_obs[:, 2]
+    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)    
+    _, _, M_likelihood_triplet = get_M20_likelihood(
+        triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume
+        )
+    return np.column_stack((M_likelihood_primary, M_likelihood_triplet))
+
+
+def get_M_triplet(q2_obs, q2_calc, triplets_obs, hkl, xnn, lattice_system, bravais_lattice):
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+        xnn, partial_unit_cell=True, lattice_system=lattice_system
+        )
+    reciprocal_volume = get_unit_cell_volume(
+        reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system
+        )
+    _, _, M_likelihood_primary = get_M20_likelihood(
+        q2_obs, q2_calc, bravais_lattice, reciprocal_volume
+        )
+
+    # q2_diff_calc is the magnitude of the calculated difference between q0 and q1
+    # It is the calculated value of triplet_obs[:, 2]
+    q2_diff_calc = get_q2_calc_triplets(triplets_obs, hkl, xnn, lattice_system)    
     _, _, M_likelihood_triplet = get_M20_likelihood(
         triplets_obs[:, 2], q2_diff_calc, bravais_lattice, reciprocal_volume
         )
@@ -961,10 +983,10 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
     elif bravais_lattice == 'oC':
         # Do I need to add C m 2 b for example?
         spacegroups = [
-            'C 2 2 21', 'C c c 2', 'C c 2 m', 'C 2 c m', 'C c 2 a', 'C 2 c b', 'C c c a', 'C 2 2 2', 'C m 2 a',
+            'C 2 2 2', 'C 2 2 21', 'C c c 2', 'C c 2 m', 'C 2 c m', 'C c 2 a', 'C 2 c b', 'C c c a', 'C m 2 a',
             ]
         extinction_groups = [
-            'C - - 21', 'C c c -', 'C c - -', 'C - c -', 'C c - a', 'C - c b', 'C c c a', 'C - - -', 'C - - a',
+            'C - - -', 'C - - 21', 'C c c -', 'C c - -', 'C - c -', 'C c - a', 'C - c b', 'C c c a', 'C - - a',
             ]
     elif bravais_lattice == 'oF':
         spacegroups =       ['F 2 2 2', 'F d d d', 'F 2 d d', 'F d 2 d', 'F d d 2']
@@ -1051,50 +1073,6 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
         hkl_ref_sg[key] = hkl_ref[np.invert(systematically_absent)]
     return hkl_ref_sg
 
-"""
-def get_extinction_group(xnn, q2_obs, triplets_obs, hkl_ref_bl, bravais_lattice, lattice_system):
-    # I am not sure where this actually gets used.
-    # It is not called in Optimizer_mpi.py
-    hkl_ref_sg = get_spacegroup_hkl_ref(hkl_ref_bl, bravais_lattice=bravais_lattice)
-    spacegroups = list(hkl_ref_sg.keys())
-    M20 = np.zeros((xnn.shape[0], len(spacegroups)))
-
-    n_peaks = q2_obs.size
-    n = xnn.shape[0]
-
-    for spacegroup_index, spacegroup in enumerate(spacegroups):
-        q2_ref_calc = Q2Calculator(
-            lattice_system=lattice_system,
-            hkl=hkl_ref_sg[spacegroup],
-            tensorflow=False,
-            representation='xnn'
-            ).get_q2(xnn)
-
-        hkl_ref_length = hkl_ref_sg[spacegroup].shape[0]
-        pairwise_differences = scipy.spatial.distance.cdist(
-            q2_obs[:, np.newaxis], q2_ref_calc.ravel()[:, np.newaxis]
-            ).reshape((n_peaks, n, hkl_ref_length))
-        hkl_assign = pairwise_differences.argmin(axis=2).T
-        hkl = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
-        if triplets_obs is None:
-            M20[:, spacegroup_index] = get_M20_from_xnn(
-                q2_obs, xnn, hkl, hkl_ref_sg[spacegroup], lattice_system
-                )
-        else:
-            M20[:, spacegroup_index] = get_M20_triplet(
-                q2_obs,
-                triplets_obs,
-                hkl,
-                xnn,
-                lattice_system,
-                bravais_lattice
-                )
-
-    best_indices = np.argmax(M20, axis=1)
-    best_spacegroup = list(np.take(spacegroups, best_indices))
-    best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
-    return best_M20, best_spacegroup
-"""
 
 def map_spacegroup_to_extinction_group(spacegroup_symbol_hm):
     # These extinction groups are based on those used by EXPO

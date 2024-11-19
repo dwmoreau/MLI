@@ -88,7 +88,8 @@ if __name__ == '__main__':
     #bravais_lattices = ['hP']
     #bravais_lattices = ['mP', 'mC', 'aP']
     #bravais_lattices = ['mP', 'mC']
-    bravais_lattices = ['aP']
+    bravais_lattices = ['mP']
+    #bravais_lattices = ['aP']
     
     if sys.argv[1] == 'random_subsampling':
         if sys.argv[4] == 'uniform':

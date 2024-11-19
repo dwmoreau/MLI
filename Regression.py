@@ -764,11 +764,18 @@ class Regression:
         else:
             # If more unit cells are requested than estimators, use the mean and covariance
             # of the estimators predictions to randomly generate unit cells
-            random_unit_cells = rng.multivariate_normal(
-                mean=generated_unit_cells[0].mean(axis=1),
-                cov=np.cov(generated_unit_cells[0], rowvar=True),
-                size=n_unit_cells - generated_unit_cells.shape[2]
-                )
+            if self.lattice_system == 'cubic':
+                random_unit_cells = rng.normal(
+                    loc=generated_unit_cells[0].mean(),
+                    scale=generated_unit_cells[0].std(),
+                    size=n_unit_cells - generated_unit_cells.shape[2]
+                    )[:, np.newaxis]
+            else:
+                random_unit_cells = rng.multivariate_normal(
+                    mean=generated_unit_cells[0].mean(axis=1),
+                    cov=np.cov(generated_unit_cells[0], rowvar=True),
+                    size=n_unit_cells - generated_unit_cells.shape[2]
+                    )
             generated_unit_cells = np.concatenate((
                 generated_unit_cells[0].T, random_unit_cells
                 ), axis=0)

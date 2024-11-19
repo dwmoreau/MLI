@@ -1,3 +1,12 @@
+"""
+sample  | n_triplets | n_triplets_indexed
+s6      | 32         | 23
+s8      | 13         | 6
+s12     | 22         | 3
+s36     | 34         | 21
+s38     | 50         | 22
+s40     | 16         | 14
+"""
 from mpi4py import MPI
 import numpy as np
 import os
@@ -112,7 +121,7 @@ entry_tags = [
     #'s7',
     #'s8',
     #'s12',
-    's13',
+    #'s13',
     #'s14',
     #'s16',
     #'s23',
@@ -124,7 +133,7 @@ entry_tags = [
     #'s31',
     #'s36',
     #'s37',
-    #'s38',
+    's38',
     #'s39',
     #'s40',
     #'s42',
@@ -143,9 +152,9 @@ logger.info('Starting process')
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0]
 #serial =           [True, True, True, True, True, True, True]
 
-bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+#manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
 #bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
 #manager_rank =     [    0,     0,     1,     1]
@@ -155,9 +164,13 @@ serial =           [True, True, True, True, True, True, True, False, False, Fals
 #manager_rank =     [    0]
 #serial =           [True]
 
-#bravais_lattices = ['oP']
-#manager_rank =     [   0]
-#serial =           [True]
+#bravais_lattices = ['tP', 'tI']
+#manager_rank =     [   0, 0]
+#serial =           [True, True]
+
+bravais_lattices = ['tI']
+manager_rank =     [  0]
+serial =           [True]
 
 #bravais_lattices = [ 'mP']
 #manager_rank =     [    0]
