@@ -260,7 +260,9 @@ class Candidates:
                 lattice_system=self.lattice_system,
                 )
             target_function.update(hkl_subsampled, refined_xnn[candidate_indices])
-            refined_xnn[candidate_indices] += target_function.gauss_newton_step(refined_xnn[candidate_indices])
+            refined_xnn[candidate_indices] += target_function.gauss_newton_step(
+                refined_xnn[candidate_indices]
+                )
 
         q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
@@ -531,7 +533,7 @@ class OptimizerBase:
         # identical.
         # This method takes pairwise differences in Xnn space and combines candidates that are 
         # closer than some given radius
-        # If this were performed with all the entries combined, it would be slow and memory intensive.
+        # If this were performed with all the entries, it would be slow and memory intensive.
         # Instead the candidates are sorted by reciprocal unit cell volume and filtering is
         # performed in chunks.
 
@@ -699,7 +701,7 @@ class OptimizerManager(OptimizerBase):
                 if generator_info['generator'] in ['nn', 'trees']:
                     generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                        batch_size=128,
+                        batch_size=2,
                         model=generator_info['generator'],
                         q2_scaler=self.indexer.q2_scaler,
                         )
@@ -708,9 +710,11 @@ class OptimizerManager(OptimizerBase):
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         )
                 elif generator_info['generator'] == 'pitf':
+                    # We only do one inference, so batch_size=total_size=1 makes sense 
+                    # but batch size of 2 is faster than one ....
                     generator_unit_cells = self.indexer.pitf_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                        batch_size=128,
+                        batch_size=2, 
                         )
                 elif generator_info['generator'] in ['random', 'distribution_volume', 'predicted_volume']:
                     generator_unit_cells = self.indexer.random_unit_cell_generator[self.bravais_lattice].generate(

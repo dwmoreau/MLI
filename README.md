@@ -1,7 +1,15 @@
 # MLI
 
 ## Dependencies
-Two separate python environments are used, one for dataset generation and another for ML training. Dataset generation requires the CCDC python API. It is a fairly complex library and I felt it was best to keep it separate from the ML libraries.
+Three python environments are used for this project.
+
+- Parsing the CCDC database requires their python API and python environment. It is a fairly complex library and I felt it was best to keep it separate from the other libraries.
+
+- Dataset generation requires the cctbx conda package.
+
+- ML models requires Tensorflow.
+
+The environments with Tensorflow and cctbx could be combined, but I kept them separate.
 
 ### For the dataset generation environment:
 1: CCDC API

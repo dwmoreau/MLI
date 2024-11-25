@@ -97,19 +97,38 @@ class Regression:
             metrics=self.loss_metrics
             )
 
-    def _get_train_val(self, data):
+    def _get_train_val(self, data, limit_volume=False):
         train = data[data['train']]
         val = data[~data['train']]
-        train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])}
-        val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])}
-        train_true = {
-            f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
-            }
-        val_true = {
-            f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
-            }
 
         volume_train = np.stack(train['reindexed_volume'])
+        volume_val = np.stack(val['reindexed_volume'])
+        if limit_volume:
+            # The large volume triclinic unit cells lead to an overflow error.
+            # So the loss becomes nan
+            max_volume = np.sort(volume_train)[int(0.95*volume_train.size)]
+            train_indices = volume_train <= max_volume
+            val_indices = volume_val <= max_volume
+            volume_train = volume_train[train_indices]
+            volume_val = volume_val[val_indices]
+            train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])[train_indices]}
+            val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])[val_indices]}
+            train_true = {
+                f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[train_indices][:, self.unit_cell_indices],
+                }
+            val_true = {
+                f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[val_indices][:, self.unit_cell_indices],
+                }
+        else:
+            train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])}
+            val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])}
+            train_true = {
+                f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
+                }
+            val_true = {
+                f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
+                }
+
         volume_train_sorted = np.sort(volume_train)
         n_volume_bins = 25
         volume_bins = np.linspace(
@@ -128,7 +147,6 @@ class Regression:
         too_large = volume_bin_weights > 10
         volume_bin_weights[too_large] = 10
         volume_train_weights = volume_bin_weights[volume_bin_indices]
-
         return train_inputs, val_inputs, train_true, val_true, volume_train_weights
 
     def fit_trees(self, data):
@@ -189,7 +207,12 @@ class Regression:
 
     def fit_model_cycles(self, data):
         self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
-        train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
+        if self.lattice_system == 'triclinic':
+            limit_volume = True
+        else:
+            limit_volume = False
+        train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data, limit_volume)
+
         for cycle_index in range(self.model_params['cycles']):
             self.compile_model('mean')
             print(f'\n Starting cycle {cycle_index} mean for {self.group}')
@@ -530,6 +553,7 @@ class Regression:
             'cycles',
             'learning_rate',
             'fit_strategy',
+            'variance_model',
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
@@ -537,6 +561,7 @@ class Regression:
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['learning_rate'] = float(params['learning_rate'])
         self.model_params['fit_strategy'] = params['fit_strategy']
+        self.model_params['variance_model'] = params['variance_model']
         if self.model_params['fit_strategy'] == 'cycles':
             self.model_params['epochs'] = int(params['epochs'])
             self.model_params['cycles'] = int(params['cycles'])
@@ -582,26 +607,6 @@ class Regression:
             'bias_initializer',
             ]
 
-        self.model_params['variance_model'] = 'alpha_beta'
-        network_keys = ['mean_params', 'alpha_params', 'beta_params']
-        for network_key in network_keys:
-            self.model_params[network_key] = dict.fromkeys(params_keys)
-            self.model_params[network_key]['unit_cell_length'] = self.unit_cell_length
-            for element in params[network_key].split('{')[1].split('}')[0].split(", '"):
-                key = element.replace("'", "").split(':')[0]
-                value = element.replace("'", "").split(':')[1]
-                if key in ['dropout_rate', 'epsilon']:
-                    self.model_params[network_key][key] = float(value)
-                if key == 'layers':
-                    self.model_params[network_key]['layers'] = np.array(
-                        value.split('[')[1].split(']')[0].split(','),
-                        dtype=int
-                        )
-                if key in ['output_activation', 'output_name']:
-                    self.model_params[network_key][key] = value.replace(' ', '')
-            self.model_params[network_key]['kernel_initializer'] = None
-            self.model_params[network_key]['bias_initializer'] = None
-        """
         network_keys = ['mean_params', 'var_params', 'alpha_params', 'beta_params']
         for network_key in network_keys:
             self.model_params[network_key] = dict.fromkeys(params_keys)
@@ -620,7 +625,7 @@ class Regression:
                     self.model_params[network_key][key] = value.replace(' ', '')
             self.model_params[network_key]['kernel_initializer'] = None
             self.model_params[network_key]['bias_initializer'] = None
-        """
+
         self.build_model()
         self.model.load_weights(
             filepath=f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5',

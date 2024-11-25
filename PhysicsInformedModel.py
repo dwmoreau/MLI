@@ -14,6 +14,7 @@ from Utilities import get_unit_cell_from_xnn
 from Utilities import get_unit_cell_volume
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_xnn_from_unit_cell
+from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import PairwiseDifferenceCalculator
 from Utilities import read_params
 from Utilities import reciprocal_uc_conversion
@@ -83,7 +84,7 @@ class ExtractionLayer(tf.keras.layers.Layer):
 
             volume_differences = distribution_volumes[1:] - distribution_volumes[:-1]
             sigma = min(max(np.median(volume_differences), 0.015), 0.035)
-            self.sigma = tf.cast(sigma, dtype=tf.float32)
+            self.sigma.assign(tf.cast(sigma, dtype=tf.float32))
 
             q2_obs_scaled = q2_obs / q2_obs_scale
             q2_obs_scaled_sorted = np.sort(
@@ -158,6 +159,9 @@ class ExtractionLayer(tf.keras.layers.Layer):
         logits = y_pred[:, :, self.model_params['unit_cell_length']]
         probabilities = tf.nn.softmax(logits)
         errors = y_true[:, tf.newaxis, :] - xnn_scaled_pred
+        # This is to prevent an overflow error
+        # tf.math.cosh has a limit around +/- 80 for dtype=tf.float32
+        errors = tf.clip_by_value(errors, -75.0, 75.0)
         return errors, probabilities
 
     def loss_function_log_cosh(self, y_true, y_pred):
@@ -488,12 +492,11 @@ class PhysicsInformedModel:
         self.xnn_mean, self.xnn_scale = np.load(
             f'{self.save_to_split_group}/{self.split_group}_xnn_scaler_{self.model_params["tag"]}.npy',
             )
-
         self.build_model(data=None)
         self.compile_model()
         self.model.load_weights(
             filepath=f'{self.save_to_split_group}/{self.split_group}_pitf_weights_{self.model_params["tag"]}.h5',
-            by_name=False
+            by_name=True
             )
 
         calibration_params_keys = [
@@ -962,6 +965,18 @@ class PhysicsInformedModel:
             data = data[~data['augmented']]
         train = data[data['train']]
         val = data[~data['train']]
+
+        #if self.lattice_system in ['triclinic', 'monoclinic']:
+        #    # This helps with overflow error in the loss function
+        #    train_xnn = np.stack(train['reindexed_xnn'])[:, self.unit_cell_indices]
+        #    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+        #        train_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+        #        )
+        #    reciprocal_volume = get_unit_cell_volume(
+        #        reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+        #        )
+        #    max_reciprocal_volume = np.sort(reciprocal_volume)[int(0.995*reciprocal_volume.size)]
+        #    train = train[reciprocal_volume < max_reciprocal_volume]
 
         train_q2_obs = np.stack(train['q2'])[:, :self.model_params['peak_length']]
         val_q2_obs = np.stack(val['q2'])[:, :self.model_params['peak_length']]

@@ -25,7 +25,7 @@ from Utilities import get_M20_likelihood_from_xnn
 
 
 class MITemplates:
-    def __init__(self, group, data_params, template_params, hkl_ref, save_to, seed):
+    def __init__(self, bravais_lattice, data_params, template_params, hkl_ref, save_to, seed):
         self.template_params = template_params
         template_params_defaults = {
             'templates_per_dominant_zone_bin': 1000,
@@ -40,7 +40,7 @@ class MITemplates:
         self.unit_cell_indices = data_params['unit_cell_indices']
         self.hkl_ref_length = data_params['hkl_ref_length']
         self.hkl_ref = hkl_ref
-        self.group = group
+        self.bravais_lattice = bravais_lattice
         self.save_to = save_to
         self.seed = seed
         self.rng = np.random.default_rng(self.seed)
@@ -64,22 +64,22 @@ class MITemplates:
     def save(self):
         write_params(
             self.template_params,
-            f'{self.save_to}/{self.group}_template_params_{self.template_params["tag"]}.csv'
+            f'{self.save_to}/{self.bravais_lattice}_template_params_{self.template_params["tag"]}.csv'
             )
         if self.template_params['calibrate']:
             joblib.dump(
                 self.hgbc_classifier,
-                f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
+                f'{self.save_to}/{self.bravais_lattice}_template_calibrator_{self.template_params["tag"]}.bin'
                 )
 
     def load_from_tag(self):
         self.miller_index_templates = np.load(
-            f'{self.save_to}/{self.group}_miller_index_templates_{self.template_params["tag"]}.npy'
+            f'{self.save_to}/{self.bravais_lattice}_miller_index_templates_{self.template_params["tag"]}.npy'
             )
         self.miller_index_templates_prob = np.load(
-            f'{self.save_to}/{self.group}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
+            f'{self.save_to}/{self.bravais_lattice}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
             )
-        params = read_params(f'{self.save_to}/{self.group}_template_params_{self.template_params["tag"]}.csv')
+        params = read_params(f'{self.save_to}/{self.bravais_lattice}_template_params_{self.template_params["tag"]}.csv')
         params_keys = [
             'tag',
             'templates_per_dominant_zone_bin',
@@ -108,7 +108,7 @@ class MITemplates:
             if params['calibrate'] == 'True':
                 self.template_params['calibrate'] = True
                 self.hgbc_classifier = joblib.load(
-                    f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
+                    f'{self.save_to}/{self.bravais_lattice}_template_calibrator_{self.template_params["tag"]}.bin'
                     )
                 self.template_params['parallelization'] = params['parallelization']
                 self.template_params['n_processes'] = int(params['n_processes'])
@@ -185,7 +185,7 @@ class MITemplates:
             axes[0].set_xlabel('a*')
             axes[1].set_xlabel('$2 x cos(\\alpha*)$')
             fig.tight_layout()
-            fig.savefig(f'{self.save_to}/{self.group}_dominant_zone_ratio_{self.template_params["tag"]}.png')
+            fig.savefig(f'{self.save_to}/{self.bravais_lattice}_dominant_zone_ratio_{self.template_params["tag"]}.png')
             plt.close()
 
             mi_sets = []
@@ -290,7 +290,7 @@ class MITemplates:
             axes[4].set_xlabel('Minimum Information')
             axes[4].set_ylabel('Dominant zone ratio (Unit Cell)')
             fig.tight_layout()
-            fig.savefig(f'{self.save_to}/{self.group}_dominant_zone_ratio_{self.template_params["tag"]}.png')
+            fig.savefig(f'{self.save_to}/{self.bravais_lattice}_dominant_zone_ratio_{self.template_params["tag"]}.png')
             plt.close()
 
             mi_sets = []
@@ -370,11 +370,11 @@ class MITemplates:
         self.miller_index_templates_prob = sampling_probability / sampling_probability.sum()
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
         np.save(
-            f'{self.save_to}/{self.group}_miller_index_templates_{self.template_params["tag"]}.npy',
+            f'{self.save_to}/{self.bravais_lattice}_miller_index_templates_{self.template_params["tag"]}.npy',
             self.miller_index_templates
             )
         np.save(
-            f'{self.save_to}/{self.group}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
+            f'{self.save_to}/{self.bravais_lattice}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
             self.miller_index_templates_prob
             )
 
@@ -470,7 +470,6 @@ class MITemplates:
             lattice_system=self.lattice_system,
             bravais_lattice=self.bravais_lattice,
             )
-        #return xnn, residuals, N_pred, q2_calc_max
         return xnn, probability, N_pred, q2_calc_max
 
     def generate_xnn(self, q2_obs, indices=None):
@@ -522,7 +521,7 @@ class MITemplates:
         # changed
         if n_templates == 'all':
             xnn_templates, _ = self.generate_xnn(q2_obs)
-        elif n_templates < self.template_params['n_templates']:
+        elif n_templates <= self.template_params['n_templates']:
             # requesting fewer templates than in the set
             # subsample
             indices = rng.choice(
@@ -536,7 +535,7 @@ class MITemplates:
             xnn_templates, _ = self.generate_xnn(q2_obs)
             # requesting more templates than in the set
             # Just sample multiple times
-            print('WARNING: Requesting more templates than available. Duplicates will be returned')
+            #print('WARNING: Requesting more templates than available. Duplicates will be returned')
             difference = n_templates - self.template_params['n_templates']
             if difference > self.template_params['n_templates']:
                 replace = True
@@ -573,28 +572,26 @@ class MITemplates:
         probability_templates = self.hgbc_classifier.predict_proba(inputs)
         if n_templates == 'all':
             xnn_templates = xnn_templates_all
-        elif n_templates < self.template_params['n_templates']:
+        elif n_templates <= xnn_templates_all.shape[0]:
             # The output of the classification is
             #   col 0: in far category (False)
             #   col 1: in close category (True)
             top_n_indices = np.argsort(probability_templates[:, 0])[:n_templates]
             xnn_templates = xnn_templates_all[top_n_indices]
-        elif n_templates > self.template_params['n_templates']:
+        elif n_templates > xnn_templates_all.shape[0]:
             # requesting more templates than in the set
             # Just sample multiple times
-            print('WARNING: Requesting more templates than available. Duplicates will be returned')
-            difference = n_templates - self.template_params['n_templates']
-            if difference > self.template_params['n_templates']:
-                replace = True
+            #print('WARNING: Requesting more templates than available. Duplicates will be returned')
+            sort_indices = np.argsort(probability_templates[:, 0])
+            n_replicates = n_templates // xnn_templates_all.shape[0]
+            n_extra = n_templates % xnn_templates_all.shape[0]
+            if n_replicates > 1:
+                replicates = np.concatenate([xnn_templates_all for _ in range(n_replicates)], axis=0)
             else:
-                replace = False
-            indices = rng.choice(
-                self.template_params['n_templates'],
-                size=difference,
-                replace=replace,
-                p=self.miller_index_templates_prob,
-                )
-            xnn_templates =  np.concatenate((xnn_templates_all, xnn_templates_all[indices]), axis=0)
+                replicates = xnn_templates_all
+            extra = xnn_templates_all[sort_indices][:n_extra]
+            xnn_templates =  np.concatenate((replicates, extra), axis=0)
+            
         unit_cell_templates = get_unit_cell_from_xnn(
             xnn_templates, partial_unit_cell=True, lattice_system=self.lattice_system
             )
@@ -602,7 +599,6 @@ class MITemplates:
 
     def generate(self, n_templates, rng, q2_obs):
         if self.template_params['calibrate']:
-            print('Generating Calibrated Candidates')
             return self.generate_calibrated(n_templates, rng, q2_obs)
         else:
             return self.generate_uncalibrated(n_templates, rng, q2_obs)
@@ -738,7 +734,7 @@ class MITemplates:
         self.hgbc_classifier.fit(train_inputs, neighbor_train)
         joblib.dump(
             self.hgbc_classifier,
-            f'{self.save_to}/{self.group}_template_calibrator_{self.template_params["tag"]}.bin'
+            f'{self.save_to}/{self.bravais_lattice}_template_calibrator_{self.template_params["tag"]}.bin'
             )
 
         probability_train = self.hgbc_classifier.predict_proba(train_inputs)
@@ -828,7 +824,7 @@ class MITemplates:
         axes[2].set_xlabel('Fraction of all entries within CR')
         axes[2].set_ylabel('Fraction of predicted entries within CR')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.group}_calibration_{self.template_params["tag"]}.png')
+        fig.savefig(f'{self.save_to}/{self.bravais_lattice}_calibration_{self.template_params["tag"]}.png')
         plt.close()
 
         ##############################
@@ -1008,6 +1004,6 @@ class MITemplates:
             axes[0, 0].set_ylabel('Predicted')
             axes[1, 0].set_ylabel('Predicted')
             fig.tight_layout()
-            fig.savefig(f'{self.save_to}/{self.group}_template_reg_eval_{self.template_params["tag"]}_{save_label}.png')
+            fig.savefig(f'{self.save_to}/{self.bravais_lattice}_template_reg_eval_{self.template_params["tag"]}_{save_label}.png')
             plt.close()
         """

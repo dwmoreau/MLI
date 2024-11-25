@@ -3,21 +3,27 @@
     - Do peak picking with new geo and masks
 
 - Model ensemble
-    - WTF
+    - Correct ordering of the candidates
+        - NN: randomize
+        - Trees: randomize
+        - PITF: 
+            - Move top_n to front and randomize
+            - Move rest to end and randomize
+        - Templates:
+            - Select top_n
 
-- Integral filter model
-    - Retrain PITF Models with new sigma approach
-        - cubic
-        - tetragonal
-        - hexagonal
-        - rhombohedral
-        - orthorhombic
-    - Test load_by_tag
-    - Run baseline for comparison
+- move to NERSC
+    - How to ideally install python
+    - Where to store the data
 
 - Documentation
-    - Rewrite
-    - github README.md
+    - Finish the section on Integral Filter Model
+    - Reread and add edits
+
+- Data
+    - Materials project as cif files?
+    - Reindex triclinic in reciprocal space
+    - Standardization of monoclinic unit cells
 
 
 - Experimental Data
@@ -41,11 +47,10 @@
 - Augmentation
 - Random unit cell generator
 - Indexing.py
-- Data
-    - Reindex triclinic in reciprocal space
 - 2D Indexing
     - Start working on 2D specific algorithms using the indexed reflections
         - Can I decompose frames into basis vectors
+- Integral filter model
 
 Readings:
     - Look more into TREOR
@@ -118,7 +123,9 @@ class Indexing:
         self.template_params = template_params
         self.pitf_params = pitf_params
 
-        results_directory = os.path.join(self.data_params['base_directory'], 'models', self.data_params['tag'])
+        results_directory = os.path.join(
+            self.data_params['base_directory'], 'models', self.data_params['tag']
+            )
         self.save_to = {
             'results': results_directory,
             'augmentor': os.path.join(results_directory, 'augmentor'),
@@ -425,7 +432,9 @@ class Indexing:
         data_group = [None for _ in range(len(data_grouped.groups.keys()))]
         for index, group in enumerate(data_grouped.groups.keys()):
             data_group[index] = data_grouped.get_group(group)
-            data_group[index].insert(loc=0, column='split_group_label', value=index * np.ones(len(data_group[index])))
+            data_group[index].insert(
+                loc=0, column='split_group_label', value=index * np.ones(len(data_group[index]))
+                )
             data_group[index] = data_group[index].sample(
                 n=min(len(data_group[index]), self.data_params['n_max_group']),
                 replace=False,
@@ -1185,7 +1194,7 @@ class Indexing:
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             self.miller_index_templator[bravais_lattice] = MITemplates(
-                group=bravais_lattice,
+                bravais_lattice=bravais_lattice,
                 data_params=self.data_params,
                 template_params=self.template_params[bravais_lattice],
                 hkl_ref=self.hkl_ref[bravais_lattice],
@@ -1194,14 +1203,6 @@ class Indexing:
                 )
             if self.template_params[bravais_lattice]['load_from_tag']:
                 self.miller_index_templator[bravais_lattice].load_from_tag()
-                #unit_cell_templates = self.miller_index_templator[bravais_lattice].generate(
-                #    102,
-                #    self.rng,
-                #    np.array(self.data.iloc[0]['q2'])
-                #    )
-                #print(self.data.iloc[0]['reindexed_unit_cell'])
-                #for i in range(unit_cell_templates.shape[0]):
-                #    print(unit_cell_templates[i])
             else:
                 self.miller_index_templator[bravais_lattice].setup(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
@@ -1258,7 +1259,6 @@ class Indexing:
         self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
-            split_group_data = self.data[self.data['split_group'] == split_group]
             self.pitf_generator[split_group] = PhysicsInformedModel(
                 split_group,
                 self.data_params,
@@ -1270,10 +1270,12 @@ class Indexing:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
-                print('Doing nothing')
-                #self.pitf_generator[split_group].load_from_tag()
+                #print('Doing nothing')
+                self.pitf_generator[split_group].load_from_tag()
+                #split_group_data = self.data[self.data['split_group'] == split_group]
                 #self.pitf_generator[split_group].evaluate(split_group_data)
             else:
+                split_group_data = self.data[self.data['split_group'] == split_group]
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
                 self.pitf_generator[split_group].train_calibration(data=split_group_data)

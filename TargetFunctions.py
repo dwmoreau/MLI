@@ -108,6 +108,9 @@ class LikelihoodLoss:
         mean = y_pred[:, :, 0]
         var = y_pred[:, :, 1]
         error = (y_true - mean) / tf.math.sqrt(var)
+        # This is to prevent an overflow error
+        # tf.math.cosh has a limit around +/- 80 for dtype=tf.float32
+        error = tf.clip_by_value(error, -75.0, 75.0)
         log_cosh = tf.math.log(tf.math.cosh(error))
         return tf.reduce_mean(log_cosh, axis=1)
 
@@ -119,6 +122,7 @@ class LikelihoodLoss:
     def log_cosh_error(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         error = (y_true - mean)
+        error = tf.clip_by_value(error, -75.0, 75.0)
         log_cosh = tf.math.log(tf.math.cosh(error))
         return tf.reduce_mean(log_cosh, axis=1)
 
