@@ -1,3 +1,24 @@
+"""
+Current indexing rates
+
+    - NO q2 ERROR
+cF |  100% {'Not found': 0, 'Found': 208, 'Off by two': 0, 'Found explainers': 0}
+cI |  100% {'Not found': 0, 'Found': 223, 'Off by two': 0, 'Found explainers': 0}
+cP |  100% {'Not found': 0, 'Found': 463, 'Off by two': 1, 'Found explainers': 0}
+hP | 99.8% {'Not found': 1, 'Found': 998, 'Off by two': 0, 'Found explainers': 1}
+hR |  100% {'Not found': 0, 'Found': 1000, 'Off by two': 0, 'Found explainers': 0}
+tI | 99.9% {'Not found': 1, 'Found': 999, 'Off by two': 0, 'Found explainers': 0}
+tP | 99.6% {'Not found': 2, 'Found': 996, 'Off by two': 1, 'Found explainers': 1}
+oC | 99.3% {'Not found': 4, 'Found': 993, 'Off by two': 0, 'Found explainers': 3}
+oF |  100% {'Not found': 0, 'Found': 767, 'Off by two': 0, 'Found explainers': 0}
+oI |  100% {'Not found': 0, 'Found': 496, 'Off by two': 0, 'Found explainers': 0}
+oP | 99.8% {'Not found': 2, 'Found': 998, 'Off by two': 0, 'Found explainers': 0}
+mC | 99.0% {'Not found': 4, 'Found': 990, 'Off by two': 1, 'Found explainers': 5}
+mP | 99.2% {'Not found': 5, 'Found': 992, 'Off by two': 0, 'Found explainers': 3}
+aP | 93.6% {'Not found': 32, 'Found': 936, 'Off by two': 0, 'Found explainers': 32}
+
+
+"""
 from mpi4py import MPI
 import numpy as np
 import os
@@ -21,10 +42,12 @@ if __name__ == '__main__':
     n_ranks = comm.Get_size()
     split_comm = comm.Split(color=rank, key=rank)
 
+    #np.seterr(all='raise')
+
     load_data = True
     broadening_tag = '1'
     error_tag = '1'
-    n_entries = 500
+    n_entries = 1000
     #q2_error_params = np.array([0.0001, 0.001]) / 1
     q2_error_params = np.array([0.000000001, 0])
     #q2_error_params = np.array([0.000087, 0.00092]) / 1# [9.23692112e-04 8.72845689e-05]
@@ -111,18 +134,18 @@ if __name__ == '__main__':
         }
     for entry_index in range(n_entries):
         entry = data.iloc[entry_index]
-        print(entry)
+        #print(entry)
         unit_cell_true = np.array(entry['reindexed_unit_cell'])
         for bravais_lattice in bravais_lattices:
             optimizer[bravais_lattice].run(entry=entry, n_top_candidates=n_top_candidates)
             found = False
             off_by_two = False
             found_explainer = False
-            print(np.column_stack((
-                optimizer[bravais_lattice].top_unit_cell,
-                optimizer[bravais_lattice].top_M20,
-                optimizer[bravais_lattice].top_spacegroup
-                )))
+            #print(np.column_stack((
+            #    optimizer[bravais_lattice].top_unit_cell,
+            #    optimizer[bravais_lattice].top_M20,
+            #    optimizer[bravais_lattice].top_spacegroup
+            #    )))
             for candidate_index in range(optimizer[bravais_lattice].top_unit_cell.shape[0]):
                 correct, off_by_two = validate_candidate_known_bl(
                     unit_cell_true=unit_cell_true,
@@ -138,13 +161,21 @@ if __name__ == '__main__':
             if found:
                 report_counts['Found'] += 1
             elif off_by_two:
-                report_counts['off_by_two'] += 1
+                report_counts['Off by two'] += 1
             elif found_explainer:
                 report_counts['Found explainers'] += 1
             else:
                 report_counts['Not found'] += 1
+                print()
+                print(entry)
+                print(np.column_stack((
+                    optimizer[bravais_lattice].top_unit_cell,
+                    optimizer[bravais_lattice].top_M20,
+                    optimizer[bravais_lattice].top_spacegroup
+                    )))
+                print()
             print(report_counts, rank)
-            print()
+            #print()
     report_counts_gathered = comm.gather(report_counts, root=0)
 
     if rank == 0:

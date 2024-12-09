@@ -229,9 +229,18 @@ class CandidateOptLoss:
         dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
         term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
         H = np.sum(self.hessian_prefactor * term0, axis=1)
-        good = np.linalg.matrix_rank(H, hermitian=True) == self.uc_length
+        # Need to ensure H is invertible before inverting.
+        invertible = np.linalg.det(H) != 0 # This is the fastest
+        #invertible = np.linalg.matrix_rank(H, hermitian=True) == self.uc_length
+        #invertible = np.isfinite(np.linalg.cond(H)) # This is slow
         delta_gn = np.zeros((self.n_entries, self.uc_length))
-        delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
+        try:
+            delta_gn[invertible] = -np.matmul(
+                np.linalg.inv(H[invertible]),
+                dloss_dxnn[invertible, :, np.newaxis]
+                )[:, :, 0]
+        except np.linalg.LinAlgError as e:
+            print(f'GAUSS-NEWTON INVERSION FAILED: {e}')
         return delta_gn
 
     def linear_least_squares(self):

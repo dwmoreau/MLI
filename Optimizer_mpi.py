@@ -55,7 +55,7 @@ class Candidates:
         if not self.triplets is None:
             self.best_M_triplets = np.zeros((self.n, 2))
         self.candidate_index = np.arange(self.n)
-        self.update_unit_cell_from_xnn()
+        self.fix_out_of_range_candidates()
 
         self.q2_calculator = Q2Calculator(
             lattice_system=self.lattice_system,
@@ -263,7 +263,13 @@ class Candidates:
             refined_xnn[candidate_indices] += target_function.gauss_newton_step(
                 refined_xnn[candidate_indices]
                 )
-
+        refined_xnn = fix_unphysical(
+            xnn=refined_xnn,
+            rng=self.rng,
+            minimum_unit_cell=self.minimum_unit_cell, 
+            maximum_unit_cell=self.maximum_unit_cell,
+            lattice_system=self.lattice_system,
+            )
         q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
@@ -287,7 +293,7 @@ class Candidates:
         self.best_M20[improved] = refined_M20[improved]
         self.best_xnn[improved] = refined_xnn[improved]
 
-    def correct_off_by_two(self):
+    def standardize_cell(self):
         # These do a quick standardization of monoclinic and triclinic candidates. It is just a
         # Selling reduction.
         # This is performed in this function because the Miller indices are reassigned at the 
@@ -297,13 +303,49 @@ class Candidates:
                 self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
                 )
             if self.lattice_system == 'monoclinic':
-                best_unit_cell = monoclinic_standardization(best_unit_cell, partial_unit_cell=True)
+                best_standardized_unit_cell = monoclinic_standardization(
+                    best_unit_cell, partial_unit_cell=True
+                    )
             elif self.lattice_system == 'triclinic':
-                best_unit_cell, _, _ = selling_reduction(best_unit_cell)
-            self.best_xnn = get_xnn_from_unit_cell(
-                best_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-                )
+                best_standardized_unit_cell, _, _ = selling_reduction(best_unit_cell)
 
+            # Some of the Selling reductions result in failures - these unit cells become NAN
+            # Find these and replace them with the initial unit cell.
+            failed = np.any(np.isnan(best_standardized_unit_cell), axis=1)
+            if np.sum(failed) > 0:
+                #print('Failure in Standardization - NaN check\n    numpy warning has been caught and corrected')
+                best_standardized_unit_cell[failed] = best_unit_cell[failed]
+
+            # Some of the standardized unit cells are unphysical. The standardization fails but does
+            # not return a NAN. Find these and replace them with the initial unit cell
+            best_standardized_unit_cell_check = fix_unphysical(
+                unit_cell=best_standardized_unit_cell,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell, 
+                maximum_unit_cell=self.maximum_unit_cell,
+                lattice_system=self.lattice_system,
+                )
+            failed = np.any(
+                best_standardized_unit_cell_check != best_standardized_unit_cell,
+                axis=1
+                )
+            if np.sum(failed) > 0:
+                #print('Failure Standardization - unphysical check\n    numpy warning has been caught and corrected')
+                best_standardized_unit_cell[failed] = best_unit_cell[failed]
+
+            # Still some unphysical unit cells make it through. These cannot be converted between
+            # reciprocal and real space.
+            best_standardized_xnn = get_xnn_from_unit_cell(
+                best_standardized_unit_cell,
+                partial_unit_cell=True,
+                lattice_system=self.lattice_system
+                )
+            failed = np.any(np.isnan(best_standardized_xnn), axis=1)
+            if np.sum(failed) > 0:
+                #print('Failure in Standardization - Final check\n    numpy warning has been caught and corrected')
+                self.best_xnn[~failed] = best_standardized_xnn[~failed]
+
+    def correct_off_by_two(self):
         mult_factor = np.array([1/2, 1, 2, 3, 4])
         if self.lattice_system == 'cubic':
             mult_factors = mult_factor[:, np.newaxis]
@@ -349,6 +391,13 @@ class Candidates:
         hkl = np.zeros([n_test, mult_factors.shape[0], self.n_peaks, 3])
         for mf_index in range(mult_factors.shape[0]):
             xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn[test_indices]
+            xnn_mult = fix_unphysical(
+                xnn=xnn_mult,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell, 
+                maximum_unit_cell=self.maximum_unit_cell,
+                lattice_system=self.lattice_system,
+                )
             q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
             hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
@@ -541,9 +590,15 @@ class OptimizerBase:
         # each axis. This also performs a quick reindexing.
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
+        #print('refine_cell')
         candidates.refine_cell()
+        #print('standardize_cell')
+        candidates.standardize_cell()
+        #print('correct_off_by_two')
         candidates.correct_off_by_two()
+        #print('assign_extinction_group')
         candidates.assign_extinction_group()
+        #print('calculate_peaks_indexed')
         candidates.calculate_peaks_indexed()
 
         if self.opt_params['convergence_testing']:

@@ -80,16 +80,55 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
         [a**2, a*b*np.cos(gamma), a*c*np.cos(beta)],
         [a*b*np.cos(gamma), b**2, b*c*np.cos(alpha)],
         [a*c*np.cos(beta), b*c*np.cos(alpha), c**2]
-        ])
-    S_inv = np.linalg.inv(S.T)
+        ]).T
 
-    a_inv = np.sqrt(S_inv[:, 0, 0])
-    b_inv = np.sqrt(S_inv[:, 1, 1])
-    c_inv = np.sqrt(S_inv[:, 2, 2])
+    # Singular matrices are extremely rare here. They have been observed with triclinic lattices
+    # during the off by two check.
+    success = True
+    try:
+        S_inv = np.linalg.inv(S)
+    except np.linalg.LinAlgError as e:
+        print(f'RECIPROCAL-DIRECT UNIT CELL CONVERSION FAILED: {e}')
+        print('    RERUNNING CONVERSION WITH SINGULAR MATRIX CHECK')
+        # Using np.linalg.matrix_rank(S, hermitian=True) == 3, gives an error here.
+        invertible = np.all(np.column_stack((
+            np.linalg.det(S) != 0,
+            np.isfinite(np.linalg.cond(S))
+            )), axis=1)
+        S_inv = np.zeros(S.shape)
+        S_inv[invertible] = np.linalg.inv(S[invertible])
+        success = False
 
-    alpha_inv = np.arccos(S_inv[:, 1, 2] / (b_inv * c_inv))
-    beta_inv = np.arccos(S_inv[:, 0, 2] / (a_inv * c_inv))
-    gamma_inv = np.arccos(S_inv[:, 0, 1] / (a_inv * b_inv))
+    if success:
+        a_inv = np.sqrt(S_inv[:, 0, 0])
+        b_inv = np.sqrt(S_inv[:, 1, 1])
+        c_inv = np.sqrt(S_inv[:, 2, 2])
+
+        alpha_inv = np.arccos(S_inv[:, 1, 2] / (b_inv * c_inv))
+        beta_inv = np.arccos(S_inv[:, 0, 2] / (a_inv * c_inv))
+        gamma_inv = np.arccos(S_inv[:, 0, 1] / (a_inv * b_inv))
+    else:
+        a_inv = np.zeros(unit_cell.shape[0])
+        b_inv = np.zeros(unit_cell.shape[0])
+        c_inv = np.zeros(unit_cell.shape[0])
+        alpha_inv = np.zeros(unit_cell.shape[0])
+        beta_inv = np.zeros(unit_cell.shape[0])
+        gamma_inv = np.zeros(unit_cell.shape[0])
+
+        a_inv[~invertible] = np.nan
+        b_inv[~invertible] = np.nan
+        c_inv[~invertible] = np.nan
+        alpha_inv[~invertible] = np.nan
+        beta_inv[~invertible] = np.nan
+        gamma_inv[~invertible] = np.nan
+
+        a_inv[invertible] = np.sqrt(S_inv[invertible, 0, 0])
+        b_inv[invertible] = np.sqrt(S_inv[invertible, 1, 1])
+        c_inv[invertible] = np.sqrt(S_inv[invertible, 2, 2])
+
+        alpha_inv[invertible] = np.arccos(S_inv[invertible, 1, 2] / (b_inv * c_inv)[invertible])
+        beta_inv[invertible] = np.arccos(S_inv[invertible, 0, 2] / (a_inv * c_inv)[invertible])
+        gamma_inv[invertible] = np.arccos(S_inv[invertible, 0, 1] / (a_inv * b_inv)[invertible])
     
     if partial_unit_cell and lattice_system != 'triclinic':
         if lattice_system == 'cubic':
@@ -315,6 +354,13 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
                     xnn[index, 3] = cos_ralpha0 * (2 * rb[index] * rc[index])
                     xnn[index, 4] = cos_rbeta0 * (2 * ra[index] * rc[index])
                     xnn[index, 5] = cos_rgamma0 * (2 * ra[index] * rb[index])
+        # If the reciprocal unit cell conversion fails due to a singular matrix, then the returned
+        # unit cell is np.nan. This is extremely rare at this point
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(xnn, partial_unit_cell=False)
+        unit_cell = reciprocal_uc_conversion(reciprocal_unit_cell, partial_unit_cell=False)
+        failed = np.any(np.isnan(unit_cell), axis=1)
+        if np.count_nonzero(failed) > 0:
+            xnn[failed, :] = np.array([1/5**2, 1/5**2, 1/5**2, 0, 0, 0])
         return xnn
 
     elif not unit_cell is None:
@@ -398,6 +444,13 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
                     unit_cell[index, 3] = np.arccos(cos_alpha0)
                     unit_cell[index, 4] = np.arccos(cos_beta0)
                     unit_cell[index, 5] = np.arccos(cos_gamma0)
+
+        # If the reciprocal unit cell conversion fails due to a singular matrix, then the returned
+        # unit cell is np.nan. This is extremely rare at this point
+        reciprocal_unit_cell = reciprocal_uc_conversion(unit_cell, partial_unit_cell=False)
+        failed = np.any(np.isnan(reciprocal_unit_cell), axis=1)
+        if np.count_nonzero(failed) > 0:
+            unit_cell[failed, :] = np.array([5, 5, 5, np.pi/2, np.pi/2, np.pi/2])
         return unit_cell
 
 
@@ -573,10 +626,13 @@ def get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
     # P = 1 / (1 + arg)
     mu, nu = get_multiplicity_taupin88(bravais_lattice)
     observed_difference2 = (np.sqrt(q2_obs[np.newaxis]) - np.sqrt(q2_calc))**2
-    arg = 8*np.pi*q2_obs * np.sqrt(observed_difference2) / (reciprocal_volume[:, np.newaxis] * mu)
-    probability = 1/(1 + arg)
-    M = -1/np.log(2) * np.sum(np.log(1 - np.exp(-arg) + 1e-10), axis=1)
-    return -np.sum(np.log(probability), axis=1), probability, M
+    # There is an upstream error where reciprocal volumes can be very small.
+    # Adding 1e-100 here prevents division by zero errors
+    arg = 8*np.pi*q2_obs * np.sqrt(observed_difference2) / (reciprocal_volume[:, np.newaxis] * mu + 1e-100)
+    probability = 1 / (1 + arg)
+    # The 1e-100 factor prevents np.log(~0) = -infinity
+    M = -1/np.log(2) * np.sum(np.log(1 - np.exp(-arg) + 1e-100), axis=1)
+    return -np.sum(np.log(probability + 1e-100), axis=1), probability, M
 
 
 def get_multiplicity_taupin88(bravais_lattice):

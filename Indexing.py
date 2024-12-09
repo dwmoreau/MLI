@@ -2,15 +2,18 @@
 - 10398
     - Do peak picking with new geo and masks
 
+* Testing
+    - Optimization without q2 error to validate current code
+    - Optimization with q2 error to characterize optimization
+
 - Model ensemble
-    - Correct ordering of the candidates
-        - NN: randomize
-        - Trees: randomize
-        - PITF: 
-            - Move top_n to front and randomize
-            - Move rest to end and randomize
-        - Templates:
-            - Select top_n
+    - Review
+
+* Reindexing
+    * Standardization of monoclinic unit cells
+        - Run iotbx.symmetry on monoclinic unit cells
+    * Catch numerical errors during Selling reduction
+    * Reindex triclinic in reciprocal space
 
 - move to NERSC
     - How to ideally install python
@@ -20,10 +23,8 @@
     - Finish the section on Integral Filter Model
     - Reread and add edits
 
-- Data
-    - Materials project as cif files?
-    - Reindex triclinic in reciprocal space
-    - Standardization of monoclinic unit cells
+- SWE
+    - Multiprocessing parallelization
 
 
 - Experimental Data
@@ -32,8 +33,6 @@
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 - Optimization
-    - standardization of monoclinic cells
-    - Add mechanism for analysis of failed entries 
 - Spacegroup assignments:
     - Add a validation
     - https://www.markvardsen.net/projects/ExtSym/main.html
@@ -43,7 +42,6 @@
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 - Regression
 - Templating
-- SWE
 - Augmentation
 - Random unit cell generator
 - Indexing.py
@@ -51,6 +49,8 @@
     - Start working on 2D specific algorithms using the indexed reflections
         - Can I decompose frames into basis vectors
 - Integral filter model
+- Data
+    - Materials project as cif files?
 
 Readings:
     - Look more into TREOR

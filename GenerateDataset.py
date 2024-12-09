@@ -80,6 +80,8 @@ class EntryGenerator:
         self.broadening_params = broadening_muliples[np.newaxis] * broadening_params[:, np.newaxis]
         self.broadening_tags = peak_generation_info['broadening_tags']
         self.wavelength = peak_generation_info['wavelength']
+        # self.d_min - highest numerical value, minimum resolution
+        # self.d_max - lowest numerical_value, maximum resolution
         self.d_min = self.wavelength / (2*np.sin(peak_generation_info['theta2_min']/2 * np.pi/180))
         self.d_max = self.wavelength / (2*np.sin(peak_generation_info['theta2_max']/2 * np.pi/180))
         self.theta2_pattern = peak_generation_info['theta2_pattern']
@@ -170,6 +172,8 @@ class EntryGenerator:
                 cif_structure = edit_undefined_scatters(cif_file_name)
                 data['cif_file_name'] = cif_file_name.replace('.cif', '_editted.cif')
 
+            # self.d_min - highest numerical value, minimum resolution
+            # self.d_max - lowest numerical_value, maximum resolution
             miller_indices = cif_structure[key].build_miller_set(
                 d_min=self.d_max, d_max=self.d_min, anomalous_flag=False
                 )
