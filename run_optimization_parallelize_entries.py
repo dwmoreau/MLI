@@ -17,15 +17,85 @@ mC | 99.0% {'Not found': 4, 'Found': 990, 'Off by two': 1, 'Found explainers': 5
 mP | 99.2% {'Not found': 5, 'Found': 992, 'Off by two': 0, 'Found explainers': 3}
 aP | 93.6% {'Not found': 32, 'Found': 936, 'Off by two': 0, 'Found explainers': 32}
 
+    - 1X q2_error
+cF | {'Not found': 1, 'Found': 207, 'Off by two': 0, 'Found explainers': 0}
+cI | {'Not found': 0, 'Found': 223, 'Off by two': 0, 'Found explainers': 0}
+cP | {'Not found': 3, 'Found': 460, 'Off by two': 1, 'Found explainers': 0}
+hP | {'Not found': 5, 'Found': 995, 'Off by two': 0, 'Found explainers': 0}
+hR | {'Not found': 6, 'Found': 994, 'Off by two': 0, 'Found explainers': 0}
+tI | {'Not found': 6, 'Found': 994, 'Off by two': 0, 'Found explainers': 0}
+tP | {'Not found': 4, 'Found': 996, 'Off by two': 0, 'Found explainers': 0}
+oC | {'Not found': 25, 'Found': 975, 'Off by two': 0, 'Found explainers': 0}
+oF | {'Not found': 6, 'Found': 761, 'Off by two': 0, 'Found explainers': 0}
+oI | {'Not found': 4, 'Found': 492, 'Off by two': 0, 'Found explainers': 0}
+oP | {'Not found': 5, 'Found': 995, 'Off by two': 0, 'Found explainers': 0}
+mC | {'Not found': 32, 'Found': 968, 'Off by two': 0, 'Found explainers': 0}
+mP | {'Not found': 58, 'Found': 941, 'Off by two': 1, 'Found explainers': 0}
+aP |
+
+    -2X q2_error
+cF |
+cI |
+cP |
+hP |
+hR |
+tI |
+tP |
+oC |
+oF |
+oI |
+oP |
+mC | {'Not found': 147, 'Found': 849, 'Off by two': 4, 'Found explainers': 0}
+mP | {'Not found': 292, 'Found': 705, 'Off by two': 3, 'Found explainers': 0}
+aP |
+
+    -4X q2_error
+cF |
+cI |
+cP |
+hP |
+hR |
+tI |
+tP |
+oC |
+oF |
+oI |
+oP |
+mC | {'Not found': 726, 'Found': 273, 'Off by two': 1, 'Found explainers': 0}
+mP | {'Not found': 741, 'Found': 255, 'Off by two': 4, 'Found explainers': 0}
+aP |
+
+    -6X q2_error
+cF | {'Not found': 92, 'Found': 115, 'Off by two': 1, 'Found explainers': 0}
+cI | {'Not found': 90, 'Found': 118, 'Off by two': 15, 'Found explainers': 0}
+cP | {'Not found': 264, 'Found': 188, 'Off by two': 12, 'Found explainers': 0}
+hP | {'Not found': 306, 'Found': 692, 'Off by two': 2, 'Found explainers': 0}
+hR | {'Not found': 307, 'Found': 692, 'Off by two': 1, 'Found explainers': 0}
+tI |
+tP |
+oC |
+oF |
+oI |
+oP |
+mC | {'Not found': 938, 'Found': 62, 'Off by two': 0, 'Found explainers': 0}
+mP | {'Not found': 937, 'Found': 63, 'Off by two': 0, 'Found explainers': 0}
+aP |
 
 """
 from mpi4py import MPI
-import numpy as np
 import os
 # This supresses the tensorflow message on import
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+import numpy as np
 import pandas as pd
+import time
 
+from Utilities import get_peak_generation_info
 from UtilitiesOptimizer import get_cubic_optimizer
 from UtilitiesOptimizer import get_hexagonal_optimizer
 from UtilitiesOptimizer import get_monoclinic_optimizer
@@ -46,14 +116,13 @@ if __name__ == '__main__':
 
     load_data = True
     broadening_tag = '1'
-    error_tag = '1'
     n_entries = 1000
-    #q2_error_params = np.array([0.0001, 0.001]) / 1
-    q2_error_params = np.array([0.000000001, 0])
-    #q2_error_params = np.array([0.000087, 0.00092]) / 1# [9.23692112e-04 8.72845689e-05]
+
+    #q2_error_params = np.array([0.000000001, 0])
+    q2_error_params = 6 * get_peak_generation_info()['q2_error_params']
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    bravais_lattices = ['aP']
+    bravais_lattices = ['hR']
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:
@@ -112,7 +181,7 @@ if __name__ == '__main__':
                     hkl[entry_index, :, 2] = np.array(bravais_lattice_data[f'reindexed_l_{broadening_tag}'].iloc[entry_index])[:n_peaks]
                 sigma_error = q2_error_params[0] + q2 * q2_error_params[1]
                 q2 += rng.normal(loc=0, scale=sigma_error)
-                bravais_lattice_data['q2'] = list(q2)
+                bravais_lattice_data['q2'] = list(np.abs(q2))
                 bravais_lattice_data['reindexed_hkl'] = list(hkl)
                 bravais_lattice_data.drop(columns=drop_columns, inplace=True)
                 data.append(bravais_lattice_data)
@@ -134,9 +203,9 @@ if __name__ == '__main__':
         }
     for entry_index in range(n_entries):
         entry = data.iloc[entry_index]
-        #print(entry)
         unit_cell_true = np.array(entry['reindexed_unit_cell'])
         for bravais_lattice in bravais_lattices:
+            start = time.time()
             optimizer[bravais_lattice].run(entry=entry, n_top_candidates=n_top_candidates)
             found = False
             off_by_two = False
@@ -174,7 +243,8 @@ if __name__ == '__main__':
                     optimizer[bravais_lattice].top_spacegroup
                     )))
                 print()
-            print(report_counts, rank)
+            stop = time.time()
+            print(report_counts, rank, stop - start)
             #print()
     report_counts_gathered = comm.gather(report_counts, root=0)
 

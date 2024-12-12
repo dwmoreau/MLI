@@ -7,11 +7,17 @@ s36     | 34         | 21
 s38     | 50         | 22
 s40     | 16         | 14
 """
-from mpi4py import MPI
-import numpy as np
+
 import os
 # This supresses the tensorflow message on import
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+from mpi4py import MPI
+import numpy as np
 import pandas as pd
 
 from UtilitiesOptimizer import get_logger

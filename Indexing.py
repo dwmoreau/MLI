@@ -3,8 +3,8 @@
     - Do peak picking with new geo and masks
 
 * Testing
-    - Optimization without q2 error to validate current code
     - Optimization with q2 error to characterize optimization
+    - Test with impurities to characterize optimization
 
 - Model ensemble
     - Review

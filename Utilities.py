@@ -12,9 +12,6 @@ def get_peak_generation_info():
     # The cctbx powder patterns are generated with 'broadening_params'
     # The wavelength of 0.827 is the approximate wavelength during 2024A8043 and 2023B8059
     # experiments at SACLA 
-    # 'broadening_params': np.array([0.0001, 0.005]),
-    # 'broadening_multiples': np.array([0.5, 1, 1.5]),
-    #wavelength = 1.54
 
     wavelength = 0.827
     dtheta2 = 0.01
@@ -32,6 +29,7 @@ def get_peak_generation_info():
         'theta2_max': theta2_max,
         'theta2_pattern': theta2_pattern,
         'q2_pattern': (2 * np.sin(theta2_pattern/2 * np.pi/180) / wavelength)**2,
+        'q2_error_params': np.array([0.000087, 0.00092]),
         }
     return peak_generation_info
 
@@ -1717,13 +1715,11 @@ def fast_assign(q2_obs, q2_ref):
     for candidate_index in range(n_candidates):
         for obs_index in range(n_obs):
             current_min = 100
-            current_min_index = None
             for ref_index in range(n_ref):
                 diff = abs(q2_obs[obs_index] - q2_ref[candidate_index, ref_index])
                 if diff < current_min:
                     current_min = diff
-                    current_min_index = ref_index
-            hkl_assign[candidate_index, obs_index] = current_min_index
+                    hkl_assign[candidate_index, obs_index] = ref_index
     return hkl_assign
 
 

@@ -4,6 +4,11 @@ import numpy as np
 import os
 # This supresses the tensorflow message on import
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import pandas as pd
 from tqdm import tqdm
 
