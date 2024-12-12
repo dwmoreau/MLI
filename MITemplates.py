@@ -17,11 +17,10 @@ from Utilities import get_unit_cell_volume
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import read_params
 from Utilities import write_params
-from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import reciprocal_uc_conversion
 from Utilities import Q2Calculator
 from Utilities import fast_assign
-from Utilities import get_M20_likelihood_from_xnn
+from Utilities import get_M20_likelihood
 
 
 class MITemplates:
@@ -384,12 +383,11 @@ class MITemplates:
             self.calibrate_templates(data)
         self.save()
 
-    def generate_xnn_fast_old(self, q2_obs, indices=None):
+    def generate_xnn_fast(self, q2_obs, indices=None):
         # This is still slow, but about 2 times faster than the other method
-        # original I just did linear least squares iteratively until q2_calc was ordered (1st for loop)
-        # It is faster to use Gauss-Newton non-linear least squares (2nd for loop)
+        # original I just did linear least squares iteratively until q2_calc was ordered
+        # It is faster to use Gauss-Newton non-linear least squares
         # This is mostly copied from TargetFunctions.py
-        # I forgot the reason, but I don't use this function.
 
         if indices is None:
             hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
@@ -398,44 +396,28 @@ class MITemplates:
             hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates[indices]], self.lattice_system)
             n_templates = indices.size
 
-        # Calculate initial values for xnn using linear least squares methods
-        xnn = np.zeros((n_templates, self.unit_cell_length))
-        A = hkl2 / q2_obs[np.newaxis, :, np.newaxis]
-        b = np.ones(self.template_params['n_peaks'])
-        for template_index in range(n_templates):
-            xnn[template_index], r, rank, s = np.linalg.lstsq(
-                A[template_index], b, rcond=None
-                )
-
         # q2_calc should increase monotonically. Sort hkl2 then re-solve for xnn iteratively.
+        xnn = np.zeros((n_templates, self.unit_cell_length))
         sigma = q2_obs[np.newaxis]
         hessian_prefactor = (1 / sigma**2)[:, :, np.newaxis, np.newaxis]
+        term0 = np.matmul(hkl2[:, :, :, np.newaxis], hkl2[:, :, np.newaxis, :])
+        H = np.sum(hessian_prefactor * term0, axis=1)
+        good = np.linalg.matrix_rank(H, hermitian=True) == self.unit_cell_length
+        xnn = xnn[good]
+        hkl2 = hkl2[good]
         for index in range(5):
-            if index == 4:
-                q2_calculator = Q2Calculator(
-                    lattice_system=self.lattice_system,
-                    hkl=self.hkl_ref,
-                    tensorflow=False,
-                    representation='xnn'
-                    )
-                q2_ref_calc = q2_calculator.get_q2(xnn)
-                hkl_assign = fast_assign(q2_obs, q2_ref_calc)
-                hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-                hkl2 = get_hkl_matrix(hkl, self.lattice_system)
-                q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
-            else:
-                q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
+            q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
+            if index != 0:
                 sort_indices = q2_calc.argsort(axis=1)
                 q2_calc = np.take_along_axis(q2_calc, sort_indices, axis=1)
                 hkl2 = np.take_along_axis(hkl2, sort_indices[:, :, np.newaxis], axis=1)
+
             residuals = (q2_calc - q2_obs[np.newaxis]) / sigma
             dlikelihood_dq2_pred = residuals / sigma
             dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * hkl2, axis=1)
             term0 = np.matmul(hkl2[:, :, :, np.newaxis], hkl2[:, :, np.newaxis, :])
             H = np.sum(hessian_prefactor * term0, axis=1)
-            good = np.linalg.matrix_rank(H, hermitian=True) == self.unit_cell_length
-            delta_gn = np.zeros((n_templates, self.unit_cell_length))
-            delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
+            delta_gn = -np.matmul(np.linalg.inv(H), dloss_dxnn[:, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
         residuals = np.abs(q2_calc - q2_obs[np.newaxis])
         xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
@@ -447,108 +429,26 @@ class MITemplates:
         # Running it twice with a small chunk size removes more lattices
         # while also being reasonably fast.
         for _ in range(2):
-            xnn = self.downsample_candidates(xnn, residuals)
+            xnn, q2_calc = self.downsample_candidates(xnn, q2_calc, residuals)
+        reciprocal_volume = get_unit_cell_volume(get_reciprocal_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            ), partial_unit_cell=True, lattice_system=self.lattice_system)
 
-        # These next few lines just recalculate xnn and essentially do nothing.
         q2_calculator = Q2Calculator(
             lattice_system=self.lattice_system,
             hkl=self.hkl_ref,
             tensorflow=False,
             representation='xnn'
             )
-        q2_ref_calc = q2_calculator.get_q2(xnn) # Need to downsample
-        hkl_assign = fast_assign(q2_obs, q2_ref_calc)
-        hkl = np.take(self.hkl_ref, hkl_assign, axis=0) # Need to downsample
-        hkl2 = get_hkl_matrix(hkl, self.lattice_system)
-        q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0] # Need to downsample
-        residuals = np.abs(q2_calc - q2_obs[np.newaxis])
-
+        q2_ref_calc = q2_calculator.get_q2(xnn)
         q2_calc_max = q2_calc.max(axis=1)
         N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
-        _, probability, _ = get_M20_likelihood_from_xnn(
+
+        _, probability, _ = get_M20_likelihood(
             q2_obs=q2_obs,
-            xnn=xnn,
-            hkl=hkl,
-            lattice_system=self.lattice_system,
+            q2_calc=q2_calc,
             bravais_lattice=self.bravais_lattice,
-            )
-        return xnn, probability, N_pred, q2_calc_max
-
-    def generate_xnn_fast(self, q2_obs, indices=None):
-        # This is still slow, but about 2 times faster than the other method
-        # original I just did linear least squares iteratively until q2_calc was ordered (1st for loop)
-        # It is faster to use Gauss-Newton non-linear least squares (2nd for loop)
-        # This is mostly copied from TargetFunctions.py
-        # I forgot the reason, but I don't use this function.
-
-        if indices is None:
-            hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
-            n_templates = self.template_params['n_templates']
-        else:
-            hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates[indices]], self.lattice_system)
-            n_templates = indices.size
-
-        # Calculate initial values for xnn using linear least squares methods
-        xnn = np.zeros((n_templates, self.unit_cell_length))
-        A = hkl2 / q2_obs[np.newaxis, :, np.newaxis]
-        b = np.ones(self.template_params['n_peaks'])
-        for template_index in range(n_templates):
-            xnn[template_index], r, rank, s = np.linalg.lstsq(
-                A[template_index], b, rcond=None
-                )
-
-        # q2_calc should increase monotonically. Sort hkl2 then re-solve for xnn iteratively.
-        sigma = q2_obs[np.newaxis]
-        hessian_prefactor = (1 / sigma**2)[:, :, np.newaxis, np.newaxis]
-        for index in range(5):
-            q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
-            sort_indices = q2_calc.argsort(axis=1)
-            q2_calc = np.take_along_axis(q2_calc, sort_indices, axis=1)
-            hkl2 = np.take_along_axis(hkl2, sort_indices[:, :, np.newaxis], axis=1)
-
-            residuals = (q2_calc - q2_obs[np.newaxis]) / sigma
-            dlikelihood_dq2_pred = residuals / sigma
-            dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * hkl2, axis=1)
-            term0 = np.matmul(hkl2[:, :, :, np.newaxis], hkl2[:, :, np.newaxis, :])
-            H = np.sum(hessian_prefactor * term0, axis=1)
-            good = np.linalg.matrix_rank(H, hermitian=True) == self.unit_cell_length
-            delta_gn = np.zeros((n_templates, self.unit_cell_length))
-            delta_gn[good] = -np.matmul(np.linalg.inv(H[good]), dloss_dxnn[good, :, np.newaxis])[:, :, 0]
-            xnn += delta_gn
-        residuals = np.abs(q2_calc - q2_obs[np.newaxis])
-        xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
-
-        # Downsampling removes redundant unit cells
-        # Downsampling happens in chunks of xnn sorted by reciprocal space volume.
-        # If the chunk size is large, downsampling is extremely slow.
-        # If the chunk size is small, not enough redundant lattices get removed
-        # Running it twice with a small chunk size removes more lattices
-        # while also being reasonably fast.
-        for _ in range(2):
-            xnn = self.downsample_candidates(xnn, residuals)
-
-        # These next few lines just recalculate xnn and essentially do nothing.
-        q2_calculator = Q2Calculator(
-            lattice_system=self.lattice_system,
-            hkl=self.hkl_ref,
-            tensorflow=False,
-            representation='xnn'
-            )
-        q2_ref_calc = q2_calculator.get_q2(xnn) # Need to downsample
-        hkl_assign = fast_assign(q2_obs, q2_ref_calc)
-        hkl = np.take(self.hkl_ref, hkl_assign, axis=0) # Need to downsample
-        hkl2 = get_hkl_matrix(hkl, self.lattice_system)
-        q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0] # Need to downsample
-        residuals = np.abs(q2_calc - q2_obs[np.newaxis])
-
-        q2_calc_max = q2_calc.max(axis=1)
-        N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
-        _, probability, _ = get_M20_likelihood_from_xnn(
-            q2_obs=q2_obs,
-            xnn=xnn,
-            hkl=hkl,
-            lattice_system=self.lattice_system,
-            bravais_lattice=self.bravais_lattice,
+            reciprocal_volume=reciprocal_volume
             )
         return xnn, probability, N_pred, q2_calc_max
 
@@ -683,8 +583,8 @@ class MITemplates:
         else:
             return self.generate_uncalibrated(n_templates, rng, q2_obs)
 
-    def downsample_candidates(self, xnn, residuals):
-        chunk_size = 500
+    def downsample_candidates(self, xnn, q2_calc, residuals):
+        chunk_size = 250
         n_chunks = xnn.shape[0] // chunk_size + 1
         radius = self.template_params['radius'] / 100
 
@@ -693,16 +593,20 @@ class MITemplates:
             ), partial_unit_cell=True, lattice_system=self.lattice_system)
         sort_indices = np.argsort(reciprocal_volume)
         xnn = xnn[sort_indices]
+        q2_calc = q2_calc[sort_indices]
         residuals = residuals[sort_indices]
         error = np.linalg.norm(residuals, axis=1)
 
         xnn_downsampled = []
+        q2_calc_downsampled = []
         for chunk_index in range(n_chunks):
             if chunk_index == n_chunks - 1:
                 xnn_chunk = xnn[chunk_index * chunk_size:]
+                q2_calc_chunk = q2_calc[chunk_index * chunk_size:]
                 error_chunk = error[chunk_index * chunk_size:]
             else:
                 xnn_chunk = xnn[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+                q2_calc_chunk = q2_calc[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 error_chunk = error[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
             status = True
             while status:
@@ -714,10 +618,15 @@ class MITemplates:
                     neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
                     best_neighbor = np.argmin(error[neighbor_indices])
                     xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
+                    q2_calc_best_neighbor = q2_calc_chunk[neighbor_indices][best_neighbor]
                     error_best_neighbor = error_chunk[neighbor_indices][best_neighbor]
                     xnn_chunk = np.row_stack((
                         np.delete(xnn_chunk, neighbor_indices, axis=0), 
                         xnn_best_neighbor
+                        ))
+                    q2_calc_chunk = np.row_stack((
+                        np.delete(q2_calc_chunk, neighbor_indices, axis=0), 
+                        q2_calc_best_neighbor
                         ))
                     error_chunk = np.concatenate((
                         np.delete(error_chunk, neighbor_indices), 
@@ -726,8 +635,10 @@ class MITemplates:
                 else:
                     status = False
             xnn_downsampled.append(xnn_chunk)
+            q2_calc_downsampled.append(q2_calc_chunk)
         xnn_downsampled = np.row_stack(xnn_downsampled)
-        return xnn_downsampled
+        q2_calc_downsampled = np.row_stack(q2_calc_downsampled)
+        return xnn_downsampled, q2_calc_downsampled
 
     def _get_inputs_worker(self, inputs):
         q2_obs = inputs[0]
