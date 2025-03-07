@@ -4,7 +4,11 @@
 
 Todo:
     1: Rerun all models
-    2: Double check radius of convergence code. Make sure results for each Bravais lattice exists
+        - Tetragonal
+        - Evaluate model parameters
+            - Should they be adjusted?
+            - Are they correct?
+    2: Rerun convergence radius
     3: Redo model ensemble with new mathematical formulation
     4: Extend this formulation to get unit cell redistribution parameterization
     5: Perform optimizations and save results
@@ -14,8 +18,8 @@ Todo:
 - Model ensemble
     - Redo with a better mathematical formulation
 
-- Perform optimizations to get results for 
 - Figure of Merit
+    - Perform optimizations to get training set
     - Put together a new FOM that utilizes data from all Bravais lattices simultaneously
         - Does this work? Where does this work well?
         - Use results from indexing attempts
@@ -1316,6 +1320,8 @@ class Indexing:
             else:
                 split_group_indices = self.data['split_group'] == split_group
                 self.unit_cell_generator[split_group].train_regression(data=self.data[split_group_indices])
+                # Loading from tag ensures the onnx models are loaded for evaluation.
+                self.unit_cell_generator[split_group].load_from_tag()
 
     def inferences_regression(self):
         reindexed_uc_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))

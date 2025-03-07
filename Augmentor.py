@@ -897,13 +897,13 @@ class Augmentor:
                 class_weight='balanced_subsample',
                 ),
             param_grid={
-                'max_depth': [4, 8, 16, 32],
+                'max_depth': [4, 8, 16],
                 'min_samples_leaf': [2, 4, 8],
                 'min_samples_split': [2, 4, 8],
-                'n_estimators': [50, 100, 200],
+                'n_estimators': [50, 100, 200, 400],
                 },
             cv=5,
-            n_jobs=-1,
+            n_jobs=6,
             verbose=1,
             )
         grid_search.fit(X=train_features, y=train_y)

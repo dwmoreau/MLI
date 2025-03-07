@@ -62,6 +62,7 @@ import numpy as np
 import pandas as pd
 import sys
 
+from Utilities import get_peak_generation_info
 from Utilities import get_xnn_from_unit_cell
 from UtilitiesOptimizer import get_cubic_optimizer
 from UtilitiesOptimizer import get_hexagonal_optimizer
@@ -81,7 +82,7 @@ if __name__ == '__main__':
 
     load_data = True
     broadening_tag = '1'
-    q2_error_params = np.array([0.0001, 0.001]) / 1
+    q2_error_params = get_peak_generation_info()['q2_error_params']
     
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
@@ -223,18 +224,12 @@ if __name__ == '__main__':
                 'bravais_lattice',
                 'train',
                 f'q2_{broadening_tag}',
-                f'reindexed_h_{broadening_tag}',
-                f'reindexed_k_{broadening_tag}',
-                f'reindexed_l_{broadening_tag}',
                 'reindexed_spacegroup_symbol_hm',
                 'reindexed_unit_cell',
                 'reindexed_xnn',
                 ]
             drop_columns = [
                 f'q2_{broadening_tag}',
-                f'reindexed_h_{broadening_tag}',
-                f'reindexed_k_{broadening_tag}',
-                f'reindexed_l_{broadening_tag}',
                 ]
             for bravais_lattice in bravais_lattices:
                 bravais_lattice_data = pd.read_parquet(
@@ -248,16 +243,11 @@ if __name__ == '__main__':
                 peaks = bravais_lattice_data[f'q2_{broadening_tag}']
                 bravais_lattice_data = bravais_lattice_data.loc[peaks.apply(np.count_nonzero) >= n_peaks]
                 q2 = np.zeros((bravais_lattice_data.shape[0], n_peaks))
-                hkl = np.zeros((bravais_lattice_data.shape[0], n_peaks, 3))
                 for entry_index in range(bravais_lattice_data.shape[0]):
                     q2[entry_index] = np.array(bravais_lattice_data[f'q2_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-                    hkl[entry_index, :, 0] = np.array(bravais_lattice_data[f'reindexed_h_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-                    hkl[entry_index, :, 1] = np.array(bravais_lattice_data[f'reindexed_k_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-                    hkl[entry_index, :, 2] = np.array(bravais_lattice_data[f'reindexed_l_{broadening_tag}'].iloc[entry_index])[:n_peaks]
                 sigma_error = q2_error_params[0] + q2 * q2_error_params[1]
                 q2 += rng.normal(loc=0, scale=sigma_error)
-                bravais_lattice_data['q2'] = list(q2)
-                bravais_lattice_data['reindexed_hkl'] = list(hkl)
+                bravais_lattice_data['q2'] = list(np.sort(np.abs(q2), axis=1))
                 bravais_lattice_data.drop(columns=drop_columns, inplace=True)
                 if not n_entries is None and bravais_lattice_data.shape[0] > n_entries:
                     bravais_lattice_data = bravais_lattice_data.sample(n=n_entries, random_state=rng)
@@ -337,6 +327,6 @@ if __name__ == '__main__':
             plt.close()
 
             np.save(
-                f'figures/data/radius_of_convergence_{output_tag}_{bravais_lattice}.npy',
+                f'figures/data/{bravais_lattice}_radius_of_convergence_{output_tag}.npy',
                 np.row_stack((options['convergence_distances'], found_rate))
                 )

@@ -614,7 +614,7 @@ class Regression:
                 )
             model_manager.save(
                 model=self.random_forest_regressor,
-                X=train_inputs,
+                n_features=train_inputs.shape[1],
                 )
             model_manager._save_sklearn(
                 model=self.random_forest_regressor,
@@ -630,7 +630,7 @@ class Regression:
                     )
                 model_manager.save(
                     model=self.random_forest_regressor[ratio_index],
-                    X=train_inputs,
+                    n_features=train_inputs.shape[1],
                     )
                 model_manager._save_sklearn(
                     model=self.random_forest_regressor,
