@@ -1,7 +1,6 @@
 import numpy as np
 import scipy.optimize
 import scipy.spatial
-import scipy.special
 
 from Indexing import Indexing
 from Reindexing import monoclinic_standardization
@@ -28,15 +27,20 @@ from Utilities import get_multiplicity_taupin88
 from Utilities import vectorized_subsampling
 from Utilities import get_hkl_matrix
 
+#import psutil
+#import gc
+
 
 class Candidates:
-    def __init__(self, q2_obs, triplets, xnn, hkl_ref, lattice_system, bravais_lattice, opt_params):
+    def __init__(self, q2_obs, triplets, xnn, hkl_ref, lattice_system, bravais_lattice, opt_params, rng, fom):
         self.lattice_system = lattice_system
         self.bravais_lattice = bravais_lattice
         self.minimum_unit_cell = opt_params['minimum_uc']
         self.maximum_unit_cell = opt_params['maximum_uc']
         self.assignment_threshold = opt_params['assignment_threshold']
-        self.rng = np.random.default_rng()
+        self.figure_of_merit = opt_params['figure_of_merit']
+        self.rng = rng
+        self.fom = fom
         self.hkl_ref = hkl_ref
         self.hkl_ref_length = hkl_ref.shape[0]
         self.top_n_assignments_triplets = 2
@@ -123,32 +127,6 @@ class Candidates:
                 self.bravais_lattice
                 )
         self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
-
-    def get_sigma_reduction(self):
-        # Check to see if any of the candidates can predict the triplets
-        q2_diff_calc = get_q2_calc_triplets(
-            self.triplets, self.hkl, self.xnn, self.lattice_system
-            )
-        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-            self.xnn, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        reciprocal_volume = get_unit_cell_volume(
-            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        _, probability, _ = get_M20_likelihood(
-            self.triplets[:, 2], q2_diff_calc, self.bravais_lattice, reciprocal_volume
-            )
-        # indexed_triplets: n_candidates x n_triplets
-        indexed_triplets = probability > self.assignment_threshold
-        sigma_reduction = np.ones((self.n, self.n_peaks))
-        peak_indices = np.round(self.triplets[:, :2], decimals=0).astype(int)
-        for triplet_index in range(self.n_triplets):
-            if np.sum(indexed_triplets[:, triplet_index]) > 0:
-                peak_index_0 = peak_indices[triplet_index, 0]
-                peak_index_1 = peak_indices[triplet_index, 1]
-                sigma_reduction[indexed_triplets[:, triplet_index], peak_index_0] *= 1/2
-                sigma_reduction[indexed_triplets[:, triplet_index], peak_index_1] *= 1/2
-        return sigma_reduction
 
     def iteration_worker_common(self, target_function):
         self.xnn += target_function.gauss_newton_step(self.xnn)
@@ -537,8 +515,9 @@ class Candidates:
 
 
 class OptimizerBase:
-    def __init__(self, comm):
+    def __init__(self, comm, fom):
         self.comm = comm
+        self.fom = fom
         self.rank = self.comm.Get_rank()
         self.n_ranks = self.comm.Get_size()
         self.lattice_system = self.comm.bcast(self.lattice_system, root=self.root)
@@ -559,7 +538,12 @@ class OptimizerBase:
             lattice_system=self.lattice_system,
             bravais_lattice=self.bravais_lattice,
             opt_params=self.opt_params,
+            rng=self.rng,
+            fom=self.fom
             )
+        #process = psutil.Process()
+        #gc.collect()
+        #print(f'Memory usage after instantiating candidates: {process.memory_info().rss / 1024 ** 2} MB')
         return candidates
 
     def run_common(self, n_top_candidates):
@@ -590,15 +574,10 @@ class OptimizerBase:
         # each axis. This also performs a quick reindexing.
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
-        #print('refine_cell')
         candidates.refine_cell()
-        #print('standardize_cell')
         candidates.standardize_cell()
-        #print('correct_off_by_two')
         candidates.correct_off_by_two()
-        #print('assign_extinction_group')
         candidates.assign_extinction_group()
-        #print('calculate_peaks_indexed')
         candidates.calculate_peaks_indexed()
 
         if self.opt_params['convergence_testing']:
@@ -608,7 +587,7 @@ class OptimizerBase:
 
 
 class OptimizerWorker(OptimizerBase):
-    def __init__(self, comm):
+    def __init__(self, comm, fom, seed=12345):
         self.root = 0
         self.lattice_system = None
         self.bravais_lattice = None
@@ -616,8 +595,8 @@ class OptimizerWorker(OptimizerBase):
         self.hkl_ref = None
         self.n_peaks = None
         self.hkl_ref_length = None
-        self.rng = np.random.default_rng()
-        super().__init__(comm)
+        self.rng = np.random.default_rng(seed)
+        super().__init__(comm, fom)
         
     def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20):
         self.q2_obs = np.zeros(self.n_peaks)
@@ -643,7 +622,7 @@ class OptimizerWorker(OptimizerBase):
 
 
 class OptimizerManager(OptimizerBase):
-    def __init__(self, data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm, seed=12345):
+    def __init__(self, data_params, opt_params, reg_params, template_params, pitf_params, random_params, bravais_lattice, comm, fom, seed=12345):
         self.root = comm.Get_rank()
         assert self.root == 0
         self.data_params = data_params
@@ -708,12 +687,12 @@ class OptimizerManager(OptimizerBase):
 
         self.n_peaks = self.indexer.data_params['n_peaks']
         self.unit_cell_length = self.indexer.data_params['unit_cell_length']
-        super().__init__(comm)
+        super().__init__(comm, fom)
 
     def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20):
-        if entry is None:
+        if (entry is None) and (not q2 is None):
             self.q2_obs = q2[:self.n_peaks]
-        elif q2 is None:
+        elif (not entry is None) and (q2 is None):
             self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
             if self.opt_params['convergence_testing']:
                 self.xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['unit_cell_indices']]
@@ -752,7 +731,13 @@ class OptimizerManager(OptimizerBase):
                     ))
             self.convergence_initial_xnn = np.concatenate(convergence_initial_xnn, axis=0)
         else:
+            #process = psutil.Process()
+            #gc.collect()
+            #print(f'Memory usage before creating candidates: {process.memory_info().rss / 1024 ** 2} MB')
+
             for generator_info in self.opt_params['generator_info']:
+                gc.collect()
+                #print(f'Memory usage before {generator_info["generator"]}: {process.memory_info().rss / 1024 ** 2} MB')
                 if generator_info['generator'] in ['nn', 'trees']:
                     generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
@@ -777,6 +762,9 @@ class OptimizerManager(OptimizerBase):
                         model=generator_info['generator'],
                         )
                 candidate_unit_cells_all.append(generator_unit_cells)
+                gc.collect()
+                #print(f'Memory usage after {generator_info["generator"]}: {process.memory_info().rss / 1024 ** 2} MB')
+                #print()
         candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
 
         candidate_unit_cells_all = fix_unphysical(
@@ -807,6 +795,8 @@ class OptimizerManager(OptimizerBase):
                 candidate_xnn_rank = candidate_xnn_all[rank_index::self.n_ranks]
             else:
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
+        gc.collect()
+        #print(f'Memory usage after candidate xnn: {process.memory_info().rss / 1024 ** 2} MB')
         return self.generate_candidates_common(candidate_xnn_rank)
 
     def redistribute_xnn(self, xnn):

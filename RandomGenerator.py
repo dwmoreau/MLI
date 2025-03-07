@@ -1,7 +1,8 @@
-import joblib
 import matplotlib.pyplot as plt
+import os
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import GridSearchCV
 
 from Reindexing import reindex_entry_monoclinic
 from Reindexing import reindex_entry_orthorhombic
@@ -10,14 +11,16 @@ from Utilities import fix_unphysical
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_unit_cell_volume
 from Utilities import reciprocal_uc_conversion
-from Utilities import read_params
-from Utilities import write_params
+from IOManagers import read_params
+from IOManagers import write_params
+from IOManagers import SKLearnManager
 
 
 class RandomGenerator:
     def __init__(self, bravais_lattice, data_params, model_params, save_to):
         self.lattice_system = data_params['lattice_system']
         self.unit_cell_length = data_params['unit_cell_length']
+        self.n_peaks = data_params['n_peaks']
         self.bravais_lattice = bravais_lattice
         self.save_to = save_to
         self.model_params = model_params
@@ -25,10 +28,11 @@ class RandomGenerator:
     def setup(self):
         model_params_defaults = {
             'random_state': 0,
-            'n_estimators': 200,
-            'min_samples_leaf': 1,
-            'max_depth': None,
-            'subsample': 0.1,
+            'n_estimators': 50,
+            'min_samples_leaf': 5,
+            'max_depth': 10,
+            'subsample': 0.05,
+            'grid_search': None,
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
@@ -36,14 +40,7 @@ class RandomGenerator:
 
     def train(self, data):
         q2 = np.stack(data['q2'])
-        # This is to correct for a bug in the dataset parsing.
-        # This has been corrected and the following lines should be deleted when the 
-        # dataset is regenerated next
         reciprocal_reindexed_unit_cell = np.stack(data['reciprocal_reindexed_unit_cell'])
-        if np.sum(reciprocal_reindexed_unit_cell == 0) > 0:
-            print('THERE ARE ZEROS IN THE RECIPROCAL REINDEXED UNIT CELLL')
-            reindexed_unit_cell = np.stack(data['reindexed_unit_cell'])
-            reciprocal_reindexed_unit_cell = reciprocal_uc_conversion(reindexed_unit_cell)
         vol = get_unit_cell_volume(reciprocal_reindexed_unit_cell)
         train = np.array(data['train'], dtype=bool)
             
@@ -67,7 +64,10 @@ class RandomGenerator:
         axes.set_ylabel('Empirical PDF')
         axes_r.set_ylabel('Emprical CDF')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.bravais_lattice}_volume_distribution_{self.model_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'{self.bravais_lattice}_volume_distribution_{self.model_params["tag"]}.png'
+            ))
         plt.close()
 
         # Random forest unit cell prediction
@@ -79,7 +79,32 @@ class RandomGenerator:
             max_depth=self.model_params['max_depth'],
             max_samples=self.model_params['subsample'],
             )
-        self.random_forest_regressor.fit(q2[train], vol[train])
+        if self.model_params['grid_search'] is not None:
+            # Set up GridSearchCV
+            # param_grid input is a dictionary with the same names as the random forest model.
+            # subsample needs to be correctly named 'max_samples'.
+            param_grid = self.model_params['grid_search'].copy()
+            subsample_value = param_grid['subsample']
+            del param_grid['subsample']
+            param_grid['max_samples'] = subsample_value
+            grid_search = GridSearchCV(
+                estimator=self.random_forest_regressor,
+                param_grid=param_grid,
+                cv=5,
+                n_jobs=-1,
+                verbose=1,
+                )
+            grid_search.fit(q2[train], vol[train])
+            best_params = grid_search.best_params_.copy()
+            subsample_value = best_params['max_samples']
+            del best_params['max_samples']
+            best_params['subsample'] = subsample_value
+            self.model_params.update(best_params)
+            self.random_forest_regressor = grid_search.best_estimator_
+            print(grid_search.best_params_)
+        else:
+            # Fit the RandomForestRegressor directly if no grid search is specified
+            self.random_forest_regressor.fit(q2[train], vol[train])
 
         vol_pred_train = self.random_forest_regressor.predict(q2[train])
         vol_pred_val = self.random_forest_regressor.predict(q2[~train])
@@ -121,7 +146,10 @@ class RandomGenerator:
         axes[0, 0].set_ylabel('Volume Predicted')
         axes[1, 0].set_ylabel('Error / std')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.bravais_lattice}_volume_pred_{self.model_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'{self.bravais_lattice}_volume_pred_{self.model_params["tag"]}.png'
+            ))
         plt.close()
 
         self.save()
@@ -129,25 +157,45 @@ class RandomGenerator:
     def save(self):
         write_params(
             self.model_params,
-            f'{self.save_to}/{self.bravais_lattice}_random_params_{self.model_params["tag"]}.csv'
+            os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_random_params_{self.model_params["tag"]}.csv'
+                )
             )
-        joblib.dump(
-            self.random_forest_regressor,
-            f'{self.save_to}/{self.bravais_lattice}_random_forest_regressor.bin'
+        model_manager = SKLearnManager(
+            filename=os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_random_forest_regressor'
+                ),
+            model_type='custom'
+            )
+        model_manager.save(
+            model=self.random_forest_regressor,
+            n_features=self.n_peaks,
+            )
+        model_manager._save_sklearn(
+            model=self.random_forest_regressor,
             )
         np.save(
-            f'{self.save_to}/{self.bravais_lattice}_volume_lims.npy',
+            os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_volume_lims.npy'
+                ),
             self.volume_lims
             )
         np.save(
-            f'{self.save_to}/{self.bravais_lattice}_volume_distribution.npy',
+            os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_volume_distribution.npy'
+                ),
             self.volume_distribution
             )
 
     def load_from_tag(self):
-        params = read_params(
-            f'{self.save_to}/{self.bravais_lattice}_random_params_{self.model_params["tag"]}.csv'
-            )
+        params = read_params(os.path.join(
+            f'{self.save_to}',
+            f'{self.bravais_lattice}_random_params_{self.model_params["tag"]}.csv'
+            ))
         params_keys = [
             'random_state',
             'n_estimators',
@@ -166,15 +214,23 @@ class RandomGenerator:
             self.model_params['max_depth'] = int(params['max_depth'])
         self.model_params['subsample'] = float(params['subsample'])
 
-        self.random_forest_regressor = joblib.load(
-            f'{self.save_to}/{self.bravais_lattice}_random_forest_regressor.bin'
+        self.random_forest_regressor = SKLearnManager(
+            filename=os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_random_forest_regressor'
+                ),
+            model_type='custom'
             )
-        self.volume_lims = np.load(
-            f'{self.save_to}/{self.bravais_lattice}_volume_lims.npy'
-            )
-        self.volume_distribution = np.load(
-            f'{self.save_to}/{self.bravais_lattice}_volume_distribution.npy'
-            )
+        self.random_forest_regressor.load()
+
+        self.volume_lims = np.load(os.path.join(
+            f'{self.save_to}',
+            f'{self.bravais_lattice}_volume_lims.npy'
+            ))
+        self.volume_distribution = np.load(os.path.join(
+            f'{self.save_to}',
+            f'{self.bravais_lattice}_volume_distribution.npy'
+            ))
 
     def generate(self, n_unit_cells, rng, q2_obs, model=None):
         if self.lattice_system in ['cubic', 'tetragonal', 'hexagonal', 'orthorhombic']:
@@ -221,12 +277,7 @@ class RandomGenerator:
             indices = np.searchsorted(self.volume_distribution[:, 2], rand)
             random_volume_scale = self.volume_distribution[indices, 0]
         elif model == 'predicted_volume':
-            preds = np.zeros(self.model_params['n_estimators'])
-            for est_index in range(self.model_params['n_estimators']):
-                preds[est_index] = self.random_forest_regressor.estimators_[est_index].predict(
-                    q2_obs[np.newaxis]
-                    )[0]
-
+            preds = self.random_forest_regressor.predict_individual_trees(q2_obs[np.newaxis])[:, 0]
             if n_unit_cells > self.model_params['n_estimators']:
                 replace = True
             else:

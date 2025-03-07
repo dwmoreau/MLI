@@ -1,9 +1,10 @@
 import numpy as np
+import os
 import pandas as pd
 
 
-entries_csd = pd.read_parquet(f'data/unique_entries_csd.parquet')
-entries_cod = pd.read_parquet(f'data/unique_entries_cod.parquet')
+entries_csd = pd.read_parquet(os.path.join('data', 'unique_entries_csd.parquet'))
+entries_cod = pd.read_parquet(os.path.join('data', 'unique_entries_cod.parquet'))
 
 all_unique_entries = []
 groups_csd = entries_csd.groupby('bravais_lattice')
@@ -55,4 +56,4 @@ for key in keys:
 
 all_unique_entries = pd.concat(all_unique_entries, ignore_index=True)
 all_unique_entries.drop(columns=[0], inplace=True)
-all_unique_entries.to_parquet('data/unique_cod_entries_not_in_csd.parquet')
+all_unique_entries.to_parquet(os.path.join('data', 'unique_cod_entries_not_in_csd.parquet'))

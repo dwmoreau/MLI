@@ -279,19 +279,19 @@ def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12
     entry_generator = EntryGenerator(lattice_system)
 
     if rank == 0:
-        if not os.path.exists('data/GeneratedDatasets'):
-            os.mkdir('data/GeneratedDatasets')
-        if os.path.exists('data/GeneratedDatasets/tmp'):
-            shutil.rmtree('data/GeneratedDatasets/tmp')
-        os.mkdir('data/GeneratedDatasets/tmp')
+        if not os.path.exists(os.path.join('data', 'GeneratedDatasets')):
+            os.mkdir(os.path.join('data', 'GeneratedDatasets'))
+        if os.path.exists(os.path.join('data', 'GeneratedDatasets', 'tmp')):
+            shutil.rmtree(os.path.join('data', 'GeneratedDatasets', 'tmp'))
+        os.mkdir(os.path.join('data', 'GeneratedDatasets', 'tmp'))
         # opening and accessing the giant data frame is only done on rank 0
         entries = []
         entries_csd = pd.read_parquet(
-            'data/unique_entries_csd.parquet',
+            os.path.join('data', 'unique_entries_csd.parquet'),
             columns=entry_generator.data_frame_keys_to_keep
             )
         entries_cod = pd.read_parquet(
-            'data/unique_cod_entries_not_in_csd.parquet',
+            os.path.join('data', 'unique_cod_entries_not_in_csd.parquet'),
             columns=entry_generator.data_frame_keys_to_keep
             )
         entries_csd = entries_csd.loc[entries_csd['bravais_lattice'] == bravais_lattice]
@@ -360,20 +360,27 @@ def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12
         entries_rank[f'reindexed_k_{broadening_tag}'] = reindexed_k[broadening_tag]
         entries_rank[f'reindexed_l_{broadening_tag}'] = reindexed_l[broadening_tag]
 
-    entries_rank.to_parquet(f'data/GeneratedDatasets/tmp/chunk_{rank:02d}.parquet')
+    entries_rank.to_parquet(os.path.join(
+        'data',
+        'GeneratedDatasets',
+        'tmp',
+        f'chunk_{rank:02d}.parquet'
+        ))
 
     COMM.Barrier()
     if rank == 0:
         chunks = []
-        for file_name in os.listdir('data/GeneratedDatasets/tmp'):
+        for file_name in os.listdir(os.path.join('data', 'GeneratedDatasets', 'tmp')):
             if file_name.startswith('chunk'):
-                chunks.append(pd.read_parquet('data/GeneratedDatasets/tmp/' + file_name))
+                chunks.append(pd.read_parquet(os.path.join('data', 'GeneratedDatasets', 'tmp', file_name)))
         chunks = pd.concat(chunks, ignore_index=True)
         chunks = test_train_split(chunks, rng, train_fraction)
-        chunks.to_parquet(
-            f'data/GeneratedDatasets/dataset_{bravais_lattice}.parquet'
-            )
-        shutil.rmtree('data/GeneratedDatasets/tmp')
+        chunks.to_parquet(os.path.join(
+            'data',
+            'GeneratedDatasets',
+            f'dataset_{bravais_lattice}.parquet'
+            ))
+        shutil.rmtree(os.path.join('data', 'GeneratedDatasets', 'tmp'))
     else:
         MPI.Finalize()
 

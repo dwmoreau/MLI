@@ -92,11 +92,13 @@ if __name__ == '__main__':
     #bravais_lattices = ['oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     #bravais_lattices = ['hP']
     #bravais_lattices = ['mP', 'mC', 'aP']
-    #bravais_lattices = ['mP', 'mC']
-    bravais_lattices = ['mP']
+    bravais_lattices = ['mP', 'mC']
+    #bravais_lattices = ['mP']
     #bravais_lattices = ['aP']
+
     
     if sys.argv[1] == 'random_subsampling':
+        n_peaks = int(sys.argv[5])
         if sys.argv[4] == 'uniform':
             uniform_sampling = True
         else:
@@ -105,12 +107,13 @@ if __name__ == '__main__':
             {
             'worker': 'random_subsampling',
             'n_iterations': int(sys.argv[2]),
-            'n_peaks': 20,
+            'n_peaks': n_peaks,
             'n_drop': int(sys.argv[3]),
             'uniform_sampling': uniform_sampling,
             }
             ]
         output_tag_elements = [
+            f'peaks:{iteration_info[0]["n_peaks"]}',
             f'drop{iteration_info[0]["n_drop"]}',
             f'iter{iteration_info[0]["n_iterations"]}',
             ]
@@ -119,19 +122,22 @@ if __name__ == '__main__':
         else:
            output_tag_elements += ['sampQ2']
     elif sys.argv[1] == 'random_power':
+        n_peaks = int(sys.argv[5])
         iteration_info = [{
             'worker': 'random_power',
             'n_iterations': int(sys.argv[2]),
-            'n_peaks': 20,
+            'n_peaks': n_peaks,
             'power_range': [float(sys.argv[3]), float(sys.argv[4])],
             }]
         output_tag_elements = [
            'random_power',
+           f'peaks:{iteration_info[0]["n_peaks"]}',
            f'{iteration_info[0]["power_range"][0]}',
            f'{iteration_info[0]["power_range"][1]}',
            f'iter{iteration_info[0]["n_iterations"]}'
            ]
     elif sys.argv[1] == 'random_subsampling_power':
+        n_peaks = int(sys.argv[5])
         if sys.argv[4] == 'uniform':
             uniform_sampling = True
         else:
@@ -139,15 +145,16 @@ if __name__ == '__main__':
         iteration_info = [{
             'worker': 'random_subsampling_power',
             'n_iterations': int(sys.argv[2]),
-            'n_peaks': 20,
+            'n_peaks': n_peaks,
             'n_drop': int(sys.argv[3]),
             'uniform_sampling': uniform_sampling,
             'power': 3,
             }]
         output_tag_elements = [
-           f'power{iteration_info[0]["n_drop"]}_{iteration_info[0]["power"]}',
-           f'iter{iteration_info[0]["n_iterations"]}',
-           ]
+            f'peaks:{iteration_info[0]["n_peaks"]}',
+            f'power{iteration_info[0]["n_drop"]}_{iteration_info[0]["power"]}',
+            f'iter{iteration_info[0]["n_iterations"]}',
+            ]
         if uniform_sampling:
            output_tag_elements += ['sampUniform']
         else:
@@ -156,11 +163,12 @@ if __name__ == '__main__':
     #iteration_info = [{
     #    'worker': 'random_subsampling',
     #    'n_iterations': 50,
-    #    'n_peaks': 20,
+    #    'n_peaks': n_peaks,
     #    'n_drop': 14,
     #    'uniform_sampling': False,
     #    }]
     #output_tag_elements = [
+    #   f'peaks:{iteration_info[0]["n_peaks"]}',
     #   f'drop{iteration_info[0]["n_drop"]}',
     #   f'iter{iteration_info[0]["n_iterations"]}',
     #   ]
@@ -171,7 +179,7 @@ if __name__ == '__main__':
     #iteration_info = [{
     #    'worker': 'random_power',
     #    'n_iterations': 50,
-    #    'n_peaks': 20,
+    #    'n_peaks': n_peaks,
     #    'power_range': [0, 16],
     #    }]
     #output_tag_elements = [
@@ -193,19 +201,19 @@ if __name__ == '__main__':
     rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
+            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
         elif bravais_lattice in ['hP']:
-            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, split_comm, options)
+            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
         elif bravais_lattice in ['hR']:
-            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, split_comm, options)
+            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, split_comm, options)
+            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
+            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
+            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
         elif bravais_lattice in ['aP']:
-            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, split_comm, options)
+            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
 
     if rank == 0:
         if load_data:
@@ -229,7 +237,6 @@ if __name__ == '__main__':
                 f'reindexed_l_{broadening_tag}',
                 ]
             for bravais_lattice in bravais_lattices:
-                n_peaks = 20
                 bravais_lattice_data = pd.read_parquet(
                     f'/Users/DWMoreau/MLI/data/GeneratedDatasets/dataset_{bravais_lattice}.parquet',
                     columns=read_columns

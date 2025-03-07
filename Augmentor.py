@@ -1,16 +1,16 @@
 import copy
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 import pandas as pd
 import scipy.ndimage
-import scipy.optimize
-import scipy.signal
-import scipy.stats
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import ConfusionMatrixDisplay
+from sklearn.model_selection import GridSearchCV
 from tqdm import tqdm
 
+from IOManagers import write_params
 from Reindexing import get_split_group
 from Reindexing import reindex_entry_triclinic
 from Reindexing import reindex_entry_monoclinic
@@ -62,6 +62,14 @@ class Augmentor:
                 self.aug_params['augment_shift'][1],
                 self.unit_cell_length
                 )
+        # Save the augmentation parameters so they can be viewed to verify what was done.
+        write_params(
+            self.aug_params,
+            os.path.join(
+                f'{self.save_to}',
+                f'aug_params_{self.aug_params["tag"]}.csv'
+                )
+            )
 
     def setup(self, data, split_groups):
         print(f'\n Setting up augmentation {self.aug_params["tag"]}')
@@ -125,7 +133,10 @@ class Augmentor:
                         axes[bin_index].set_ylabel('')
                     axes[0].set_title(f'Unit cell covariance\n{split_group}')
                 fig.tight_layout()
-                fig.savefig(f'{self.save_to}/aug_unit_cell_cov_{split_group}_{self.aug_params["tag"]}.png')
+                fig.savefig(os.path.join(
+                    f'{self.save_to}',
+                    f'aug_unit_cell_cov_{split_group}_{self.aug_params["tag"]}.png'
+                    ))
                 plt.close()
 
         elif self.aug_params['augment_method'] == 'pca':
@@ -173,7 +184,10 @@ class Augmentor:
                         axes[bin_index, 1].set_title('PCA Singular values')
                         axes[bin_index, 2].set_title('STD of transformation')
                 fig.tight_layout()
-                fig.savefig(f'{self.save_to}/aug_unit_cell_pca_{split_group}_{self.aug_params["tag"]}.png')
+                fig.savefig(os.path.join(
+                    f'{self.save_to}',
+                    f'aug_unit_cell_pca_{split_group}_{self.aug_params["tag"]}.png'
+                    ))
                 plt.close()
 
         # calculate the order of the peak in the list of sa peaks
@@ -275,7 +289,10 @@ class Augmentor:
         axes[1, 1].set_ylabel('Distribution')
         axes[1, 1].set_xlabel('$q^2$ spacing')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/aug_setup_{self.aug_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'aug_setup_{self.aug_params["tag"]}.png'
+            ))
         plt.close()
 
     def augment(self, data, subgroup_label):
@@ -677,7 +694,7 @@ class Augmentor:
                 status = False
         return perturbed_unit_cell_scaled
 
-    def evaluate(self, data, split_group):
+    def evaluate_old(self, data, split_group):
         train = data[data['train']]
         train_unaugmented = train[~train['augmented']]
         train_augmented = train[train['augmented']]
@@ -800,7 +817,10 @@ class Augmentor:
             f'q2 Train / Val Acc: {train_accuracy_q2_obs:0.2f} / {val_accuracy_q2_obs:0.2f}',
             ]))
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/aug_predictions_{split_group}_{self.aug_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'aug_predictions_{split_group}_{self.aug_params["tag"]}.png'
+            ))
         plt.close()
 
         fig, axes = plt.subplots(1, 2, figsize=(6, 3))
@@ -809,7 +829,10 @@ class Augmentor:
         axes[0].set_xlabel('Unit Cell Feature Importance')
         axes[1].set_xlabel('Peak Position Feature Importance')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/aug_feature_importance_{split_group}_{self.aug_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'aug_feature_importance_{split_group}_{self.aug_params["tag"]}.png'
+            ))
         plt.close()
 
         n_important = 5
@@ -830,5 +853,188 @@ class Augmentor:
             axes[axes_index].set_xlabel('q2_obs')
         axes[0].legend()
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/q2_distributions_{split_group}_{self.aug_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'q2_distributions_{split_group}_{self.aug_params["tag"]}.png'
+            ))
+        plt.close()
+
+    def evaluate(self, data, split_group):
+        train = data[data['train']]
+        train_unaugmented = train[~train['augmented']]
+        train_augmented = train[train['augmented']]
+        # There are usually an order of magnitude more augmented datasets than unaugmented
+        # Downsample the augmented data so the balance is reasonable.
+        if len(train_augmented) > len(train_unaugmented):
+            train_augmented = train_augmented.sample(n=len(train_unaugmented), replace=False)
+            train = pd.concat((train_unaugmented, train_augmented), ignore_index=True)
+        train_uc = np.stack(train['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        train_uc_volume = get_unit_cell_volume(
+            train_uc, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        train_y = np.array(train['augmented'], dtype=int)
+        train_q2_obs = np.stack(train['q2'])
+
+        val = data[~data['train']]
+        val_unaugmented = val[~val['augmented']]
+        val_augmented = val[val['augmented']]
+        if len(val_augmented) > len(val_unaugmented):
+            val_augmented = val_augmented.sample(n=len(val_unaugmented), replace=False)
+            val = pd.concat((val_unaugmented, val_augmented), ignore_index=True)
+        val_uc = np.stack(val['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        val_uc_volume = get_unit_cell_volume(
+            val_uc, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        val_y = np.array(val['augmented'], dtype=int)
+        val_q2_obs = np.stack(val['q2'])
+
+        # Concatenate features
+        train_features = np.hstack((train_uc, train_q2_obs))
+        val_features = np.hstack((val_uc, val_q2_obs))
+
+        grid_search = GridSearchCV(
+            estimator=RandomForestClassifier(
+                class_weight='balanced_subsample',
+                ),
+            param_grid={
+                'max_depth': [4, 8, 16, 32],
+                'min_samples_leaf': [2, 4, 8],
+                'min_samples_split': [2, 4, 8],
+                'n_estimators': [50, 100, 200],
+                },
+            cv=5,
+            n_jobs=-1,
+            verbose=1,
+            )
+        grid_search.fit(X=train_features, y=train_y)
+        classifier = grid_search.best_estimator_
+
+        train_accuracy = classifier.score(X=train_features, y=train_y)
+        val_accuracy = classifier.score(X=val_features, y=val_y)
+
+        train_pred = classifier.predict(train_features)
+        train_correct = train_pred == train_y
+
+        val_pred = classifier.predict(val_features)
+        val_correct = val_pred == val_y
+
+        n_bins = 40
+        bins = [None for _ in range(self.unit_cell_length + 1)]
+        centers = [None for _ in range(self.unit_cell_length + 1)]
+        train_true_frac = np.zeros((n_bins, self.unit_cell_length + 1))
+        val_true_frac = np.zeros((n_bins, self.unit_cell_length + 1))
+
+        for uc_index in range(self.unit_cell_length + 1):
+            if uc_index == self.unit_cell_length:
+                sorted_uc = np.sort(train_uc_volume)
+            else:
+                sorted_uc = np.sort(train_uc[:, uc_index])
+            bins[uc_index] = np.linspace(sorted_uc[0], sorted_uc[int(0.99*sorted_uc.size)], n_bins + 1)
+            centers[uc_index] = (bins[uc_index][1:] + bins[uc_index][:-1]) / 2
+            if uc_index == self.unit_cell_length:
+                train_bin_indices = np.searchsorted(bins[uc_index], train_uc_volume) - 1
+                val_bin_indices = np.searchsorted(bins[uc_index], val_uc_volume) - 1
+            else:
+                train_bin_indices = np.searchsorted(bins[uc_index], train_uc[:, uc_index]) - 1
+                val_bin_indices = np.searchsorted(bins[uc_index], val_uc[:, uc_index]) - 1
+            for bin_index in range(n_bins):
+                train_select = train_correct[train_bin_indices == bin_index]
+                val_select = val_correct[val_bin_indices == bin_index]
+                if train_select.size > 0:
+                    train_true_frac[bin_index, uc_index] = train_select.sum() / train_select.size
+                else:
+                    train_true_frac[bin_index, uc_index] = np.nan
+                if val_select.size > 0:
+                    val_true_frac[bin_index, uc_index] = val_select.sum() / val_select.size
+                else:
+                    val_true_frac[bin_index, uc_index] = np.nan
+
+        figsize = (5 + 1.5**(self.unit_cell_length + 1), 3)
+        fig, axes = plt.subplots(1, self.unit_cell_length + 1, figsize=figsize)
+        if self.lattice_system == 'cubic':
+            labels = ['a', 'Volume']
+        elif self.lattice_system in ['tetragonal', 'hexagonal']:
+            labels = ['a', 'b', 'Volume']
+        elif self.lattice_system == 'orthorhombic':
+            labels = ['a', 'b', 'c', 'Volume']
+        elif self.lattice_system == 'monoclinic':
+            labels = ['a', 'b', 'c', 'beta', 'Volume']
+        elif self.lattice_system == 'triclinic':
+            labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma', 'Volume']
+        elif self.lattice_system == 'rhombohedral':
+            labels = ['a', 'alpha', 'Volume']
+        axes_r = [axes[i].twinx() for i in range(self.unit_cell_length + 1)]
+        for uc_index in range(self.unit_cell_length + 1):
+            if uc_index == self.unit_cell_length:
+                unaugmented_uc = train_uc_volume[~train['augmented']]
+                augmented_uc = train_uc_volume[train['augmented']]
+            else:
+                unaugmented_uc = train_uc[~train['augmented'], uc_index]
+                augmented_uc = train_uc[train['augmented'], uc_index]
+            axes[uc_index].hist(unaugmented_uc, bins=bins[uc_index], label='Original', density=True)
+            axes[uc_index].hist(augmented_uc, bins=bins[uc_index], label='Augmented', density=True, alpha=0.5)
+            axes_r[uc_index].plot(centers[uc_index], train_true_frac[:, uc_index], color=[1, 0, 0], label='Train Accuracy')
+            axes_r[uc_index].plot(centers[uc_index], val_true_frac[:, uc_index], color=[0, 1, 0], label='Val Accuracy')
+            axes_r[uc_index].plot(centers[uc_index], 0.5*np.ones(centers[uc_index].size), color=[0, 0, 0], linestyle='dotted')
+            axes[uc_index].set_xlabel(labels[uc_index])
+        axes[0].set_ylabel('Distribution')
+        axes_r[self.unit_cell_length].set_ylabel('Prediction Accuracy')
+        axes[0].legend(frameon=False, framealpha=0.5)
+        axes_r[self.unit_cell_length].legend(frameon=False, framealpha=0.5)
+        axes[0].set_title('\n'.join([
+            f'Train / Val Acc: {train_accuracy:0.2f} / {val_accuracy:0.2f}',
+            ]))
+        fig.tight_layout()
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'aug_predictions_{split_group}_{self.aug_params["tag"]}.png'
+            ))
+        plt.close()
+
+        fig, axes = plt.subplots(1, 1, figsize=(6, 3))
+        axes.plot(
+            classifier.feature_importances_[:self.unit_cell_length],
+            marker='.', label='Unit Cell'
+            )
+        axes.plot(
+            classifier.feature_importances_[self.unit_cell_length:],
+            marker='.', label='q2 obs'
+            )
+        ylim = axes.get_ylim()
+        axes.plot(
+            [self.unit_cell_length + 0.5, self.unit_cell_length + 0.5], ylim,
+            color=[0, 0, 0], linestyle='dotted'
+            )
+        axes.set_ylim(ylim)
+        axes.legend(frameon=False)
+        axes.set_xlabel('Feature Importance')
+        fig.tight_layout()
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'aug_feature_importance_{split_group}_{self.aug_params["tag"]}.png'
+            ))
+        plt.close()
+
+        n_important = 5
+        feature_indices = np.argsort(classifier.feature_importances_[self.unit_cell_length:])[::-1][:n_important]
+        sorted_q2 = np.sort(train_q2_obs.ravel())
+        q2_bins = np.linspace(0, sorted_q2[int(0.9975*sorted_q2.size)], 101)
+        unaugmented_q2 = train_q2_obs[~train['augmented']]
+        augmented_q2 = train_q2_obs[train['augmented']]
+        fig, axes = plt.subplots(1, n_important + 1, figsize=(10, 4), sharex=True)
+        axes[0].hist(unaugmented_q2.ravel(), bins=q2_bins, density=True, label='Original')
+        axes[0].hist(augmented_q2.ravel(), bins=q2_bins, density=True, alpha=0.5, label='Augmented')
+        axes[0].set_title('All Peaks')
+        for axes_index, feature_index in enumerate(feature_indices):
+            axes[axes_index + 1].hist(unaugmented_q2[:, feature_index], bins=q2_bins, density=True, label='Original')
+            axes[axes_index + 1].hist(augmented_q2[:, feature_index], bins=q2_bins, density=True, alpha=0.5, label='Augmented')
+            axes[axes_index + 1].set_title(f'q2 index: {feature_index}')
+        for axes_index in range(n_important + 1):
+            axes[axes_index].set_xlabel('q2_obs')
+        axes[0].legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'q2_distributions_{split_group}_{self.aug_params["tag"]}.png'
+            ))
         plt.close()

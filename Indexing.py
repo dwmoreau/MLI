@@ -1,38 +1,47 @@
 """
-- 10398
-    - Do peak picking with new geo and masks
+- Write first draft of paper
+    - Get feedback
 
-* Testing
-    - Optimization with q2 error to characterize optimization
-    - Test with impurities to characterize optimization
+Todo:
+    1: Rerun all models
+    2: Double check radius of convergence code. Make sure results for each Bravais lattice exists
+    3: Redo model ensemble with new mathematical formulation
+    4: Extend this formulation to get unit cell redistribution parameterization
+    5: Perform optimizations and save results
+    6: ML approach to FOM
+
 
 - Model ensemble
-    - Review
+    - Redo with a better mathematical formulation
 
-* Reindexing
-    * Standardization of monoclinic unit cells
+- Perform optimizations to get results for 
+- Figure of Merit
+    - Put together a new FOM that utilizes data from all Bravais lattices simultaneously
+        - Does this work? Where does this work well?
+        - Use results from indexing attempts
+
+    - Integrate into optimization
+    - Radius of convergence testing
+    - Add to paper
+
+- Optimization
+    - Redistribution
+        - Optimize the redistribution parameters to improve the ensemble formula
+        - This is a brute force nearest neighbor algorithm. Is there a better method???
+
+    - Target function
+        - What if the derivative of the unit cell in the weight is considered?
+
+- Reindexing
+    - Catch numerical errors during Selling reduction
+    - Standardization of monoclinic unit cells
         - Run iotbx.symmetry on monoclinic unit cells
-    * Catch numerical errors during Selling reduction
-    * Reindex triclinic in reciprocal space
+    - Reindex triclinic in reciprocal space
 
 - move to NERSC
     - How to ideally install python
     - Where to store the data
 
-- Documentation
-    - Finish the section on Integral Filter Model
-    - Reread and add edits
-
-- SWE
-    - Multiprocessing parallelization
-
-
-- Experimental Data
-    - Automate triplet picking
-    - GSASII tutorials
-        - Create a refined peak list and attempt optimization for each powder pattern
-        - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
-- Optimization
 - Spacegroup assignments:
     - Add a validation
     - https://www.markvardsen.net/projects/ExtSym/main.html
@@ -40,17 +49,54 @@
     - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
     - https://journals.iucr.org/paper?fe5024
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
-- Regression
+
+- SWE
+    - Make triclinic optimization robust against failures
+        - Warnings:
+            /Users/DWMoreau/MLI/Utilities.py:626: RuntimeWarning: invalid value encountered in sqrt
+              observed_difference2 = (np.sqrt(q2_obs[np.newaxis]) - np.sqrt(q2_calc))**2
+            /Users/DWMoreau/MLI/Utilities.py:223: RuntimeWarning: invalid value encountered in sqrt
+              volume = unit_cell[:, 0]**3 * np.sqrt(1 - 3*np.cos(unit_cell[:, 1])**2 + 2*np.cos(unit_cell[:, 1])**3)
+            /Users/DWMoreau/MLI/Reindexing.py:608: RuntimeWarning: invalid value encountered in divide
+              gamma = np.arccos(s6[:, 2] / (a*b))
+            /Users/DWMoreau/MLI/Utilities.py:101: RuntimeWarning: invalid value encountered in sqrt
+              a_inv = np.sqrt(S_inv[:, 0, 0])
+    - Dependencies
+        training:
+            numpy scipy pandas pyarrow matplotlib mpi4py scikit-learn
+            tqdm gemmi numba jupyterlab openpyxl skl2onnx onnxruntime
+        inference???:
+            numpy scipy pandas mpi4py scikit-learn gemmi numba onnxruntime
+    - Only load quantitized model
+    - Get inferences running with a barebones environment
+        - remove pytorch / tensorflow imports
+        - remove sklearn imports
+        - remove pandas imports
+    - Code review
+        - Static code analysis
+        - Manual read through
+            - High priority sections
+            - Use AI powered approaches
+                - Get Continue working in VSCode
+        - Tests
+    
+- Data
+    - Materials project as cif files
+        - mp_20 datset
+    - GSASII tutorials
+        - Create a refined peak list and attempt optimization for each powder pattern
+        - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
+
+- Integral filter model
+    - Tie together the Miller index assignment and unit cell prediction models.
 - Templating
+    - Need a better way to evaluate this model
+- Regression
+    - Hyperparameter training for Mean-Variance models
 - Augmentation
 - Random unit cell generator
+- Documentation
 - Indexing.py
-- 2D Indexing
-    - Start working on 2D specific algorithms using the indexed reflections
-        - Can I decompose frames into basis vectors
-- Integral filter model
-- Data
-    - Materials project as cif files?
 
 Readings:
     - Look more into TREOR
@@ -81,7 +127,6 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 """
-import joblib
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
@@ -105,9 +150,11 @@ from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_unit_cell_from_xnn
 from Utilities import get_unit_cell_volume
 from Utilities import Q2Calculator
-from Utilities import read_params
 from Utilities import reciprocal_uc_conversion
-from Utilities import write_params
+from IOManagers import read_params
+from IOManagers import write_params
+from IOManagers import load_standard_scaler
+from IOManagers import save_standard_scaler
 
 
 class Indexing:
@@ -250,13 +297,13 @@ class Indexing:
         #    print(f'{key} -> {self.group_mappings[key]}')
 
     def setup_from_tag(self, load_bravais_lattice='all'):
-        self.angle_scale = np.load(f'{self.save_to["data"]}/angle_scale.npy')
-        self.uc_scaler = joblib.load(f'{self.save_to["data"]}/uc_scaler.bin')
-        self.volume_scaler = joblib.load(f'{self.save_to["data"]}/volume_scaler.bin')
-        self.q2_scaler = joblib.load(f'{self.save_to["data"]}/q2_scaler.bin')
-        self.xnn_scaler = joblib.load(f'{self.save_to["data"]}/xnn_scaler.bin')
+        self.angle_scale = np.load(os.path.join(f'{self.save_to["data"]}', 'angle_scale.npy'))
+        self.uc_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'uc_scaler.json'))
+        self.volume_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'volume_scaler.json'))
+        self.q2_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'q2_scaler.json'))
+        self.xnn_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'xnn_scaler.json'))
 
-        params = read_params(f'{self.save_to["data"]}/data_params.csv')
+        params = read_params(os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
         data_params_keys = [
             'augment',
             'bravais_lattices',
@@ -302,9 +349,9 @@ class Indexing:
         if load_bravais_lattice != 'all':
             self.data_params['bravais_lattices'] = [load_bravais_lattice]
             self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
-            self.hkl_ref[load_bravais_lattice] = np.load(
-                f'{self.save_to["data"]}/hkl_ref_{load_bravais_lattice}.npy'
-                )
+            self.hkl_ref[load_bravais_lattice] = np.load(os.path.join(
+                f'{self.save_to["data"]}', f'hkl_ref_{load_bravais_lattice}.npy'
+                ))
             split_groups = []
             for split_group in self.data_params['split_groups']:
                 if split_group.startswith(load_bravais_lattice):
@@ -314,9 +361,9 @@ class Indexing:
         else:
             self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
             for bravais_lattice in self.data_params['bravais_lattices']:
-                self.hkl_ref[bravais_lattice] = np.load(
-                    f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy'
-                    )
+                self.hkl_ref[bravais_lattice] = np.load(os.path.join(
+                    f'{self.save_to["data"]}', f'hkl_ref_{bravais_lattice}.npy'
+                    ))
 
     def save(self):
         reindexed_hkl = np.stack(self.data['reindexed_hkl'])
@@ -325,19 +372,27 @@ class Indexing:
         save_to_data['reindexed_k'] = list(reindexed_hkl[:, :, 1])
         save_to_data['reindexed_l'] = list(reindexed_hkl[:, :, 2])
         save_to_data.drop(columns=['reindexed_hkl'], inplace=True)
-        save_to_data.to_parquet(f'{self.save_to["data"]}/data.parquet')
+        save_to_data.to_parquet(os.path.join(f'{self.save_to["data"]}', 'data.parquet'))
 
         for bravais_lattice in self.data_params['bravais_lattices']:
             np.save(
-                f'{self.save_to["data"]}/hkl_ref_{bravais_lattice}.npy',
+                os.path.join(f'{self.save_to["data"]}', f'hkl_ref_{bravais_lattice}.npy'),
                 self.hkl_ref[bravais_lattice]
                 )
-        np.save(f'{self.save_to["data"]}/angle_scale.npy', self.angle_scale)
-        joblib.dump(self.uc_scaler, f'{self.save_to["data"]}/uc_scaler.bin')
-        joblib.dump(self.volume_scaler, f'{self.save_to["data"]}/volume_scaler.bin')
-        joblib.dump(self.q2_scaler, f'{self.save_to["data"]}/q2_scaler.bin')
-        joblib.dump(self.xnn_scaler, f'{self.save_to["data"]}/xnn_scaler.bin')
-        write_params(self.data_params, f'{self.save_to["data"]}/data_params.csv')
+        np.save(os.path.join(f'{self.save_to["data"]}', 'angle_scale.npy'), self.angle_scale)
+        save_standard_scaler(
+            self.uc_scaler, os.path.join(f'{self.save_to["data"]}','uc_scaler.json')
+            )
+        save_standard_scaler(
+            self.volume_scaler, os.path.join(f'{self.save_to["data"]}','volume_scaler.json')
+            )
+        save_standard_scaler(
+            self.q2_scaler, os.path.join(f'{self.save_to["data"]}','q2_scaler.json')
+            )
+        save_standard_scaler(
+            self.xnn_scaler, os.path.join(f'{self.save_to["data"]}','xnn_scaler.json')
+            )
+        write_params(self.data_params, os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
 
     def load_data(self):
         read_columns = [
@@ -365,7 +420,7 @@ class Indexing:
         for index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             file_name = os.path.join(
                 self.data_params['data_dir'],
-                f'GeneratedDatasets/dataset_{bravais_lattice}.parquet'
+                os.path.join('GeneratedDatasets', f'dataset_{bravais_lattice}.parquet')
                 )
             print(f'Loading data from {file_name}')
             data.append(pd.read_parquet(file_name, columns=read_columns))
@@ -504,7 +559,7 @@ class Indexing:
         self.save()
 
     def load_data_from_tag(self, load_augmented, load_train, load_bravais_lattice='all'):
-        self.data = pd.read_parquet(f'{self.save_to["data"]}/data.parquet')
+        self.data = pd.read_parquet(os.path.join(f'{self.save_to["data"]}', 'data.parquet'))
         if 'reindexed_h' in self.data.keys():
             reindexed_hkl = np.stack([
                 np.stack(self.data['reindexed_h'], axis=0),
@@ -767,7 +822,7 @@ class Indexing:
         axes.set_xlabel('Group')
         axes.legend()
         fig.tight_layout()
-        fig.savefig(f'{self.save_to["data"]}/group_counts.png')
+        fig.savefig(os.path.join(f'{self.save_to["data"]}', 'group_counts.png'))
         plt.close()
 
         # Histogram of Bravais lattices
@@ -787,7 +842,7 @@ class Indexing:
         axes.set_xlabel('Bravais Lattice')
         axes.legend()
         fig.tight_layout()
-        fig.savefig(f'{self.save_to["data"]}/bl_counts.png')
+        fig.savefig(os.path.join(f'{self.save_to["data"]}', 'bl_counts.png'))
         plt.close()
 
         unaugmented_data = self.data[~self.data['augmented']]
@@ -797,7 +852,10 @@ class Indexing:
                 data=unaugmented_data[unaugmented_data['bravais_lattice'] == bravais_lattice],
                 n_peaks=self.data_params['n_peaks'],
                 hkl_ref_length=self.data_params['hkl_ref_length'],
-                save_to=f'{self.save_to["data"]}/hkl_labels_unaugmented_{bravais_lattice}.png',
+                save_to=os.path.join(
+                    f'{self.save_to["data"]}',
+                    f'hkl_labels_unaugmented_{bravais_lattice}.png'
+                    ),
                 )
             if self.data_params['augment']:
                 bl_augmented_data = augmented_data[augmented_data['bravais_lattice'] == bravais_lattice]
@@ -806,7 +864,10 @@ class Indexing:
                         data=bl_augmented_data,
                         n_peaks=self.data_params['n_peaks'],
                         hkl_ref_length=self.data_params['hkl_ref_length'],
-                        save_to=f'{self.save_to["data"]}/hkl_labels_augmented_{bravais_lattice}.png',
+                        save_to=os.path.join(
+                            f'{self.save_to["data"]}',
+                            f'hkl_labels_augmented_{bravais_lattice}.png'
+                            ),
                         )
 
         # Histograms of inputs
@@ -958,7 +1019,7 @@ class Indexing:
             axes[0, 0].set_title('q2')
             axes[0, 1].set_title(f'Volume\n(x{plot_volume_scale})')
             fig.tight_layout()
-            fig.savefig(f'{self.save_to["data"]}/regression_inputs_{split_group}.png')
+            fig.savefig(os.path.join(f'{self.save_to["data"]}', f'regression_inputs_{split_group}.png'))
             plt.close()
 
         # Histograms of Xnn
@@ -1007,7 +1068,7 @@ class Indexing:
             axes[0, 0].set_ylabel('Raw data')
             axes[1, 0].set_ylabel('Standard Scaling')
             fig.tight_layout()
-            fig.savefig(f'{self.save_to["data"]}/xnn_inputs_{split_group}.png')
+            fig.savefig(os.path.join(f'{self.save_to["data"]}', f'xnn_inputs_{split_group}.png'))
             plt.close()
 
         # Covariance
@@ -1032,7 +1093,7 @@ class Indexing:
             axes[1].set_xlabel('')
             axes[1].set_ylabel('')
             fig.tight_layout()
-            fig.savefig(f'{self.save_to["data"]}/covariance_inputs.png')
+            fig.savefig(os.path.join(f'{self.save_to["data"]}', 'covariance_inputs.png'))
             plt.close()
 
         # what is the order of the unit cell lengths
@@ -1076,7 +1137,7 @@ class Indexing:
                 axes[1].set_title('Middle axis position')
                 axes[2].set_title('Longest axis position')
                 fig.tight_layout()
-                fig.savefig(f'{self.save_to["data"]}/axis_order_{split_group}.png')
+                fig.savefig(os.path.join(f'{self.save_to["data"]}', f'axis_order_{split_group}.png'))
                 plt.close()
 
         # split group similarity
@@ -1152,7 +1213,7 @@ class Indexing:
         axes.set_yticklabels(ordered_spacegroups)
         axes.set_xticklabels(ordered_spacegroups, rotation=90)
         fig.tight_layout()
-        fig.savefig(f'{self.save_to["data"]}/volume_similarity.png')
+        fig.savefig(os.path.join(f'{self.save_to["data"]}', 'volume_similarity.png'))
         plt.close()
 
         if self.data_params['lattice_system'] == 'orthorhombic':
@@ -1170,7 +1231,7 @@ class Indexing:
         axes.set_yticklabels(ordered_spacegroups)
         axes.set_xticklabels(ordered_spacegroups, rotation=90)
         fig.tight_layout()
-        fig.savefig(f'{self.save_to["data"]}/hkl_similarity.png')
+        fig.savefig(os.path.join(f'{self.save_to["data"]}', 'hkl_similarity.png'))
         plt.close()
 
     def setup_random(self):
@@ -1190,6 +1251,20 @@ class Indexing:
                 self.random_unit_cell_generator[bravais_lattice].setup()
                 self.random_unit_cell_generator[bravais_lattice].train(bl_data)
 
+                #generator_test = RandomGenerator(
+                #    bravais_lattice=bravais_lattice,
+                #    data_params=self.data_params,
+                #    model_params=self.random_params[bravais_lattice],
+                #    save_to=self.save_to['random'],
+                #    )
+                #generator_test.load_from_tag()
+                #generator_test.generate(
+                #    n_unit_cells=100,
+                #    rng=np.random.default_rng(0),
+                #    q2_obs=np.array(bl_data.iloc[0]['q2']),
+                #    model='predicted_volume'
+                #    )
+
     def setup_miller_index_templates(self):
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
@@ -1207,6 +1282,21 @@ class Indexing:
                 self.miller_index_templator[bravais_lattice].setup(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
                     )
+                #generator_test = MITemplates(
+                #    bravais_lattice=bravais_lattice,
+                #    data_params=self.data_params,
+                #    template_params=self.template_params[bravais_lattice],
+                #    hkl_ref=self.hkl_ref[bravais_lattice],
+                #    save_to=self.save_to['template'],
+                #    seed=self.random_seed
+                #    )
+                #generator_test.load_from_tag()
+                #bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
+                #generator_test.generate(
+                #    n_templates=10,
+                #    rng=np.random.default_rng(0),
+                #    q2_obs=np.array(bl_data.iloc[0]['q2']),
+                #    )
 
     def setup_regression(self):
         self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])
@@ -1270,16 +1360,15 @@ class Indexing:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
-                #print('Doing nothing')
                 self.pitf_generator[split_group].load_from_tag()
-                #split_group_data = self.data[self.data['split_group'] == split_group]
-                #self.pitf_generator[split_group].evaluate(split_group_data)
             else:
                 split_group_data = self.data[self.data['split_group'] == split_group]
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
                 self.pitf_generator[split_group].train_calibration(data=split_group_data)
+                self.pitf_generator[split_group].load_from_tag()
                 self.pitf_generator[split_group].evaluate(split_group_data)
+                self.pitf_generator[split_group].evaluate(split_group_data, quantitized_model=True)
 
     def evaluate_regression(self):
         for bravais_lattice in self.data_params['bravais_lattices']:
@@ -1287,7 +1376,7 @@ class Indexing:
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
@@ -1295,7 +1384,7 @@ class Indexing:
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_tree.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg_tree.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
@@ -1303,7 +1392,7 @@ class Indexing:
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg_calibration.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
@@ -1311,7 +1400,7 @@ class Indexing:
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{bravais_lattice}_reg_calibration_tree.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg_calibration_tree.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
@@ -1320,7 +1409,7 @@ class Indexing:
                 data=self.data[self.data['split_group'] == split_group],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
@@ -1328,7 +1417,7 @@ class Indexing:
                 data=self.data[self.data['split_group'] == split_group],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_tree.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg_tree.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
@@ -1336,7 +1425,7 @@ class Indexing:
                 data=self.data[self.data['split_group'] == split_group],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg_calibration.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='nn'
                 )
@@ -1344,7 +1433,7 @@ class Indexing:
                 data=self.data[self.data['split_group'] == split_group],
                 unit_cell_length=self.data_params['unit_cell_length'],
                 unit_cell_key='reindexed_unit_cell',
-                save_to_name=f'{self.save_to["regression"]}/{split_group}_reg_calibration_tree.png',
+                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg_calibration_tree.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
                 model='trees'
                 )
@@ -1352,7 +1441,7 @@ class Indexing:
             data=self.data,
             unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
-            save_to_name=f'{self.save_to["regression"]}/All_reg.png',
+            save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg.png'),
             unit_cell_indices=self.data_params['unit_cell_indices'],
             model='nn'
             )
@@ -1360,7 +1449,7 @@ class Indexing:
             data=self.data,
             unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
-            save_to_name=f'{self.save_to["regression"]}/All_reg_calibration.png',
+            save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg_calibration.png'),
             unit_cell_indices=self.data_params['unit_cell_indices'],
             model='nn'
             )
@@ -1368,7 +1457,7 @@ class Indexing:
             data=self.data,
             unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
-            save_to_name=f'{self.save_to["regression"]}/All_reg_trees.png',
+            save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg_trees.png'),
             unit_cell_indices=self.data_params['unit_cell_indices'],
             model='trees'
             )
@@ -1376,7 +1465,7 @@ class Indexing:
             data=self.data,
             unit_cell_length=self.data_params['unit_cell_length'],
             unit_cell_key='reindexed_unit_cell',
-            save_to_name=f'{self.save_to["regression"]}/All_reg_calibration_trees.png',
+            save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg_calibration_trees.png'),
             unit_cell_indices=self.data_params['unit_cell_indices'],
             model='trees'
             )

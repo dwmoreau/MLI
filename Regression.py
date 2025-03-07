@@ -1,17 +1,19 @@
 import copy
 import gc
-import joblib
+import keras
 import matplotlib.pyplot as plt
 import numpy as np
-import pickle
+import os
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.decomposition import PCA
-import tensorflow as tf
+from sklearn.model_selection import GridSearchCV
 
 from Networks import mlp_model_builder
 from TargetFunctions import LikelihoodLoss
-from Utilities import read_params
-from Utilities import write_params
+from IOManagers import read_params
+from IOManagers import write_params
+from IOManagers import SKLearnManager
+from IOManagers import NeuralNetworkManager
 
 
 class Regression:
@@ -34,17 +36,16 @@ class Regression:
             self.fit_model_cycles(data)
         elif self.model_params['fit_strategy'] == 'warmup':
             self.fit_model_warmup(data)
-        self.save()
+        train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
+        self.save(train_inputs)
 
     def build_model(self):
-        inputs = {
-            'q2_scaled': tf.keras.Input(
-                shape=self.n_peaks,
-                name='input_points',
-                dtype=tf.float32,
-                )
-            }
-        self.model = tf.keras.Model(inputs, self.model_builder(inputs))
+        inputs = keras.Input(
+            shape=(self.n_peaks,),
+            name='q2_scaled',
+            dtype='float32',
+            )
+        self.model = keras.Model(inputs, self.model_builder(inputs))
         #self.model.summary()
         self.get_layer_names()
 
@@ -90,11 +91,13 @@ class Regression:
             self.model.get_layer(layer_name).trainable = mean_setting
         for layer_name in self.var_layer_names:
             self.model.get_layer(layer_name).trainable = var_setting
+
         self.model.compile(
-            optimizer=self.optimizer, 
+            optimizer=keras.optimizers.Adam(self.model_params['learning_rate']), 
             loss=self.loss_functions,
             loss_weights=self.loss_weights,
-            metrics=self.loss_metrics
+            metrics=self.loss_metrics,
+            run_eagerly=False,
             )
 
     def _get_train_val(self, data, limit_volume=False):
@@ -111,23 +114,16 @@ class Regression:
             val_indices = volume_val <= max_volume
             volume_train = volume_train[train_indices]
             volume_val = volume_val[val_indices]
-            train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])[train_indices]}
-            val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])[val_indices]}
-            train_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[train_indices][:, self.unit_cell_indices],
-                }
-            val_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[val_indices][:, self.unit_cell_indices],
-                }
+            train_inputs = np.stack(train['q2_scaled'])[train_indices]
+            val_inputs = np.stack(val['q2_scaled'])[val_indices]
+            train_true = np.stack(train['reindexed_unit_cell_scaled'])[train_indices][:, self.unit_cell_indices]
+            val_true = np.stack(val['reindexed_unit_cell_scaled'])[val_indices][:, self.unit_cell_indices]
+
         else:
-            train_inputs = {'q2_scaled': np.stack(train['q2_scaled'])}
-            val_inputs = {'q2_scaled': np.stack(val['q2_scaled'])}
-            train_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(train['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
-                }
-            val_true = {
-                f'uc_pred_scaled_{self.group}': np.stack(val['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices],
-                }
+            train_inputs = np.stack(train['q2_scaled'])
+            val_inputs = np.stack(val['q2_scaled'])
+            train_true = np.stack(train['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
+            val_true = np.stack(val['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
 
         volume_train_sorted = np.sort(volume_train)
         n_volume_bins = 25
@@ -151,6 +147,14 @@ class Regression:
 
     def fit_trees(self, data):
         train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
+        if self.model_params['random_forest']['grid_search'] is not None:
+            # param_grid input is a dictionary with the same names as the random forest model.
+            # subsample needs to be correctly named 'max_samples'.
+            param_grid = self.model_params['random_forest']['grid_search'].copy()
+            subsample_value = param_grid['subsample']
+            del param_grid['subsample']
+            param_grid['max_samples'] = subsample_value
+
         if self.lattice_system == 'cubic':
             self.random_forest_regressor = RandomForestRegressor(
                 random_state=self.model_params['random_forest']['random_state'],
@@ -159,11 +163,27 @@ class Regression:
                 max_depth=self.model_params['random_forest']['max_depth'],
                 max_samples=self.model_params['random_forest']['subsample'],
                 )
-            # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
-            # function. The true values are 'reindexed_unit_cell_scaled'
-            self.random_forest_regressor.fit(
-                train_inputs['q2_scaled'], train_true[f'uc_pred_scaled_{self.group}']
-                )
+            if self.model_params['random_forest']['grid_search'] is not None:
+                # Set up GridSearchCV
+                grid_search = GridSearchCV(
+                    estimator=self.random_forest_regressor,
+                    param_grid=param_grid,
+                    cv=5,
+                    n_jobs=-1,
+                    verbose=1,
+                    )
+                grid_search.fit(train_inputs, train_true.ravel())
+                best_params = grid_search.best_params_.copy()
+                subsample_value = best_params['max_samples']
+                del best_params['max_samples']
+                best_params['subsample'] = subsample_value
+                self.model_params['random_forest'].update(best_params)
+                self.random_forest_regressor = grid_search.best_estimator_
+            else:
+                # Fit the RandomForestRegressor directly if no grid search is specified
+                # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
+                # function. The actual values are 'reindexed_unit_cell_scaled'
+                self.random_forest_regressor.fit(train_inputs, train_true.ravel())
         else:
             n_ratio_bins = self.model_params['random_forest']['n_dominant_zone_bins']
             train = data[data['train']]
@@ -172,21 +192,54 @@ class Regression:
             if self.lattice_system == 'rhombohedral':
                 # Ratio in rhombohedral is the cosine of the angle
                 # angle is limited between 0 and 120 degrees or 1 and -1/2 (cos(alpha))
-                ratio_bins = np.linspace(-1/2, 1, n_ratio_bins + 1)
                 ratio = np.cos(unit_cell_train[:, 3])
+                ratio_sorted = np.sort(ratio)
+                ratio_bins = [ratio_sorted[int(f*ratio_sorted.size)] for f in np.linspace(0, 0.999, n_ratio_bins + 1)]
+                ratio_bins[0] = -1/2
+                ratio_bins[-1] = 1
             else:
                 # unit_cell_train is a N x 6 array. So the first three indices of the
                 # first axis are unit cell magnitudes.
-                ratio_bins = np.concatenate([[0], np.linspace(0.3, 1, n_ratio_bins)])
                 ratio = unit_cell_train[:, :3].min(axis=1) / unit_cell_train[:, :3].max(axis=1)
+                ratio_sorted = np.sort(ratio)
+                ratio_bins = [ratio_sorted[int(f*ratio_sorted.size)] for f in np.linspace(0, 0.999, n_ratio_bins + 1)]
+                ratio_bins[0] = 0
+                ratio_bins[-1] = 1
 
-            n_estimators_per_bin = int(np.ceil(
-                self.model_params['random_forest']['n_estimators'] / (n_ratio_bins)
-                ))
+            if self.model_params['random_forest']['grid_search']:
+                grid_search = GridSearchCV(
+                    estimator=RandomForestRegressor(
+                        random_state=0, 
+                        n_estimators=self.model_params['random_forest']['n_estimators'],
+                        min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
+                        max_depth=self.model_params['random_forest']['max_depth'],
+                        max_samples=self.model_params['random_forest']['subsample'],
+                        ),
+                    param_grid=param_grid,
+                    cv=5,
+                    n_jobs=6,
+                    verbose=1,
+                    )
+                indices_train = np.random.default_rng(0).choice(
+                    train_inputs.shape[0],
+                    size=int(train_inputs.shape[0]/n_ratio_bins),
+                    replace=False
+                    )
+                grid_search.fit(
+                    train_inputs[indices_train],
+                    train_true[indices_train],
+                    sample_weight=train_weights[indices_train]
+                    )
+                best_params = grid_search.best_params_.copy()
+                subsample_value = best_params['max_samples']
+                del best_params['max_samples']
+                best_params['subsample'] = subsample_value
+                self.model_params['random_forest'].update(best_params)
+
             self.random_forest_regressor = [
                 RandomForestRegressor(
                     random_state=0, 
-                    n_estimators=n_estimators_per_bin,
+                    n_estimators=self.model_params['random_forest']['n_estimators'],
                     min_samples_leaf=self.model_params['random_forest']['min_samples_leaf'],
                     max_depth=self.model_params['random_forest']['max_depth'],
                     max_samples=self.model_params['random_forest']['subsample'],
@@ -200,8 +253,8 @@ class Regression:
                 # f'uc_pred_scaled_{self.group}' in train_true refers to the NN layer that goes to the target
                 # function. The true values are 'reindexed_unit_cell_scaled'
                 self.random_forest_regressor[ratio_index].fit(
-                    train_inputs['q2_scaled'][indices_train],
-                    train_true[f'uc_pred_scaled_{self.group}'][indices_train],
+                    train_inputs[indices_train],
+                    train_true[indices_train],
                     sample_weight=train_weights[indices_train]
                     )
 
@@ -212,7 +265,6 @@ class Regression:
         else:
             limit_volume = False
         train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data, limit_volume)
-
         for cycle_index in range(self.model_params['cycles']):
             self.compile_model('mean')
             print(f'\n Starting cycle {cycle_index} mean for {self.group}')
@@ -225,7 +277,7 @@ class Regression:
                 validation_data=(val_inputs, val_true),
                 sample_weight=train_weights,
                 )
-            tf.keras.backend.clear_session()
+            keras.backend.clear_session()
             gc.collect()
             self.compile_model('variance')
             print(f'\n Starting cycle {cycle_index} variance for {self.group}')
@@ -241,7 +293,7 @@ class Regression:
             # https://github.com/tensorflow/tensorflow/issues/37505
             # these are to deal with a memory leak.
             # This does not solve the issue
-            tf.keras.backend.clear_session()
+            keras.backend.clear_session()
             gc.collect()
 
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -312,7 +364,10 @@ class Regression:
         axes[1].set_ylabel('UC MSE')
         axes[1].set_xlabel('Epoch')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.group}_reg_training_loss_{self.model_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}', 
+            f'{self.group}_reg_training_loss_{self.model_params["tag"]}.png'
+            ))
         plt.close()
 
     def fit_model_warmup(self, data):
@@ -420,7 +475,10 @@ class Regression:
         axes_1r.set_ylabel('UC MSE: Val / Training')
         axes[1].set_xlabel('Epoch')
         fig.tight_layout()
-        fig.savefig(f'{self.save_to}/{self.group}_reg_training_loss_{self.model_params["tag"]}.png')
+        fig.savefig(os.path.join(
+            f'{self.save_to}',
+            f'{self.group}_reg_training_loss_{self.model_params["tag"]}.png'
+            ))
         plt.close()
 
     def setup(self):
@@ -468,6 +526,7 @@ class Regression:
                 'max_depth': 10,
                 'subsample': 0.05,
                 'n_dominant_zone_bins': 10,
+                'grid_search': None,
                 },
             }
         for key in model_params_defaults.keys():
@@ -486,8 +545,6 @@ class Regression:
             if not 'epochs' in self.model_params.keys():
                 self.model_params['epochs'] = [10, 10, 80]
 
-        self.optimizer = tf.optimizers.legacy.Adam(self.model_params['learning_rate'])
-
         for key in model_params_defaults['mean_params'].keys():
             if key not in self.model_params['mean_params'].keys():
                 self.model_params['mean_params'][key] = model_params_defaults['mean_params'][key]
@@ -499,48 +556,91 @@ class Regression:
                 self.model_params['var_params'][key] = model_params_defaults['var_params'][key]
         self.model_params['var_params']['kernel_initializer'] = None
         self.model_params['var_params']['bias_initializer'] = \
-            tf.keras.initializers.RandomNormal(mean=-1, stddev=0.05, seed=self.seed)
+            keras.initializers.RandomNormal(mean=-1, stddev=0.05, seed=self.seed)
 
         for key in model_params_defaults['alpha_params'].keys():
             if key not in self.model_params['alpha_params'].keys():
                 self.model_params['alpha_params'][key] = model_params_defaults['alpha_params'][key]
         self.model_params['alpha_params']['kernel_initializer'] = None
         self.model_params['alpha_params']['bias_initializer'] = \
-            tf.keras.initializers.RandomNormal(mean=2, stddev=0.05, seed=self.seed)
+            keras.initializers.RandomNormal(mean=2, stddev=0.05, seed=self.seed)
 
         for key in model_params_defaults['beta_params'].keys():
             if key not in self.model_params['beta_params'].keys():
                 self.model_params['beta_params'][key] = model_params_defaults['beta_params'][key]
         self.model_params['beta_params']['kernel_initializer'] = None
         self.model_params['beta_params']['bias_initializer'] = \
-            tf.keras.initializers.RandomNormal(mean=0.5, stddev=0.05, seed=self.seed)
+            keras.initializers.RandomNormal(mean=0.5, stddev=0.05, seed=self.seed)
 
         for key in model_params_defaults['random_forest'].keys():
             if key not in self.model_params['random_forest'].keys():
                 self.model_params['random_forest'][key] = model_params_defaults['random_forest'][key]
 
-    def save(self):
-        # Loading the random forest models is a significant overhead cost when performing
-        # optimization. Saving / loading as pickle files is faster by a factor of two.
-        # joblib should be more agnostic to sklearn version, so there won't be a sklearn
-        # version requirement. Loading speeds can be improved by making the models smaller.
+    def save(self, train_inputs):
         model_params = copy.deepcopy(self.model_params)
-        write_params(model_params, f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
-        self.model.save_weights(f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5')
+        write_params(
+            model_params,
+            os.path.join(
+                f'{self.save_to}',
+                f'{self.group}_reg_params_{self.model_params["tag"]}.csv'
+                )
+            )
+        model_manager = NeuralNetworkManager(
+            model=self.model,
+            model_name=f'{self.group}_reg_weights_{self.model_params["tag"]}',
+            save_dir=self.save_to,
+            )
+        model_manager.save_keras_weights()
+        model_manager.convert_to_onnx(
+            example_inputs=train_inputs,
+            input_signature=(keras.Input(
+                shape=(self.n_peaks,),
+                name='q2_scaled',
+                dtype='float32',
+                ),)
+            )
+        model_manager.quantize_onnx(
+            method='dynamic',
+            calibration_data=train_inputs
+            )
+
         if self.lattice_system == 'cubic':
-            joblib.dump(
-                self.random_forest_regressor,
-                f'{self.save_to}/{self.group}_random_forest_regressor.bin'
+            model_manager = SKLearnManager(
+                filename=os.path.join(
+                    f'{self.save_to}',
+                    f'{self.group}_random_forest_regressor'
+                    ),
+                model_type='custom'
+                )
+            model_manager.save(
+                model=self.random_forest_regressor,
+                X=train_inputs,
+                )
+            model_manager._save_sklearn(
+                model=self.random_forest_regressor,
                 )
         else:
             for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
-                joblib.dump(
-                    self.random_forest_regressor[ratio_index],
-                    f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
+                model_manager = SKLearnManager(
+                    filename=os.path.join(
+                        f'{self.save_to}',
+                        f'{self.group}_{ratio_index}_random_forest_regressor'
+                        ),
+                    model_type='custom'
+                    )
+                model_manager.save(
+                    model=self.random_forest_regressor[ratio_index],
+                    X=train_inputs,
+                    )
+                model_manager._save_sklearn(
+                    model=self.random_forest_regressor,
                     )
                 
     def load_from_tag(self):
-        params = read_params(f'{self.save_to}/{self.group}_reg_params_{self.model_params["tag"]}.csv')
+        params = read_params(os.path.join(
+            f'{self.save_to}',
+            f'{self.group}_reg_params_{self.model_params["tag"]}.csv'
+            ))
         params_keys = [
             'tag',
             'mean_params',
@@ -586,15 +686,26 @@ class Regression:
                     self.model_params['random_forest']['max_depth'] = int(value)
 
         if self.lattice_system == 'cubic':
-            self.random_forest_regressor = joblib.load(
-                f'{self.save_to}/{self.group}_random_forest_regressor.bin'
+            self.random_forest_regressor = SKLearnManager(
+                filename=os.path.join(
+                    f'{self.save_to}',
+                    f'{self.group}_random_forest_regressor'
+                    ),
+                model_type='custom'
                 )
+            self.random_forest_regressor.load()
         else:
             self.random_forest_regressor = []
             for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
-                self.random_forest_regressor.append(joblib.load(
-                    f'{self.save_to}/{self.group}_{ratio_index}_random_forest_regressor.bin'
-                    ))
+                model_manager = SKLearnManager(
+                    filename=os.path.join(
+                        f'{self.save_to}',
+                        f'{self.group}_{ratio_index}_random_forest_regressor'
+                        ),
+                    model_type='custom'
+                    )
+                model_manager.load()
+                self.random_forest_regressor.append(model_manager)
 
         params_keys = [
             'dropout_rate',
@@ -627,57 +738,59 @@ class Regression:
             self.model_params[network_key]['bias_initializer'] = None
 
         self.build_model()
-        self.model.load_weights(
-            filepath=f'{self.save_to}/{self.group}_reg_weights_{self.model_params["tag"]}.h5',
-            by_name=True
+        model_manager = NeuralNetworkManager(
+            model=self.model,
+            model_name=f'{self.group}_reg_weights_{self.model_params["tag"]}',
+            save_dir=self.save_to,
             )
+        self.onnx_model = model_manager.load_onnx_model(quantized=True)
+        self.model = model_manager.load_keras_model(self.model)
         self.compile_model(mode='both')
 
     def model_builder(self, inputs):
         uc_pred_mean_scaled = mlp_model_builder(
-            inputs['q2_scaled'],
+            inputs,
             tag=f'uc_pred_mean_scaled_{self.group}',
             model_params=self.model_params['mean_params'],
             output_name=f'{self.model_params["mean_params"]["output_name"]}_{self.group}'
             )
         if self.model_params['variance_model'] == 'normal':
             uc_pred_var_scaled = mlp_model_builder(
-                inputs['q2_scaled'],
+                inputs,
                 tag=f'uc_pred_var_scaled_{self.group}',
                 model_params=self.model_params['var_params'],
                 output_name=f'{self.model_params["var_params"]["output_name"]}_{self.group}'
                 )
-
             # uc_pred_mean_scaled: n_batch x unit_cell_length
-            uc_pred_scaled = tf.keras.layers.Concatenate(
+            uc_pred_scaled = keras.layers.Concatenate(
                 axis=2,
                 name=f'uc_pred_scaled_{self.group}'
                 )((
-                    uc_pred_mean_scaled[:, :, tf.newaxis],
-                    uc_pred_var_scaled[:, :, tf.newaxis],
+                    keras.ops.expand_dims(uc_pred_mean_scaled, axis=2),
+                    keras.ops.expand_dims(uc_pred_var_scaled, axis=2),
                     ))
         elif self.model_params['variance_model'] == 'alpha_beta':
             uc_pred_alpha_scaled = 1 + mlp_model_builder(
-                inputs['q2_scaled'],
+                inputs,
                 tag=f'uc_pred_alpha_scaled_{self.group}',
                 model_params=self.model_params['alpha_params'],
                 output_name=f'{self.model_params["alpha_params"]["output_name"]}_{self.group}'
                 )
             uc_pred_beta_scaled = mlp_model_builder(
-                inputs['q2_scaled'],
+                inputs,
                 tag=f'uc_pred_beta_scaled_{self.group}',
                 model_params=self.model_params['beta_params'],
                 output_name=f'{self.model_params["beta_params"]["output_name"]}_{self.group}'
                 )
 
             # uc_pred_mean_scaled: n_batch x unit_cell_length
-            uc_pred_scaled = tf.keras.layers.Concatenate(
+            uc_pred_scaled = keras.layers.Concatenate(
                 axis=2,
                 name=f'uc_pred_scaled_{self.group}'
                 )((
-                    uc_pred_mean_scaled[:, :, tf.newaxis],
-                    uc_pred_alpha_scaled[:, :, tf.newaxis],
-                    uc_pred_beta_scaled[:, :, tf.newaxis],
+                    keras.ops.expand_dims(uc_pred_mean_scaled, axis=2),
+                    keras.ops.expand_dims(uc_pred_alpha_scaled, axis=2),
+                    keras.ops.expand_dims(uc_pred_beta_scaled, axis=2),
                     ))
         return uc_pred_scaled
 
@@ -808,25 +921,62 @@ class Regression:
     def predict_trees(self, q2_scaled):
         N = q2_scaled.shape[0]
         if self.lattice_system == 'cubic':
-            uc_pred_scaled = self.random_forest_regressor.predict(q2_scaled)[:, np.newaxis]
-            uc_pred_scaled_tree = np.zeros((N, self.unit_cell_length, self.model_params['random_forest']['n_estimators']))
-            for tree in range(self.model_params['random_forest']['n_estimators']):
-                uc_pred_scaled_tree[:, :, tree] = \
-                    self.random_forest_regressor.estimators_[tree].predict(q2_scaled)[:, np.newaxis]
+            uc_pred_scaled_tree = self.random_forest_regressor.predict_individual_trees(
+                q2_scaled,
+                output_size=self.unit_cell_length
+                )
         else:
-            uc_pred_scaled_tree = np.zeros((N, self.unit_cell_length, self.model_params['random_forest']['n_estimators']))
-            tree_index = 0
+            uc_pred_scaled_tree = np.zeros((
+                N,
+                self.unit_cell_length,
+                self.model_params['random_forest']['n_dominant_zone_bins']*self.model_params['random_forest']['n_estimators']
+                ))
             for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
-                for tree in range(len(self.random_forest_regressor[ratio_index].estimators_)):
-                    uc_pred_scaled_tree[:, :, tree_index] = \
-                        self.random_forest_regressor[ratio_index].estimators_[tree].predict(q2_scaled)
-                    tree_index += 1
+                start = ratio_index * self.model_params['random_forest']['n_estimators']
+                stop = (ratio_index + 1) * self.model_params['random_forest']['n_estimators']
+                uc_pred_scaled_tree[:, :, start: stop] = self.random_forest_regressor.predict_individual_trees(
+                    q2_scaled,
+                    output_size=self.unit_cell_length
+                    )
 
         uc_pred_scaled = uc_pred_scaled_tree.mean(axis=2)
         uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2
         return uc_pred_scaled, uc_pred_scaled_var, uc_pred_scaled_tree
 
     def predict_nn(self, q2_scaled, batch_size=None):
+        if batch_size is None:
+            batch_size = self.model_params['batch_size']
+
+        # predict_on_batch helps with a memory leak...
+        N = q2_scaled.shape[0]
+        uc_pred_scaled = np.zeros((N, self.unit_cell_length))
+        uc_pred_scaled_var = np.zeros((N, self.unit_cell_length))
+        for index in range(N):
+            outputs = self.onnx_model.run(
+                None,
+                {'input': q2_scaled[index].astype(np.float32)[np.newaxis]}
+                )[0]
+
+            if self.model_params['variance_model'] == 'normal':
+                uc_pred_scaled[index] = outputs[0, :, 0]
+                uc_pred_scaled_var[index] = outputs[0, :, 1]
+            elif self.model_params['variance_model'] == 'alpha_beta':
+                uc_pred_scaled[index] = outputs[0, :, 0]
+                pred_alpha = outputs[0, :, 1]
+                pred_beta = outputs[0, :, 2]
+                uc_pred_scaled_var[index] = pred_beta / (pred_alpha - 1)
+
+        # [0.43981636] [0.20755097] <- Original Keras model
+        # [0.43981636] [0.20755097] <- loading Keras model through manager
+        # [0.43981636] [0.20755097] <- onnx model
+        # [0.433568]   [0.20709202] <- int8 quantized model
+        return uc_pred_scaled, uc_pred_scaled_var
+
+    def predict_nn_old(self, q2_scaled, batch_size=None):
+        '''
+        This performs neural network predictions using the Keras model.
+        Switching to inferences performed with the int8 quantized model.
+        '''
         if batch_size is None:
             batch_size = self.model_params['batch_size']
 
@@ -839,11 +989,11 @@ class Regression:
         for batch_index in range(n_batches + 1):
             start = batch_index * batch_size
             if batch_index == n_batches:
-                batch_inputs = {'q2_scaled': np.zeros((batch_size, self.n_peaks))}
-                batch_inputs['q2_scaled'][:left_over] = q2_scaled[start: start + left_over]
-                batch_inputs['q2_scaled'][left_over:] = q2_scaled[0]
+                batch_inputs = np.zeros((batch_size, self.n_peaks))
+                batch_inputs[:left_over] = q2_scaled[start: start + left_over]
+                batch_inputs[left_over:] = q2_scaled[0]
             else:
-                batch_inputs = {'q2_scaled': q2_scaled[start: start + batch_size]}
+                batch_inputs = q2_scaled[start: start + batch_size]
 
             outputs = self.model.predict_on_batch(batch_inputs)
 

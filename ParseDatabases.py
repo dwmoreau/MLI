@@ -22,6 +22,7 @@ from Utilities import map_spacegroup_to_extinction_group
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 
+
 class ProcessEntry:
     def __init__(self):
         self.database = None
@@ -66,9 +67,9 @@ class ProcessEntry:
         self.status = True
         self.reason = None
 
-        self.hkl_ref_triclinic = np.load('data/hkl_ref_aP.npy')[:60]
-        self.hkl_ref_monoclinic = np.load('data/hkl_ref_mP.npy')[:60]
-        hkl_ref_hexagonal = np.load('data/hkl_ref_hP.npy')
+        self.hkl_ref_triclinic = np.load(os.path.join('data', 'hkl_ref_aP.npy'))[:60]
+        self.hkl_ref_monoclinic = np.load(os.path.join('data', 'hkl_ref_mP.npy'))[:60]
+        hkl_ref_hexagonal = np.load(os.path.join('data', 'hkl_ref_hP.npy'))
         check = -hkl_ref_hexagonal[:, 0] + hkl_ref_hexagonal[:, 1] + hkl_ref_hexagonal[:, 2]
         rhombohedral_condition = (check % 3) == 0
         self.hkl_ref_hexagonal = hkl_ref_hexagonal[rhombohedral_condition][:60]
@@ -552,9 +553,12 @@ class ProcessCSDEntry(ProcessEntry):
             return None
 
         # I write cif files so I can load them with cctbx to generate powder patterns
-        cif_directory = os.path.join(
-            '/Users/DWMoreau/csd_cifs', str(self.spacegroup_number)
-            )
+        cif_directory = os.path.join(os.path.join(
+            'Users',
+            'DWMoreau',
+            'csd_cifs',
+            str(self.spacegroup_number)
+            ))
         self.cif_file_name = os.path.join(
             cif_directory, f'{self.identifier}.cif'
             )

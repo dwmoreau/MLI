@@ -95,12 +95,16 @@ def calc_pairwise_diff(q, q_ref=None, metric='euclidean'):
         q_norm = q / np.linalg.norm(q, axis=1)[:, np.newaxis]
         
         # Calculate cosine distances and convert to angles
-        cos_angles = scipy.spatial.distance.pdist(q_norm, metric='cosine')
-        angles = np.arccos(np.clip(1 - cos_angles, -1, 1))
-
+        #cos_angles = scipy.spatial.distance.pdist(q_norm, metric='cosine')
+        i, j = np.triu_indices(len(q), k=1)
+        cos_angles = np.dot(q_norm, q_norm.T)
+        valid = np.logical_and(cos_angles >= -1, cos_angles <= 1)
+        angles = np.full(cos_angles.shape, np.nan)
+        angles[valid] = np.arccos(cos_angles[valid])
+        angles = angles[i, j]
+        
         # Calculate cross products for handedness
         # Convert to full matrix indices
-        i, j = np.triu_indices(len(q), k=1)
         cross_products = np.cross(q_norm[i], q_norm[j])
         
         # Use z-component sign for handedness
@@ -132,10 +136,9 @@ def law_of_cosines(q2_0, q2_1, q2_diff, clip=False):
     if clip:
         return np.arccos(np.clip(cos_theta, -1, 1))
     else:
-        angles = np.zeros_like(cos_theta)
+        angles = np.full(cos_theta.shape, np.nan)
         valid = (cos_theta >= -1) & (cos_theta <= 1)
         angles[valid] = np.arccos(cos_theta[valid])
-        angles[~valid] = np.nan
         return angles
 
 
@@ -163,81 +166,6 @@ def manual_cross(q1, q2):
         q1[2] * q2[0] - q1[0] * q2[2],
         q1[0] * q2[1] - q1[1] * q2[0]
     ])
-
-"""
-def get_R_point_to_ref(q_move, q_ref):
-    # Rotates q_move onto q_ref
-    # If rotation_axis is None, then find the best rotation
-    # Otherwise, 
-    q_move_norm = q_move / np.linalg.norm(q_move)
-    q_ref_norm = q_ref / np.linalg.norm(q_ref)
-    #rotation_axis = np.cross(q_move_norm, q_ref_norm)
-    rotation_axis = manual_cross(q_move_norm, q_ref_norm)
-    if np.linalg.norm(rotation_axis) < 1e-10:
-        # Vectors are parallel or anti-parallel
-        dot_product = np.dot(q_move_norm, q_ref_norm)
-        if dot_product < 0:  # Anti-parallel
-            # Find any vector perpendicular to q_move_norm
-            if abs(q_move_norm[0]) < abs(q_move_norm[1]):
-                perp = np.array([1, 0, 0])
-            else:
-                perp = np.array([0, 1, 0])
-            perp = perp - np.dot(perp, q_move_norm) * q_move_norm
-            perp = perp / np.linalg.norm(perp)
-            
-            # Create rotation matrix for 180° rotation around perp
-            K = np.array([[0, -perp[2], perp[1]],
-                          [perp[2], 0, -perp[0]],
-                          [-perp[1], perp[0], 0]])
-            R = np.eye(3) + 0 * K + (-2) * K @ K  # sin(π)=0, 1-cos(π)=-2
-        else:
-            R = np.eye(3)
-    else:
-        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
-        angle = np.arccos(np.clip(np.dot(q_move_norm, q_ref_norm), -1, 1))
-        
-        # Create rotation matrix using Rodrigues formula
-        K = np.array([[0, -rotation_axis[2], rotation_axis[1]],
-                     [rotation_axis[2], 0, -rotation_axis[0]],
-                     [-rotation_axis[1], rotation_axis[0], 0]])
-        R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
-    return R
-
-
-def get_R_point_to_ref_along_axis(q_move, q_ref, rotation_axis):
-    # Normalize input vectors
-    q_move_norm = q_move / np.linalg.norm(q_move)
-    q_ref_norm = q_ref / np.linalg.norm(q_ref)
-    rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
-    
-    # Project q_move and q_ref onto the plane perpendicular to the rotation axis
-    q_move_proj = q_move_norm - np.dot(q_move_norm, rotation_axis) * rotation_axis
-    q_ref_proj = q_ref_norm - np.dot(q_ref_norm, rotation_axis) * rotation_axis
-    if np.linalg.norm(q_move_proj) < 1e-10 or np.linalg.norm(q_ref_proj) < 1e-10:
-        # One of the vectors is aligned with the rotation axis
-        # In this case, no rotation is needed or possible around this axis
-        return np.eye(3)
-
-    # Normalize the projected vectors
-    q_move_proj = q_move_proj / np.linalg.norm(q_move_proj)
-    q_ref_proj = q_ref_proj / np.linalg.norm(q_ref_proj)
-
-    # Calculate the angle between the projected vectors
-    angle = np.arccos(np.clip(np.dot(q_move_proj, q_ref_proj), -1, 1))
-    
-    # Determine the direction of rotation using the cross product
-    cross_product = manual_cross(q_move_proj, q_ref_proj)
-    if np.dot(cross_product, rotation_axis) < 0:
-        angle = -angle
-    
-    # Create rotation matrix using Rodrigues formula
-    K = np.array([[0, -rotation_axis[2], rotation_axis[1]],
-                  [rotation_axis[2], 0, -rotation_axis[0]],
-                  [-rotation_axis[1], rotation_axis[0], 0]])
-    R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
-    
-    return R
-"""
 
 
 @numba.njit
@@ -468,12 +396,12 @@ def combine_graphs_sub_func(graph_ref, graph_add, i_ref, j_ref, i_add, j_add, co
     q_add = graph_add[:, :3]
 
     # Step 1: Get rotation matrix that rotates q_add_i onto q_ref_i:
-    R1 = get_R_point_to_ref_numba(q_add[i_add], q_ref[i_ref])
+    R1 = get_R_point_to_ref(q_add[i_add], q_ref[i_ref])
     q_ref_1 = (R1 @ q_ref.T).T
     q_add_1 = (R1 @ q_add.T).T
 
     # Step 2: Rotate q_add_j onto q_ref_j while keeping q_ref_i in place.
-    R2 = get_R_point_to_ref_along_axis_numba(q_add[j_add], q_ref[j_ref], q_ref[i_ref])
+    R2 = get_R_point_to_ref_along_axis(q_add[j_add], q_ref[j_ref], q_ref[i_ref])
     q_ref_2 = (R2 @ q_ref_1.T).T
     q_add_2 = (R2 @ q_add_1.T).T
 
@@ -682,6 +610,155 @@ def remove_redundant_arrays(array_list, red_tolerance=0.01):
 
 @numba.njit
 def calculate_basis_error(potential_basis, points):
+    """Calculate how well a basis represents points with integer coefficients."""
+    try:
+        # Calculate inverse of basis matrix
+        basis_inv = np.linalg.inv(potential_basis)
+        
+        # Calculate coefficients for all points
+        coeffs = basis_inv @ points.T
+        coeffs_rounded = np.round(coeffs)
+        
+        # Calculate error and integer score
+        reconstructed = (potential_basis @ coeffs_rounded).T
+        errors = np.zeros(points.shape[0])
+        for i in range(points.shape[0]):
+            errors[i] = np.sqrt(np.sum((points[i] - reconstructed[i])**2))
+        
+        mean_error = np.mean(errors)
+        
+        # Count points that are represented exactly by integers
+        integer_score = 0
+        for i in range(points.shape[0]):
+            is_integer = True
+            for j in range(3):
+                if abs(coeffs[j, i] - coeffs_rounded[j, i]) >= 0.05:
+                    is_integer = False
+                    break
+            if is_integer:
+                integer_score += 1
+                
+        return integer_score, mean_error, basis_inv
+    except:
+        # If matrix inversion fails
+        return -1, float('inf'), np.zeros((3, 3))
+
+
+def find_grid_basis(points, verbose=True):
+    """
+    Find the best basis vectors for a grid of points by trying combinations of points.
+    
+    Parameters:
+    points : numpy.ndarray
+        N x 3 array of grid point coordinates (already differences)
+    
+    Returns:
+    A : numpy.ndarray
+        3 x 3 matrix representing the best basis vectors
+    """
+    n_points = points.shape[0]
+    
+    # We need at least 3 points to form a basis
+    if n_points < 3:
+        raise ValueError("Need at least 3 points to form a basis")
+    
+    best_basis = None
+    best_error = float('inf')
+    best_integer_score = 0
+    best_det = 0
+
+    distance = np.linalg.norm(points, axis=1)
+    points = points[np.argsort(distance)]
+
+    # Try all combinations of 3 points as potential basis vectors
+    for indices in combinations(range(int(n_points/5)), 3):
+        # Form a potential basis from these three points
+        potential_basis = points[list(indices)].T  # 3x3 matrix
+        
+        # Check if this basis is valid (linearly independent)
+        if np.abs(np.linalg.det(potential_basis)) < 1e-6:
+            continue  # Singular matrix, not a valid basis
+        
+        # Calculate how well this basis represents all points with integer coefficients
+        try:
+            integer_score, error, refined_basis = calculate_basis_error_numba(potential_basis, points)
+            # We prefer bases that represent more points with integers
+            # If tied, we prefer the one with lower overall error
+            if integer_score > best_integer_score:
+                best_basis = potential_basis
+                best_error = error
+                best_integer_score = integer_score
+                best_det = np.linalg.det(potential_basis)
+            elif integer_score == best_integer_score:
+                if error < best_error:
+                    best_basis = potential_basis
+                    best_error = error
+                    best_integer_score = integer_score
+                    best_det = np.linalg.det(potential_basis)
+
+        except np.linalg.LinAlgError:
+            # Skip if matrix inversion fails
+            continue
+    
+    if best_basis is None:
+        return None, None, None
+    # Report how well the basis performs
+    refined_integer_score, refined_error, refined_basis = refine_basis(best_basis, points)
+    if verbose:
+        print(f"Found basis representing {refined_integer_score}/{n_points} points exactly with integers")
+        print(f"Total squared error for non-integer coefficients: {refined_error}")
+        print(refined_basis)
+    return refined_basis, refined_integer_score, refined_error
+
+
+def refine_basis(basis, points):
+    """Calculate how well a basis represents points with integer coefficients."""
+    basis_inv = np.linalg.inv(basis)
+
+    # Calculate coefficients for all points
+    coeffs = basis_inv @ points.T
+    coeffs_rounded = np.round(coeffs)
+    indexed = np.all(np.abs(coeffs - coeffs_rounded) < 0.2, axis=0)
+
+    # Extract the integer-indexed points and their rounded coefficients
+    indexed_points = points[indexed]
+    indexed_coeffs = coeffs_rounded[:, indexed]  # 3 x N matrix of integer coefficients
+
+    """
+    nx3        3x3     3xn        nx3       3x3
+    a      =   X    @    b         b     @   X
+    points = (basis @ coeff).T = coeff.T @ basis.T
+
+    3xn       nx3       3x3
+    a      =  b         X
+    points = coeff.T @ basis.T
+    """
+    refined_basis, residuals, rank, s = np.linalg.lstsq(indexed_coeffs.T, indexed_points, rcond=None)
+    refined_basis = refined_basis.T
+
+    try:
+        refined_inv = np.linalg.inv(refined_basis)
+    except:
+        # If there's an error with the refined basis, return the original results
+        original_error = np.mean(np.linalg.norm(points - (potential_basis @ coeffs_rounded).T, axis=1))
+        return integer_score, original_error, potential_basis
+
+    refined_coeffs = refined_inv @ points.T
+    refined_coeffs_rounded = np.round(refined_coeffs)
+    
+    # Recalculate error and integer score
+    reconstructed = (refined_basis @ refined_coeffs_rounded).T
+    errors = np.linalg.norm(points - reconstructed, axis=1)
+    mean_error = np.mean(errors)
+    
+    # Count points that can be represented exactly with integers
+    refined_indexed = np.all(np.abs(refined_coeffs - refined_coeffs_rounded) < 0.05, axis=0)
+    refined_integer_score = np.sum(refined_indexed)
+    return refined_integer_score, mean_error, refined_basis
+
+
+@numba.njit
+def calculate_basis_error_numba(potential_basis, points):
     """Calculate how well a basis represents points with integer coefficients."""
     try:
         # Calculate inverse of basis matrix
@@ -1739,7 +1816,7 @@ class PeakListCreator:
                             key = (
                                 triplet_peak_indices[p0],
                                 triplet_peak_indices[p1]
-                                )
+                                ) 
                             check0 = np.logical_and(
                                 q20_obs[pair_index] > triplet_peaks[p0] - delta*triplet_breadths[p0],
                                 q20_obs[pair_index] < triplet_peaks[p0] + delta*triplet_breadths[p0],
@@ -1748,7 +1825,9 @@ class PeakListCreator:
                                 q21_obs[pair_index] > triplet_peaks[p1] - delta*triplet_breadths[p1],
                                 q21_obs[pair_index] < triplet_peaks[p1] + delta*triplet_breadths[p1],
                                 )
-                            if check0 and check1:
+                            check2 = np.invert(np.isnan(angular_diff_lattice[pair_index]))
+                            check3 = np.abs(angular_diff_lattice[pair_index]) < 2.8
+                            if check0 and check1 and check2 and check3:
                                 if key[0] < key[1]:
                                     q20_triplet_peak = triplet_peaks[p0]
                                     q21_triplet_peak = triplet_peaks[p1]
@@ -1762,7 +1841,6 @@ class PeakListCreator:
                                     q2_diff_lattice[pair_index],
                                     angular_diff_lattice[pair_index],
                                     ])
-
         for key in triplet_keys:
             if len(self.triplets[key]) > 0:
                 self.triplets[key] = np.row_stack(self.triplets[key])
@@ -1822,9 +1900,10 @@ class PeakListCreator:
                 # scipy.signal.find_peaks does not find peaks at the first and last index.
                 # Padding zeros at the start and end are attempts to pick them up.
                 n_pad = 5
+
                 diff_peak_indices, _ = scipy.signal.find_peaks(
                     np.concatenate((np.zeros(n_pad), hist_half, np.zeros(n_pad))),
-                    prominence=prominence_factor*(np.median(hist_half) + 1)
+                    prominence=prominence_factor*(np.std(hist_half) + 1)
                     )
                 diff_peak_indices -= n_pad
                 diff_peak_indices = diff_peak_indices[diff_peak_indices >= 0]
@@ -1924,7 +2003,7 @@ class PeakListCreator:
                                     hkl_diff = hkl0 - hkl1
                                     hkl2_diff = get_hkl_matrix(hkl_diff[np.newaxis], lattice_system)
                                     q2_diff_calc = np.sum(xnn * hkl2_diff, axis=1)[0]
-                                    angle_diff_calc = law_of_cosines(q2_0, q2_1, q2_diff_calc, clip=True)
+                                    angle_diff_calc = law_of_cosines(q2_0, q2_1, q2_diff_calc, clip=False)
                                     if make_label:
                                         label = 'Pred Diff'
                                     else:
@@ -2206,7 +2285,7 @@ class PeakListCreator:
                 
             self.aligned_settings[key] = aligned_settings_list
 
-    def plot_settings(self):
+    def plot_settings(self, eps=0.02, min_samples=3):
         """
         Plot the aligned settings from dictionary, separate figure for each key
         All arrays from same key plotted together with different markers and shades
@@ -2268,7 +2347,7 @@ class PeakListCreator:
                 for peak_index in range(3):
                     aligned_setting_common_ang_peak = aligned_setting_common_ang[:, peak_index, :]
 
-                    cluster = sklearn.cluster.DBSCAN(eps=0.02, min_samples=3)
+                    cluster = sklearn.cluster.DBSCAN(eps=eps, min_samples=min_samples)
                     cluster = cluster.fit(aligned_setting_common_ang_peak)
                     labels = np.unique(cluster.labels_)
                     labels = labels[labels != -1]
@@ -2302,7 +2381,6 @@ class PeakListCreator:
                 ax.set_ylim([-max_range, max_range])
                 ax.set_zlim([-max_range, max_range])
                 plt.show()
-
 
     def make_graphs(self, iterations=5, red_tolerance=0.05, comb_tolerance=0.01):
         """
@@ -2353,11 +2431,11 @@ class PeakListCreator:
         #   1: graphs - all graphs
         #   2: last_graphs - graphs built in the last iterations
         #   3: building_graphs - graphs being built in the current iteration
-        print(f'Initial Graphs: {len(graphs)}')
+        print(f'Initial Graphs: {len(self.graphs)}')
         for iteration in range(iterations):
             building_graphs = []
             # Try to add each graph to the last iterations graphs
-            for last_graph0 in last_graphs:
+            for last_graph0 in tqdm.tqdm(last_graphs):
                 for last_graph1 in last_graphs:
                     building_graphs += combine_graphs(
                         last_graph0,
@@ -2366,11 +2444,11 @@ class PeakListCreator:
                         red_tolerance=red_tolerance
                         )
             last_graphs = remove_redundant_arrays(building_graphs, red_tolerance=red_tolerance)
-            last_graphs = remove_redundant_arrays_slow(last_graphs, red_tolerance=red_tolerance)
+            #last_graphs = remove_redundant_arrays_slow(last_graphs, red_tolerance=red_tolerance)
             self.graphs += last_graphs
-            self.graphs = remove_redundant_arrays(graphs, red_tolerance=red_tolerance)
+            self.graphs = remove_redundant_arrays(self.graphs, red_tolerance=red_tolerance)
             print(f'Iteration {iteration} built {len(building_graphs)} total and {len(last_graphs)} unique graphs')
-            print(f'    Currently {len(graphs)} graphs')
+            print(f'    Currently {len(self.graphs)} graphs')
 
         biggest_graph = 0
         biggest_graph_counts = 1
@@ -2389,6 +2467,7 @@ class PeakListCreator:
 
     def plot_graphs(self, size_lim, plot=True):
         basis_all = []
+        score_all = []
         for graph in self.graphs:
             if graph.shape[0] >= size_lim:
                 points = np.row_stack([graph[:, :3], -graph[:, :3]])
@@ -2408,9 +2487,10 @@ class PeakListCreator:
                         )
                 all_peaks_unique = np.row_stack(all_peaks_unique)
                 all_peaks_unique = all_peaks_unique[np.linalg.norm(all_peaks_unique, axis=1) > 0.005]
-                basis, score = find_grid_basis(all_peaks_unique, verbose=plot)
+                basis, score, error = find_grid_basis(all_peaks_unique, verbose=plot)
                 if not basis is None:
                     basis_all.append(basis)
+                    score_all.append([score, error])
                     if plot:
                         fig, axis = plt.subplots(1, 1, figsize=(6, 6), subplot_kw={'projection': '3d'})
                         axis.scatter(0, 0, 0, color=[0, 0, 0], s=50, marker='x')
@@ -2440,8 +2520,8 @@ class PeakListCreator:
                         axis.set_zlim([-max_range, max_range])
                         fig.tight_layout()
                         plt.show()
-        self.basis = np.stack(basis_all, axis=0)      
-
+        self.basis = np.stack(basis_all, axis=0)
+        self.basis_score = np.stack(score_all, axis=0)
         """
         d = -np.sum(self.basis, axis=2)
         s6 = np.column_stack((
