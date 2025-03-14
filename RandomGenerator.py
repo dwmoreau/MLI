@@ -219,7 +219,7 @@ class RandomGenerator:
                 f'{self.save_to}',
                 f'{self.bravais_lattice}_random_forest_regressor'
                 ),
-            model_type='custom'
+            model_type='sklearn'
             )
         self.random_forest_regressor.load()
 
@@ -277,7 +277,9 @@ class RandomGenerator:
             indices = np.searchsorted(self.volume_distribution[:, 2], rand)
             random_volume_scale = self.volume_distribution[indices, 0]
         elif model == 'predicted_volume':
-            preds = self.random_forest_regressor.predict_individual_trees(q2_obs[np.newaxis])[:, 0]
+            preds = self.random_forest_regressor.predict_individual_trees(
+                q2_obs[np.newaxis], n_outputs=1
+                )[0, 0, :]
             if n_unit_cells > self.model_params['n_estimators']:
                 replace = True
             else:

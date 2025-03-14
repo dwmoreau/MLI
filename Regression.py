@@ -633,7 +633,7 @@ class Regression:
                     n_features=train_inputs.shape[1],
                     )
                 model_manager._save_sklearn(
-                    model=self.random_forest_regressor,
+                    model=self.random_forest_regressor[ratio_index],
                     )
                 
     def load_from_tag(self):
@@ -686,23 +686,41 @@ class Regression:
                     self.model_params['random_forest']['max_depth'] = int(value)
 
         if self.lattice_system == 'cubic':
+            #self.random_forest_regressor = SKLearnManager(
+            #    filename=os.path.join(
+            #        f'{self.save_to}',
+            #        f'{self.group}_random_forest_regressor'
+            #        ),
+            #    model_type='custom'
+            #    )
             self.random_forest_regressor = SKLearnManager(
                 filename=os.path.join(
                     f'{self.save_to}',
                     f'{self.group}_random_forest_regressor'
                     ),
-                model_type='custom'
+                model_type='sklearn'
                 )
             self.random_forest_regressor.load()
         else:
             self.random_forest_regressor = []
             for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                """
                 model_manager = SKLearnManager(
                     filename=os.path.join(
                         f'{self.save_to}',
                         f'{self.group}_{ratio_index}_random_forest_regressor'
                         ),
                     model_type='custom'
+                    )
+                model_manager.load()
+                self.random_forest_regressor.append(model_manager)
+                """
+                model_manager = SKLearnManager(
+                    filename=os.path.join(
+                        f'{self.save_to}',
+                        f'{self.group}_{ratio_index}_random_forest_regressor'
+                        ),
+                    model_type='sklearn'
                     )
                 model_manager.load()
                 self.random_forest_regressor.append(model_manager)
@@ -922,8 +940,7 @@ class Regression:
         N = q2_scaled.shape[0]
         if self.lattice_system == 'cubic':
             uc_pred_scaled_tree = self.random_forest_regressor.predict_individual_trees(
-                q2_scaled,
-                output_size=self.unit_cell_length
+                q2_scaled, n_outputs=self.unit_cell_length
                 )
         else:
             uc_pred_scaled_tree = np.zeros((
@@ -934,10 +951,24 @@ class Regression:
             for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
                 start = ratio_index * self.model_params['random_forest']['n_estimators']
                 stop = (ratio_index + 1) * self.model_params['random_forest']['n_estimators']
-                uc_pred_scaled_tree[:, :, start: stop] = self.random_forest_regressor.predict_individual_trees(
-                    q2_scaled,
-                    output_size=self.unit_cell_length
+                uc_pred_scaled_tree[:, :, start: stop] = self.random_forest_regressor[ratio_index].predict_individual_trees(
+                    q2_scaled, n_outputs=self.unit_cell_length
                     )
+            """
+            # This does a prediction with the onnx model
+            # This feature is broekn right now
+            uc_pred_scaled_tree = np.zeros((
+                N,
+                self.unit_cell_length,
+                self.model_params['random_forest']['n_dominant_zone_bins']*self.model_params['random_forest']['n_estimators']
+                ))
+            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                start = ratio_index * self.model_params['random_forest']['n_estimators']
+                stop = (ratio_index + 1) * self.model_params['random_forest']['n_estimators']
+                uc_pred_scaled_tree[:, :, start: stop] = self.random_forest_regressor[ratio_index].predict_individual_trees(
+                    q2_scaled,
+                    )
+            """
 
         uc_pred_scaled = uc_pred_scaled_tree.mean(axis=2)
         uc_pred_scaled_var = uc_pred_scaled_tree.std(axis=2)**2

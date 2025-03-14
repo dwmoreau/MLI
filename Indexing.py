@@ -4,19 +4,26 @@
 
 Todo:
     1: Rerun all models
-        - Tetragonal
-        - Evaluate model parameters
-            - Should they be adjusted?
-            - Are they correct?
-    2: Rerun convergence radius
-    3: Redo model ensemble with new mathematical formulation
-    4: Extend this formulation to get unit cell redistribution parameterization
-    5: Perform optimizations and save results
+        x Predicted Volume
+            - Rerun with subsample a 75
+            - Rerun with more estimators
+        x MITemplates
+            x Try using all the peaks for templating
+        - Random Forest Regression
+            - Rerun with subsample as large as possible but still retaining good variance
+            - More consistent
+    2: Redo model ensemble with new mathematical formulation
+    3: Extend this formulation to get unit cell redistribution parameterization
+    4: Perform optimizations and save results
+    5: Edit documenation
     6: ML approach to FOM
 
+- Optimization
+    - Redistribution
+        - Optimize the redistribution parameters to improve the ensemble formula
 
-- Model ensemble
-    - Redo with a better mathematical formulation
+    - Target function
+        - What if the derivative of the unit cell in the weight is considered?
 
 - Figure of Merit
     - Perform optimizations to get training set
@@ -27,14 +34,6 @@ Todo:
     - Integrate into optimization
     - Radius of convergence testing
     - Add to paper
-
-- Optimization
-    - Redistribution
-        - Optimize the redistribution parameters to improve the ensemble formula
-        - This is a brute force nearest neighbor algorithm. Is there a better method???
-
-    - Target function
-        - What if the derivative of the unit cell in the weight is considered?
 
 - Reindexing
     - Catch numerical errors during Selling reduction
@@ -91,12 +90,14 @@ Todo:
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 
+
+- Model ensemble
+- Templating
 - Integral filter model
     - Tie together the Miller index assignment and unit cell prediction models.
-- Templating
-    - Need a better way to evaluate this model
 - Regression
     - Hyperparameter training for Mean-Variance models
+    - Fix the Individual Prediction for Trees and test
 - Augmentation
 - Random unit cell generator
 - Documentation

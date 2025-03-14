@@ -12,7 +12,6 @@ from Utilities import get_M20
 from Utilities import get_M20_likelihood
 from Utilities import get_M20_likelihood_from_xnn
 from Utilities import get_M_triplet
-from Utilities import get_M_triplet_old
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_spacegroup_hkl_ref
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -257,7 +256,7 @@ class Candidates:
         if self.triplets is None:
             improved = refined_M20 > self.best_M20
         else:
-            refined_M_triplets = get_M_triplet_old(
+            refined_M_triplets = get_M_triplet(
                 self.q2_obs,
                 self.triplets,
                 refined_hkl,
@@ -395,7 +394,7 @@ class Candidates:
             hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
             )[:, 0]
         if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet_old(
+            self.best_M_triplets = get_M_triplet(
                 self.q2_obs,
                 self.triplets,
                 self.best_hkl,
@@ -470,7 +469,7 @@ class Candidates:
             self.best_hkl = best_hkl
 
         if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet_old(
+            self.best_M_triplets = get_M_triplet(
                 self.q2_obs,
                 self.triplets,
                 self.best_hkl,
@@ -550,6 +549,9 @@ class OptimizerBase:
         self.comm.Bcast(self.q2_obs, root=self.root)
         self.triplets = self.comm.bcast(self.triplets, root=self.root)
         candidates = self.generate_candidates_rank()
+        if self.opt_params['redistribution_testing']:
+            return self.opt_params['max_neighbors'], self.opt_params['neighbor_radius']
+
         for iteration_info in self.opt_params['iteration_info']:
             for iter_index in range(iteration_info['n_iterations']):
                 if iteration_info['worker'] == 'random_subsampling':
@@ -662,23 +664,24 @@ class OptimizerManager(OptimizerBase):
             seed=12345,
             )
         self.indexer.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
-        load_random_forest = False
-        load_nn = False
-        load_pitf = False
-        for generator_info in self.opt_params['generator_info']:
-            if generator_info['generator'] == 'trees':
-                load_random_forest = True
-            elif generator_info['generator'] == 'nn':
-                load_nn = True
-            elif generator_info['generator'] == 'pitf':
-                load_pitf = True
-        if load_nn or load_random_forest:
-            # eventually add an option so the NN doesn't get loaded if it won't be used
-            self.indexer.setup_regression()
-        if load_pitf:
-            self.indexer.setup_pitf()
-        self.indexer.setup_miller_index_templates()
-        self.indexer.setup_random()
+        if self.opt_params['convergence_testing'] == False:
+            load_random_forest = False
+            load_nn = False
+            load_pitf = False
+            for generator_info in self.opt_params['generator_info']:
+                if generator_info['generator'] == 'trees':
+                    load_random_forest = True
+                elif generator_info['generator'] == 'nn':
+                    load_nn = True
+                elif generator_info['generator'] == 'pitf':
+                    load_pitf = True
+            if load_nn or load_random_forest:
+                # eventually add an option so the NN doesn't get loaded if it won't be used
+                self.indexer.setup_regression()
+            if load_pitf:
+                self.indexer.setup_pitf()
+            self.indexer.setup_miller_index_templates()
+            self.indexer.setup_random()
 
         self.n_groups = len(self.indexer.data_params['split_groups'])
         self.lattice_system = self.indexer.data_params['lattice_system']
@@ -694,7 +697,7 @@ class OptimizerManager(OptimizerBase):
             self.q2_obs = q2[:self.n_peaks]
         elif (not entry is None) and (q2 is None):
             self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
-            if self.opt_params['convergence_testing']:
+            if self.opt_params['convergence_testing'] or self.opt_params['redistribution_testing']:
                 self.xnn_true = np.array(entry['reindexed_xnn'])[self.indexer.data_params['unit_cell_indices']]
         self.triplets = triplets
         if not self.triplets is None:
@@ -736,7 +739,7 @@ class OptimizerManager(OptimizerBase):
             #print(f'Memory usage before creating candidates: {process.memory_info().rss / 1024 ** 2} MB')
 
             for generator_info in self.opt_params['generator_info']:
-                gc.collect()
+                #gc.collect()
                 #print(f'Memory usage before {generator_info["generator"]}: {process.memory_info().rss / 1024 ** 2} MB')
                 if generator_info['generator'] in ['nn', 'trees']:
                     generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
@@ -762,7 +765,7 @@ class OptimizerManager(OptimizerBase):
                         model=generator_info['generator'],
                         )
                 candidate_unit_cells_all.append(generator_unit_cells)
-                gc.collect()
+                #gc.collect()
                 #print(f'Memory usage after {generator_info["generator"]}: {process.memory_info().rss / 1024 ** 2} MB')
                 #print()
         candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
@@ -785,7 +788,10 @@ class OptimizerManager(OptimizerBase):
             partial_unit_cell=True,
             lattice_system=self.lattice_system
             )
-        if self.opt_params['convergence_testing'] == False:
+
+        if self.opt_params['redistribution_testing']:
+            self.redistrubution_testing(candidate_xnn_all)
+        elif self.opt_params['convergence_testing'] == False:
             candidate_xnn_all = self.redistribute_xnn(candidate_xnn_all)
 
         self.sent_candidates = np.zeros(self.n_ranks, dtype=int)
@@ -795,13 +801,49 @@ class OptimizerManager(OptimizerBase):
                 candidate_xnn_rank = candidate_xnn_all[rank_index::self.n_ranks]
             else:
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
-        gc.collect()
+        #gc.collect()
         #print(f'Memory usage after candidate xnn: {process.memory_info().rss / 1024 ** 2} MB')
         return self.generate_candidates_common(candidate_xnn_rank)
 
+    def _redistribution_testing_functional(self, neighbor_radius, xnn, convergence_radius):
+        self.opt_params['neighbor_radius'] = neighbor_radius
+        redistributed_xnn = self.redistribute_xnn(xnn)
+
+        # Calcuate N_gen(delta xnn)
+        distance = np.linalg.norm(redistributed_xnn - self.xnn_true[np.newaxis], axis=1)
+        bins = np.concatenate([0, convergence_radius[0]])
+        distance_hist, _ = np.histogram(distance, bins=bins)
+        N_gen = np.cumsum(distance_hist)
+
+        N_success = 1 / convergence_radius[1]
+
+        # Calculate target function
+        F = (N_gen - N_success) / N_success
+        term_0 = np.min(0, np.max(F, axis=1), axis=1)
+        term_1 = np.trapz(F, convergence_radius[0], axis=1)
+        return term_0 - term_1
+
+    def redistrubution_testing(self, xnn):
+        # Steps:
+        #   Perform a grid search where max_neighbors is a prespecified grid. At each point, do
+        #   an optimization for the best neighbor_radius
+        opt_neighbor_radius = np.zeros(len(self.opt_params['max_neighbors_grid']))
+        objective_function = np.zeros(len(self.opt_params['max_neighbors_grid']))
+        for index, max_neighors in enumerate(self.opt_params['max_neighbors_grid']):
+            self.opt_params['max_neighbors'] = max_neighors
+            opt_results = scipy.optimize.minimize_scalar(
+                fun=self._redistribution_testing_functional,
+                bounds=[0, 0.1],
+                args=(xnn, self.opt_params['convergence_radius'][self.bravais_lattice])
+                )
+            opt_neighbor_radius[index] = opt_results.x
+            objective_function[index] = opt_results.fun
+        best_index = np.argmin(objective_function)
+        self.opt_params['max_neighbors'] = self.opt_params['max_neighbors_grid'][best_index]
+        self.opt_params['neighbor_radius'] = opt_neighbor_radius[best_index]
+
     def redistribute_xnn(self, xnn):
         # This function is meant to be called only once before optimization starts
-        # exhaustive_search is meant to redistribute candidates during optimization
         redistributed_xnn = xnn.copy()
         n_redistributed = 0
         iteration = 0
@@ -838,36 +880,38 @@ class OptimizerManager(OptimizerBase):
                 # Find candidates that have fewer than the number of maximum neighbors and
                 # redistribute excess to neighborhoods near these candidates
                 low_density_indices = np.where(neighbor_count < self.opt_params['max_neighbors'])[0]
-                if low_density_indices.size == 0:
-                    ### !!! FIX THIS CASE
-                    ### !!! What should be done if there are no low density regions
-                    break
-                # Bias the redistribution to the lowest density regions by probabalistly sampling
-                # the low density regions.
-                prob = self.opt_params['max_neighbors'] - neighbor_count[low_density_indices]
-                prob = prob / prob.sum()
-                if excess_neighbors <= low_density_indices.size:
-                    replace = False
+                if low_density_indices > 0:
+                    # Bias the redistribution to the lowest density regions by probabalistly sampling
+                    # the low density regions.
+                    prob = self.opt_params['max_neighbors'] - neighbor_count[low_density_indices]
+                    prob = prob / prob.sum()
+                    if excess_neighbors <= low_density_indices.size:
+                        replace = False
+                    else:
+                        replace = True
+                    to_indices = low_density_indices[self.rng.choice(
+                        low_density_indices.size, size=excess_neighbors, replace=replace, p=prob
+                        )]
+                    norm_factor = 1
                 else:
-                    replace = True
-                to_indices = low_density_indices[self.rng.choice(
-                    low_density_indices.size, size=excess_neighbors, replace=replace, p=prob
-                    )]
+                    # This is an untested case. Print if it is actually seen
+                    # In the case that there are no low density regions, perturb by selecting the
+                    # lowest density indices, then perturb by a larger amount.
+                    print('low_density_indices == 0 case')
+                    to_indices = np.argsort(neighbor_count)[:excess_neighbors]
+                    norm_factor = 2
                 redistributed_xnn = self.redistribute_and_perturb_xnn(
-                    redistributed_xnn, from_indices, to_indices
+                    redistributed_xnn, from_indices, to_indices, norm_factor
                     )
             iteration += 1
         return redistributed_xnn
 
-    def redistribute_and_perturb_xnn(self, xnn, from_indices, to_indices, norm_factor=None):
+    def redistribute_and_perturb_xnn(self, xnn, from_indices, to_indices, norm_factor):
         n_indices = from_indices.size
-        if not norm_factor is None:
-            norm_factor = self.rng.uniform(low=norm_factor[0], high=norm_factor[1], size=n_indices)
-        else:
-            norm_factor = np.ones(n_indices)
-        norm_factor *= self.opt_params['neighbor_radius']
         perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.unit_cell_length))
-        perturbation *= (norm_factor / np.linalg.norm(perturbation, axis=1))[:, np.newaxis]
+        perturbation *= (
+            norm_factor*self.opt_params['neighbor_radius'] / np.linalg.norm(perturbation, axis=1)
+            )[:, np.newaxis]
         xnn[from_indices] = xnn[to_indices] + perturbation
         xnn[from_indices] = fix_unphysical(
             xnn=xnn[from_indices],
@@ -1044,13 +1088,12 @@ class OptimizerManager(OptimizerBase):
             n_indexed_triplets_downsampled = np.concatenate(n_indexed_triplets_downsampled)
             M_triplets_downsampled = np.row_stack(M_triplets_downsampled)
 
-        sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
-        #if self.triplets is None:
-        #    sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
-        #else:
-        #    sort_indices = np.argsort(
-        #        np.sum(M_triplets_downsampled, axis=1)
-        #        )[::-1][:n_top_candidates]
+        if self.triplets is None:
+            sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
+        else:
+            sort_indices = np.argsort(
+                np.sum(M_triplets_downsampled, axis=1)
+                )[::-1][:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
         self.top_M20 = M20_downsampled[sort_indices]
         self.top_n_indexed = n_indexed_downsampled[sort_indices]

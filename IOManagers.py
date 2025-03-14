@@ -93,7 +93,7 @@ class SKLearnManager:
         elif self.model_type == 'custom':
             return self.model.predict(X)
     
-    def predict_individual_trees(self, X, output_size=None):
+    def predict_individual_trees(self, X, n_outputs=None):
         """
         Get predictions from individual trees (for ensemble models).
         Only works with 'sklearn' or 'custom' model types.
@@ -105,23 +105,24 @@ class SKLearnManager:
             Individual tree predictions or None if not supported
         """
         if self.model_type == 'sklearn':
-            if output_size is None:
-                output_size = 1
-                reduce_dimension = True
-            else:
-                reduce_dimension = False
-            preds = np.zeros((
-                X.shape[0],
-                output_size,
-                len(self.model.estimators_)
-                ))
+            if n_outputs is None:
+                if len(self.model.estimators_[0].predict(X).shape) == 1:
+                    n_outputs = 1
+                else:
+                    n_outputs = self.model.estimators_[0].predict(X).shape[1]
+            n_samples = X.shape[0]
+            n_estimators = len(self.model.estimators_)
+
+            # Initialize predictions array with appropriate dimensions
+            preds = np.zeros((n_samples, n_outputs, n_estimators))
             for tree_index, tree in enumerate(self.model.estimators_):
-                preds[:, :, tree_index] = tree.predict(X)
-            if reduce_dimension:
-                preds = preds[:, 0, :]
+                if n_outputs == 1:
+                    preds[:, :, tree_index] = tree.predict(X)[:, np.newaxis]
+                else:
+                    preds[:, :, tree_index] = tree.predict(X)
             return preds
         elif self.model_type == 'custom':
-            return self.model.predict_individual_trees(X, output_size)
+            return self.model.predict_individual_trees(X, n_outputs)
         else:
             raise ValueError("Individual tree predictions not supported for ONNX models")
     
@@ -151,8 +152,8 @@ class SKLearnManager:
         with open(f"{self.filename}.onnx", "wb") as f:
             f.write(onnx_model.SerializeToString())
     
-    def _save_custom(self, model):
-        """Save model in custom version-independent format"""
+    def _save_custom(self, model) -> None:
+        """Save model in custom version-independent format, supporting multi-output trees"""
         # Save with joblib as backup
         joblib.dump(model, f"{self.filename}.joblib")
         
@@ -224,24 +225,52 @@ class SKLearnManager:
             self.n_features = forest_data['n_features']
             self.trees = forest_data['trees']
         
-        def predict(self, X):
-            """Get ensemble prediction"""
-            predictions = self.predict_individual_trees(X)
-            return np.mean(predictions, axis=0)
+        def predict(self, X, n_outputs=None):
+            """
+            Get ensemble prediction, supporting both single-output and multi-output trees.
+            
+            Args:
+                X: Input features
+                
+            Returns:
+                Ensemble predictions
+            """
+            predictions = self.predict_individual_trees(X, n_outputs)
+            
+            # For multi-output, we need to average over the first axis (trees)
+            if predictions.ndim == 3:  # (n_estimators, n_samples, n_outputs)
+                return np.mean(predictions, axis=0)  # -> (n_samples, n_outputs)
+            else:  # (n_estimators, n_samples)
+                return np.mean(predictions, axis=0)  # -> (n_samples,)
         
-        def predict_individual_trees(self, X, output_size=None):
-            """Get predictions from each individual tree"""
+        def predict_individual_trees(self, X, n_outputs=None):
+            """
+            Get predictions from each individual tree, supporting both single-output
+            and multi-output trees.
+            
+            Args:
+                X: Input features of shape (n_samples, n_features)
+                
+            Returns:
+                Individual tree predictions of shape:
+                - For single output: (n_estimators, n_samples)
+                - For multi output: (n_estimators, n_samples, n_outputs)
+            """
             if X.ndim == 1:
-                X = X[:, np.newaxis]
+                X = X.reshape(1, -1)
                 
             n_samples = X.shape[0]
-            if output_size is None:
-                output_size = 1
-                reduce_dimension = True
-            else:
-                reduce_dimension = False
-            individual_preds = np.zeros((n_samples, output_size, self.n_estimators))
             
+            # Determine output dimensionality from the first tree's values
+            if n_outputs is None:
+                first_leaf_value = self.trees[0]['values'][0]
+                n_outputs = len(first_leaf_value)
+            # Initialize predictions array with appropriate dimensions
+            if n_outputs == 1:
+                individual_preds = np.zeros((n_samples, self.n_estimators))
+            else:
+                individual_preds = np.zeros((n_samples, n_outputs, self.n_estimators))
+
             for tree_idx, tree in enumerate(self.trees):
                 nodes = tree['nodes']
                 values = tree['values']
@@ -256,7 +285,13 @@ class SKLearnManager:
                         
                         # Check if we're at a leaf node
                         if node['left_child'] == -1:  # Leaf node
-                            individual_preds[sample_idx, :, tree_idx] = values[node['value_index']][0]
+                            leaf_value = values[node['value_index']]
+                            
+                            if n_outputs == 1:
+                                individual_preds[sample_idx, tree_idx] = leaf_value[0]
+                            else:
+                                for output_index in range(n_outputs):
+                                    individual_preds[sample_idx, output_index, tree_idx] = leaf_value[output_index][0]
                             break
                             
                         # If not leaf, go left or right based on feature comparison
@@ -264,8 +299,7 @@ class SKLearnManager:
                             node_id = node['left_child']
                         else:
                             node_id = node['right_child']
-            if reduce_dimension:
-                individual_preds = individual_preds[:, 0, :]
+
             return individual_preds
 
 
@@ -525,7 +559,7 @@ class NeuralNetworkManager:
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Keras weights not found at {weights_path}")
         self.model.load_weights(weights_path)
-        print(f"Loaded Keras model weights from {weights_path}")
+        #print(f"Loaded Keras model weights from {weights_path}")
         return self.model
     
     def load_onnx_model(self, quantized=True):
@@ -548,7 +582,7 @@ class NeuralNetworkManager:
         
         # Create an ONNX Runtime inference session
         self.onnx_session = onnxruntime.InferenceSession(onnx_path)
-        print(f"Loaded ONNX model from {onnx_path}")
+        #print(f"Loaded ONNX model from {onnx_path}")
         return self.onnx_session
     
     def predict_with_onnx(self, input_data):

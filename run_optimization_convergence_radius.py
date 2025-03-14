@@ -47,6 +47,8 @@ n_iterations
 # triclinic
     n_drop: 12
     n_iter: 80
+
+python run_optimization_convergence_radius.py random_subsampling 100 14 q2 20 
 """
 import os
 # This supresses the tensorflow message on import
@@ -56,6 +58,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ["KERAS_BACKEND"] = "torch"
 from mpi4py import MPI
 import matplotlib.pyplot as plt
 import numpy as np
@@ -90,10 +93,11 @@ if __name__ == '__main__':
     #bravais_lattices = ['hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP']
     #bravais_lattices = ['hP', 'hR', 'tI', 'tP']
     #bravais_lattices = ['oC', 'oF', 'oI', 'oP']
+    bravais_lattices = ['oP']
     #bravais_lattices = ['oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     #bravais_lattices = ['hP']
     #bravais_lattices = ['mP', 'mC', 'aP']
-    bravais_lattices = ['mP', 'mC']
+    #bravais_lattices = ['mP', 'mC']
     #bravais_lattices = ['mP']
     #bravais_lattices = ['aP']
 
@@ -114,7 +118,7 @@ if __name__ == '__main__':
             }
             ]
         output_tag_elements = [
-            f'peaks:{iteration_info[0]["n_peaks"]}',
+            f'peaks{iteration_info[0]["n_peaks"]}',
             f'drop{iteration_info[0]["n_drop"]}',
             f'iter{iteration_info[0]["n_iterations"]}',
             ]
@@ -202,19 +206,19 @@ if __name__ == '__main__':
     rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
+            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
         elif bravais_lattice in ['hP']:
-            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
+            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
         elif bravais_lattice in ['hR']:
-            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
+            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
+            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
+            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
+            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
         elif bravais_lattice in ['aP']:
-            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options)
+            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
 
     if rank == 0:
         if load_data:
@@ -294,7 +298,7 @@ if __name__ == '__main__':
             fig, axes = plt.subplots(1, 1, figsize=(6, 3))
             axes.loglog(options['convergence_distances'], found_rate, marker='.')
             axes.set_ylabel('Success Rate')
-            axes.set_xlabel('Xnn Perturbation Amount (1/$\mathrm{\AA}^2$)')
+            axes.set_xlabel('Xnn Perturbation Amount (1/A^2$)')
             axes.set_title(bravais_lattice)
 
             xlim = axes.get_xlim()
@@ -323,10 +327,14 @@ if __name__ == '__main__':
             axes.set_xlim(xlim)
             axes.set_ylim(ylim)
             fig.tight_layout()
-            fig.savefig(f'figures/{bravais_lattice}_radius_of_convergence_{output_tag}.png')
+            fig.savefig(os.path.join(
+                'figures', f'{bravais_lattice}_roc_{output_tag}.png'
+                ))
             plt.close()
 
             np.save(
-                f'figures/data/{bravais_lattice}_radius_of_convergence_{output_tag}.npy',
-                np.row_stack((options['convergence_distances'], found_rate))
+                os.path.join(
+                    'figures', 'data', f'{bravais_lattice}_roc_{output_tag}.npy'
+                    ),
+                np.vstack((options['convergence_distances'], found_rate))
                 )

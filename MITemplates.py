@@ -1,9 +1,3 @@
-"""
-How would this look as a ML implementation of TREOR:
-    1: Create a set of basis lines, first N peaks
-    2: Create a set of all observed Miller index combinations up to the first N peaks
-    3: Calibrated 
-"""
 import joblib
 import matplotlib.pyplot as plt
 import multiprocessing
@@ -47,7 +41,8 @@ class MITemplates:
             'templates_per_dominant_zone_bin': 2000,
             'parallelization': 'multiprocessing',
             'n_processes': 4,
-            'n_train': 100,
+            'n_entries_train': 1000,
+            'n_instances_train': 1000000,
             'loss': 'squared_error',
             'learning_rate': 0.1,
             'max_leaf_nodes': 31,
@@ -57,6 +52,7 @@ class MITemplates:
             'n_peaks': data_params['n_peaks'],
             'n_peaks_template': min(10, data_params['n_peaks']),
             'n_peaks_calibration': min(20, data_params['n_peaks']),
+            'max_distance': 0.05,
             'grid_search': None,
             }
         for key in template_params_defaults.keys():
@@ -105,7 +101,8 @@ class MITemplates:
             'n_templates',
             'parallelization',
             'n_processes',
-            'n_train',
+            'n_entries_train',
+            'n_instances_train',
             'max_depth',
             'min_samples_leaf',
             'l2_regularization',
@@ -133,7 +130,8 @@ class MITemplates:
 
         self.template_params['parallelization'] = params['parallelization']
         self.template_params['n_processes'] = int(params['n_processes'])
-        self.template_params['n_train'] = int(params['n_train'])
+        self.template_params['n_entries_train'] = int(params['n_entries_train'])
+        self.template_params['n_instances_train'] = int(params['n_instances_train'])
         self.template_params['max_depth'] = int(params['max_depth'])
         self.template_params['min_samples_leaf'] = int(params['min_samples_leaf'])
         self.template_params['l2_regularization'] = float(params['l2_regularization'])
@@ -449,7 +447,7 @@ class MITemplates:
             H = np.sum(hessian_prefactor * term0, axis=1)
             delta_gn = -np.matmul(np.linalg.inv(H), dloss_dxnn[:, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
-        xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
+            xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
 
         # Now prepare each template for calibration, which does not involve the same
         # number of peaks as the templates.
@@ -484,7 +482,9 @@ class MITemplates:
             )
         target_function.update(hkl_template[:, :self.template_params['n_peaks_template']], xnn)
         xnn += target_function.gauss_newton_step(xnn)
-        q2_calc = (get_hkl_matrix(hkl_calibration, self.lattice_system) @ xnn[:, :, np.newaxis])[:, :, 0]
+        xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
+        hkl2 = get_hkl_matrix(hkl_calibration, self.lattice_system)
+        q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
         residuals = (q2_calc - q2_obs_calibration[np.newaxis]) / q2_obs_calibration[np.newaxis]
 
         # Third, downsample to removes redundant unit cells
@@ -495,7 +495,6 @@ class MITemplates:
         # while also being reasonably fast.
         for _ in range(2):
             xnn, q2_calc = self.downsample_candidates(xnn, q2_calc, residuals)
-
         # Third, calculate the values needed for calibration
         reciprocal_volume = get_unit_cell_volume(get_reciprocal_unit_cell_from_xnn(
             xnn, partial_unit_cell=True, lattice_system=self.lattice_system
@@ -529,8 +528,8 @@ class MITemplates:
                 N_pred[:, np.newaxis],
                 q2_calc_max[:, np.newaxis],
                 ), axis=1).astype(np.float32)
-            distance_templates = self.hgbc_regressor.predict(inputs)[:, 0]    
-            top_n_indices = np.argsort(distance_templates)[:n_templates]
+            success_pred_templates = self.hgbc_regressor.predict(inputs)[:, 0]    
+            top_n_indices = np.argsort(success_pred_templates)[::-1][:n_templates]
             xnn_templates = xnn_templates_all[top_n_indices]
         elif n_templates > xnn_templates_all.shape[0]:
             # requesting more templates than in the set
@@ -649,21 +648,55 @@ class MITemplates:
 
         probability = np.row_stack(probability)
         distance = np.concatenate(distance)
-        n_templates_entry = [xnn_entry.shape[0] for xnn_entry in xnn]
         xnn = np.row_stack(xnn)
         N_pred = np.concatenate(N_pred)
         q2_calc_max = np.concatenate(q2_calc_max)
-        return probability, distance, xnn, xnn_true[indices], N_pred, q2_calc_max, n_templates_entry
+        return probability, distance, xnn, xnn_true[indices], N_pred, q2_calc_max
 
     def calibrate_templates(self, data):
         unaugmented_data = data[~data['augmented']]
         training_data = unaugmented_data[unaugmented_data['train']]
         val_data = unaugmented_data[~unaugmented_data['train']]
-        n_val = int(0.2*self.template_params['n_train'])
-        probability_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train, n_templates_entry_train = \
-            self.get_inputs(training_data, self.template_params['n_train'])
-        probability_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val, n_templates_entry_val = \
+        n_val = int(0.2*self.template_params['n_entries_train'])
+        probability_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train = \
+            self.get_inputs(training_data, self.template_params['n_entries_train'])
+        probability_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val = \
             self.get_inputs(val_data, n_val)
+
+        # Select only training and validation entries that are within 0.01 1/A**2
+        # of the correct values.
+        # distance_train has shape Nx1
+        train_select = distance_train[:, 0] < self.template_params['max_distance']
+        probability_train = probability_train[train_select]
+        distance_train = distance_train[train_select]
+        N_pred_train = N_pred_train[train_select]
+        q2_calc_max_train = q2_calc_max_train[train_select]
+        if distance_train.size > self.template_params['n_instances_train']:
+            train_select = self.rng.choice(
+                distance_train.size,
+                size=self.template_params['n_instances_train'],
+                replace=False
+                )
+            probability_train = probability_train[train_select]
+            distance_train = distance_train[train_select]
+            N_pred_train = N_pred_train[train_select]
+            q2_calc_max_train = q2_calc_max_train[train_select]
+
+        val_select = distance_val[:, 0] < self.template_params['max_distance']
+        probability_val = probability_val[val_select]
+        distance_val = distance_val[val_select]
+        N_pred_val = N_pred_val[val_select]
+        q2_calc_max_val = q2_calc_max_val[val_select]
+        if distance_val.size > self.template_params['n_instances_train']:
+            val_select = self.rng.choice(
+                distance_val.size,
+                size=self.template_params['n_instances_train'],
+                replace=False
+                )
+            probability_val = probability_val[val_select]
+            distance_val = distance_val[val_select]
+            N_pred_val = N_pred_val[val_select]
+            q2_calc_max_val = q2_calc_max_val[val_select]
 
         # Convert to float32 ensures that the ONNX conversion and the sklearn model
         # provide the same inferences.
@@ -678,6 +711,18 @@ class MITemplates:
             q2_calc_max_val[:, np.newaxis], 
             ), axis=1).astype(np.float32)
 
+        roc = np.load(self.template_params['roc_file_name'].replace('!!', self.bravais_lattice))
+        distance_convergence = roc[0]
+        success_rate = roc[1]
+        indices_train = np.searchsorted(distance_convergence, distance_train)
+        indices_train[indices_train < 0] = 0
+        indices_train[indices_train >= success_rate.size] = success_rate.size - 1
+        train_outputs = success_rate[indices_train].ravel()
+        indices_val = np.searchsorted(distance_convergence, distance_val)
+        indices_val[indices_val < 0] = 0
+        indices_val[indices_val >= success_rate.size] = success_rate.size - 1
+        val_outputs = success_rate[indices_val].ravel()
+
         print('Fitting Hist Boosting Model')
         if self.template_params['grid_search'] is None:
             self.hgbc_regressor = sklearn.ensemble.HistGradientBoostingRegressor(
@@ -688,7 +733,7 @@ class MITemplates:
                 min_samples_leaf=self.template_params['min_samples_leaf'],
                 l2_regularization=self.template_params['l2_regularization'],
                 )
-            self.hgbc_regressor.fit(train_inputs, distance_train.ravel())
+            self.hgbc_regressor.fit(train_inputs, train_outputs)
         else:
             grid_search = GridSearchCV(
                 estimator=sklearn.ensemble.HistGradientBoostingRegressor(
@@ -701,37 +746,35 @@ class MITemplates:
                     ),
                 param_grid=self.template_params['grid_search'],
                 cv=5,
-                n_jobs=6,
+                n_jobs=2,
                 verbose=1,
                 )
-            grid_search.fit(train_inputs, distance_train.ravel())
+            grid_search.fit(train_inputs, train_outputs, sample_weight=train_outputs)
             self.template_params.update(grid_search.best_params_)
             print(grid_search.best_params_)
             self.hgbc_regressor = grid_search.best_estimator_
 
-        distance_pred_train = self.hgbc_regressor.predict(train_inputs)
-        distance_pred_val = self.hgbc_regressor.predict(val_inputs)
-        alpha = 0.25
-        ms = 0.1
+        success_pred_train = self.hgbc_regressor.predict(train_inputs)
+        success_pred_val = self.hgbc_regressor.predict(val_inputs)
 
+        alpha = 0.1
+        ms = 0.1
         fig, axes = plt.subplots(1, 2, figsize=(6, 3))
         axes[0].plot(
-            distance_train, distance_pred_train,
+            train_outputs, success_pred_train,
             linestyle='none', marker='.', alpha=alpha, markersize=ms
             )
         axes[1].plot(
-            distance_val, distance_pred_val,
+            val_outputs, success_pred_val,
             linestyle='none', marker='.', alpha=alpha, markersize=ms
             )
         for index in range(2):
-            xlim = axes[index].get_xlim()
-            ylim = axes[index].get_ylim()
-            lim = [0, max(xlim[1], ylim[1])]
+            lim = [0, 1.05]
             axes[index].plot(lim, lim, linestyle='dotted', color=[0, 0, 0], linewidth=1)
             axes[index].set_xlim(lim)
             axes[index].set_ylim(lim)
-            axes[index].set_xlabel('True Distance')
-        axes[0].set_ylabel('Predicted Distance')
+            axes[index].set_xlabel('True Success Rate')
+        axes[0].set_ylabel('Predicted Success Rate')
         axes[0].set_title('Training')
         axes[1].set_title('Validation')
         fig.tight_layout()

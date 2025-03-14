@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import scipy.spatial
 
-from FigureOfMerit import FigureOfMerit
+#from FigureOfMerit import FigureOfMerit
 from MPIFileHandler import MPIFileHandler
 from Optimizer_mpi import OptimizerManager
 from Optimizer_mpi import OptimizerWorker
@@ -288,7 +288,7 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
     n_candidates = int(n_candidates_scale * 2000)
     generator_info = [
         {'generator': 'nn', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.4*n_candidates)},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.25*n_candidates)},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.25*n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.25*n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.15*n_candidates)},
         #{'generator': 'random', 'n_unit_cells': 100},
@@ -360,14 +360,14 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     random_params = {bravais_lattice: {'tag': f'tetragonal_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 2000)
     generator_info = [
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 100},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 125},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 125},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 125},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 125},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 100},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 125},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 125},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 125},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 125},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(0.25*0.6*n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(0.25*0.6*n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(0.25*0.6*n_candidates)},
@@ -450,22 +450,22 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     random_params = {bravais_lattice: {'tag': f'hexagonal_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 2000)
     generator_info = [
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 100},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 100},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 60},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 60},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 60},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 60},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 60},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 60},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 60},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 60},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 100},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 100},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': 60},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': 60},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': 60},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': 60},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': 60},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': 60},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': 60},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': 60},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/8*0.15*n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/8*0.15*n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/8*0.15*n_candidates)},
@@ -540,10 +540,10 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     random_params = {bravais_lattice: {'tag': f'rhombohedral_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 2000)
     generator_info = [
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': 200},
-        #{'generator': 'nn', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': 200},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': 200},
-        #{'generator': 'trees', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': 200},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': 200},
+        {'generator': 'nn', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': 200},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': 200},
+        {'generator': 'trees', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': 200},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.5*0.6*n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': int(0.5*0.6*n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.3*n_candidates)},
@@ -884,7 +884,7 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     generator_info = [
         {'generator': 'nn', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.10 * n_candidates)},
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.05 * n_candidates)},
-        #{'generator': 'pitf', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(f * 100)},
+        {'generator': 'pitf', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.05 * n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.70 * n_candidates)},
         #{'generator': 'random', 'n_unit_cells': n_candidates},
         #{'generator': 'distribution_volume', 'n_unit_cells': int(f * 100)},
@@ -1010,7 +1010,8 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
         'assignment_threshold': 0.95,
         }
     """
-    fom = get_fom_tree(broadening_tag)
+    #fom = get_fom_tree(broadening_tag)
+    fom = None
     bravais_lattices = mpi_organizers.keys()
     optimizer = dict.fromkeys(bravais_lattices)
     for bl_index, bravais_lattice in enumerate(bravais_lattices):
