@@ -5,14 +5,6 @@ import numba
 import numpy as np
 import os
 
-from sklearn.preprocessing import StandardScaler
-import skl2onnx
-from skl2onnx.common.data_types import FloatTensorType
-import onnxruntime
-import onnx
-import onnxruntime.quantization
-import keras
-
 
 class SKLearnManager:
     """
@@ -93,7 +85,7 @@ class SKLearnManager:
         elif self.model_type == 'custom':
             return self.model.predict(X)
     
-    def predict_individual_trees(self, X, n_outputs=None):
+    def predict_individual_trees(self, X, n_outputs):
         """
         Get predictions from individual trees (for ensemble models).
         Only works with 'sklearn' or 'custom' model types.
@@ -105,11 +97,11 @@ class SKLearnManager:
             Individual tree predictions or None if not supported
         """
         if self.model_type == 'sklearn':
-            if n_outputs is None:
-                if len(self.model.estimators_[0].predict(X).shape) == 1:
-                    n_outputs = 1
-                else:
-                    n_outputs = self.model.estimators_[0].predict(X).shape[1]
+            #if n_outputs is None:
+            #    if len(self.model.estimators_[0].predict(X).shape) == 1:
+            #        n_outputs = 1
+            #    else:
+            #        n_outputs = self.model.estimators_[0].predict(X).shape[1]
             n_samples = X.shape[0]
             n_estimators = len(self.model.estimators_)
 
@@ -133,6 +125,7 @@ class SKLearnManager:
     def _save_onnx(self, model, n_features):
         """Save model in ONNX format"""
         from skl2onnx import convert_sklearn
+        from skl2onnx.common.data_types import FloatTensorType
         
         # Define input type
         initial_types = [('float_input', FloatTensorType([None, n_features]))]
@@ -201,6 +194,7 @@ class SKLearnManager:
     
     def _load_onnx(self):
         """Load ONNX model"""
+        import onnxruntime
         model_path = f"{self.filename}.onnx"
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
@@ -304,7 +298,7 @@ class SKLearnManager:
 
 
 class NeuralNetworkManager:
-    def __init__(self, model=None, model_name="model", save_dir="saved_models"):
+    def __init__(self, model_name="model", save_dir="saved_models"):
         """
         Initialize the model manager.
         
@@ -313,16 +307,15 @@ class NeuralNetworkManager:
             model_name: Name to use when saving the model
             save_dir: Directory to save models
         """
-        self.model = model
         self.model_name = model_name
         self.save_dir = save_dir
         self.onnx_session = None
         self.quantized_onnx_session = None
-        if os.environ["KERAS_BACKEND"] == 'torch':
-            self.convert_to_onnx = self._convert_to_onnx_pytorch
-        elif os.environ["KERAS_BACKEND"] == 'tensorflow':
-            self.convert_to_onnx = self._convert_to_onnx_tensorflow
-        
+        if 'KERAS_BACKEND' in os.environ.keys():
+            if os.environ["KERAS_BACKEND"] == 'torch':
+                self.convert_to_onnx = self._convert_to_onnx_pytorch
+            elif os.environ["KERAS_BACKEND"] == 'tensorflow':
+                self.convert_to_onnx = self._convert_to_onnx_tensorflow
         # Create save directory if it doesn't exist
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -339,17 +332,14 @@ class NeuralNetworkManager:
         """Get the path for saving the quantized ONNX model."""
         return os.path.join(self.save_dir, f"{self.model_name}_quantized.onnx")
     
-    def save_keras_weights(self):
+    def save_keras_weights(self, model):
         """Save the Keras model weights."""
-        if self.model is None:
-            raise ValueError("No model has been set.")
-        
         weights_path = self._get_keras_weights_path()
-        self.model.save_weights(weights_path)
+        model.save_weights(weights_path)
         print(f"Keras model weights saved to {weights_path}")
         return weights_path
     
-    def _convert_to_onnx_pytorch(self, example_inputs=None, input_signature=None):
+    def _convert_to_onnx_pytorch(self, model, example_inputs=None, input_signature=None):
         """
         Convert the Keras model to ONNX format.
         
@@ -375,7 +365,7 @@ class NeuralNetworkManager:
         # No dynamic axes - everything is static
         # This implies that the batch size is always one
         torch.onnx.export(
-            model=self.model,
+            model=model,
             args=dummy_input_tensor,
             f=onnx_path,
             opset_version=13,
@@ -389,7 +379,7 @@ class NeuralNetworkManager:
         print(f"ONNX model saved to {onnx_path}")
         return onnx_path
 
-    def _convert_to_onnx_tensorflow(self, example_inputs=None, input_signature=None):
+    def _convert_to_onnx_tensorflow(self, model, example_inputs=None, input_signature=None):
         """
         Convert the Keras model to ONNX format.
         
@@ -398,15 +388,17 @@ class NeuralNetworkManager:
                             (e.g., [keras.InputSpec(dtype='float32', shape=(None, 224, 224, 3)])
         """
         import tf2onnx
+        import keras
+        import onnx
         
         onnx_path = self._get_onnx_path()
         
         # If input signature is not provided, try to infer it
         if input_signature is None:
             # Try to infer from model inputs
-            if hasattr(self.model, 'inputs') and self.model.inputs:
+            if hasattr(model, 'inputs') and model.inputs:
                 shapes = []
-                for inp in self.model.inputs:
+                for inp in model.inputs:
                     shape = inp.shape
                     # Handle different backends by getting shape as list
                     if hasattr(shape, 'as_list'):
@@ -425,13 +417,15 @@ class NeuralNetworkManager:
                 raise ValueError("Please provide input_signature for ONNX conversion")
         
         # Convert the model to ONNX
-        model_proto, _ = tf2onnx.convert.from_keras(self.model, input_signature, opset=13)
+        model_proto, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
         # Save the ONNX model
         onnx.save(model_proto, onnx_path)
         print(f"ONNX model saved to {onnx_path}")
         return onnx_path
     
     def quantize_onnx(self, method="dynamic", calibration_data=None):
+        import onnx
+        import onnxruntime.quantization
         """
         Perform 8-bit quantization on the ONNX model.
         
@@ -522,7 +516,7 @@ class NeuralNetworkManager:
             
         return quantized_path
     
-    def save_model(self, input_signature=None, quant_method="dynamic", calibration_data=None):
+    def save_model(self, model, input_signature=None, quant_method="dynamic", calibration_data=None):
         """
         Save the model in both Keras weights and quantized ONNX formats.
         
@@ -532,10 +526,10 @@ class NeuralNetworkManager:
             calibration_data: Required for static quantization
         """
         # Save Keras weights
-        self.save_keras_weights()
+        self.save_keras_weights(model)
         
         # Convert to ONNX
-        onnx_path = self.convert_to_onnx(input_signature)
+        onnx_path = self.convert_to_onnx(model, input_signature)
         
         # Quantize ONNX model
         quantized_path = self.quantize_onnx(onnx_path, method=quant_method, calibration_data=calibration_data)
@@ -555,6 +549,7 @@ class NeuralNetworkManager:
         Returns:
             The loaded Keras model
         """
+        self.model = model
         weights_path = self._get_keras_weights_path()
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Keras weights not found at {weights_path}")
@@ -572,6 +567,7 @@ class NeuralNetworkManager:
         Returns:
             An ONNX Runtime InferenceSession
         """
+        import onnxruntime
         if quantized:
             onnx_path = self._get_quantized_onnx_path()
         else:
@@ -603,6 +599,7 @@ def save_standard_scaler(scaler, filename):
 
 
 def load_standard_scaler(filename):
+    from sklearn.preprocessing import StandardScaler
     with open(filename, 'r') as f:
         params = json.load(f)
     scaler = StandardScaler()

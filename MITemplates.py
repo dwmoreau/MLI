@@ -6,7 +6,6 @@ import os
 import scipy.spatial
 import sklearn.ensemble
 from sklearn.model_selection import GridSearchCV
-from tqdm import tqdm
 
 from TargetFunctions import CandidateOptLoss
 from Utilities import fix_unphysical
@@ -612,6 +611,7 @@ class MITemplates:
         return probability, distance, xnn, N_pred, q2_calc_max
 
     def get_inputs(self, data, n_entries):
+        from tqdm import tqdm
         q2_obs = np.stack(data['q2'])
         probability = []
         distance = []

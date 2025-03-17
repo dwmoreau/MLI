@@ -1,6 +1,4 @@
 import os
-# This supresses the tensorflow message on import
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
@@ -10,6 +8,7 @@ from mpi4py import MPI
 import numpy as np
 import pandas as pd
 
+from Utilities import get_peak_generation_info
 from UtilitiesOptimizer import get_logger
 from UtilitiesOptimizer import get_mpi_organizer
 from UtilitiesOptimizer import get_optimizers
@@ -19,7 +18,7 @@ from UtilitiesOptimizer import validate_candidate
 broadening_tag = '1'
 error_tag = '1'
 n_entries = 1 # Maximum number of entries to load for each Bravais lattice
-q2_error_params = np.array([0.000087, 0.00092]) / 1
+q2_error_params = get_peak_generation_info()['q2_error_params']
 n_top_candidates = 20
 n_candidates_scale = 1
 rng = np.random.default_rng()
@@ -41,30 +40,17 @@ Right now there are two splits. One is for a serial communicator. This will be u
 lattices that are optimized serially. The next is for a joint communicator. This will be used for
 Bravais lattices optimized in parallel. 
 """
-#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-#manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
-# ~ 0.7 Gb -------------------------] 0.7
-# ~ 2.4 Gb -------------------------------------------------] 1.7
-# ~ 3.6 Gb -----------------------------------------------------------------------------] 1.2
-# ~ 5.1 Gb -------------------------------------------------------------------------------------------] 1.5
-# ~ 5.8 Gb ---------------------------------------------------------------------------------------------------] 0.7
 #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,     0]
 #serial =           [True, True, True, True, True, True, True,  True,  True,  True,  True,  True,  True,  True]
 
-# 3.4 Gb - All models
-# 1.6 Gb - No Integral Filter
-# 3.0 Gb - No NN
-# 3.3 Gb - No Trees
-# 3.4 Gb - No Templates
-# 3.3 Gb - No Random Forest Volume Pred
-
-bravais_lattices = ['oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-manager_rank =     [   0,     0,     0,     0,     0,     0,     0]
-serial =           [True,  True,  True,  True,  True,  True,  True]
-
+#bravais_lattices = ['oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+#manager_rank =     [   0,     0,     0,     0,     0,     0,     0]
+#serial =           [True,  True,  True,  True,  True,  True,  True]
 
 #bravais_lattices = ['cP', 'tP',  'oP']
 #manager_rank =     [   0,    1,     0]
@@ -182,8 +168,10 @@ for bl_index_data, bravais_lattice_data in enumerate(bravais_lattices):
                     role = 'worker'
                 mpi_organizers[bravais_lattice].split_comm.barrier()
                 logger.info(f'Starting optimization of {bravais_lattice} {role}')
+                print(f'Starting optimization of {bravais_lattice} {role}')
                 optimizer[bravais_lattice].run(entry=entry, n_top_candidates=n_top_candidates)
                 logger.info(f'Finishing optimization of {bravais_lattice} {role}')
+                print(f'Finishing optimization of {bravais_lattice} {role}')
         comm.barrier()
 
         # Gather the optimization results

@@ -1,11 +1,8 @@
 import numpy as np
-import scipy.special
-from sklearn.linear_model import LinearRegression
-import keras
 
 
 class LikelihoodLoss:
-    def __init__(self, likelihood, n, beta_nll=None, tuning_param=None):
+    def __init__(self, likelihood, n, beta_nll=None, tuning_param=None):        
         """
         beta_nll: if None, use negative log likelihood target function
                   if not none, use beta-nll target function from Seitzer 2022
@@ -13,30 +10,35 @@ class LikelihoodLoss:
         tuning_param: degrees of freedom for the t-distribution likelihood
         self.prefactor is negative log of the normalization constant
         """
+        import keras
+        import scipy.special
+        self.keras = keras
+        _ = self.keras
+
         self.n = n
         if likelihood == 'normal':
             self.likelihood_function = self.normal_likelihood
-            self.prefactor = keras.ops.cast(
-                1/2 * keras.ops.log(2 * np.pi),
+            self.prefactor = self.keras.ops.cast(
+                1/2 * self.keras.ops.log(2 * np.pi),
                 dtype='float32',
                 )
         elif likelihood == 't-dist':
             self.likelihood_function = self.t_dist_likelihood
             self.tuning_param = tuning_param
             v = self.tuning_param
-            prefactor0 = keras.ops.cast(
+            prefactor0 = self.keras.ops.cast(
                 -scipy.special.gammaln((v + 1) / 2) / scipy.special.gammaln(v / 2),
                 dtype='float32',
                 )
-            prefactor1 = keras.ops.cast(
-                1/2 * keras.ops.log(v * np.pi),
+            prefactor1 = self.keras.ops.cast(
+                1/2 * self.keras.ops.log(v * np.pi),
                 dtype='float32',
                 )
             self.prefactor = prefactor0 + prefactor1
         elif likelihood == 'alpha_beta':
             self.likelihood_function = self.alpha_beta_likelihood
-            self.prefactor = keras.ops.cast(
-                1/2 * keras.ops.log(2 * np.pi),
+            self.prefactor = self.keras.ops.cast(
+                1/2 * self.keras.ops.log(2 * np.pi),
                 dtype='float32',
                 )
         elif likelihood == 'mean_absolute_error':
@@ -59,91 +61,91 @@ class LikelihoodLoss:
         mean = y_pred[:, :, 0]
         alpha = y_pred[:, :, 1]
         beta = y_pred[:, :, 2]
-        term0 = -alpha * keras.ops.log(beta)
+        term0 = -alpha * self.keras.ops.log(beta)
         # lgamma is the log of the absolute value of the gamma function
         # Keras does not provide a backend agnostic gamma function
         # These terms are unnecessary anyways...
         #term1 = -tf.math.lgamma(alpha + 1/2)
         #term2 = tf.math.lgamma(alpha)
-        term3 = (alpha + 1/2) * keras.ops.log(beta + 1/2 * (y_true - mean)**2)
+        term3 = (alpha + 1/2) * self.keras.ops.log(beta + 1/2 * (y_true - mean)**2)
         likelihoods = self.prefactor + term0 + term3 #+ term1 + term2
         if self.beta_likelihood:
             var = beta / (alpha - 1)
-            likelihoods = likelihoods * keras.ops.stop_gradient(var**self.beta_nll)
-        return keras.ops.sum(likelihoods, axis=1)
+            likelihoods = likelihoods * self.keras.ops.stop_gradient(var**self.beta_nll)
+        return self.keras.ops.sum(likelihoods, axis=1)
 
     def normal_likelihood(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         var = y_pred[:, :, 1]
-        term0 = 1/2 * keras.ops.log(var)
+        term0 = 1/2 * self.keras.ops.log(var)
         term1 = 0.5 * (y_true - mean)**2 / var
         # likelihoods: n_batch x n_lattice_params
         likelihoods = self.prefactor + term0 + term1
         if self.beta_likelihood:
-            likelihoods = likelihoods * keras.ops.stop_gradient(var**self.beta_nll)
-        return keras.ops.sum(likelihoods, axis=1)
+            likelihoods = likelihoods * self.keras.ops.stop_gradient(var**self.beta_nll)
+        return self.keras.ops.sum(likelihoods, axis=1)
 
     def cauchy_likelihood(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         var = y_pred[:, :, 1]
-        term0 = keras.ops.log(var)
+        term0 = self.keras.ops.log(var)
         z2 = (y_true - mean)**2 / var
-        term1 = keras.ops.log(1 + z2)
+        term1 = self.keras.ops.log(1 + z2)
         likelihoods = term0 + term1 + self.prefactor
         if self.beta_likelihood:
-            likelihoods = likelihoods * keras.ops.stop_gradient(var**self.beta_nll)
-        return keras.ops.sum(likelihoods, axis=1)
+            likelihoods = likelihoods * self.keras.ops.stop_gradient(var**self.beta_nll)
+        return self.keras.ops.sum(likelihoods, axis=1)
 
     def t_dist_likelihood(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         var = y_pred[:, :, 1]
-        term0 = keras.ops.log(var)
+        term0 = self.keras.ops.log(var)
         z2 = (y_true - mean)**2 / var
-        term1 = (self.tuning_param + 1) / 2 * keras.ops.log(1 + 1/self.tuning_param * z2)
+        term1 = (self.tuning_param + 1) / 2 * self.keras.ops.log(1 + 1/self.tuning_param * z2)
         likelihoods = term0 + term1 + self.prefactor
         if self.beta_likelihood:
-            likelihoods = likelihoods * keras.ops.stop_gradient(var**self.beta_nll)
-        return keras.ops.sum(likelihoods, axis=1)
+            likelihoods = likelihoods * self.keras.ops.stop_gradient(var**self.beta_nll)
+        return self.keras.ops.sum(likelihoods, axis=1)
 
     def log_cosh_likelihood(self, y_true, y_pred):
         # This is not a likelihood function. The "likelihood" distinguishes this
         # call that uses variance from the "error" call that does not.
         mean = y_pred[:, :, 0]
         var = y_pred[:, :, 1]
-        error = (y_true - mean) / keras.ops.sqrt(var)
+        error = (y_true - mean) / self.keras.ops.sqrt(var)
 
         # This is to prevent an overflow error
-        # keras.ops.cosh has a limit around +/- 80
-        error = keras.ops.clip(error, -75.0, 75.0)
-        log_cosh = keras.ops.log(keras.ops.cosh(error))
+        # self.keras.ops.cosh has a limit around +/- 80
+        error = self.keras.ops.clip(error, -75.0, 75.0)
+        log_cosh = self.keras.ops.log(keras.ops.cosh(error))
 
         # I don't know how to incorporate the beta_nll parameter here because this is not a likelihood.
         # If I had to guess, it might look like this:
         # if self.beta_likelihood:
-        #   error = (y_true - mean) / keras.ops.sqrt(var) * keras.ops.stop_gradient(keras.ops.sqrt(var**self.beta_nll))
+        #   error = (y_true - mean) / self.keras.ops.sqrt(var) * self.keras.ops.stop_gradient(keras.ops.sqrt(var**self.beta_nll))
         # else:
-        #   error = (y_true - mean) / keras.ops.sqrt(var)
+        #   error = (y_true - mean) / self.keras.ops.sqrt(var)
         # or it might look like this:
         # if self.beta_likelihood:
-        #   log_cosh = log_cosh * keras.ops.stop_gradient(var**self.beta_nll)
-        return keras.ops.mean(log_cosh, axis=1)
+        #   log_cosh = log_cosh * self.keras.ops.stop_gradient(var**self.beta_nll)
+        return self.keras.ops.mean(log_cosh, axis=1)
 
     def mean_squared_error(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         square_difference = (y_true - mean)**2
-        return keras.ops.mean(square_difference, axis=1)
+        return self.keras.ops.mean(square_difference, axis=1)
 
     def log_cosh_error(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
         error = (y_true - mean)
-        error = keras.ops.clip(error, -75.0, 75.0)
-        log_cosh = keras.ops.log(keras.ops.cosh(error))
-        return keras.ops.mean(log_cosh, axis=1)
+        error = self.keras.ops.clip(error, -75.0, 75.0)
+        log_cosh = self.keras.ops.log(keras.ops.cosh(error))
+        return self.keras.ops.mean(log_cosh, axis=1)
 
     def mean_absolute_error(self, y_true, y_pred):
         mean = y_pred[:, :, 0]
-        absolute_difference = keras.ops.absolute(y_true - mean)
-        return keras.ops.mean(absolute_difference, axis=1)
+        absolute_difference = self.keras.ops.absolute(y_true - mean)
+        return self.keras.ops.mean(absolute_difference, axis=1)
 
 
 class CandidateOptLoss:

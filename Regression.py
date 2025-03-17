@@ -1,15 +1,11 @@
 import copy
 import gc
-import keras
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.decomposition import PCA
 from sklearn.model_selection import GridSearchCV
 
-from Networks import mlp_model_builder
-from TargetFunctions import LikelihoodLoss
 from IOManagers import read_params
 from IOManagers import write_params
 from IOManagers import SKLearnManager
@@ -40,6 +36,7 @@ class Regression:
         self.save(train_inputs)
 
     def build_model(self):
+        import keras
         inputs = keras.Input(
             shape=(self.n_peaks,),
             name='q2_scaled',
@@ -50,6 +47,8 @@ class Regression:
         self.get_layer_names()
 
     def compile_model(self, mode):
+        import keras
+        from TargetFunctions import LikelihoodLoss
         if mode == 'mean':
             self.reg_loss = LikelihoodLoss(
                 self.model_params['target_function'],
@@ -259,6 +258,7 @@ class Regression:
                     )
 
     def fit_model_cycles(self, data):
+        import keras
         self.fit_history = [None for _ in range(2 * self.model_params['cycles'])]
         if self.lattice_system == 'triclinic':
             limit_volume = True
@@ -554,29 +554,21 @@ class Regression:
         for key in model_params_defaults['var_params'].keys():
             if key not in self.model_params['var_params'].keys():
                 self.model_params['var_params'][key] = model_params_defaults['var_params'][key]
-        self.model_params['var_params']['kernel_initializer'] = None
-        self.model_params['var_params']['bias_initializer'] = \
-            keras.initializers.RandomNormal(mean=-1, stddev=0.05, seed=self.seed)
 
         for key in model_params_defaults['alpha_params'].keys():
             if key not in self.model_params['alpha_params'].keys():
                 self.model_params['alpha_params'][key] = model_params_defaults['alpha_params'][key]
-        self.model_params['alpha_params']['kernel_initializer'] = None
-        self.model_params['alpha_params']['bias_initializer'] = \
-            keras.initializers.RandomNormal(mean=2, stddev=0.05, seed=self.seed)
 
         for key in model_params_defaults['beta_params'].keys():
             if key not in self.model_params['beta_params'].keys():
                 self.model_params['beta_params'][key] = model_params_defaults['beta_params'][key]
-        self.model_params['beta_params']['kernel_initializer'] = None
-        self.model_params['beta_params']['bias_initializer'] = \
-            keras.initializers.RandomNormal(mean=0.5, stddev=0.05, seed=self.seed)
 
         for key in model_params_defaults['random_forest'].keys():
             if key not in self.model_params['random_forest'].keys():
                 self.model_params['random_forest'][key] = model_params_defaults['random_forest'][key]
 
     def save(self, train_inputs):
+        import keras
         model_params = copy.deepcopy(self.model_params)
         write_params(
             model_params,
@@ -636,7 +628,7 @@ class Regression:
                     model=self.random_forest_regressor[ratio_index],
                     )
                 
-    def load_from_tag(self):
+    def load_from_tag(self, mode):
         params = read_params(os.path.join(
             f'{self.save_to}',
             f'{self.group}_reg_params_{self.model_params["tag"]}.csv'
@@ -685,45 +677,46 @@ class Regression:
                 else:
                     self.model_params['random_forest']['max_depth'] = int(value)
 
-        if self.lattice_system == 'cubic':
-            #self.random_forest_regressor = SKLearnManager(
-            #    filename=os.path.join(
-            #        f'{self.save_to}',
-            #        f'{self.group}_random_forest_regressor'
-            #        ),
-            #    model_type='custom'
-            #    )
-            self.random_forest_regressor = SKLearnManager(
-                filename=os.path.join(
-                    f'{self.save_to}',
-                    f'{self.group}_random_forest_regressor'
-                    ),
-                model_type='sklearn'
-                )
-            self.random_forest_regressor.load()
-        else:
-            self.random_forest_regressor = []
-            for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
-                """
-                model_manager = SKLearnManager(
+        if mode in ['training', 'inference:both', 'inference:trees']:
+            if self.lattice_system == 'cubic':
+                #self.random_forest_regressor = SKLearnManager(
+                #    filename=os.path.join(
+                #        f'{self.save_to}',
+                #        f'{self.group}_random_forest_regressor'
+                #        ),
+                #    model_type='custom'
+                #    )
+                self.random_forest_regressor = SKLearnManager(
                     filename=os.path.join(
                         f'{self.save_to}',
-                        f'{self.group}_{ratio_index}_random_forest_regressor'
-                        ),
-                    model_type='custom'
-                    )
-                model_manager.load()
-                self.random_forest_regressor.append(model_manager)
-                """
-                model_manager = SKLearnManager(
-                    filename=os.path.join(
-                        f'{self.save_to}',
-                        f'{self.group}_{ratio_index}_random_forest_regressor'
+                        f'{self.group}_random_forest_regressor'
                         ),
                     model_type='sklearn'
                     )
-                model_manager.load()
-                self.random_forest_regressor.append(model_manager)
+                self.random_forest_regressor.load()
+            else:
+                self.random_forest_regressor = []
+                for ratio_index in range(self.model_params['random_forest']['n_dominant_zone_bins']):
+                    """
+                    model_manager = SKLearnManager(
+                        filename=os.path.join(
+                            f'{self.save_to}',
+                            f'{self.group}_{ratio_index}_random_forest_regressor'
+                            ),
+                        model_type='custom'
+                        )
+                    model_manager.load()
+                    self.random_forest_regressor.append(model_manager)
+                    """
+                    model_manager = SKLearnManager(
+                        filename=os.path.join(
+                            f'{self.save_to}',
+                            f'{self.group}_{ratio_index}_random_forest_regressor'
+                            ),
+                        model_type='sklearn'
+                        )
+                    model_manager.load()
+                    self.random_forest_regressor.append(model_manager)
 
         params_keys = [
             'dropout_rate',
@@ -755,17 +748,30 @@ class Regression:
             self.model_params[network_key]['kernel_initializer'] = None
             self.model_params[network_key]['bias_initializer'] = None
 
-        self.build_model()
-        model_manager = NeuralNetworkManager(
-            model=self.model,
-            model_name=f'{self.group}_reg_weights_{self.model_params["tag"]}',
-            save_dir=self.save_to,
-            )
-        self.onnx_model = model_manager.load_onnx_model(quantized=True)
-        self.model = model_manager.load_keras_model(self.model)
-        self.compile_model(mode='both')
+        if mode in ['training']:
+            self.build_model()
+            self.model = model_manager.load_keras_model(self.model)
+            self.compile_model(mode='both')
+        if mode in ['training', 'inference:both', 'inference:nn']:
+            model_manager = NeuralNetworkManager(
+                model_name=f'{self.group}_reg_weights_{self.model_params["tag"]}',
+                save_dir=self.save_to,
+                )
+            self.onnx_model = model_manager.load_onnx_model(quantized=True)
 
     def model_builder(self, inputs):
+        import keras
+        from Networks import mlp_model_builder
+        self.model_params['var_params']['kernel_initializer'] = None
+        self.model_params['var_params']['bias_initializer'] = \
+            keras.initializers.RandomNormal(mean=-1, stddev=0.05, seed=self.seed)
+        self.model_params['alpha_params']['kernel_initializer'] = None
+        self.model_params['alpha_params']['bias_initializer'] = \
+            keras.initializers.RandomNormal(mean=2, stddev=0.05, seed=self.seed)
+        self.model_params['beta_params']['kernel_initializer'] = None
+        self.model_params['beta_params']['bias_initializer'] = \
+            keras.initializers.RandomNormal(mean=0.5, stddev=0.05, seed=self.seed)
+
         uc_pred_mean_scaled = mlp_model_builder(
             inputs,
             tag=f'uc_pred_mean_scaled_{self.group}',

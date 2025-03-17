@@ -1,27 +1,11 @@
 """
-- Write first draft of paper
-    - Get feedback
-
 Todo:
-    1: Rerun all models
-        x Predicted Volume
-            - Rerun with subsample a 75
-            - Rerun with more estimators
-        x MITemplates
-            x Try using all the peaks for templating
-        - Random Forest Regression
-            - Rerun with subsample as large as possible but still retaining good variance
-            - More consistent
-    2: Redo model ensemble with new mathematical formulation
-    3: Extend this formulation to get unit cell redistribution parameterization
-    4: Perform optimizations and save results
-    5: Edit documenation
-    6: ML approach to FOM
+    1: Perform optimizations 
+        - save results
+    2: Edit documenation
+    3: ML approach to FOM
 
 - Optimization
-    - Redistribution
-        - Optimize the redistribution parameters to improve the ensemble formula
-
     - Target function
         - What if the derivative of the unit cell in the weight is considered?
 
@@ -70,11 +54,7 @@ Todo:
             tqdm gemmi numba jupyterlab openpyxl skl2onnx onnxruntime
         inference???:
             numpy scipy pandas mpi4py scikit-learn gemmi numba onnxruntime
-    - Only load quantitized model
-    - Get inferences running with a barebones environment
-        - remove pytorch / tensorflow imports
-        - remove sklearn imports
-        - remove pandas imports
+                matplotlib jupyterlab
     - Code review
         - Static code analysis
         - Manual read through
@@ -139,17 +119,7 @@ import os
 import pandas as pd
 from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.preprocessing import StandardScaler
-from tqdm import tqdm
 
-from Augmentor import Augmentor
-from Evaluations import evaluate_regression
-from Evaluations import evaluate_regression_pitf
-from Evaluations import calibrate_regression
-from Evaluations import calibrate_regression_pitf
-from MITemplates import MITemplates
-from PhysicsInformedModel import PhysicsInformedModel
-from RandomGenerator import RandomGenerator
-from Regression import Regression
 from Utilities import get_hkl_matrix
 from Utilities import get_xnn_from_reciprocal_unit_cell
 from Utilities import get_unit_cell_from_xnn
@@ -591,6 +561,7 @@ class Indexing:
         self.data_params['split_groups'] = sorted(list(self.data['split_group'].unique()))
 
     def setup_hkl(self):
+        from tqdm import tqdm
         print('Setting up the hkl labels')
         indices = np.logical_and(self.data['train'], ~self.data['augmented'])
         self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
@@ -671,6 +642,7 @@ class Indexing:
         self.data['hkl_labels'] = list(hkl_labels)
 
     def augment_data(self):
+        from Augmentor import Augmentor
         self.augmentor = Augmentor(
             aug_params=self.aug_params,
             data_params=self.data_params,
@@ -1240,6 +1212,7 @@ class Indexing:
         plt.close()
 
     def setup_random(self):
+        from RandomGenerator import RandomGenerator
         self.random_unit_cell_generator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             self.random_unit_cell_generator[bravais_lattice] = RandomGenerator(
@@ -1271,6 +1244,7 @@ class Indexing:
                 #    )
 
     def setup_miller_index_templates(self):
+        from MITemplates import MITemplates
         self.miller_index_templator = dict.fromkeys(self.data_params['bravais_lattices'])
         for bl_index, bravais_lattice in enumerate(self.data_params['bravais_lattices']):
             self.miller_index_templator[bravais_lattice] = MITemplates(
@@ -1303,7 +1277,8 @@ class Indexing:
                 #    q2_obs=np.array(bl_data.iloc[0]['q2']),
                 #    )
 
-    def setup_regression(self):
+    def setup_regression(self, mode):
+        from Regression import Regression
         self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             self.unit_cell_generator[split_group] = Regression(
@@ -1317,12 +1292,12 @@ class Indexing:
                 )
             self.unit_cell_generator[split_group].setup()
             if self.reg_params[split_group]['load_from_tag']:
-                self.unit_cell_generator[split_group].load_from_tag()
+                self.unit_cell_generator[split_group].load_from_tag(mode=mode)
             else:
                 split_group_indices = self.data['split_group'] == split_group
                 self.unit_cell_generator[split_group].train_regression(data=self.data[split_group_indices])
                 # Loading from tag ensures the onnx models are loaded for evaluation.
-                self.unit_cell_generator[split_group].load_from_tag()
+                self.unit_cell_generator[split_group].load_from_tag(mode=mode)
 
     def inferences_regression(self):
         reindexed_uc_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))
@@ -1352,7 +1327,8 @@ class Indexing:
         self.data['reindexed_unit_cell_pred_trees'] = list(reindexed_uc_pred_trees)
         self.data['reindexed_unit_cell_pred_var_trees'] = list(reindexed_uc_pred_var_trees)
 
-    def setup_pitf(self):
+    def setup_pitf(self, mode):
+        from PhysicsInformedModel import PhysicsInformedModel
         self.pitf_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
@@ -1367,17 +1343,22 @@ class Indexing:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
-                self.pitf_generator[split_group].load_from_tag()
+                self.pitf_generator[split_group].load_from_tag(mode=mode)
             else:
                 split_group_data = self.data[self.data['split_group'] == split_group]
                 self.pitf_generator[split_group].setup(split_group_data)
                 self.pitf_generator[split_group].train(data=split_group_data)
                 self.pitf_generator[split_group].train_calibration(data=split_group_data)
-                self.pitf_generator[split_group].load_from_tag()
+                self.pitf_generator[split_group].load_from_tag(mode='training')
                 self.pitf_generator[split_group].evaluate(split_group_data)
+                self.pitf_generator[split_group].load_from_tag(mode='inference')
                 self.pitf_generator[split_group].evaluate(split_group_data, quantitized_model=True)
 
     def evaluate_regression(self):
+        from Evaluations import evaluate_regression
+        from Evaluations import evaluate_regression_pitf
+        from Evaluations import calibrate_regression
+        from Evaluations import calibrate_regression_pitf
         for bravais_lattice in self.data_params['bravais_lattices']:
             evaluate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
