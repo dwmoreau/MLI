@@ -247,10 +247,10 @@ if __name__ == '__main__':
 
     load_data = True
     broadening_tag = '1'
-    n_entries = 1000
+    n_entries = 10
 
     peak_generation_info = get_peak_generation_info()
-    q2_error_params = 3 * peak_generation_info['q2_error_params']
+    q2_error_params = 1 * peak_generation_info['q2_error_params']
     q2_broadening_params = peak_generation_info['broadening_params']
     n_contaminants = 0
     n_top_candidates = 20

@@ -27,11 +27,11 @@ class Regression:
 
     def train_regression(self, data):
         self.fit_trees(data)
-        self.build_model()
-        if self.model_params['fit_strategy'] == 'cycles':
-            self.fit_model_cycles(data)
-        elif self.model_params['fit_strategy'] == 'warmup':
-            self.fit_model_warmup(data)
+        #self.build_model()
+        #if self.model_params['fit_strategy'] == 'cycles':
+        #    self.fit_model_cycles(data)
+        #elif self.model_params['fit_strategy'] == 'warmup':
+        #    self.fit_model_warmup(data)
         train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
         self.save(train_inputs)
 
@@ -577,6 +577,7 @@ class Regression:
                 f'{self.group}_reg_params_{self.model_params["tag"]}.csv'
                 )
             )
+        """
         model_manager = NeuralNetworkManager(
             model=self.model,
             model_name=f'{self.group}_reg_weights_{self.model_params["tag"]}',
@@ -595,7 +596,7 @@ class Regression:
             method='dynamic',
             calibration_data=train_inputs
             )
-
+        """
         if self.lattice_system == 'cubic':
             model_manager = SKLearnManager(
                 filename=os.path.join(

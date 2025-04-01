@@ -290,7 +290,7 @@ class Candidates:
             # Find these and replace them with the initial unit cell.
             failed = np.any(np.isnan(best_standardized_unit_cell), axis=1)
             if np.sum(failed) > 0:
-                #print('Failure in Standardization - NaN check\n    numpy warning has been caught and corrected')
+                print('Failure in Standardization - NaN check\n    numpy warning has been caught and corrected')
                 best_standardized_unit_cell[failed] = best_unit_cell[failed]
 
             # Some of the standardized unit cells are unphysical. The standardization fails but does
@@ -307,7 +307,7 @@ class Candidates:
                 axis=1
                 )
             if np.sum(failed) > 0:
-                #print('Failure Standardization - unphysical check\n    numpy warning has been caught and corrected')
+                print('Failure Standardization - unphysical check\n    numpy warning has been caught and corrected')
                 best_standardized_unit_cell[failed] = best_unit_cell[failed]
 
             # Still some unphysical unit cells make it through. These cannot be converted between
@@ -319,7 +319,7 @@ class Candidates:
                 )
             failed = np.any(np.isnan(best_standardized_xnn), axis=1)
             if np.sum(failed) > 0:
-                #print('Failure in Standardization - Final check\n    numpy warning has been caught and corrected')
+                print('Failure in Standardization - Final check\n    numpy warning has been caught and corrected')
                 self.best_xnn[~failed] = best_standardized_xnn[~failed]
 
     def correct_off_by_two(self):
@@ -385,7 +385,7 @@ class Candidates:
         # The M20 score is more sensitive to unindexed peaks than M_triplet is incorrect unit
         # cell volume
         best_index = np.argmax(M20, axis=1)
-        final_mult_factor = np.take(mult_factors, best_index, axis=0)        
+        final_mult_factor = np.take(mult_factors, best_index, axis=0)
         self.best_xnn[test_indices] *= final_mult_factor**2
         self.best_M20[test_indices] = np.take_along_axis(
             M20, best_index[:, np.newaxis], axis=1
@@ -404,18 +404,44 @@ class Candidates:
                 )
 
         # do quick reindexing to enforce constraints
-        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-            self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        reciprocal_unit_cell = reindex_entry_basic(
-            reciprocal_unit_cell,
-            lattice_system=self.lattice_system,
-            bravais_lattice=self.bravais_lattice,
-            space='reciprocal'
-            )
-        self.best_xnn = get_xnn_from_reciprocal_unit_cell(
-            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
+        if self.lattice_system == 'triclinic':
+            # The triclinic reindexing is a Selling reduction performed in direct space.
+            # There are numerical issues with my implementation of this reduction that need to be
+            # worked on. It occasionally produces triclinic unit cells that are not physical. This
+            # produces a np.nan and a warning when the unit cell is converted from direct to
+            # reciprocal space.
+            unit_cell = get_unit_cell_from_xnn(
+                self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            unit_cell = reindex_entry_basic(
+                unit_cell,
+                lattice_system=self.lattice_system,
+                bravais_lattice=self.bravais_lattice,
+                space='direct'
+                )
+            unit_cell = fix_unphysical(
+                unit_cell=unit_cell,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell, 
+                maximum_unit_cell=self.maximum_unit_cell,
+                lattice_system=self.lattice_system,
+                )
+            self.best_xnn = get_xnn_from_unit_cell(
+                unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+        else:
+            reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+                self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            reciprocal_unit_cell = reindex_entry_basic(
+                reciprocal_unit_cell,
+                lattice_system=self.lattice_system,
+                bravais_lattice=self.bravais_lattice,
+                space='reciprocal'
+                )
+            self.best_xnn = get_xnn_from_reciprocal_unit_cell(
+                reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
 
     def assign_extinction_group(self):
         hkl_ref_sg = get_spacegroup_hkl_ref(self.hkl_ref, bravais_lattice=self.bravais_lattice)
@@ -576,12 +602,18 @@ class OptimizerBase:
         # each axis. This also performs a quick reindexing.
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
+        print('Done with optimization')
         candidates.refine_cell()
+        print('    - Done with refinement')
         candidates.standardize_cell()
+        print('    - Done with standardization')
         candidates.correct_off_by_two()
+        print('    - Done with off by two')
         candidates.assign_extinction_group()
+        print('    - Done with extinction group')
         candidates.calculate_peaks_indexed()
-
+        print('    - Done with peaks indexed')
+        print()
         if self.opt_params['convergence_testing']:
             self.convergence_testing(candidates)
         else:
@@ -998,12 +1030,24 @@ class OptimizerManager(OptimizerBase):
                 best_xnn_all.append(best_xnn_rank)
                 best_n_indexed_all.append(best_n_indexed_rank)
                 best_spacegroup_all += best_spacegroup_rank
+
         best_M20_all = np.concatenate(best_M20_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
         if not self.triplets is None:
             best_n_indexed_triplets_all = np.concatenate(best_n_indexed_triplets_all, axis=0)
             best_M_triplets_all = np.concatenate(best_M_triplets_all, axis=0)
+
+        # Remove any candidates with np.nan as a unit cell.
+        # I believe these are caused by numerical issues with triclinic unit cells during the
+        # Selling reduction
+        good_indices = np.invert(np.any(np.isnan(best_xnn_all), axis=1))
+        best_M20_all = best_M20_all[good_indices]
+        best_xnn_all = best_xnn_all[good_indices]
+        best_n_indexed_all = best_n_indexed_all[good_indices]
+        if not self.triplets is None:
+            best_n_indexed_triplets_all = best_n_indexed_triplets_all[good_indices]
+            best_M_triplets_all = best_M_triplets_all[good_indices]
 
         # Next remove nearly identical xnn's by selecting the xnn within an arbitrary radius
         # with the highest M20 score. The candidates are sorted by reciprocal volume so the

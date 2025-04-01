@@ -13,6 +13,36 @@ def tensor_to_numpy(tensor):
         return tensor.detach().cpu().numpy()
 
 
+class SigmaDecayCallback(keras.callbacks.Callback):
+    def __init__(self, extraction_layer, initial_multiplier=10, decay_rate=0.9):
+        """
+        Callback to decay sigma from initial_value to final_value exponentially.
+        
+        Args:
+            custom_layer: The layer containing the sigma parameter
+            initial_value: Starting value for sigma (default: 0.1)
+            final_value: Target minimum value for sigma (default: 0.02)
+            decay_rate: Rate of exponential decay (default: 0.9)
+        """
+        super().__init__()
+        self.extraction_layer = extraction_layer
+        self.initial_value = initial_multiplier*self.extraction_layer.sigma_init
+        self.final_value = self.extraction_layer.sigma_init
+        self.decay_rate = decay_rate
+        
+    def on_train_begin(self, logs=None):
+        """Set sigma to initial value when training starts"""
+        self.extraction_layer.sigma.assign(self.initial_value)
+        print(f"Training started: sigma initialized to {self.initial_value:0.5f}")
+        
+    def on_epoch_begin(self, epoch, logs=None):
+        """Update sigma using exponential decay formula"""
+        # Calculate new sigma value using exponential decay
+        new_sigma = self.final_value + (self.initial_value - self.final_value) * (self.decay_rate ** epoch)
+        self.extraction_layer.sigma.assign(new_sigma)
+        print(f"Epoch {epoch + 1}: sigma decayed to {new_sigma:0.5f}")
+
+
 class ExtractionLayer(keras.layers.Layer):
     def __init__(self, model_params, q2_obs, xnn, reciprocal_volume, q2_obs_scale, **kwargs):
         super().__init__(**kwargs)
@@ -39,7 +69,7 @@ class ExtractionLayer(keras.layers.Layer):
             shape=(),
             initializer=keras.initializers.Zeros(),
             dtype='float32',
-            trainable=True,
+            trainable=False,
             constraint=keras.constraints.NonNeg(),
             name='sigma'
             )
@@ -103,7 +133,8 @@ class ExtractionLayer(keras.layers.Layer):
             #plt.show()
 
             volume_differences = distribution_volumes[1:] - distribution_volumes[:-1]
-            sigma = min(max(np.median(volume_differences), 0.015), 0.035)
+            sigma = min(max(2*np.median(volume_differences), 0.015), 0.04)
+            self.sigma_init = sigma
             self.sigma.assign(keras.ops.cast(sigma, dtype='float32'))
 
             q2_obs_scaled = q2_obs / q2_obs_scale
@@ -154,11 +185,11 @@ class ExtractionLayer(keras.layers.Layer):
                     q2_filters[filter_index, filter_peak_index] = q2_obs_scaled_rv[peak_index].rvs()
             if self.model_params['model_type'] == 'deep':
                 q2_filters = q2_filters[np.argsort(peak_position_sum)]
+            
             self.filters.assign(
                 keras.ops.expand_dims(keras.ops.cast(q2_filters, dtype='float32'), axis=0)
                 )
             self.filters_init = self.filters.numpy()[0]
-
             #fig, axes = plt.subplots(1, 1, figsize=(6, 3))
             #q2_filt_scaled_hist, _ = np.histogram(
             #    q2_filters.ravel(),
@@ -307,7 +338,9 @@ class ExtractionLayer(keras.layers.Layer):
         plt.close()
 
         if not self.filters_init is None:
+            print('Making weight plot')
             filters_opt = self.filters.numpy()[0]
+            sigma_opt = self.sigma.numpy()
             colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
             alpha = 0.75
             fig, axes = plt.subplots(1, 2, figsize=(6, 3))
@@ -323,11 +356,14 @@ class ExtractionLayer(keras.layers.Layer):
             axes[0].set_title('Filter Weights')
             axes[0].set_xlabel('Value')
             axes[1].set_xlabel('Difference')
+            axes[1].set_title(f'sigma init/opt: {self.sigma_init:0.4f} {sigma_opt:0.4f}')
             axes[0].legend()
             axes[1].legend()
             fig.tight_layout()
             fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_weights_{tag}.png'))
             plt.close()
+        else:
+            print(self.filters_init)
 
     def evaluate_init(self, q2_obs_scaled, save_to, split_group, tag):
         q2_filters = tensor_to_numpy(self.volumes * self.filters)

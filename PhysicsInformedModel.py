@@ -62,15 +62,14 @@ class PhysicsInformedModel:
             'augment': True,
             'model_type': 'metric',
             'calibration_params': {
-                'layers': [1000, 500, 100],
-                'dropout_rate': 0.25,
-                'n_components': 5,
+                'layers': 3,
                 'n_peaks': self.n_peaks,
                 'epsilon_pds': 0.1,
-                'epochs': 10,
+                'epochs': 20,
                 'learning_rate': 0.0001,
-                'augment': False,
+                'augment': True,
                 'batch_size': 64,
+                'l1_regularization': 0.0,
                 },
             }
 
@@ -112,12 +111,12 @@ class PhysicsInformedModel:
             )
 
         model_manager = NeuralNetworkManager(
-            model=self.model,
             model_name=f'{self.split_group}_pitf_weights_{self.model_params["tag"]}',
             save_dir=f'{self.save_to_split_group}',
             )
-        model_manager.save_keras_weights()
+        model_manager.save_keras_weights(self.model)
         model_manager.convert_to_onnx(
+            self.model,
             example_inputs=train_inputs,
             input_signature=keras.Input(
                 shape=(self.model_params['peak_length'],),
@@ -132,6 +131,13 @@ class PhysicsInformedModel:
 
     def save_calibration(self, train_inputs):
         import keras
+        write_params(
+            self.model_params,
+            os.path.join(
+                f'{self.save_to_split_group}',
+                f'{self.split_group}_pitf_params_{self.model_params["tag"]}.csv'
+                )
+            )
         self.calibration_model.save_weights(
             os.path.join(
                 f'{self.save_to_split_group}',
@@ -139,12 +145,12 @@ class PhysicsInformedModel:
                 )
             )
         model_manager = NeuralNetworkManager(
-            model=self.calibration_model,
             model_name=f'{self.split_group}_calibration_weights_{self.model_params["tag"]}',
             save_dir=f'{self.save_to_split_group}',
             )
-        model_manager.save_keras_weights()
+        model_manager.save_keras_weights(self.calibration_model)
         model_manager.convert_to_onnx(
+            self.calibration_model,
             example_inputs=train_inputs,
             input_signature=(
                 keras.Input(
@@ -258,27 +264,22 @@ class PhysicsInformedModel:
 
         calibration_params_keys = [
             'layers',
-            'dropout_rate',
-            'n_components',
+            'l1_regularization',
             'n_peaks',
             'epsilon_pds',
             'epochs',
             'learning_rate',
             'augment',
-            'batch_size'
+            'batch_size',
             ]
         self.model_params['calibration_params'] = dict.fromkeys(params_keys)
+        self.model_params['calibration_params']['l1_regularization'] = 0.0
         for element in params['calibration_params'].split('{')[1].split('}')[0].split(", '"):
             key = element.replace("'", "").split(':')[0]
             value = element.replace("'", "").split(':')[1]
-            if key in ['dropout_rate', 'epsilon_pds', 'learning_rate']:
+            if key in ['dropout_rate', 'epsilon_pds', 'learning_rate', 'l1_regularization']:
                 self.model_params['calibration_params'][key] = float(value)
-            elif key == 'layers':
-                self.model_params['calibration_params']['layers'] = np.array(
-                    value.split('[')[1].split(']')[0].split(','),
-                    dtype=int
-                    )
-            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size']:
+            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers']:
                 self.model_params['calibration_params'][key] = int(value)
             elif key == 'augment':
                 if value == 'True':
@@ -304,11 +305,11 @@ class PhysicsInformedModel:
         keras.utils.set_random_seed(1)
         #tf.config.experimental.enable_op_determinism()
         if not data is None:
-            data = data[data['train']]
-            #data = data[~data['augmented']]
-            q2_obs = np.stack(data['q2'])[:, :self.model_params['extraction_peak_length']]
+            training_data = data[data['train']]
+            #training_data = training_data[~training_data['augmented']]
+            q2_obs = np.stack(training_data['q2'])[:, :self.model_params['extraction_peak_length']]
             self.q2_obs_scale = q2_obs.std()
-            unit_cell = np.stack(data['reindexed_unit_cell'])[:, self.unit_cell_indices]
+            unit_cell = np.stack(training_data['reindexed_unit_cell'])[:, self.unit_cell_indices]
             xnn = get_xnn_from_unit_cell(unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system)
             reciprocal_unit_cell = reciprocal_uc_conversion(
                 unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
@@ -436,7 +437,8 @@ class PhysicsInformedModel:
         #####################
         x = self.extraction_layer(
             inputs[:, :self.model_params['extraction_peak_length']],
-            amplitude_logits
+            amplitude_logits,
+            name='extraction_layer'
             )
 
         #################
@@ -637,55 +639,28 @@ class PhysicsInformedModel:
         pairwise_differences_transformed = self.transform_pairwise_differences(
             pairwise_differences_scaled, True
             )
-        for index in range(len(self.model_params['calibration_params']['layers'])):
+        for index in range(self.model_params['calibration_params']['layers']):
             dense_layer = keras.layers.Dense(
-                self.model_params['calibration_params']['layers'][index],
-                activation='linear',
+                self.hkl_ref.shape[0],
+                activation=keras.activations.gelu,
                 name=f'dense_{index}',
                 use_bias=False,
+                kernel_initializer=keras.initializers.HeUniform,
+                kernel_regularizer=keras.regularizers.L1(
+                    l1=self.model_params['calibration_params']['l1_regularization']
+                    ),
                 )
             if index == 0:
                 x = dense_layer(pairwise_differences_transformed)
             else:
                 x = dense_layer(x)
-            x = keras.layers.LayerNormalization(
-                name=f'layer_norm_{index}',
-                axis=2
-                )(x)
-            x = keras.activations.gelu(x)
-            x = keras.layers.Dropout(
-                rate=self.model_params['calibration_params']['dropout_rate'],
-                name=f'dropout_{index}'
-                )(x)
 
-        # x: batch_size x n_peaks x units
-        # scaler: batch_size x n_peaks x n_components
-        scaler = keras.layers.Concatenate(
-            axis=1,
-            name='scaler'
-            )([
-            keras.ops.expand_dims(keras.layers.Dense(
-                2*self.model_params['calibration_params']['n_components'] - 2,
-                activation='linear',
-                name=f'calibration_scaler_{index}',
-                use_bias=False,
-                )(x[:, index, :]), axis=1) for index in range(self.n_peaks)
-            ])
-
-        hkl_logits = keras.ops.expand_dims(scaler[:, :, 0], axis=2) * keras.ops.ones_like(pairwise_differences_transformed)
-        hkl_logits = keras.layers.Add()([
-            hkl_logits,
-            keras.ops.expand_dims(scaler[:, :, 1], axis=2) * pairwise_differences_transformed
-            ])
-        for power in range(2, self.model_params['calibration_params']['n_components']):
-            hkl_logits = keras.layers.Add()([
-                hkl_logits,
-                keras.ops.expand_dims(scaler[:, :, power], axis=2) * pairwise_differences_transformed**power
-                ])
-            hkl_logits = keras.layers.Add()([
-                hkl_logits,
-                keras.ops.expand_dims(scaler[:, :, self.model_params['calibration_params']['n_components'] + power - 2], axis=2) * pairwise_differences_transformed**(1/power)
-                ])
+        hkl_logits = keras.layers.Dense(
+            self.hkl_ref.shape[0],
+            activation='linear',
+            name=f'hkl_logits',
+            use_bias=False,
+            )(x)
 
         hkl_softmax = keras.layers.Softmax(
             name='hkl_softmax',
@@ -695,7 +670,10 @@ class PhysicsInformedModel:
 
     def compile_model(self):
         import keras
-        optimizer = keras.optimizers.Adam(self.model_params['learning_rate'])
+        # Create learning rate scheduler
+        optimizer = keras.optimizers.Adam(
+            learning_rate=self.model_params['learning_rate'],
+            )
         if self.model_params['loss_type'] == 'mse':
             loss_functions = {
                 f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.loss_function_mse
@@ -734,6 +712,7 @@ class PhysicsInformedModel:
 
     def train(self, data):
         import keras
+        from Networks import SigmaDecayCallback
         if self.model_params['augment'] == False:
             data = data[~data['augmented']]
         train = data[data['train']]
@@ -817,6 +796,14 @@ class PhysicsInformedModel:
                 self.split_group,
                 self.model_params["tag"]
                 )
+
+            callbacks = [SigmaDecayCallback(
+                extraction_layer=self.extraction_layer,
+                decay_rate=0.8,
+                initial_multiplier=2
+                )]
+        else:
+            callbacks = None
         self.fit_history = self.model.fit(
             x=train_inputs,
             y=train_true,
@@ -824,7 +811,7 @@ class PhysicsInformedModel:
             shuffle=True,
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
-            callbacks=None,
+            callbacks=callbacks,
             )
         self.save(train_inputs)
 
@@ -867,6 +854,14 @@ class PhysicsInformedModel:
             f'{self.split_group}_pitf_training_loss_{self.model_params["tag"]}.png'
             ))
         plt.close()
+
+        if self.model_params['model_type'] != 'base_line':
+            self.extraction_layer.evaluate_weights(
+                train_inputs, 
+                self.save_to_split_group,
+                self.split_group,
+                self.model_params["tag"]
+                )
 
     def train_calibration(self, data):
         import keras

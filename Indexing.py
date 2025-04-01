@@ -1,16 +1,33 @@
 """
-Todo:
-    1: Perform optimizations 
-        - save results
-    2: Edit documenation
-    3: ML approach to FOM
+Todo
+    1: Rewrite of Paper
+        - More impactful results
+        - Split into supplementary sections
+    2: ML approach to FOM
 
-- Optimization
-    - Target function
-        - What if the derivative of the unit cell in the weight is considered?
+- Results
+    - Model predictions are improved when more peaks are observed.
+        - Train model on data with narrower peaks
+            broadening_tag == 0.66
+        - Train model on data with non-systematically absent peaks
+        - Make a table of unit cell error.
+
+    - Integral Filter model outperforms baseline.
+        - Train baseline model
+
+    - Algorithm has a near 100% success rate with error free data.
+
+    - ML predictions improve sucess rate with error.
+        - Rerun
+        - Include triclinic
+
+    - Execution time and implementation details
+        - Describe user requirements
+        - RAM demand
+        - Cross platform???
 
 - Figure of Merit
-    - Perform optimizations to get training set
+    - Regenerate data
     - Put together a new FOM that utilizes data from all Bravais lattices simultaneously
         - Does this work? Where does this work well?
         - Use results from indexing attempts
@@ -19,15 +36,16 @@ Todo:
     - Radius of convergence testing
     - Add to paper
 
+- Integral filter model
+    x Run baseline models
+    - Run models on narrower breadth data
+        - sa
+        - 0.66
+
 - Reindexing
-    - Catch numerical errors during Selling reduction
+    - Reindex triclinic in reciprocal space
     - Standardization of monoclinic unit cells
         - Run iotbx.symmetry on monoclinic unit cells
-    - Reindex triclinic in reciprocal space
-
-- move to NERSC
-    - How to ideally install python
-    - Where to store the data
 
 - Spacegroup assignments:
     - Add a validation
@@ -54,7 +72,8 @@ Todo:
             tqdm gemmi numba jupyterlab openpyxl skl2onnx onnxruntime
         inference???:
             numpy scipy pandas mpi4py scikit-learn gemmi numba onnxruntime
-                matplotlib jupyterlab
+                matplotlib jupyterlab pyarrow tqdm
+            - where does gemmi get used?
     - Code review
         - Static code analysis
         - Manual read through
@@ -62,6 +81,7 @@ Todo:
             - Use AI powered approaches
                 - Get Continue working in VSCode
         - Tests
+    - move to NERSC
     
 - Data
     - Materials project as cif files
@@ -72,16 +92,15 @@ Todo:
 
 
 - Model ensemble
+- Optimization
 - Templating
-- Integral filter model
-    - Tie together the Miller index assignment and unit cell prediction models.
 - Regression
-    - Hyperparameter training for Mean-Variance models
     - Fix the Individual Prediction for Trees and test
 - Augmentation
 - Random unit cell generator
 - Documentation
 - Indexing.py
+
 
 Readings:
     - Look more into TREOR
@@ -1297,7 +1316,7 @@ class Indexing:
                 split_group_indices = self.data['split_group'] == split_group
                 self.unit_cell_generator[split_group].train_regression(data=self.data[split_group_indices])
                 # Loading from tag ensures the onnx models are loaded for evaluation.
-                self.unit_cell_generator[split_group].load_from_tag(mode=mode)
+                #self.unit_cell_generator[split_group].load_from_tag(mode=mode)
 
     def inferences_regression(self):
         reindexed_uc_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))

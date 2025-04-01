@@ -319,15 +319,17 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
         cos_rbeta = xnn[:, 4] / (2 * ra * rc)    
         cos_rgamma = xnn[:, 5] / (2 * ra * rb)
 
-        bad_ralpha = np.logical_or(cos_ralpha < 0, cos_ralpha > 1)
-        bad_rbeta = np.logical_or(cos_rbeta < 0, cos_rbeta > 1)
-        bad_rgamma = np.logical_or(cos_rgamma < 0, cos_rgamma > 1)
+        # In principal, cos_rangle could be up to 1.0, although this would likely never occur.
+        # This is limited to 0.99 to prevent numerical errors.
+        bad_ralpha = np.logical_or(cos_ralpha < 0, cos_ralpha > 0.95)
+        bad_rbeta = np.logical_or(cos_rbeta < 0, cos_rbeta > 0.95)
+        bad_rgamma = np.logical_or(cos_rgamma < 0, cos_rgamma > 0.95)
         if np.sum(bad_ralpha) > 0:
-            xnn[bad_ralpha, 3] = (2 * rb * rc)[bad_ralpha] * rng.uniform(low=0, high=1, size=np.sum(bad_ralpha))
+            xnn[bad_ralpha, 3] = (2 * rb * rc)[bad_ralpha] * rng.uniform(low=0, high=0.99, size=np.sum(bad_ralpha))
         if np.sum(bad_rbeta) > 0:
-            xnn[bad_rbeta, 4] = (2 * ra * rc)[bad_rbeta] * rng.uniform(low=0, high=1, size=np.sum(bad_rbeta))
+            xnn[bad_rbeta, 4] = (2 * ra * rc)[bad_rbeta] * rng.uniform(low=0, high=0.99, size=np.sum(bad_rbeta))
         if np.sum(bad_rgamma) > 0:
-            xnn[bad_rgamma, 5] = (2 * ra * rb)[bad_rgamma] * rng.uniform(low=0, high=1, size=np.sum(bad_rgamma))
+            xnn[bad_rgamma, 5] = (2 * ra * rb)[bad_rgamma] * rng.uniform(low=0, high=0.99, size=np.sum(bad_rgamma))
         
         # Unit cell volume:
         # abc * sqrt[1 - cos(alpha)**2 - cos(beta)**2 - cos(gamma)**2 + 2*cos(alpha)*cos(beta)*cos(gamma)]
@@ -381,7 +383,8 @@ def fix_unphysical_triclinic(xnn=None, unit_cell=None, rng=None, minimum_unit_ce
 
         # Unit cell here is direct space. So angles are obtuse. The case above is for the Xnn 
         # coordinates which are based on reciprocal space unit cells
-        maximum_angle = np.pi
+        # Angles can occur up to pi or 180 degrees. This is limited to prevent numerical errors.
+        maximum_angle = 0.95 * np.pi
         minimum_angle = np.pi/2
 
         too_small_lengths = unit_cell[:, :3] < minimum_unit_cell
