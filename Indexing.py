@@ -1,31 +1,5 @@
 """
 Todo
-    1: Rewrite of Paper
-        - More impactful results
-        - Split into supplementary sections
-    2: ML approach to FOM
-
-- Results
-    - Model predictions are improved when more peaks are observed.
-        - Train model on data with narrower peaks
-            broadening_tag == 0.66
-        - Train model on data with non-systematically absent peaks
-        - Make a table of unit cell error.
-
-    - Integral Filter model outperforms baseline.
-        - Train baseline model
-
-    - Algorithm has a near 100% success rate with error free data.
-
-    - ML predictions improve sucess rate with error.
-        - Rerun
-        - Include triclinic
-
-    - Execution time and implementation details
-        - Describe user requirements
-        - RAM demand
-        - Cross platform???
-
 - Figure of Merit
     - Regenerate data
     - Put together a new FOM that utilizes data from all Bravais lattices simultaneously
@@ -34,18 +8,6 @@ Todo
 
     - Integrate into optimization
     - Radius of convergence testing
-    - Add to paper
-
-- Integral filter model
-    x Run baseline models
-    - Run models on narrower breadth data
-        - sa
-        - 0.66
-
-- Reindexing
-    - Reindex triclinic in reciprocal space
-    - Standardization of monoclinic unit cells
-        - Run iotbx.symmetry on monoclinic unit cells
 
 - Spacegroup assignments:
     - Add a validation
@@ -56,16 +18,7 @@ Todo
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
 - SWE
-    - Make triclinic optimization robust against failures
-        - Warnings:
-            /Users/DWMoreau/MLI/Utilities.py:626: RuntimeWarning: invalid value encountered in sqrt
-              observed_difference2 = (np.sqrt(q2_obs[np.newaxis]) - np.sqrt(q2_calc))**2
-            /Users/DWMoreau/MLI/Utilities.py:223: RuntimeWarning: invalid value encountered in sqrt
-              volume = unit_cell[:, 0]**3 * np.sqrt(1 - 3*np.cos(unit_cell[:, 1])**2 + 2*np.cos(unit_cell[:, 1])**3)
-            /Users/DWMoreau/MLI/Reindexing.py:608: RuntimeWarning: invalid value encountered in divide
-              gamma = np.arccos(s6[:, 2] / (a*b))
-            /Users/DWMoreau/MLI/Utilities.py:101: RuntimeWarning: invalid value encountered in sqrt
-              a_inv = np.sqrt(S_inv[:, 0, 0])
+    - Reorganize repo
     - Dependencies
         training:
             numpy scipy pandas pyarrow matplotlib mpi4py scikit-learn
@@ -74,6 +27,8 @@ Todo
             numpy scipy pandas mpi4py scikit-learn gemmi numba onnxruntime
                 matplotlib jupyterlab pyarrow tqdm
             - where does gemmi get used?
+            - Why are pandas & pyarrow necessary?
+            - Remove tqdm dependency
     - Code review
         - Static code analysis
         - Manual read through
@@ -81,25 +36,30 @@ Todo
             - Use AI powered approaches
                 - Get Continue working in VSCode
         - Tests
-    - move to NERSC
+    - Get working on NERSC
+    - Get a downloadable version working
+    - Linux testing
+    - Windows testing
     
 - Data
     - Materials project as cif files
-        - mp_20 datset
+        - mp_20 dataset
     - GSASII tutorials
         - Create a refined peak list and attempt optimization for each powder pattern
         - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
 
-
+- Integral filter model
 - Model ensemble
 - Optimization
 - Templating
 - Regression
-    - Fix the Individual Prediction for Trees and test
+    - Remove the MVE
 - Augmentation
 - Random unit cell generator
 - Documentation
 - Indexing.py
+- Reindexing
+    - Reindex triclinic in reciprocal space
 
 
 Readings:
@@ -405,7 +365,7 @@ class Indexing:
             'split',
             ]
 
-        if self.data_params['augment']:
+        if self.data_params['augment'] and self.data_params["broadening_tag"] != 'sa':
             # These are all the non-systematically absent peaks and are used during augmentation
             # to pick new peaks.
             read_columns += ['q2_sa', 'reindexed_h_sa', 'reindexed_k_sa', 'reindexed_l_sa']

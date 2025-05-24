@@ -599,13 +599,85 @@ def get_s6_from_unit_cell(unit_cell):
     return s6
 
 
-def get_unit_cell_from_s6(s6):
+def get_unit_cell_from_s6_with_warnings(s6):
     a = np.sqrt(-(s6[:, 3] + s6[:, 1] + s6[:, 2]))
     b = np.sqrt(-(s6[:, 4] + s6[:, 0] + s6[:, 2]))
     c = np.sqrt(-(s6[:, 5] + s6[:, 0] + s6[:, 1]))
     alpha = np.arccos(s6[:, 0] / (b*c))
     beta = np.arccos(s6[:, 1] / (a*c))
     gamma = np.arccos(s6[:, 2] / (a*b))
+
+    unit_cell = np.column_stack((a, b, c, alpha, beta, gamma))
+    return unit_cell
+
+
+def get_unit_cell_from_s6(s6):
+    a2 = -(s6[:, 3] + s6[:, 1] + s6[:, 2])
+    b2 = -(s6[:, 4] + s6[:, 0] + s6[:, 2])
+    c2 = -(s6[:, 5] + s6[:, 0] + s6[:, 1])
+    nonphysical_lengths = np.any(np.stack((a2, b2, c2), axis=1) <= 0, axis=1)
+    if np.count_nonzero(nonphysical_lengths) == 0:
+        a = np.sqrt(a2)
+        b = np.sqrt(b2)
+        c = np.sqrt(c2)
+        alpha_arg = s6[:, 0] / (b*c)
+        beta_arg = s6[:, 1] / (a*c)
+        gamma_arg = s6[:, 2] / (a*b)
+        nonphysical_angles = np.any(
+            np.abs(np.stack((alpha_arg, beta_arg, gamma_arg), axis=1)) > 1,
+            axis=1
+        )
+    else:
+        physical_lengths = np.invert(nonphysical_lengths)
+        a = np.zeros(s6.shape[0])
+        b = np.zeros(s6.shape[0])
+        c = np.zeros(s6.shape[0])
+
+        a[nonphysical_lengths] = np.nan
+        b[nonphysical_lengths] = np.nan
+        c[nonphysical_lengths] = np.nan
+
+        a[physical_lengths] = np.sqrt(a2[physical_lengths])
+        b[physical_lengths] = np.sqrt(b2[physical_lengths])
+        c[physical_lengths] = np.sqrt(c2[physical_lengths])
+
+        alpha_arg = np.zeros(s6.shape[0])
+        beta_arg = np.zeros(s6.shape[0])
+        gamma_arg = np.zeros(s6.shape[0])
+
+        alpha_arg[nonphysical_lengths] = np.nan
+        beta_arg[nonphysical_lengths] = np.nan
+        gamma_arg[nonphysical_lengths] = np.nan
+
+        alpha_arg[physical_lengths] = s6[physical_lengths, 0] / (b*c)[physical_lengths]
+        beta_arg[physical_lengths] = s6[physical_lengths, 1] / (a*c)[physical_lengths]
+        gamma_arg[physical_lengths] = s6[physical_lengths, 2] / (a*b)[physical_lengths]
+
+        nonphysical_angles = nonphysical_lengths
+
+        nonphysical_angles[physical_lengths] = np.any(np.abs(np.stack((
+            alpha_arg[physical_lengths], 
+            beta_arg[physical_lengths], 
+            gamma_arg[physical_lengths]
+            ), axis=1)) > 1, axis=1)
+
+    if np.count_nonzero(nonphysical_angles) == 0:
+        alpha = np.arccos(alpha_arg)
+        beta = np.arccos(beta_arg)
+        gamma = np.arccos(gamma_arg)
+    else:
+        physical_angles = np.invert(nonphysical_angles)
+        alpha = np.zeros(s6.shape[0])
+        beta = np.zeros(s6.shape[0])
+        gamma = np.zeros(s6.shape[0])
+
+        alpha[nonphysical_angles] = np.nan
+        beta[nonphysical_angles] = np.nan
+        gamma[nonphysical_angles] = np.nan
+
+        alpha[physical_angles] = np.arccos(alpha_arg[physical_angles])
+        beta[physical_angles] = np.arccos(beta_arg[physical_angles])
+        gamma[physical_angles] = np.arccos(gamma_arg[physical_angles])
 
     unit_cell = np.column_stack((a, b, c, alpha, beta, gamma))
     return unit_cell
@@ -965,11 +1037,18 @@ def selling_reduction(unit_cell, space='direct'):
         s6_reduced[indices] = s6_reduced_next[indices]
         hkl_transformation[indices] =  hkl_transformation_next[indices]
 
+    # There is a numerical warning for invalid value encountered in sqrt.
+    # Removing the square root should work and not produce the warning.
     order = np.argsort(np.column_stack((
         np.sqrt(-(s6_reduced[:, 3] + s6_reduced[:, 1] + s6_reduced[:, 2])),
         np.sqrt(-(s6_reduced[:, 4] + s6_reduced[:, 0] + s6_reduced[:, 2])),
         np.sqrt(-(s6_reduced[:, 5] + s6_reduced[:, 0] + s6_reduced[:, 1]))
         )), axis=1)
+    #order = np.argsort(np.column_stack((
+    #    -(s6_reduced[:, 3] + s6_reduced[:, 1] + s6_reduced[:, 2]),
+    #    -(s6_reduced[:, 4] + s6_reduced[:, 0] + s6_reduced[:, 2]),
+    #    -(s6_reduced[:, 5] + s6_reduced[:, 0] + s6_reduced[:, 1])
+    #    )), axis=1)
 
     abc = np.all(order == np.array([0, 1, 2]), axis=1)
     acb = np.all(order == np.array([0, 2, 1]), axis=1)

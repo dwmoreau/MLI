@@ -83,52 +83,90 @@ def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=
         ]).T
 
     # Singular matrices are extremely rare here. They have been observed with triclinic lattices
-    # during the off by two check.
+    # during the off by two check. It is faster to use a try & except statement to catch exceptions
+    # than to verify invertibility.
     success = True
     try:
         S_inv = np.linalg.inv(S)
     except np.linalg.LinAlgError as e:
         print(f'RECIPROCAL-DIRECT UNIT CELL CONVERSION FAILED: {e}')
         print('    RERUNNING CONVERSION WITH SINGULAR MATRIX CHECK')
-        # Using np.linalg.matrix_rank(S, hermitian=True) == 3, gives an error here.
-        invertible = np.all(np.column_stack((
-            np.linalg.det(S) != 0,
-            np.isfinite(np.linalg.cond(S))
-            )), axis=1)
+        # nans in the S matrices makes them non-invertible. They also cause exceptions in the
+        # numpy functions that check for invertibility.
+        invertible = np.invert(np.any(np.isnan(S), axis=(1, 2)))
+        # These are other checks to find which matrices are invertible.
+        invertible[invertible] = np.linalg.det(S[invertible]) != 0
+        invertible[invertible] = np.isfinite(np.linalg.cond(S[invertible]))
+        invertible[invertible] = np.linalg.matrix_rank(S[invertible], hermitian=True) == 3
         S_inv = np.zeros(S.shape)
         S_inv[invertible] = np.linalg.inv(S[invertible])
         success = False
 
-    if success:
+    diag = np.diagonal(S_inv, axis1=1, axis2=2)
+    nonphysical_lengths = np.any(diag <= 0, axis=1)
+    if np.count_nonzero(nonphysical_lengths) == 0:
         a_inv = np.sqrt(S_inv[:, 0, 0])
         b_inv = np.sqrt(S_inv[:, 1, 1])
         c_inv = np.sqrt(S_inv[:, 2, 2])
 
-        alpha_inv = np.arccos(S_inv[:, 1, 2] / (b_inv * c_inv))
-        beta_inv = np.arccos(S_inv[:, 0, 2] / (a_inv * c_inv))
-        gamma_inv = np.arccos(S_inv[:, 0, 1] / (a_inv * b_inv))
+        alpha_arg = S_inv[:, 1, 2] / (b_inv * c_inv)
+        beta_arg = S_inv[:, 0, 2] / (a_inv * c_inv)
+        gamma_arg = S_inv[:, 0, 1] / (a_inv * b_inv)
+        nonphysical_angles = np.any(
+            np.abs(np.stack((alpha_arg, beta_arg, gamma_arg), axis=1)) > 1,
+            axis=1
+        )
     else:
+        physical_lengths = np.invert(nonphysical_lengths)
         a_inv = np.zeros(unit_cell.shape[0])
         b_inv = np.zeros(unit_cell.shape[0])
         c_inv = np.zeros(unit_cell.shape[0])
+
+        a_inv[nonphysical_lengths] = np.nan
+        b_inv[nonphysical_lengths] = np.nan
+        c_inv[nonphysical_lengths] = np.nan
+
+        a_inv[physical_lengths] = np.sqrt(S_inv[physical_lengths, 0, 0])
+        b_inv[physical_lengths] = np.sqrt(S_inv[physical_lengths, 1, 1])
+        c_inv[physical_lengths] = np.sqrt(S_inv[physical_lengths, 2, 2])
+
+        alpha_arg = np.zeros(unit_cell.shape[0])
+        beta_arg = np.zeros(unit_cell.shape[0])
+        gamma_arg = np.zeros(unit_cell.shape[0])
+
+        alpha_arg[nonphysical_lengths] = np.nan
+        beta_arg[nonphysical_lengths] = np.nan
+        gamma_arg[nonphysical_lengths] = np.nan
+
+        alpha_arg[physical_lengths] = S_inv[physical_lengths, 1, 2] / (b_inv * c_inv)[physical_lengths]
+        beta_arg[physical_lengths] = S_inv[physical_lengths, 0, 2] / (a_inv * c_inv)[physical_lengths]
+        gamma_arg[physical_lengths] = S_inv[physical_lengths, 0, 1] / (a_inv * b_inv)[physical_lengths]
+
+        nonphysical_angles = nonphysical_lengths
+
+        nonphysical_angles[physical_lengths] = np.any(np.abs(np.stack((
+            alpha_arg[physical_lengths], 
+            beta_arg[physical_lengths], 
+            gamma_arg[physical_lengths]
+            ), axis=1)) > 1, axis=1)
+
+    if np.count_nonzero(nonphysical_angles) == 0:
+        alpha_inv = np.arccos(alpha_arg)
+        beta_inv = np.arccos(beta_arg)
+        gamma_inv = np.arccos(gamma_arg)
+    else:
+        physical_angles = np.invert(nonphysical_angles)
         alpha_inv = np.zeros(unit_cell.shape[0])
         beta_inv = np.zeros(unit_cell.shape[0])
         gamma_inv = np.zeros(unit_cell.shape[0])
 
-        a_inv[~invertible] = np.nan
-        b_inv[~invertible] = np.nan
-        c_inv[~invertible] = np.nan
-        alpha_inv[~invertible] = np.nan
-        beta_inv[~invertible] = np.nan
-        gamma_inv[~invertible] = np.nan
+        alpha_inv[nonphysical_angles] = np.nan
+        beta_inv[nonphysical_angles] = np.nan
+        gamma_inv[nonphysical_angles] = np.nan
 
-        a_inv[invertible] = np.sqrt(S_inv[invertible, 0, 0])
-        b_inv[invertible] = np.sqrt(S_inv[invertible, 1, 1])
-        c_inv[invertible] = np.sqrt(S_inv[invertible, 2, 2])
-
-        alpha_inv[invertible] = np.arccos(S_inv[invertible, 1, 2] / (b_inv * c_inv)[invertible])
-        beta_inv[invertible] = np.arccos(S_inv[invertible, 0, 2] / (a_inv * c_inv)[invertible])
-        gamma_inv[invertible] = np.arccos(S_inv[invertible, 0, 1] / (a_inv * b_inv)[invertible])
+        alpha_inv[physical_angles] = np.arccos(alpha_arg[physical_angles])
+        beta_inv[physical_angles] = np.arccos(beta_arg[physical_angles])
+        gamma_inv[physical_angles] = np.arccos(gamma_arg[physical_angles])
     
     if partial_unit_cell and lattice_system != 'triclinic':
         if lattice_system == 'cubic':

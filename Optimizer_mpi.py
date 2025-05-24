@@ -602,18 +602,11 @@ class OptimizerBase:
         # each axis. This also performs a quick reindexing.
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
-        print('Done with optimization')
         candidates.refine_cell()
-        print('    - Done with refinement')
         candidates.standardize_cell()
-        print('    - Done with standardization')
         candidates.correct_off_by_two()
-        print('    - Done with off by two')
         candidates.assign_extinction_group()
-        print('    - Done with extinction group')
         candidates.calculate_peaks_indexed()
-        print('    - Done with peaks indexed')
-        print()
         if self.opt_params['convergence_testing']:
             self.convergence_testing(candidates)
         else:
@@ -711,7 +704,7 @@ class OptimizerManager(OptimizerBase):
                     load_pitf = True
                 elif generator_info['generator'] == 'templates':
                     load_templates = True
-                elif generator_info['generator'] == 'predicted_volume':
+                elif generator_info['generator'] in ['predicted_volume', 'distribution_volume', 'random']:
                     load_random = True
             if load_nn and load_random_forest:
                 self.indexer.setup_regression(mode='inference:both')

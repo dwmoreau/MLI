@@ -116,7 +116,7 @@ oI |
 oP | 
 mC | {'Not found': 300, 'Found': 697, 'Off by two': 3, 'Found explainers': 0}
 mP | {'Not found': 370, 'Found': 616, 'Off by two': 14, 'Found explainers': 0}
-aP |
+aP | {'Not found': 785, 'Found': 215, 'Off by two': 0, 'Found explainers': 0}
 
     - 1X q2_error & 3 contaminants
 oC | 
@@ -125,7 +125,7 @@ oI |
 oP | 
 mC | {'Not found': 458, 'Found': 539, 'Off by two': 3, 'Found explainers': 0}
 mP | {'Not found': 508, 'Found': 472, 'Off by two': 20, 'Found explainers': 0}
-aP |
+aP | {'Not found': 897, 'Found': 103, 'Off by two': 0, 'Found explainers': 0}
 
     - 1X q2_error & 4 contaminants
 oC | 
@@ -134,7 +134,7 @@ oI |
 oP | 
 mC | {'Not found': 615, 'Found': 384, 'Off by two': 1, 'Found explainers': 0}
 mP | {'Not found': 648, 'Found': 343, 'Off by two': 9, 'Found explainers': 0}
-aP |
+aP | {'Not found': 941, 'Found': 59, 'Off by two': 0, 'Found explainers': 0}
 
     - 1X q2_error & 5 contaminants
 oC | 
@@ -143,7 +143,7 @@ oI |
 oP | 
 mC | {'Not found': 722, 'Found': 276, 'Off by two': 2, 'Found explainers': 0}
 mP | {'Not found': 750, 'Found': 238, 'Off by two': 12, 'Found explainers': 0}
-aP |
+aP | {'Not found': 969, 'Found': 31, 'Off by two': 0, 'Found explainers': 0}
 
     - 1X q2_error & 6 contaminants
 oC | 
@@ -152,7 +152,7 @@ oI |
 oP | 
 mC | {'Not found': 799, 'Found': 201, 'Off by two': 0, 'Found explainers': 0}
 mP | {'Not found': 823, 'Found': 164, 'Off by two': 13, 'Found explainers': 0}
-aP |
+aP | {'Not found': 982, 'Found': 17, 'Off by two': 1, 'Found explainers': 0}
 
     - 1X q2_error & 1 contaminants & n_candidates
      1000 | 2000 | 3000 | 4000
@@ -184,34 +184,62 @@ aP |
     - NO q2 ERROR - Random unit cell generation
 mC | {'Not found': 21, 'Found': 792, 'Off by two': 2, 'Found explainers': 185}
 mP | {'Not found': 48, 'Found': 927, 'Off by two': 0, 'Found explainers': 25}
-aP | 
+aP | {'Not found': 102, 'Found': 760, 'Off by two': 0, 'Found explainers': 138}
 
     - 1x q2 ERROR - Random unit cell generation
 mC | {'Not found': 248, 'Found': 749, 'Off by two': 3, 'Found explainers': 0}
 mP | {'Not found': 168, 'Found': 831, 'Off by two': 1, 'Found explainers': 0}
-aP | 
+aP | {'Not found': 566, 'Found': 434, 'Off by two': 0, 'Found explainers': 0}
 
     - 2x q2 ERROR - Random unit cell generation
 mC | {'Not found': 426, 'Found': 564, 'Off by two': 10, 'Found explainers': 0}
 mP | {'Not found': 360, 'Found': 639, 'Off by two': 1, 'Found explainers': 0}
-aP | 
+aP | {'Not found': 861, 'Found': 139, 'Off by two': 0, 'Found explainers': 0}
 
     - 3x q2 ERROR - Random unit cell generation
 mC | {'Not found': 669, 'Found': 324, 'Off by two': 7, 'Found explainers': 0}
 mP | {'Not found': 593, 'Found': 405, 'Off by two': 2, 'Found explainers': 0}
-aP | 
-
+aP | {'Not found': 966, 'Found': 34, 'Off by two': 0, 'Found explainers': 0}
 
     - 4x q2 ERROR - Random unit cell generation
 mC | {'Not found': 800, 'Found': 197, 'Off by two': 3, 'Found explainers': 0}
 mP | {'Not found': 770, 'Found': 230, 'Off by two': 0, 'Found explainers': 0}
-aP | 
+aP | {'Not found': 992, 'Found': 8, 'Off by two': 0, 'Found explainers': 0}
 
     - 6x q2 ERROR - Random unit cell generation
 mC | {'Not found': 957, 'Found': 41, 'Off by two': 2, 'Found explainers': 0}
 mP | {'Not found': 951, 'Found': 49, 'Off by two': 0, 'Found explainers': 0}
-aP | 
+aP | {'Not found': 1000, 'Found': 0, 'Off by two': 0, 'Found explainers': 0}
 
+    - 1x q2 ERROR & 1 contaminant- Random unit cell generation
+mC | {'Not found': 343, 'Found': 650, 'Off by two': 7, 'Found explainers': 0}
+mP | {'Not found': 302, 'Found': 690, 'Off by two': 8, 'Found explainers': 0}
+aP | {'Not found': 726, 'Found': 274, 'Off by two': 0, 'Found explainers': 0}
+
+    - 1x q2 ERROR & 2 contaminant- Random unit cell generation
+mC | {'Not found': 449, 'Found': 545, 'Off by two': 6, 'Found explainers': 0}
+mP | {'Not found': 422, 'Found': 570, 'Off by two': 8, 'Found explainers': 0}
+aP | {'Not found': 817, 'Found': 183, 'Off by two': 0, 'Found explainers': 0}
+
+    - 1x q2 ERROR & 3 contaminant- Random unit cell generation
+mC | {'Not found': 541, 'Found': 453, 'Off by two': 6, 'Found explainers': 0}
+mP | {'Not found': 520, 'Found': 468, 'Off by two': 12, 'Found explainers': 0}
+aP | {'Not found': 905, 'Found': 95, 'Off by two': 0, 'Found explainers': 0}
+
+    - 1x q2 ERROR & 4 contaminant- Random unit cell generation
+mC | {'Not found': 656, 'Found': 344, 'Off by two': 0, 'Found explainers': 0}
+mP | {'Not found': 638, 'Found': 356, 'Off by two': 6, 'Found explainers': 0}
+aP | {'Not found': 943, 'Found': 57, 'Off by two': 0, 'Found explainers': 0}
+
+    - 1x q2 ERROR & 5 contaminant- Random unit cell generation
+mC | {'Not found': 735, 'Found': 263, 'Off by two': 2, 'Found explainers': 0}
+mP | {'Not found': 719, 'Found': 272, 'Off by two': 9, 'Found explainers': 0}
+aP | {'Not found': 951, 'Found': 49, 'Off by two': 0, 'Found explainers': 0}
+
+    - 1x q2 ERROR & 6 contaminant- Random unit cell generation
+mC | {'Not found': 790, 'Found': 209, 'Off by two': 1, 'Found explainers': 0}
+mP | {'Not found': 781, 'Found': 208, 'Off by two': 11, 'Found explainers': 0}
+aP | {'Not found': 978, 'Found': 22, 'Off by two': 0, 'Found explainers': 0}
 """
 from mpi4py import MPI
 import os
@@ -247,10 +275,10 @@ if __name__ == '__main__':
 
     load_data = True
     broadening_tag = '1'
-    n_entries = 10
+    n_entries = 1000
 
     peak_generation_info = get_peak_generation_info()
-    q2_error_params = 1 * peak_generation_info['q2_error_params']
+    q2_error_params = 3 * peak_generation_info['q2_error_params']
     q2_broadening_params = peak_generation_info['broadening_params']
     n_contaminants = 0
     n_top_candidates = 20
