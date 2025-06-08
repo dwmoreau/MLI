@@ -55,7 +55,6 @@ class RandomGenerator:
         centers = (bins[1:] + bins[:-1]) / 2
         pdf, _ = np.histogram(vol[train], bins=bins, density=True)
         cdf = np.cumsum(pdf) * (bins[1] - bins[0])
-        self.volume_distribution = np.column_stack((centers, pdf, cdf))
         fig, axes = plt.subplots(1, 1, figsize=(5, 3))
         axes.bar(centers, pdf, width=(bins[1] - bins[0]))
         axes_r = axes.twinx()
@@ -183,13 +182,6 @@ class RandomGenerator:
                 ),
             self.volume_lims
             )
-        np.save(
-            os.path.join(
-                f'{self.save_to}',
-                f'{self.bravais_lattice}_volume_distribution.npy'
-                ),
-            self.volume_distribution
-            )
 
     def load_from_tag(self):
         params = read_params(os.path.join(
@@ -226,10 +218,6 @@ class RandomGenerator:
         self.volume_lims = np.load(os.path.join(
             f'{self.save_to}',
             f'{self.bravais_lattice}_volume_lims.npy'
-            ))
-        self.volume_distribution = np.load(os.path.join(
-            f'{self.save_to}',
-            f'{self.bravais_lattice}_volume_distribution.npy'
             ))
 
     def generate(self, n_unit_cells, rng, q2_obs, model=None):
@@ -272,10 +260,6 @@ class RandomGenerator:
             random_volume_scale = rng.uniform(
                 low=self.volume_lims[0], high=self.volume_lims[1], size=n_unit_cells
                 )
-        elif model == 'distribution_volume':
-            rand = rng.random(size=n_unit_cells)
-            indices = np.searchsorted(self.volume_distribution[:, 2], rand)
-            random_volume_scale = self.volume_distribution[indices, 0]
         elif model == 'predicted_volume':
             preds = self.random_forest_regressor.predict_individual_trees(
                 q2_obs[np.newaxis], n_outputs=1

@@ -21,7 +21,7 @@ from TargetFunctions import CandidateOptLoss
 
 
 class PhysicsInformedModel:
-    def __init__(self, split_group, data_params, model_params, save_to, seed, q2_scaler, xnn_scaler, hkl_ref):
+    def __init__(self, split_group, data_params, model_params, save_to, seed, hkl_ref):
         self.split_group = split_group
         self.data_params = data_params
         self.model_params = model_params
@@ -37,8 +37,6 @@ class PhysicsInformedModel:
         self.rng = np.random.default_rng(self.seed)
         self.lattice_system = self.data_params['lattice_system']
         self.hkl_ref = hkl_ref
-        self.global_q2_scaler = q2_scaler
-        self.global_xnn_scaler = xnn_scaler
 
     def setup(self, data):
         model_params_defaults = {
@@ -80,9 +78,6 @@ class PhysicsInformedModel:
             if key not in self.model_params['calibration_params'].keys():
                 self.model_params['calibration_params'][key] = model_params_defaults['calibration_params'][key]
         self.model_params['unit_cell_length'] = self.unit_cell_length
-        if self.model_params['model_type'] == 'deep':
-            self.model_params['n_volumes'] = self.model_params['n_volumes_depth'][0]
-            self.model_params['n_filters'] = self.model_params['n_filters_depth'][-1]
         self.build_model(data=data)
         self.build_calibration_model()
 
@@ -335,8 +330,6 @@ class PhysicsInformedModel:
             self.model = keras.Model(inputs, self.model_builder_metric(inputs))
         elif self.model_params['model_type'] == 'base_line':
             self.model = keras.Model(inputs, self.model_builder_base_line(inputs))
-        elif self.model_params['model_type'] == 'deep':
-            self.model = keras.Model(inputs, self.model_builder_deep(inputs))
         self.compile_model()
         #self.model.summary()
 
@@ -346,13 +339,13 @@ class PhysicsInformedModel:
             lattice_system=self.data_params['lattice_system'],
             hkl_ref=self.hkl_ref,
             tensorflow=True,
-            q2_scaler=self.global_q2_scaler,
+            q2_scaler=self.q2_obs_scale,
             )
         self.pairwise_difference_calculation_numpy = PairwiseDifferenceCalculator(
             lattice_system=self.data_params['lattice_system'],
             hkl_ref=self.hkl_ref,
             tensorflow=False,
-            q2_scaler=self.global_q2_scaler,
+            q2_scaler=self.q2_obs_scale,
             )
         inputs = (
             keras.Input(
@@ -456,159 +449,6 @@ class PhysicsInformedModel:
                 kernel_initializer=keras.initializers.HeUniform
                 )(x)
 
-        # output: batch_size, n_volumes, unit_cell_length + 1
-        output = keras.layers.Dense(
-            self.unit_cell_length + 1,
-            activation='linear',
-            name=f'{self.model_params["model_type"]}_xnn_scaled',
-            kernel_initializer=keras.initializers.HeUniform
-            )(x)
-        return output
-
-    def model_builder_deep(self, inputs):
-        import keras
-        # inputs: batch_size, n_peaks
-        # metric: batch_size, n_volumes, n_filters
-        ################################################
-        # Initial Dense layers that predict amplitudes #
-        ################################################
-        x_initial = inputs
-        for index in range(len(self.model_params['initial_layers'])):
-            x_initial = keras.layers.Dense(
-                self.model_params['initial_layers'][index],
-                activation=keras.activations.gelu,
-                name=f'initial_metric_dense_{index}',
-                use_bias=False,
-                kernel_initializer=keras.initializers.HeUniform
-                )(x_initial)
-        amplitude_logits = keras.layers.Dense(
-            self.model_params['n_filters_depth'][0]*self.model_params['filter_length']*self.model_params['extraction_peak_length'],
-            activation='linear',
-            name='initial_amplitude_logits',
-            use_bias=False,
-            kernel_initializer=keras.initializers.HeUniform
-            )(x_initial)
-        amplitude_logits = keras.layers.Reshape(
-            (
-                1,
-                self.model_params['n_filters_depth'][0],
-                self.model_params['filter_length'],
-                self.model_params['extraction_peak_length']
-                )
-            )(amplitude_logits)
-        amplitude = keras.activations.softmax(
-            amplitude_logits, axis=4
-            )
-
-        ############################
-        # Metric prediction layers #
-        ############################
-        # unweighted_metric: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
-        # metric:            batch_size, n_volumes, n_filters
-        unweighted_metric = self.extraction_layer(
-            inputs[:, :self.model_params['extraction_peak_length']],
-            )
-        metric = keras.ops.sum(
-            amplitude * unweighted_metric[:, :, :self.model_params['n_filters_depth'][0], :, :],
-            axis=(3, 4)
-            )
-        for depth_index in range(1, len(self.model_params['n_volumes_depth'])):
-            volume_rankings = keras.ops.sum(metric, axis=2)
-            volume_sort_indices = tf.argsort(volume_rankings, axis=1, direction='DESCENDING')
-            if depth_index == 1:
-                volume_indices = volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]]
-            else:
-                volume_indices = tf.gather(
-                    params=volume_indices,
-                    indices=volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]],
-                    axis=1,
-                    batch_dims=1
-                    )
-            metric = tf.gather(
-                params=metric,
-                indices=volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]],
-                axis=1,
-                batch_dims=1,
-                )
-            # unweighted_metric: bs, n_volumes, n_filters, filter_length, peak_extraction_length
-            unweighted_metric = tf.gather(
-                params=unweighted_metric,
-                indices=volume_sort_indices[:, :self.model_params['n_volumes_depth'][depth_index]],
-                axis=1,
-                batch_dims=1,
-                )
-            x_depth = metric
-            for index in range(len(self.model_params['depth_layers'])):
-                x_depth = keras.layers.Dense(
-                    self.model_params['depth_layers'][index],
-                    activation=keras.activations.gelu,
-                    name=f'depth_metric_dense_{depth_index}_{index}',
-                    use_bias=False,
-                    kernel_initializer=keras.initializers.HeUniform
-                    )(x_depth)
-            amplitude_logits = keras.layers.Dense(
-                self.model_params['n_filters_depth'][depth_index]*self.model_params['filter_length']*self.model_params['extraction_peak_length'],
-                activation='linear',
-                name=f'depth_amplitude_logits_{depth_index}',
-                use_bias=False,
-                kernel_initializer=keras.initializers.HeUniform,
-                kernel_regularizer=keras.regularizers.L1(
-                    l1=self.model_params['l1_regularization']
-                    ),
-                )(x_depth)
-            amplitude_logits = keras.layers.Reshape(
-                (
-                    self.model_params['n_volumes_depth'][depth_index],
-                    self.model_params['n_filters_depth'][depth_index],
-                    self.model_params['filter_length'],
-                    self.model_params['extraction_peak_length']
-                    )
-                )(amplitude_logits)
-            amplitude = keras.activations.softmax(
-                amplitude_logits, axis=4
-                )
-            metric = keras.ops.sum(
-                amplitude * unweighted_metric[:, :, :self.model_params['n_filters_depth'][depth_index], :, :],
-                axis=(3, 4)
-                )
-        # x_depth:         bs, n_volumes, arb_units
-        # volumes_indices: bs, n_volumes
-        if len(self.model_params['n_volumes_depth']) == 1:
-            volume_rankings = keras.ops.sum(metric, axis=2)
-            volume_sort_indices = tf.argsort(volume_rankings, axis=1, direction='DESCENDING')
-            volume_indices = volume_sort_indices
-            x = tf.gather(
-                params=metric,
-                indices=volume_sort_indices,
-                axis=1,
-                batch_dims=1,
-                )
-        elif len(self.model_params['n_volumes_depth']) > 1:
-            volume_embeddings = keras.layers.Embedding(
-                input_dim=self.model_params['n_volumes_depth'][0],
-                output_dim=1,
-                embeddings_initializer="uniform",
-                embeddings_regularizer=None,
-                input_length=None,
-                sparse=False,
-                )(volume_indices)
-            #volume_embeddings = (volume_indices/self.model_params['n_volumes_depth'][0])[:, :, tf.newaxis]
-            x = keras.layers.Concatenate(axis=2)((metric, volume_embeddings))
-
-        ################
-        # Hiden layers #
-        ################
-        for index in range(len(self.model_params['final_layers'])):
-            x = keras.layers.Dense(
-                self.model_params['final_layers'][index],
-                activation=keras.activations.gelu,
-                name=f'metric_dense_{index}',
-                use_bias=False,
-                kernel_regularizer=keras.regularizers.L1(
-                    l1=self.model_params['l1_regularization']
-                    ),
-                kernel_initializer=keras.initializers.HeUniform
-                )(x)
         # output: batch_size, n_volumes, unit_cell_length + 1
         output = keras.layers.Dense(
             self.unit_cell_length + 1,
@@ -902,11 +742,11 @@ class PhysicsInformedModel:
         train_xnn_pred_top5 = train_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
 
         train_inputs_calibration = (
-            np.stack(train['q2_scaled']),
+            np.stack(train['q2']) / self.q2_obs_scale,
             train_xnn_pred_top5[:, 0],
             )
         val_inputs_calibration = (
-            np.stack(val['q2_scaled']),
+            np.stack(val['q2']) / self.q2_obs_scale,
             val_xnn_pred_top5[:, 0],
             )
         train_true_calibration = np.stack(train['hkl_labels'])
@@ -998,7 +838,7 @@ class PhysicsInformedModel:
         return xnn_pred_top_n, softmax_pred_top_n
 
     def predict_hkl(self, q2_obs, xnn, batch_size=None):
-        q2_obs_scaled = (q2_obs - self.global_q2_scaler.mean_[0]) / self.global_q2_scaler.scale_[0]
+        q2_obs_scaled = q2_obs / self.q2_obs_scale
 
         #print(f'\n Regression inferences for {self.split_group}')
         if batch_size is None:
@@ -1491,8 +1331,8 @@ class PhysicsInformedModel:
         hkl_labels_true_train = np.stack(train['hkl_labels'])
         hkl_labels_true_val = np.stack(val['hkl_labels'])
 
-        train_q2_obs_scaled = np.stack(train['q2_scaled'])
-        val_q2_obs_scaled = np.stack(val['q2_scaled'])
+        train_q2_obs_scaled = np.stack(train['q2']) / self.q2_obs_scale
+        val_q2_obs_scaled = np.stack(val['q2']) / self.q2_obs_scale
         train_inputs_calibration = (
             train_q2_obs_scaled,
             train_xnn,

@@ -245,7 +245,7 @@ def calibrate_regression_pitf(data, unit_cell_length, unit_cell_key, save_to_nam
     plt.close()
 
 
-def evaluate_regression(data, unit_cell_length, unit_cell_key, save_to_name, unit_cell_indices, model):
+def evaluate_regression(data, unit_cell_length, unit_cell_key, save_to_name, unit_cell_indices):
     alpha = 0.1
     markersize = 0.5
 
@@ -257,16 +257,10 @@ def evaluate_regression(data, unit_cell_length, unit_cell_key, save_to_name, uni
     y_true = np.stack(data[unit_cell_key])[:, unit_cell_indices]
     y_true_train = np.stack(data[data['train']][unit_cell_key])[:, unit_cell_indices]
     y_true_val = np.stack(data[~data['train']][unit_cell_key])[:, unit_cell_indices]
-    if model == 'trees':
-        y_pred = np.stack(data[f'{unit_cell_key}_pred_trees'])
-        y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred_trees'])
-        y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred_trees'])
-        y_std = np.sqrt(np.stack(data[f'{unit_cell_key}_pred_var_trees']))
-    elif model == 'nn':
-        y_pred = np.stack(data[f'{unit_cell_key}_pred'])
-        y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred'])
-        y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred'])
-        y_std = np.sqrt(np.stack(data[f'{unit_cell_key}_pred_var']))
+    y_pred = np.stack(data[f'{unit_cell_key}_pred'])
+    y_pred_train = np.stack(data[data['train']][f'{unit_cell_key}_pred'])
+    y_pred_val = np.stack(data[~data['train']][f'{unit_cell_key}_pred'])
+    y_std = np.sqrt(np.stack(data[f'{unit_cell_key}_pred_var']))
 
     y_error = np.abs(y_pred - y_true)
     y_error_train = np.abs(y_pred_train - y_true_train)
@@ -367,7 +361,7 @@ def evaluate_regression(data, unit_cell_length, unit_cell_key, save_to_name, uni
     plt.close()
 
 
-def calibrate_regression(data, unit_cell_length, unit_cell_key, save_to_name, unit_cell_indices, model):
+def calibrate_regression(data, unit_cell_length, unit_cell_key, save_to_name, unit_cell_indices):
     # calculate residuals / uncertainty
     hist_bins = np.linspace(-4, 4, 101)
     hist_centers = (hist_bins[1:] + hist_bins[:-1]) / 2
@@ -389,12 +383,8 @@ def calibrate_regression(data, unit_cell_length, unit_cell_key, save_to_name, un
     ENCE = np.zeros((unit_cell_length, 2, n_calib_bins))
     for train_index in range(2):
         y_true = np.stack(data[train_index][unit_cell_key])[:, unit_cell_indices]
-        if model == 'trees':
-            y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred_trees'])
-            y_std = np.sqrt(np.stack(data[train_index][f'{unit_cell_key}_pred_var_trees']))
-        elif model == 'nn':
-            y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred'])
-            y_std = np.sqrt(np.stack(data[train_index][f'{unit_cell_key}_pred_var']))
+        y_pred = np.stack(data[train_index][f'{unit_cell_key}_pred'])
+        y_std = np.sqrt(np.stack(data[train_index][f'{unit_cell_key}_pred_var']))
         y_error = y_pred - y_true
 
         for index in range(unit_cell_length):

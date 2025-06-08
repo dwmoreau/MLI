@@ -120,6 +120,7 @@ class PeakListCreator:
         max_reflections_per_experiment=100,
         known_unit_cell=None, 
         known_space_group=None,
+        variable_detector=False,
     ):
         
         if type(input_path_template) == str or input_path_template is None:
@@ -128,6 +129,7 @@ class PeakListCreator:
         elif type(input_path_template) == list:
             self.multiple_run_groups = True
             self.input_path_template = input_path_template
+
         if not run_limits_sacla is None:
             assert False
             self.runs = []
@@ -139,6 +141,8 @@ class PeakListCreator:
                 self.runs = [np.arange(rl[0], rl[1] + 1) for rl in run_limits]
             else:
                 self.runs = [np.arange(run_limits[0], run_limits[1] + 1)]
+        elif runs is None:
+            self.runs = [[None]]
         else:
             if self.multiple_run_groups:
                 self.runs = runs
@@ -147,6 +151,8 @@ class PeakListCreator:
 
         self.max_reflections_per_experiment = max_reflections_per_experiment
         self.min_reflections_per_experiment = min_reflections_per_experiment
+
+        self.variable_detector = variable_detector
         
         self.suffix = suffix
         self.tag = tag
@@ -187,11 +193,11 @@ class PeakListCreator:
         self.error = None
         self.triplets_obs = None
 
-    def _run_combine_experiments(self, expt_file_names, refl_file_names, run_str, ref=True):
+    def _run_combine_experiments(self, expt_file_names, refl_file_names, run_str):
         command = ['dials.combine_experiments']
         command += expt_file_names
         command += refl_file_names
-        if ref:
+        if self.variable_detector == False:
             command += ['reference_from_experiment.detector=0']
         command += [
             f'max_reflections_per_experiment={self.max_reflections_per_experiment}',
@@ -240,6 +246,8 @@ class PeakListCreator:
                 refl_file_names_run = []
                 if type(run) == str:
                     run_str = run
+                elif run is None:
+                    run_str = ''
                 else:
                     run_str = f'{run:04d}'
                 input_path = self.input_path_template[rg_index].replace('!!!!', run_str)
@@ -253,7 +261,7 @@ class PeakListCreator:
                                 refl_file_names_run.append(refl_file_name)
                     if len(expt_file_names_run) > 0:
                         refl_counts = self._run_combine_experiments(
-                            expt_file_names_run, refl_file_names_run, run_str, ref=True
+                            expt_file_names_run, refl_file_names_run, run_str
                             )
                         if refl_counts > 0:
                             expt_file_names_rg.append(os.path.join(
@@ -263,7 +271,7 @@ class PeakListCreator:
                                 self.save_to_directory, f'{self.tag}_combined_{run_str}.refl'
                                 ))
             self._run_combine_experiments(
-                expt_file_names_rg, refl_file_names_rg, f'rg_index_{rg_index}', ref=True
+                expt_file_names_rg, refl_file_names_rg, f'rg_index_{rg_index}'
                 )
             expt_file_names.append(os.path.join(
                 self.save_to_directory, f'{self.tag}_combined_rg_index_{rg_index}.expt'
@@ -272,7 +280,7 @@ class PeakListCreator:
                 self.save_to_directory, f'{self.tag}_combined_rg_index_{rg_index}.refl'
                 ))
         self._run_combine_experiments(
-            expt_file_names, refl_file_names, 'all', ref=False
+            expt_file_names, refl_file_names, 'all'
             )
     
     def _get_s1_from_xyz(self, panel, xyz, wavelength):
@@ -794,6 +802,7 @@ class PeakListCreator:
             s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
             # q2_lattice is the magnitude**2 of the scattering vector
             q2.append(self._get_q2_spacing(s1_normed, s0))
+            start += refl_counts
         self.q2_obs = np.concatenate(q2)
 
     def filter_peaks(self, n_peaks=20, max_difference=None, delta=None, max_refl_counts=None, threshold=0.50, mask=True):

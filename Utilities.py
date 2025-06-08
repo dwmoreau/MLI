@@ -1,10 +1,4 @@
-import csv
-import gemmi
-import joblib
-import json
-from numba import jit
 import numpy as np
-import os
 
 
 def get_peak_generation_info():
@@ -1013,6 +1007,7 @@ def get_hkl_matrix(hkl, lattice_system):
 
 
 def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
+    import gemmi
     # https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
     if bravais_lattice == 'cF':
         spacegroups =        ['F 2 3',   'F d -3',  'F 41 3 2', 'F -4 3 c', 'F d -3 c']
@@ -1577,11 +1572,13 @@ class Q2Calculator:
 class PairwiseDifferenceCalculator(Q2Calculator):
     def __init__(self, lattice_system, hkl_ref, tensorflow, q2_scaler):
         super().__init__(lattice_system, hkl_ref, tensorflow, 'xnn')
-        self.q2_scaler = q2_scaler
+        # The conversion to float prevents a failure if the q2_scaler is a numpy object
+        # This would occur if it was calculated from np.std() for example.
+        self.q2_scaler = float(q2_scaler)
 
     def get_pairwise_differences(self, xnn, q2_scaled, return_q2_ref=False):
         q2_ref = self.get_q2(xnn)
-        q2_ref_scaled = (q2_ref - self.q2_scaler.mean_[0]) / self.q2_scaler.scale_[0]
+        q2_ref_scaled = q2_ref / self.q2_scaler
         # d_spacing_ref: n_entries x hkl_ref_length
         # x: n_entries x n_peaks
         # differences = n_entries x n_peaks x hkl_ref_length
@@ -1722,54 +1719,3 @@ def assign_hkl_triplets(triplets_obs, hkl_assign, triplet_hkl_ref, q2_ref_calc):
                 min_index = np.argmin(diff)
                 hkl_assign_triplets[candidate_index, triplet_index] = hkl_assign_pair[min_index]
     return hkl_assign_triplets
-
-
-@jit(fastmath=True)
-def fast_assign(q2_obs, q2_ref):
-    n_obs = q2_obs.size
-    n_candidates = q2_ref.shape[0]
-    n_ref = q2_ref.shape[1]
-    hkl_assign = np.zeros((n_candidates, n_obs), dtype=np.uint16)
-    for candidate_index in range(n_candidates):
-        for obs_index in range(n_obs):
-            current_min = 100.0
-            for ref_index in range(n_ref):
-                diff = abs(q2_obs[obs_index] - q2_ref[candidate_index, ref_index])
-                if diff < current_min:
-                    current_min = diff
-                    hkl_assign[candidate_index, obs_index] = ref_index
-    return hkl_assign
-
-
-@jit(fastmath=True)
-def fast_assign_top_n(q2_obs, q2_ref, top_n):
-    n_obs = q2_obs.size
-    n_candidates = q2_ref.shape[0]
-    n_ref = q2_ref.shape[1]
-    hkl_assign = np.zeros((n_candidates, n_obs, top_n), dtype=np.uint16)
-    for candidate_index in range(1):
-        for obs_index in range(n_obs):
-            current_min = [100.0 for _ in range(top_n)]
-            current_min_index = [0 for _ in range(top_n)]
-            for ref_index in range(n_ref):
-                diff = abs(q2_obs[obs_index] - q2_ref[candidate_index, ref_index])
-                # bisect.bisect_left could be used here, but it is not supported by numba
-                status = True
-                bisect_index = top_n - 1
-                diff_index = top_n
-                # Most reference peaks are far away, so look through array backwards
-                while status:
-                    if diff < current_min[bisect_index]:
-                        diff_index = bisect_index
-                    else:
-                        status = False                        
-                    bisect_index -= 1
-                    if bisect_index < 0:
-                        status = False
-                if diff_index < top_n:
-                    current_min.insert(diff_index, diff)
-                    current_min.pop()
-                    current_min_index.insert(diff_index, ref_index)
-                    current_min_index.pop()
-            hkl_assign[candidate_index, obs_index, :] = current_min_index
-    return hkl_assign

@@ -5,7 +5,6 @@ Todo
     - Put together a new FOM that utilizes data from all Bravais lattices simultaneously
         - Does this work? Where does this work well?
         - Use results from indexing attempts
-
     - Integrate into optimization
     - Radius of convergence testing
 
@@ -18,10 +17,22 @@ Todo
     - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
 - SWE
+    - Fix openmp error in pytorch environment
+
+    - Reduce the amount of imports in all files
+
+    - Remove unnecessary options and code:
+        - Indexing
+            - Move inferences_regression and evaluate_regression into Regression
+            - Parameter scaling
+        - PITF
+            - Deep model
     - Reorganize repo
+    - Upload models as LFS
+
     - Dependencies
         training:
-            numpy scipy pandas pyarrow matplotlib mpi4py scikit-learn
+            numpy scipy pandas pyarrow matplotlib mpi4py scikit-learn keras
             tqdm gemmi numba jupyterlab openpyxl skl2onnx onnxruntime
         inference???:
             numpy scipy pandas mpi4py scikit-learn gemmi numba onnxruntime
@@ -34,10 +45,10 @@ Todo
         - Manual read through
             - High priority sections
             - Use AI powered approaches
-                - Get Continue working in VSCode
         - Tests
     - Get working on NERSC
     - Get a downloadable version working
+        - Figure out what 
     - Linux testing
     - Windows testing
     
@@ -52,14 +63,12 @@ Todo
 - Model ensemble
 - Optimization
 - Templating
-- Regression
-    - Remove the MVE
 - Augmentation
-- Random unit cell generator
 - Documentation
 - Indexing.py
 - Reindexing
     - Reindex triclinic in reciprocal space
+- Random unit cell generator
 
 
 Readings:
@@ -97,7 +106,6 @@ import numpy as np
 import os
 import pandas as pd
 from sklearn.metrics import ConfusionMatrixDisplay
-from sklearn.preprocessing import StandardScaler
 
 from Utilities import get_hkl_matrix
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -107,8 +115,6 @@ from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
 from IOManagers import read_params
 from IOManagers import write_params
-from IOManagers import load_standard_scaler
-from IOManagers import save_standard_scaler
 
 
 class Indexing:
@@ -166,6 +172,8 @@ class Indexing:
             'n_peaks': 20,
             'broadening_tag': '1',
             'hkl_ref_length': 500,
+            'min_unit_cell': 2.25,
+            'max_unit_cell': 250,
             }
 
         for key in data_params_defaults.keys():
@@ -251,12 +259,6 @@ class Indexing:
         #    print(f'{key} -> {self.group_mappings[key]}')
 
     def setup_from_tag(self, load_bravais_lattice='all'):
-        self.angle_scale = np.load(os.path.join(f'{self.save_to["data"]}', 'angle_scale.npy'))
-        self.uc_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'uc_scaler.json'))
-        self.volume_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'volume_scaler.json'))
-        self.q2_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'q2_scaler.json'))
-        self.xnn_scaler = load_standard_scaler(os.path.join(f'{self.save_to["data"]}', 'xnn_scaler.json'))
-
         params = read_params(os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
         data_params_keys = [
             'augment',
@@ -272,6 +274,8 @@ class Indexing:
             'hkl_ref_length',
             'groupspec_file_name',
             'groupspec_sheet',
+            'min_unit_cell',
+            'max_unit_cell',
             ]
 
         self.data_params = dict.fromkeys(data_params_keys)
@@ -298,6 +302,8 @@ class Indexing:
         self.data_params['unit_cell_length'] = int(params['unit_cell_length'])
         self.data_params['groupspec_file_name'] = params['groupspec_file_name']
         self.data_params['groupspec_sheet'] = params['groupspec_sheet']
+        self.data_params['min_unit_cell'] = float(params['min_unit_cell'])
+        self.data_params['max_unit_cell'] = float(params['max_unit_cell'])
         self.reg_params['unit_cell_length'] = self.data_params['unit_cell_length']
 
         if load_bravais_lattice != 'all':
@@ -333,19 +339,6 @@ class Indexing:
                 os.path.join(f'{self.save_to["data"]}', f'hkl_ref_{bravais_lattice}.npy'),
                 self.hkl_ref[bravais_lattice]
                 )
-        np.save(os.path.join(f'{self.save_to["data"]}', 'angle_scale.npy'), self.angle_scale)
-        save_standard_scaler(
-            self.uc_scaler, os.path.join(f'{self.save_to["data"]}','uc_scaler.json')
-            )
-        save_standard_scaler(
-            self.volume_scaler, os.path.join(f'{self.save_to["data"]}','volume_scaler.json')
-            )
-        save_standard_scaler(
-            self.q2_scaler, os.path.join(f'{self.save_to["data"]}','q2_scaler.json')
-            )
-        save_standard_scaler(
-            self.xnn_scaler, os.path.join(f'{self.save_to["data"]}','xnn_scaler.json')
-            )
         write_params(self.data_params, os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
 
     def load_data(self):
@@ -492,7 +485,6 @@ class Indexing:
                 ]
 
         self.data.drop(columns=drop_columns, inplace=True)
-        self.setup_scalers()
 
         if self.data_params['augment']:
             self.augment_data()
@@ -625,15 +617,11 @@ class Indexing:
         self.augmentor = Augmentor(
             aug_params=self.aug_params,
             data_params=self.data_params,
-            min_unit_cell_scaled=self.min_unit_cell_scaled,
-            max_unit_cell_scaled=self.max_unit_cell_scaled,
+            min_unit_cell=self.data_params['min_unit_cell'],
+            max_unit_cell=self.data_params['max_unit_cell'],
             n_generated_points=self.n_generated_points,
             save_to=self.save_to['augmentor'],
             seed=self.random_seed,
-            uc_scaler=self.uc_scaler,
-            angle_scale=self.angle_scale,
-            xnn_scaler=self.xnn_scaler,
-            q2_scaler=self.q2_scaler,
             )
         self.augmentor.setup(self.data, self.data_params['split_groups'])
         data_augmented = [None for _ in range(len(self.data_params['split_groups']))]
@@ -654,92 +642,6 @@ class Indexing:
             print(f'Evaluating {split_group} Augmentation')
             split_group_data = self.data[self.data['split_group'] == split_group]
             self.augmentor.evaluate(split_group_data, split_group)
-
-    def q2_scale(self, q2):
-        return self.q2_scaler.transform(q2.ravel()[:, np.newaxis]).reshape(q2.shape)
-
-    def q2_revert(self, q2_scaled):
-        q2 = self.q2_scaler.inverse_transform(
-            q2_scaled.ravel()[:, np.newaxis]
-            ).reshape(q2_scaled.shape)
-        return q2
-
-    def volume_scale(self, volume):
-        return self.volume_scaler.transform(volume[:, np.newaxis]).reshape(volume.shape)
-
-    def volume_revert(self, volume_scaled):
-        volume = self.volume_scaler.inverse_transform(
-            volume_scaled[:, np.newaxis]
-            ).reshape(volume_scaled.shape)
-        return volume
-
-    def y_scale(self, y):
-        y_scaled = np.zeros(y.shape)
-        y_scaled[:3] = self.uc_scaler.transform(y[:3][:, np.newaxis])[:, 0]
-        y_scaled[3:] = (y[3:] - np.pi/2) / self.angle_scale
-        return y_scaled
-
-    def y_revert(self, y):
-        y_reverted = np.zeros(y.shape)
-        y_reverted[:3] = self.uc_scaler.inverse_transform(y[:3][:, np.newaxis])[:, 0]
-        y_reverted[3:] = self.angle_scale * y[3:] + np.pi/2
-        return y_reverted
-
-    def setup_scalers(self):
-        training_data = self.data.loc[np.logical_and(self.data['train'], ~self.data['augmented'])]
-        # q2 scaling
-        self.q2_scaler = StandardScaler()
-        q2_train = np.stack(training_data['q2']).ravel()
-        self.q2_scaler.fit(q2_train[:, np.newaxis])
-        self.data['q2_scaled'] = self.data['q2'].apply(self.q2_scale)
-
-        # Unit cell parameters scaling
-        uc_train = np.stack(training_data['reindexed_unit_cell'])
-
-        # lengths
-        self.uc_scaler = StandardScaler()
-        self.uc_scaler.fit(uc_train[:, :3].ravel()[:, np.newaxis])
-        # angles
-        if self.data_params['lattice_system'] in ['cubic', 'tetragonal', 'orthorhombic', 'hexagonal']:
-            self.angle_scale = 1
-        else:
-            if self.data_params['lattice_system'] == 'monoclinic':
-                angles = uc_train[:, 4]
-            elif self.data_params['lattice_system'] == 'triclinic':
-                angles = uc_train[:, 3:].ravel()
-            elif self.data_params['lattice_system'] == 'rhombohedral':
-                angles = uc_train[:, 3]
-            self.angle_scale = angles[angles != np.pi/2].std()
-        self.data['reindexed_unit_cell_scaled'] = self.data['reindexed_unit_cell'].apply(self.y_scale)
-
-        # This hard codes the minimum allowed unit cell in augmented data to 2.25 A
-        # The smallest unit cell found in the unique csd entries is 2.45A. 2.25A is about 90%.
-        # This minimum is primarily used for augmentation. Because the augmented unit cells
-        # are randomly generated, the smallest augmented unit cell will be very close to
-        # this value.
-        # This is important for performing regression in Xnn coordinates.
-        # Setting this to a minimum of 1A for example will have a maximum Xnn of 1 1/A^2.
-        # For monoclinic this led to a maximum scaled Xnn of 115 which gave an unreasonably
-        # large training loss.
-
-        # The maximum unit cell in the unique csd entries is 225A. The maximum unit cell
-        # is set to 250.
-        self.min_unit_cell_scaled = (2.25 - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-        self.max_unit_cell_scaled = (250 - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-
-        # xnn scaling
-        self.xnn_scaler = StandardScaler()
-        xnn_train = np.stack(training_data['reindexed_xnn'])
-        self.xnn_scaler.fit(xnn_train[xnn_train != 0][:, np.newaxis])
-        self.data['reindexed_xnn_scaled'] = list(
-            (np.stack(self.data['reindexed_xnn']) - self.xnn_scaler.mean_[0]) / self.xnn_scaler.scale_[0]
-            )
-
-        # Volume scaling
-        self.volume_scaler = StandardScaler()
-        volume_train = np.array(training_data['reindexed_volume'])
-        self.volume_scaler.fit(volume_train[:, np.newaxis])
-        self.data['reindexed_volume_scaled'] = list(self.volume_scale(np.array(self.data['reindexed_volume'])))
 
     def plot_input(self):
         def make_hkl_plot(data, n_peaks, hkl_ref_length, save_to):
@@ -829,14 +731,10 @@ class Indexing:
         # Histograms of inputs
         for split_group in self.data_params['split_groups']:
             group_data = self.data.loc[self.data['split_group'] == split_group]
-            fig, axes = plt.subplots(2, 8, figsize=(14, 5))
-            bins_scaled = np.linspace(-4, 4, 101)
-            centers_scaled = (bins_scaled[1:] + bins_scaled[:-1]) / 2
-            dbin_scaled = bins_scaled[1] - bins_scaled[0]
+            fig, axes = plt.subplots(1, 8, figsize=(14, 5))
 
             # q2
             data = group_data[~group_data['augmented']]
-            q2_scaled = np.stack(data['q2_scaled']).ravel()
             q2_sorted = np.sort(np.stack(data['q2']).ravel())
             lower = q2_sorted[int(0.005*q2_sorted.size)]
             upper = q2_sorted[int(0.995*q2_sorted.size)]
@@ -844,27 +742,15 @@ class Indexing:
             centers = (bins[1:] + bins[:-1]) / 2
             dbin = bins[1] - bins[0]
             hist, _ = np.histogram(q2_sorted, bins=bins, density=True)
-            axes[0, 0].bar(centers, hist, width=dbin, label='Unaugmented')
-            hist_scaled, _ = np.histogram(q2_scaled, bins=bins_scaled, density=True)
-            axes[1, 0].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+            axes[0].bar(centers, hist, width=dbin, label='Unaugmented')
             if self.data_params['augment']:
                 data_augmented = group_data[group_data['augmented']]
                 q2_augmented = np.stack(data_augmented['q2']).ravel()
                 hist_augmented, _ = np.histogram(q2_augmented, bins=bins, density=True)
-                axes[0, 0].bar(centers, hist_augmented, width=dbin, alpha=0.5, label='Augmented')
-                q2_scaled_augmented = np.stack(data_augmented['q2_scaled']).ravel()
-                hist_scaled_augmented, _ = np.histogram(
-                    q2_scaled_augmented,
-                    bins=bins_scaled, density=True
-                    )
-                axes[1, 0].bar(
-                    centers_scaled, hist_scaled_augmented,
-                    width=dbin_scaled, alpha=0.5, label='Augmented'
-                    )
-            axes[0, 0].legend()
+                axes[0].bar(centers, hist_augmented, width=dbin, alpha=0.5, label='Augmented')
+            axes[0].legend()
 
             # volume
-            volume_scaled = np.array(data['reindexed_volume_scaled'])
             volume_sorted = np.sort(np.array(data['reindexed_volume'])) / plot_volume_scale
             lower = volume_sorted[int(0.005*volume_sorted.size)]
             upper = volume_sorted[int(0.995*volume_sorted.size)]
@@ -872,20 +758,16 @@ class Indexing:
             centers = (bins[1:] + bins[:-1]) / 2
             dbin = bins[1] - bins[0]
             hist, _ = np.histogram(volume_sorted, bins=bins, density=True)
-            axes[0, 1].bar(centers, hist, width=dbin)
+            axes[1].bar(centers, hist, width=dbin)
             if self.data_params['augment']:
                 volume_augmented = np.array(data_augmented['reindexed_volume']) / plot_volume_scale
                 hist_augmented, _ = np.histogram(volume_augmented, bins=bins, density=True)
-                axes[0, 1].bar(centers, hist_augmented, width=dbin, alpha=0.5)
-            hist_scaled, _ = np.histogram(volume_scaled, bins=bins_scaled, density=True)
-            axes[1, 1].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+                axes[1].bar(centers, hist_augmented, width=dbin, alpha=0.5)
 
             # Unit cell
             unit_cell = np.stack(data['reindexed_unit_cell'])
             if self.data_params['augment']:
                 unit_cell_augmented = np.stack(data_augmented['reindexed_unit_cell'])
-                unit_cell_augmented_scaled = np.stack(data_augmented['reindexed_unit_cell_scaled'])
-            unit_cell_scaled = np.stack(data['reindexed_unit_cell_scaled'])
             sorted_lengths = np.sort(unit_cell[:, :3].ravel())
             lower = sorted_lengths[int(0.005*sorted_lengths.size)]
             upper = sorted_lengths[int(0.995*sorted_lengths.size)]
@@ -894,26 +776,14 @@ class Indexing:
             dbin = bins[1] - bins[0]
             for index in range(3):
                 hist, _ = np.histogram(unit_cell[:, index], bins=bins, density=True)
-                axes[0, index + 2].bar(centers, hist, width=dbin)
-                hist_scaled, _ = np.histogram(
-                    unit_cell_scaled[:, index], bins=bins_scaled, density=True
-                    )
-                axes[1, index + 2].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+                axes[index + 2].bar(centers, hist, width=dbin)
                 if self.data_params['augment']:
                     hist_augmented, _ = np.histogram(
                         unit_cell_augmented[:, index],
                         bins=bins, density=True
                         )
-                    axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
-                    hist_augmented_scaled, _ = np.histogram(
-                        unit_cell_augmented_scaled[:, index],
-                        bins=bins_scaled, density=True
-                        )
-                    axes[1, index + 2].bar(
-                        centers_scaled, hist_augmented_scaled,
-                        width=dbin_scaled, alpha=0.5
-                        )
-                axes[0, index + 2].set_title(y_labels[index])
+                    axes[index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+                axes[index + 2].set_title(y_labels[index])
 
             if self.data_params['lattice_system'] in ['monoclinic', 'rhombohedral', 'triclinic']:
                 if self.data_params['lattice_system'] == 'monoclinic':
@@ -933,18 +803,8 @@ class Indexing:
                         ~np.isnan(unit_cell[:, index])
                         )
                     hist, _ = np.histogram(unit_cell[indices, index], bins=bins, density=True)
-                    axes[0, index + 2].bar(centers, hist, width=dbin)
-
-                    indices = np.logical_and(
-                        unit_cell_scaled[:, index] != 0,
-                        ~np.isnan(unit_cell_scaled[:, index])
-                        )
-                    hist_scaled, _ = np.histogram(
-                        unit_cell_scaled[indices, index],
-                        bins=bins_scaled, density=True
-                        )
-                    axes[1, index + 2].bar(centers_scaled, hist_scaled, width=dbin_scaled)
-                    axes[0, index + 2].set_title(y_labels[index])
+                    axes[index + 2].bar(centers, hist, width=dbin)
+                    axes[index + 2].set_title(y_labels[index])
 
                     if self.data_params['augment']:
                         indices = np.logical_and(
@@ -957,23 +817,9 @@ class Indexing:
                             )
                         axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
 
-                        indices = np.logical_and(
-                            unit_cell_augmented_scaled[:, index] != 0,
-                            ~np.isnan(unit_cell_augmented_scaled[:, index])
-                            )
-                        hist_augmented_scaled, _ = np.histogram(
-                            unit_cell_augmented_scaled[indices, index],
-                            bins=bins_scaled, density=True
-                            )
-                        axes[1, index + 2].bar(
-                            centers_scaled, hist_augmented_scaled,
-                            width=dbin_scaled, alpha=0.5
-                            )
-
-            axes[0, 0].set_ylabel('Raw data')
-            axes[1, 0].set_ylabel('Standard Scaling')
-            axes[0, 0].set_title('q2')
-            axes[0, 1].set_title(f'Volume\n(x{plot_volume_scale})')
+            axes[0].set_ylabel('Raw data')
+            axes[0].set_title('q2')
+            axes[1].set_title(f'Volume\n(x{plot_volume_scale})')
             fig.tight_layout()
             fig.savefig(os.path.join(f'{self.save_to["data"]}', f'regression_inputs_{split_group}.png'))
             plt.close()
@@ -982,17 +828,11 @@ class Indexing:
         xnn_labels = ['Xhh', 'Xkk', 'Xll', 'Xhk', 'Xhl', 'Xkl']
         for split_group in self.data_params['split_groups']:
             group_data = self.data.loc[self.data['split_group'] == split_group]
-            fig, axes = plt.subplots(2, 6, figsize=(14, 5))
-            bins_scaled = np.linspace(-4, 4, 101)
-            centers_scaled = (bins_scaled[1:] + bins_scaled[:-1]) / 2
-            dbin_scaled = bins_scaled[1] - bins_scaled[0]
-
+            fig, axes = plt.subplots(1, 6, figsize=(14, 5))
             # Unit cell
             xnn = np.stack(data['reindexed_xnn'])
             if self.data_params['augment']:
                 xnn_augmented = np.stack(data_augmented['reindexed_xnn'])
-                xnn_augmented_scaled = np.stack(data_augmented['reindexed_xnn_scaled'])
-            xnn_scaled = np.stack(data['reindexed_xnn_scaled'])
             sorted_xnn = np.sort(xnn.ravel())
             lower = sorted_xnn[int(0.005*sorted_xnn.size)]
             upper = sorted_xnn[int(0.995*sorted_xnn.size)]
@@ -1001,53 +841,31 @@ class Indexing:
             dbin = bins[1] - bins[0]
             for index in range(6):
                 hist, _ = np.histogram(xnn[:, index], bins=bins, density=True)
-                axes[0, index].bar(centers, hist, width=dbin)
-                hist_scaled, _ = np.histogram(
-                    xnn_scaled[:, index], bins=bins_scaled, density=True
-                    )
-                axes[1, index].bar(centers_scaled, hist_scaled, width=dbin_scaled)
+                axes[index].bar(centers, hist, width=dbin)
                 if self.data_params['augment']:
                     hist_augmented, _ = np.histogram(
                         xnn_augmented[:, index], bins=bins, density=True
                         )
-                    axes[0, index].bar(centers, hist_augmented, width=dbin, alpha=0.5)
-                    hist_augmented_scaled, _ = np.histogram(
-                        xnn_augmented_scaled[:, index],
-                        bins=bins_scaled, density=True
-                        )
-                    axes[1, index].bar(
-                        centers_scaled, hist_augmented_scaled,
-                        width=dbin_scaled, alpha=0.5
-                        )
-                axes[0, index].set_title(xnn_labels[index])
+                    axes[index].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+                axes[index].set_title(xnn_labels[index])
 
-            axes[0, 0].set_ylabel('Raw data')
-            axes[1, 0].set_ylabel('Standard Scaling')
+            axes[0].set_ylabel('Raw data')
             fig.tight_layout()
             fig.savefig(os.path.join(f'{self.save_to["data"]}', f'xnn_inputs_{split_group}.png'))
             plt.close()
 
         # Covariance
         if self.data_params['lattice_system'] != 'cubic':
-            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+            fig, axes = plt.subplots(1, 1, figsize=(6, 4))
             unit_cell_cov = np.cov(unit_cell[:, self.data_params['unit_cell_indices']].T)
-            unit_cell_scaled_cov = np.cov(unit_cell_scaled[:, self.data_params['unit_cell_indices']].T)
             cov_display = ConfusionMatrixDisplay(
                 confusion_matrix=unit_cell_cov,
                 display_labels=self.uc_labels,
                 )
-            cov_scaled_display = ConfusionMatrixDisplay(
-                confusion_matrix=unit_cell_scaled_cov,
-                display_labels=self.uc_labels,
-                )
-            cov_display.plot(ax=axes[0], colorbar=False, values_format='0.2f')
-            cov_scaled_display.plot(ax=axes[1], colorbar=False, values_format='0.2f')
-            axes[0].set_title('Unit cell covariance')
-            axes[1].set_title('Scaled unit cell covariance')
-            axes[0].set_xlabel('')
-            axes[0].set_ylabel('')
-            axes[1].set_xlabel('')
-            axes[1].set_ylabel('')
+            cov_display.plot(ax=axes, colorbar=False, values_format='0.2f')
+            axes.set_title('Unit cell covariance')
+            axes.set_xlabel('')
+            axes.set_ylabel('')
             fig.tight_layout()
             fig.savefig(os.path.join(f'{self.save_to["data"]}', 'covariance_inputs.png'))
             plt.close()
@@ -1265,8 +1083,6 @@ class Indexing:
                 self.data_params,
                 self.reg_params[split_group],
                 self.save_to['regression'],
-                self.uc_scaler,
-                self.angle_scale,
                 self.random_seed,
                 )
             self.unit_cell_generator[split_group].setup()
@@ -1274,23 +1090,18 @@ class Indexing:
                 self.unit_cell_generator[split_group].load_from_tag(mode=mode)
             else:
                 split_group_indices = self.data['split_group'] == split_group
-                self.unit_cell_generator[split_group].train_regression(data=self.data[split_group_indices])
+                self.unit_cell_generator[split_group].train(data=self.data[split_group_indices])
                 # Loading from tag ensures the onnx models are loaded for evaluation.
-                #self.unit_cell_generator[split_group].load_from_tag(mode=mode)
+                self.unit_cell_generator[split_group].load_from_tag(mode=mode)
 
     def inferences_regression(self):
         reindexed_uc_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))
         reindexed_uc_pred_var = np.zeros((len(self.data), self.data_params['unit_cell_length']))
 
-        reindexed_uc_pred_trees = np.zeros((len(self.data), self.data_params['unit_cell_length']))
-        reindexed_uc_pred_var_trees = np.zeros((len(self.data), self.data_params['unit_cell_length']))
-
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             split_group_indices = self.data['split_group'] == split_group
-            reindexed_uc_pred[split_group_indices, :], reindexed_uc_pred_var[split_group_indices, :] = \
-                self.unit_cell_generator[split_group].predict(data=self.data[split_group_indices], batch_size=1024, model='nn')
-            reindexed_uc_pred_trees[split_group_indices, :], reindexed_uc_pred_var_trees[split_group_indices, :], _ = \
-                self.unit_cell_generator[split_group].predict(data=self.data[split_group_indices], model='trees')
+            reindexed_uc_pred[split_group_indices, :], reindexed_uc_pred_var[split_group_indices, :], _ = \
+                self.unit_cell_generator[split_group].predict(data=self.data[split_group_indices])
 
         reindexed_unit_cell_volume = get_unit_cell_volume(
             reindexed_uc_pred, partial_unit_cell=True, lattice_system=self.data_params['lattice_system']
@@ -1298,13 +1109,6 @@ class Indexing:
         self.data['reindexed_volume_pred'] = list(reindexed_unit_cell_volume)
         self.data['reindexed_unit_cell_pred'] = list(reindexed_uc_pred)
         self.data['reindexed_unit_cell_pred_var'] = list(reindexed_uc_pred_var)
-
-        reindexed_unit_cell_volume_trees = get_unit_cell_volume(
-            reindexed_uc_pred_trees, partial_unit_cell=True, lattice_system=self.data_params['lattice_system']
-            )
-        self.data['reindexed_volume_pred_trees'] = list(reindexed_unit_cell_volume_trees)
-        self.data['reindexed_unit_cell_pred_trees'] = list(reindexed_uc_pred_trees)
-        self.data['reindexed_unit_cell_pred_var_trees'] = list(reindexed_uc_pred_var_trees)
 
     def setup_pitf(self, mode):
         from PhysicsInformedModel import PhysicsInformedModel
@@ -1317,8 +1121,6 @@ class Indexing:
                 self.pitf_params[split_group],
                 self.save_to['pitf'],
                 self.random_seed,
-                self.q2_scaler,
-                self.xnn_scaler,
                 self.hkl_ref[bravais_lattice]
                 )
             if self.pitf_params[split_group]['load_from_tag']:
@@ -1335,9 +1137,7 @@ class Indexing:
 
     def evaluate_regression(self):
         from Evaluations import evaluate_regression
-        from Evaluations import evaluate_regression_pitf
         from Evaluations import calibrate_regression
-        from Evaluations import calibrate_regression_pitf
         for bravais_lattice in self.data_params['bravais_lattices']:
             evaluate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
@@ -1345,15 +1145,6 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='nn'
-                )
-            evaluate_regression(
-                data=self.data[self.data['bravais_lattice'] == bravais_lattice],
-                unit_cell_length=self.data_params['unit_cell_length'],
-                unit_cell_key='reindexed_unit_cell',
-                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg_tree.png'),
-                unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='trees'
                 )
             calibrate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],
@@ -1361,15 +1152,6 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg_calibration.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='nn'
-                )
-            calibrate_regression(
-                data=self.data[self.data['bravais_lattice'] == bravais_lattice],
-                unit_cell_length=self.data_params['unit_cell_length'],
-                unit_cell_key='reindexed_unit_cell',
-                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{bravais_lattice}_reg_calibration_tree.png'),
-                unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='trees'
                 )
         for split_group in self.data_params['split_groups']:
             evaluate_regression(
@@ -1378,15 +1160,6 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='nn'
-                )
-            evaluate_regression(
-                data=self.data[self.data['split_group'] == split_group],
-                unit_cell_length=self.data_params['unit_cell_length'],
-                unit_cell_key='reindexed_unit_cell',
-                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg_tree.png'),
-                unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='trees'
                 )
             calibrate_regression(
                 data=self.data[self.data['split_group'] == split_group],
@@ -1394,15 +1167,6 @@ class Indexing:
                 unit_cell_key='reindexed_unit_cell',
                 save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg_calibration.png'),
                 unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='nn'
-                )
-            calibrate_regression(
-                data=self.data[self.data['split_group'] == split_group],
-                unit_cell_length=self.data_params['unit_cell_length'],
-                unit_cell_key='reindexed_unit_cell',
-                save_to_name=os.path.join(f'{self.save_to["regression"]}', f'{split_group}_reg_calibration_tree.png'),
-                unit_cell_indices=self.data_params['unit_cell_indices'],
-                model='trees'
                 )
         evaluate_regression(
             data=self.data,
@@ -1410,7 +1174,6 @@ class Indexing:
             unit_cell_key='reindexed_unit_cell',
             save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg.png'),
             unit_cell_indices=self.data_params['unit_cell_indices'],
-            model='nn'
             )
         calibrate_regression(
             data=self.data,
@@ -1418,21 +1181,4 @@ class Indexing:
             unit_cell_key='reindexed_unit_cell',
             save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg_calibration.png'),
             unit_cell_indices=self.data_params['unit_cell_indices'],
-            model='nn'
-            )
-        evaluate_regression(
-            data=self.data,
-            unit_cell_length=self.data_params['unit_cell_length'],
-            unit_cell_key='reindexed_unit_cell',
-            save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg_trees.png'),
-            unit_cell_indices=self.data_params['unit_cell_indices'],
-            model='trees'
-            )
-        calibrate_regression(
-            data=self.data,
-            unit_cell_length=self.data_params['unit_cell_length'],
-            unit_cell_key='reindexed_unit_cell',
-            save_to_name=os.path.join(f'{self.save_to["regression"]}', 'All_reg_calibration_trees.png'),
-            unit_cell_indices=self.data_params['unit_cell_indices'],
-            model='trees'
             )

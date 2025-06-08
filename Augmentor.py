@@ -27,20 +27,16 @@ class Augmentor:
             self,
             aug_params,
             data_params,
-            min_unit_cell_scaled,
-            max_unit_cell_scaled,
+            min_unit_cell,
+            max_unit_cell,
             n_generated_points,
             save_to,
             seed,
-            uc_scaler,
-            angle_scale,
-            xnn_scaler,
-            q2_scaler
             ):
         self.aug_params = aug_params
         self.n_generated_points = n_generated_points
-        self.min_unit_cell_scaled = min_unit_cell_scaled
-        self.max_unit_cell_scaled = max_unit_cell_scaled
+        self.min_unit_cell = min_unit_cell
+        self.max_unit_cell = max_unit_cell
         self.save_to = save_to
         self.n_peaks = data_params['n_peaks']
         self.unit_cell_indices = data_params['unit_cell_indices']
@@ -50,10 +46,6 @@ class Augmentor:
         self.n_max_group = data_params['n_max_group']
         self.hkl_ref_length = data_params['hkl_ref_length']
         self.rng = np.random.default_rng(seed)
-        self.uc_scaler = uc_scaler
-        self.xnn_scaler = xnn_scaler
-        self.angle_scale = angle_scale
-        self.q2_scaler = q2_scaler
         if type(self.aug_params['augment_shift']) == float:
             self.augment_shift = self.aug_params['augment_shift']
         elif type(self.aug_params['augment_shift']) == list:
@@ -76,6 +68,12 @@ class Augmentor:
         # Calculate the number of times each entry is to be augmented
         training_data = data[data['train']]
         n_groups = len(split_groups)
+
+        # Get the mean and standard deviation of the unit cell parameters.
+        # The UC parameters are perturbed in a scaled space.
+        unit_cell = np.stack(training_data['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        self.mean_unit_cell = unit_cell.mean(axis=0)[np.newaxis]
+        self.std_unit_cell = unit_cell.std(axis=0)[np.newaxis]
 
         if self.aug_params['augment_method'] in ['cov', 'pca']:
             self.volume_bins = dict.fromkeys(split_groups)
@@ -106,7 +104,8 @@ class Augmentor:
             self.cov = dict.fromkeys(split_groups)
             for split_group_index, split_group in enumerate(split_groups):
                 split_group_data = training_data[training_data['split_group'] == split_group]
-                unit_cell_scaled = np.stack(split_group_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
+                unit_cell = np.stack(split_group_data['reindexed_unit_cell'])
+                unit_cell_scaled = (unit_cell - self.mean_unit_cell) / self.std_unit_cell
                 unit_cell_volume = np.array(split_group_data['reindexed_volume'])
                 if n_bins[split_group] == 1:
                     self.cov[split_group] = np.cov(unit_cell_scaled.T)
@@ -145,7 +144,8 @@ class Augmentor:
             self.stddev = dict.fromkeys(split_groups)
             for split_group_index, split_group in enumerate(split_groups):
                 split_group_data = training_data[training_data['split_group'] == split_group]
-                unit_cell_scaled = np.stack(split_group_data['reindexed_unit_cell_scaled'])[:, self.unit_cell_indices]
+                unit_cell = np.stack(split_group_data['reindexed_unit_cell'])[:, self.unit_cell_indices]
+                unit_cell_scaled = (unit_cell - self.mean_unit_cell) / self.std_unit_cell
                 unit_cell_volume = np.array(split_group_data['reindexed_volume'])
                 print(f'Creating {n_bins[split_group]} PCAs from {len(split_group_data)} entries for {split_group}')
                 if n_bins[split_group] == 1:
@@ -378,9 +378,7 @@ class Augmentor:
 
         augmented_entries['reciprocal_reindexed_unit_cell'] = list(reciprocal_uc_conversion(reindexed_unit_cell))
         reindexed_xnn = get_xnn_from_unit_cell(reindexed_unit_cell, partial_unit_cell=False)
-        reindexed_xnn_scaled = (reindexed_xnn - self.xnn_scaler.mean_[0]) / self.xnn_scaler.scale_[0]
         augmented_entries['reindexed_xnn'] = list(reindexed_xnn)
-        augmented_entries['reindexed_xnn_scaled'] = list(reindexed_xnn_scaled)
         augmented_entries['reindexed_volume'] = list(get_unit_cell_volume(
             reindexed_unit_cell, partial_unit_cell=False
             ))
@@ -389,17 +387,13 @@ class Augmentor:
     def augment_entry(self, entry):
         augmented_entry = copy.deepcopy(entry)
         augmented_entry['augmented'] = True
-        reindexed_unit_cell_scaled = np.array(augmented_entry['reindexed_unit_cell_scaled'])
+        reindexed_unit_cell = np.array(augmented_entry['reindexed_unit_cell'])
         reindexed_volume = np.array(augmented_entry['reindexed_volume'])
-        perturbed_reindexed_unit_cell_scaled = self.perturb_unit_cell_common(
-            reindexed_unit_cell_scaled,
+        perturbed_reindexed_unit_cell = self.perturb_unit_cell_common(
+            reindexed_unit_cell,
             augmented_entry['split_group'],
             reindexed_volume,
             )
-        perturbed_reindexed_unit_cell = np.zeros(6)
-        perturbed_reindexed_unit_cell[:3] = perturbed_reindexed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-        perturbed_reindexed_unit_cell[3:] = self.angle_scale * perturbed_reindexed_unit_cell_scaled[3:] + np.pi/2
-        augmented_entry['reindexed_unit_cell_scaled'] = perturbed_reindexed_unit_cell_scaled
         augmented_entry['reindexed_unit_cell'] = perturbed_reindexed_unit_cell
 
         # calculate new d-spacings
@@ -514,7 +508,6 @@ class Augmentor:
             reindexed_hkl = np.array(reindexed_hkl, dtype=int)[sort_indices][:self.n_peaks]
             augmented_entry[f'q2_{self.broadening_tag}'] = q2
             augmented_entry['q2'] = q2[:self.n_peaks]
-            augmented_entry['q2_scaled'] = (q2[:self.n_peaks] - self.q2_scaler.mean_[0]) / self.q2_scaler.scale_[0]
 
             augmented_entry[f'd_spacing_{self.broadening_tag}'] = 1 / np.sqrt(q2)
             augmented_entry[f'd_spacing'] = 1 / np.sqrt(q2[:self.n_peaks])
@@ -523,27 +516,27 @@ class Augmentor:
         else:
             return None
 
-    def _check_in_range(self, perturbed_unit_cell_scaled):
+    def _check_in_range(self, perturbed_unit_cell):
         if self.lattice_system == 'monoclinic':
-            minimum_angle_scaled = (np.pi/2 - np.pi/2) / self.angle_scale
-            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
+            minimum_angle = np.pi/2
+            maximum_angle = np.pi
             good_angle = False
             good_lengths = False
-            if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
-                if np.all(perturbed_unit_cell_scaled[:3] < self.max_unit_cell_scaled):
+            if np.all(perturbed_unit_cell[:3] > self.min_unit_cell):
+                if np.all(perturbed_unit_cell[:3] < self.max_unit_cell):
                     good_lengths = True
-            if minimum_angle_scaled < perturbed_unit_cell_scaled[3] < maximum_angle_scaled:
+            if minimum_angle  < perturbed_unit_cell[3] < maximum_angle:
                 good_angle = True
             if good_angle & good_lengths:
                 return True
         elif self.lattice_system == 'triclinic':
-            maximum_angle_scaled = (np.pi - np.pi/2) / self.angle_scale
+            maximum_angle = np.pi
             good_angles = False
             good_lengths = False
-            if np.all(perturbed_unit_cell_scaled[:3] > self.min_unit_cell_scaled):
-                if np.all(perturbed_unit_cell_scaled[:3] < self.max_unit_cell_scaled):
+            if np.all(perturbed_unit_cell[:3] > self.min_unit_cell):
+                if np.all(perturbed_unit_cell[:3] < self.max_unit_cell):
                     good_lengths = True
-            if np.all(perturbed_unit_cell_scaled[3:] <= maximum_angle_scaled):
+            if np.all(perturbed_unit_cell[3:] <= maximum_angle):
                 good_angles = True
             if good_angles & good_lengths:
                 return True
@@ -551,12 +544,8 @@ class Augmentor:
             good_length = False
             good_angle = False
             reciprocalable = False
-            perturbed_unit_cell = np.zeros(2)
-            perturbed_unit_cell[0] = perturbed_unit_cell_scaled[0] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            perturbed_unit_cell[1] = perturbed_unit_cell_scaled[1] * self.angle_scale + np.pi/2
-
-            if perturbed_unit_cell_scaled[0] > self.min_unit_cell_scaled:
-                if perturbed_unit_cell_scaled[0] < self.max_unit_cell_scaled:
+            if perturbed_unit_cell[0] > self.min_unit_cell:
+                if perturbed_unit_cell[0] < self.max_unit_cell:
                     good_length = True
             if 0 < perturbed_unit_cell[1]:
                 if perturbed_unit_cell[1] < 2*np.pi/3:
@@ -575,42 +564,36 @@ class Augmentor:
             if reciprocalable:
                 return True
         else:
-            if np.all(perturbed_unit_cell_scaled > self.min_unit_cell_scaled):
-                if np.all(perturbed_unit_cell_scaled < self.max_unit_cell_scaled):
+            if np.all(perturbed_unit_cell > self.min_unit_cell):
+                if np.all(perturbed_unit_cell < self.max_unit_cell):
                     return True
 
-    def _permute_perturbed_unit_cell(self, perturbed_unit_cell_scaled, unit_cell_scaled):
+    def _permute_perturbed_unit_cell(self, perturbed_unit_cell , unit_cell ):
         if self.lattice_system == 'monoclinic':
-            initial_order = np.argsort(unit_cell_scaled[:3])
+            initial_order = np.argsort(unit_cell[:3])
             initial_inverse_sort = np.argsort(initial_order)
-            current_sort = np.argsort(perturbed_unit_cell_scaled[:3])
-            perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[:3][current_sort][initial_inverse_sort]
-            current_order = np.argsort(perturbed_unit_cell_scaled[:3])
+            current_sort = np.argsort(perturbed_unit_cell[:3])
+            perturbed_unit_cell[:3] = perturbed_unit_cell[:3][current_sort][initial_inverse_sort]
+            current_order = np.argsort(perturbed_unit_cell[:3])
             if np.any(initial_order != current_order):
-                print(unit_cell_scaled)
-                print(perturbed_unit_cell_scaled)
+                print(unit_cell )
+                print(perturbed_unit_cell )
                 print()
         elif self.lattice_system in ['hexagonal', 'orthorhombic', 'tetragonal']:
-            initial_order = np.argsort(unit_cell_scaled)
+            initial_order = np.argsort(unit_cell)
             initial_inverse_sort = np.argsort(initial_order)
-            current_sort = np.argsort(perturbed_unit_cell_scaled)
-            perturbed_unit_cell_scaled = perturbed_unit_cell_scaled[current_sort][initial_inverse_sort]
-            current_order = np.argsort(perturbed_unit_cell_scaled)
+            current_sort = np.argsort(perturbed_unit_cell)
+            perturbed_unit_cell  = perturbed_unit_cell[current_sort][initial_inverse_sort]
+            current_order = np.argsort(perturbed_unit_cell)
             if np.any(initial_order != current_order):
-                print(unit_cell_scaled)
-                print(perturbed_unit_cell_scaled)
+                print(unit_cell)
+                print(perturbed_unit_cell)
                 print()
         elif self.lattice_system == 'triclinic':
-            perturbed_unit_cell = np.zeros(6)
-            perturbed_unit_cell[:3] = perturbed_unit_cell_scaled[:3] * self.uc_scaler.scale_[0] + self.uc_scaler.mean_[0]
-            perturbed_unit_cell[3:] = self.angle_scale * perturbed_unit_cell_scaled[3:] + np.pi/2
             perturbed_unit_cell, _ = reindex_entry_triclinic(perturbed_unit_cell, space='direct')
-            perturbed_unit_cell_scaled[:3] = (perturbed_unit_cell[:3] - self.uc_scaler.mean_[0]) / self.uc_scaler.scale_[0]
-            perturbed_unit_cell_scaled[3:] = (perturbed_unit_cell[3:] - np.pi/2) / self.angle_scale
-        return perturbed_unit_cell_scaled
+        return perturbed_unit_cell 
 
-    def perturb_unit_cell_common(self, unit_cell_scaled, split_group, reindexed_volume):
-        perturbed_unit_cell_scaled = unit_cell_scaled.copy()
+    def perturb_unit_cell_common(self, unit_cell, split_group, reindexed_volume):
         if self.aug_params['n_per_volume'] is None:
             volume_bin_index = None
         elif len(self.volume_bins[split_group]) == 2:
@@ -622,56 +605,62 @@ class Augmentor:
                 volume_bin_index = 0
             elif volume_bin_index >= len(self.volume_bins[split_group]) - 1:
                 volume_bin_index = len(self.volume_bins[split_group]) - 2
-        perturbed_unit_cell_scaled[self.unit_cell_indices] = self.perturb_unit_cell(
-            perturbed_unit_cell_scaled[self.unit_cell_indices], split_group, volume_bin_index
+
+        perturbed_unit_cell = unit_cell.copy()
+        perturbed_unit_cell[self.unit_cell_indices] = self.perturb_unit_cell(
+            unit_cell[self.unit_cell_indices],
+            split_group,
+            volume_bin_index
             )
         if self.lattice_system == 'cubic':
-            perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[0]
+            perturbed_unit_cell[:3] = perturbed_unit_cell[0]
         elif self.lattice_system in ['tetragonal', 'hexagonal']:
-            perturbed_unit_cell_scaled[1] = perturbed_unit_cell_scaled[0]
+            perturbed_unit_cell[1] = perturbed_unit_cell[0]
         elif self.lattice_system == 'rhombohedral':
-            perturbed_unit_cell_scaled[:3] = perturbed_unit_cell_scaled[0]
-            perturbed_unit_cell_scaled[3:] = perturbed_unit_cell_scaled[3]
-        return perturbed_unit_cell_scaled
+            perturbed_unit_cell[:3] = perturbed_unit_cell[0]
+            perturbed_unit_cell[3:] = perturbed_unit_cell[3]
+        return perturbed_unit_cell
 
-    def perturb_unit_cell_std(self, unit_cell_scaled, split_group, volume_bin_index):
+    def perturb_unit_cell_std(self, unit_cell, split_group, volume_bin_index):
         # perturb unit cell
         status = True
         i = 0
+        unit_cell_scaled = (unit_cell - self.mean_unit_cell[0]) / self.std_unit_cell[0]
         while status:
             perturbed_unit_cell_scaled = self.rng.normal(
                 loc=unit_cell_scaled,
                 scale=self.augment_shift,
                 )[0]
+            perturbed_unit_cell = perturbed_unit_cell_scaled * self.std_unit_cell[0] + self.mean_unit_cell[0]
             i += 1
-            if self._check_in_range(perturbed_unit_cell_scaled):
+            if self._check_in_range(perturbed_unit_cell):
                 status = False
-        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
-            perturbed_unit_cell_scaled, unit_cell_scaled
+        perturbed_unit_cell = self._permute_perturbed_unit_cell(
+            perturbed_unit_cell, unit_cell
             )
-        return perturbed_unit_cell_scaled
+        return perturbed_unit_cell
 
-    def perturb_unit_cell_cov(self, unit_cell_scaled, split_group, volume_bin_index):
+    def perturb_unit_cell_cov(self, unit_cell, split_group, volume_bin_index):
         # perturb unit cell
         status = True
         if volume_bin_index is None:
             cov = self.cov[split_group]
         else:
             cov = self.cov[split_group][volume_bin_index]
+        unit_cell_scaled = (unit_cell - self.mean_unit_cell[0]) / self.std_unit_cell[0]
         while status:
             perturbed_unit_cell_scaled = self.rng.multivariate_normal(
                 mean=unit_cell_scaled,
                 cov=self.augment_shift**2 * cov,
                 size=1
                 )[0]
-            if self._check_in_range(perturbed_unit_cell_scaled):
+            perturbed_unit_cell = perturbed_unit_cell_scaled * self.std_unit_cell[0] + self.mean_unit_cell[0]
+            if self._check_in_range(perturbed_unit_cell):
                 status = False
-        perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
-            perturbed_unit_cell_scaled, unit_cell_scaled
-            )
-        return perturbed_unit_cell_scaled
+        perturbed_unit_cell = self._permute_perturbed_unit_cell(perturbed_unit_cell, unit_cell)
+        return perturbed_unit_cell
 
-    def perturb_unit_cell_pca(self, unit_cell_scaled, split_group, volume_bin_index):
+    def perturb_unit_cell_pca(self, unit_cell, split_group, volume_bin_index):
         # perturb unit cell
         status = True
         if volume_bin_index is None:
@@ -680,9 +669,8 @@ class Augmentor:
         else:
             pca = self.pca[split_group][volume_bin_index]
             stddev = self.stddev[split_group][volume_bin_index]
-        unit_cell_scaled_transformed = pca.transform(
-            unit_cell_scaled[np.newaxis, :]
-            )[0]
+        unit_cell_scaled = (unit_cell - self.mean_unit_cell[0]) / self.std_unit_cell[0]
+        unit_cell_scaled_transformed = pca.transform(unit_cell_scaled[np.newaxis, :])[0]
         while status:
             perturbed_unit_cell_scaled_transformed = self.rng.normal(
                 loc=unit_cell_scaled_transformed,
@@ -691,177 +679,11 @@ class Augmentor:
             perturbed_unit_cell_scaled = pca.inverse_transform(
                 perturbed_unit_cell_scaled_transformed[np.newaxis, :]
                 )[0, :]
-            perturbed_unit_cell_scaled = self._permute_perturbed_unit_cell(
-                perturbed_unit_cell_scaled, unit_cell_scaled
-                )
-            if self._check_in_range(perturbed_unit_cell_scaled):
+            perturbed_unit_cell = perturbed_unit_cell_scaled * self.std_unit_cell[0] + self.mean_unit_cell[0]
+            perturbed_unit_cell = self._permute_perturbed_unit_cell(perturbed_unit_cell, unit_cell)
+            if self._check_in_range(perturbed_unit_cell):
                 status = False
-        return perturbed_unit_cell_scaled
-
-    def evaluate_old(self, data, split_group):
-        train = data[data['train']]
-        train_unaugmented = train[~train['augmented']]
-        train_augmented = train[train['augmented']]
-        # There are usually an order of magnitude more augmented datasets than unaugmented
-        # Downsample the augmented data so the balance is reasonable.
-        if len(train_augmented) > len(train_unaugmented):
-            train_augmented = train_augmented.sample(n=len(train_unaugmented), replace=False)
-            train = pd.concat((train_unaugmented, train_augmented), ignore_index=True)
-        train_uc = np.stack(train['reindexed_unit_cell'])[:, self.unit_cell_indices]
-        train_uc_volume = get_unit_cell_volume(
-            train_uc, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        train_y = np.array(train['augmented'], dtype=int)
-        train_q2_obs = np.stack(train['q2'])
-
-        val = data[~data['train']]
-        val_unaugmented = val[~val['augmented']]
-        val_augmented = val[val['augmented']]
-        if len(val_augmented) > len(val_unaugmented):
-            val_augmented = val_augmented.sample(n=len(val_unaugmented), replace=False)
-            val = pd.concat((val_unaugmented, val_augmented), ignore_index=True)
-        val_uc = np.stack(val['reindexed_unit_cell'])[:, self.unit_cell_indices]
-        val_uc_volume = get_unit_cell_volume(
-            val_uc, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        val_y = np.array(val['augmented'], dtype=int)
-        val_q2_obs = np.stack(val['q2'])
-
-        uc_classifier = RandomForestClassifier(
-            max_depth=3,
-            min_samples_split=10,
-            min_samples_leaf=10,
-            class_weight='balanced_subsample',
-            )
-        uc_classifier.fit(X=train_uc, y=train_y)
-        train_accuracy = uc_classifier.score(X=train_uc, y=train_y)
-        val_accuracy = uc_classifier.score(X=val_uc, y=val_y)
-
-        train_pred = uc_classifier.predict(train_uc)
-        train_correct = train_pred == train_y
-
-        val_pred = uc_classifier.predict(val_uc)
-        val_correct = val_pred == val_y
-
-        q2_obs_classifier = RandomForestClassifier(
-            max_depth=3,
-            min_samples_split=10,
-            min_samples_leaf=10,
-            class_weight='balanced_subsample',
-            )
-        q2_obs_classifier.fit(X=train_q2_obs, y=train_y)
-        train_accuracy_q2_obs = q2_obs_classifier.score(X=train_q2_obs, y=train_y)
-        val_accuracy_q2_obs = q2_obs_classifier.score(X=val_q2_obs, y=val_y)
-
-        n_bins = 40
-        bins = [None for _ in range(self.unit_cell_length + 1)]
-        centers = [None for _ in range(self.unit_cell_length + 1)]
-        train_true_frac = np.zeros((n_bins, self.unit_cell_length + 1))
-        val_true_frac = np.zeros((n_bins, self.unit_cell_length + 1))
-
-        for uc_index in range(self.unit_cell_length + 1):
-            if uc_index == self.unit_cell_length:
-                sorted_uc = np.sort(train_uc_volume)
-            else:
-                sorted_uc = np.sort(train_uc[:, uc_index])
-            bins[uc_index] = np.linspace(sorted_uc[0], sorted_uc[int(0.99*sorted_uc.size)], n_bins + 1)
-            centers[uc_index] = (bins[uc_index][1:] + bins[uc_index][:-1]) / 2
-            if uc_index == self.unit_cell_length:
-                train_bin_indices = np.searchsorted(bins[uc_index], train_uc_volume) - 1
-                val_bin_indices = np.searchsorted(bins[uc_index], val_uc_volume) - 1
-            else:
-                train_bin_indices = np.searchsorted(bins[uc_index], train_uc[:, uc_index]) - 1
-                val_bin_indices = np.searchsorted(bins[uc_index], val_uc[:, uc_index]) - 1
-            for bin_index in range(n_bins):
-                train_select = train_correct[train_bin_indices == bin_index]
-                val_select = val_correct[val_bin_indices == bin_index]
-                if train_select.size > 0:
-                    train_true_frac[bin_index, uc_index] = train_select.sum() / train_select.size
-                else:
-                    train_true_frac[bin_index, uc_index] = np.nan
-                if val_select.size > 0:
-                    val_true_frac[bin_index, uc_index] = val_select.sum() / val_select.size
-                else:
-                    val_true_frac[bin_index, uc_index] = np.nan
-
-        figsize = (5 + 1.5**(self.unit_cell_length + 1), 3)
-        fig, axes = plt.subplots(1, self.unit_cell_length + 1, figsize=figsize)
-        if self.lattice_system == 'cubic':
-            labels = ['a', 'Volume']
-        elif self.lattice_system in ['tetragonal', 'hexagonal']:
-            labels = ['a', 'b', 'Volume']
-        elif self.lattice_system == 'orthorhombic':
-            labels = ['a', 'b', 'c', 'Volume']
-        elif self.lattice_system == 'monoclinic':
-            labels = ['a', 'b', 'c', 'beta', 'Volume']
-        elif self.lattice_system == 'triclinic':
-            labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma', 'Volume']
-        elif self.lattice_system == 'rhombohedral':
-            labels = ['a', 'alpha', 'Volume']
-        axes_r = [axes[i].twinx() for i in range(self.unit_cell_length + 1)]
-        for uc_index in range(self.unit_cell_length + 1):
-            if uc_index == self.unit_cell_length:
-                unaugmented_uc = train_uc_volume[~train['augmented']]
-                augmented_uc = train_uc_volume[train['augmented']]
-            else:
-                unaugmented_uc = train_uc[~train['augmented'], uc_index]
-                augmented_uc = train_uc[train['augmented'], uc_index]
-            axes[uc_index].hist(unaugmented_uc, bins=bins[uc_index], label='Original', density=True)
-            axes[uc_index].hist(augmented_uc, bins=bins[uc_index], label='Augmented', density=True, alpha=0.5)
-            axes_r[uc_index].plot(centers[uc_index], train_true_frac[:, uc_index], color=[1, 0, 0], label='Train Accuracy')
-            axes_r[uc_index].plot(centers[uc_index], val_true_frac[:, uc_index], color=[0, 1, 0], label='Val Accuracy')
-            axes_r[uc_index].plot(centers[uc_index], 0.5*np.ones(centers[uc_index].size), color=[0, 0, 0], linestyle='dotted')
-            axes[uc_index].set_xlabel(labels[uc_index])
-        axes[0].set_ylabel('Distribution')
-        axes_r[self.unit_cell_length].set_ylabel('Prediction Accuracy')
-        axes[0].legend(frameon=False, framealpha=0.5)
-        axes_r[self.unit_cell_length].legend(frameon=False, framealpha=0.5)
-        axes[0].set_title('\n'.join([
-            f'UC Train / Val Acc: {train_accuracy:0.2f} / {val_accuracy:0.2f}',
-            f'q2 Train / Val Acc: {train_accuracy_q2_obs:0.2f} / {val_accuracy_q2_obs:0.2f}',
-            ]))
-        fig.tight_layout()
-        fig.savefig(os.path.join(
-            f'{self.save_to}',
-            f'aug_predictions_{split_group}_{self.aug_params["tag"]}.png'
-            ))
-        plt.close()
-
-        fig, axes = plt.subplots(1, 2, figsize=(6, 3))
-        axes[0].plot(uc_classifier.feature_importances_, marker='.')
-        axes[1].plot(q2_obs_classifier.feature_importances_, marker='.')
-        axes[0].set_xlabel('Unit Cell Feature Importance')
-        axes[1].set_xlabel('Peak Position Feature Importance')
-        fig.tight_layout()
-        fig.savefig(os.path.join(
-            f'{self.save_to}',
-            f'aug_feature_importance_{split_group}_{self.aug_params["tag"]}.png'
-            ))
-        plt.close()
-
-        n_important = 5
-        feature_indices = np.argsort(q2_obs_classifier.feature_importances_)[::-1][:n_important]
-        sorted_q2 = np.sort(train_q2_obs.ravel())
-        q2_bins = np.linspace(0, sorted_q2[int(0.9975*sorted_q2.size)], 101)
-        unaugmented_q2 = train_q2_obs[~train['augmented']]
-        augmented_q2 = train_q2_obs[train['augmented']]
-        fig, axes = plt.subplots(1, n_important + 1, figsize=(10, 4), sharex=True)
-        axes[0].hist(unaugmented_q2.ravel(), bins=q2_bins, density=True, label='Original')
-        axes[0].hist(augmented_q2.ravel(), bins=q2_bins, density=True, alpha=0.5, label='Augmented')
-        axes[0].set_title('All Peaks')
-        for axes_index, feature_index in enumerate(feature_indices):
-            axes[axes_index + 1].hist(unaugmented_q2[:, feature_index], bins=q2_bins, density=True, label='Original')
-            axes[axes_index + 1].hist(augmented_q2[:, feature_index], bins=q2_bins, density=True, alpha=0.5, label='Augmented')
-            axes[axes_index + 1].set_title(f'q2 index: {feature_index}')
-        for axes_index in range(n_important + 1):
-            axes[axes_index].set_xlabel('q2_obs')
-        axes[0].legend()
-        fig.tight_layout()
-        fig.savefig(os.path.join(
-            f'{self.save_to}',
-            f'q2_distributions_{split_group}_{self.aug_params["tag"]}.png'
-            ))
-        plt.close()
+        return perturbed_unit_cell
 
     def evaluate(self, data, split_group):
         train = data[data['train']]

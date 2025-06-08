@@ -1,4 +1,3 @@
-import joblib
 import matplotlib.pyplot as plt
 import multiprocessing
 import numpy as np
@@ -7,6 +6,7 @@ import scipy.spatial
 import sklearn.ensemble
 from sklearn.model_selection import GridSearchCV
 
+from numba_functions import fast_assign
 from TargetFunctions import CandidateOptLoss
 from Utilities import fix_unphysical
 from Utilities import get_hkl_matrix
@@ -16,7 +16,6 @@ from Utilities import get_unit_cell_volume
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import reciprocal_uc_conversion
 from Utilities import Q2Calculator
-from Utilities import fast_assign
 from Utilities import get_M20_likelihood
 from IOManagers import read_params
 from IOManagers import write_params
@@ -725,6 +724,7 @@ class MITemplates:
 
         print('Fitting Hist Boosting Model')
         if self.template_params['grid_search'] is None:
+            print('Instantiating')
             self.hgbc_regressor = sklearn.ensemble.HistGradientBoostingRegressor(
                 loss=self.template_params['loss'],
                 learning_rate=self.template_params['learning_rate'],
@@ -733,7 +733,9 @@ class MITemplates:
                 min_samples_leaf=self.template_params['min_samples_leaf'],
                 l2_regularization=self.template_params['l2_regularization'],
                 )
+            print('Fitting')
             self.hgbc_regressor.fit(train_inputs, train_outputs)
+            print('Done')
         else:
             grid_search = GridSearchCV(
                 estimator=sklearn.ensemble.HistGradientBoostingRegressor(
@@ -745,7 +747,7 @@ class MITemplates:
                     l2_regularization=self.template_params['l2_regularization'],
                     ),
                 param_grid=self.template_params['grid_search'],
-                cv=5,
+                cv=3,
                 n_jobs=2,
                 verbose=1,
                 )

@@ -21,7 +21,7 @@ from Utilities import get_unit_cell_volume
 from Utilities import get_q2_calc_triplets
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
-from Utilities import fast_assign
+from numba_functions import fast_assign
 from Utilities import get_multiplicity_taupin88
 from Utilities import vectorized_subsampling
 from Utilities import get_hkl_matrix
