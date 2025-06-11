@@ -7,7 +7,6 @@ from IOManagers import read_params
 from IOManagers import write_params
 from IOManagers import NeuralNetworkManager
 from Utilities import fix_unphysical
-from Utilities import get_hkl_matrix
 from Utilities import get_unit_cell_from_xnn
 from Utilities import get_unit_cell_volume
 from Utilities import get_xnn_from_reciprocal_unit_cell

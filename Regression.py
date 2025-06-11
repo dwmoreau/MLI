@@ -226,7 +226,7 @@ class Regression:
                     model=self.random_forest_regressor[ratio_index],
                     )
                 
-    def load_from_tag(self, mode):
+    def load_from_tag(self):
         params = read_params(os.path.join(
             f'{self.save_to}',
             f'{self.group}_reg_params_{self.model_params["tag"]}.csv'
@@ -252,48 +252,47 @@ class Regression:
                 else:
                     self.model_params['max_depth'] = int(params[key])
 
-        if mode in ['training', 'inference:both', 'inference:trees']:
-            if self.lattice_system == 'cubic':
-                #self.random_forest_regressor = SKLearnManager(
-                #    filename=os.path.join(
-                #        f'{self.save_to}',
-                #        f'{self.group}_random_forest_regressor'
-                #        ),
-                #    model_type='custom'
-                #    )
-                self.random_forest_regressor = SKLearnManager(
+        if self.lattice_system == 'cubic':
+            #self.random_forest_regressor = SKLearnManager(
+            #    filename=os.path.join(
+            #        f'{self.save_to}',
+            #        f'{self.group}_random_forest_regressor'
+            #        ),
+            #    model_type='custom'
+            #    )
+            self.random_forest_regressor = SKLearnManager(
+                filename=os.path.join(
+                    f'{self.save_to}',
+                    f'{self.group}_random_forest_regressor'
+                    ),
+                model_type='sklearn'
+                )
+            self.random_forest_regressor.load()
+        else:
+            self.random_forest_regressor = []
+            for ratio_index in range(self.model_params['n_dominant_zone_bins']):
+                """
+                model_manager = SKLearnManager(
                     filename=os.path.join(
                         f'{self.save_to}',
-                        f'{self.group}_random_forest_regressor'
+                        f'{self.group}_{ratio_index}_random_forest_regressor'
+                        ),
+                    model_type='custom'
+                    )
+                model_manager.load()
+                self.random_forest_regressor.append(model_manager)
+                """
+                model_manager = SKLearnManager(
+                    filename=os.path.join(
+                        f'{self.save_to}',
+                        f'{self.group}_{ratio_index}_random_forest_regressor'
                         ),
                     model_type='sklearn'
                     )
-                self.random_forest_regressor.load()
-            else:
-                self.random_forest_regressor = []
-                for ratio_index in range(self.model_params['n_dominant_zone_bins']):
-                    """
-                    model_manager = SKLearnManager(
-                        filename=os.path.join(
-                            f'{self.save_to}',
-                            f'{self.group}_{ratio_index}_random_forest_regressor'
-                            ),
-                        model_type='custom'
-                        )
-                    model_manager.load()
-                    self.random_forest_regressor.append(model_manager)
-                    """
-                    model_manager = SKLearnManager(
-                        filename=os.path.join(
-                            f'{self.save_to}',
-                            f'{self.group}_{ratio_index}_random_forest_regressor'
-                            ),
-                        model_type='sklearn'
-                        )
-                    model_manager.load()
-                    self.random_forest_regressor.append(model_manager)
+                model_manager.load()
+                self.random_forest_regressor.append(model_manager)
 
-    def generate(self, n_unit_cells, rng, q2_obs):
+    def generate(self, n_unit_cells, rng, q2):
         _, _, generated_unit_cells = self.predict(q2=q2)
         # generated_unit_cells: n_entries, unit_cell_length, n_estimators
         # Expected output: n_estimators, unit_cell_length

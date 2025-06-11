@@ -94,13 +94,12 @@ entry_tags = [
     #'homocys',
     ]
 """
-
 """
 base_dir = '/Users/DWMoreau/MLI/data/experimental_data/MFXP10033'
 entry_tags = [
-    'MI2-46',
-    'MI2-59',
-    #'MI2-68',
+    #'MI2-46',
+    #'MI2-59',
+    'MI2-68',
     #'MI2-39',
     #'MI2-58',
     #'MI2-109',
@@ -117,7 +116,7 @@ entry_tags = [
     #'MI2-06',
     ]
 """
-
+"""
 base_dir = '/Users/DWMoreau/MLI/data/experimental_data/MFXL10398'
 entry_tags = [
     #'s3',
@@ -146,6 +145,23 @@ entry_tags = [
     #'s48',
     #'s49',
     ]
+"""
+
+base_dir = '/Users/DWMoreau/MLI/data/experimental_data/gsas'
+entry_tags = [
+    '11bmb_3844',
+    '11bmb_6231',
+    '11bmb_8716',
+    'Carbidopa',
+    'CuCr2O4',
+    'FAP',
+    'garnet',
+    'La7Ca3MnO3_50K',
+    'LaMnO3_50K',
+    'PBSO4',
+]
+
+
 rng = np.random.default_rng()
 
 comm = MPI.COMM_WORLD
@@ -158,25 +174,29 @@ logger.info('Starting process')
 #manager_rank =     [   0,    0,    0,    0,    0,    0,    0]
 #serial =           [True, True, True, True, True, True, True]
 
-#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-#manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-#serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
+manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
 
 #bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
 #manager_rank =     [    0,     0,     1,     1]
 #serial =           [False, False, False, False]
 
-#bravais_lattices = [ 'cP']
-#manager_rank =     [    0]
+#bravais_lattices = ['cF', 'cI', 'cP']
+#manager_rank =     [   0,    0,    0]
+#serial =           [True, True, True]
+
+#bravais_lattices = ['cP']
+#manager_rank =     [   0]
 #serial =           [True]
 
 #bravais_lattices = ['tP', 'tI']
 #manager_rank =     [   0, 0]
 #serial =           [True, True]
 
-bravais_lattices = ['tI']
-manager_rank =     [  0]
-serial =           [True]
+#bravais_lattices = ['tI']
+#manager_rank =     [  0]
+#serial =           [True]
 
 #bravais_lattices = [ 'mP']
 #manager_rank =     [    0]
@@ -193,8 +213,7 @@ for bl in bravais_lattices:
     bl_string += f' {bl}'
 logger.info(f'Including Bravais lattices {bl_string}')
 logger.info('Starting loading optimizers')
-optimizer = get_optimizers(rank, mpi_organizers, broadening_tag, logger=logger)
-
+optimizer = get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale=1, logger=logger)
 
 for entry_tag in entry_tags:
     logger.info(f'Starting entry {entry_tag}')
@@ -203,6 +222,7 @@ for entry_tag in entry_tags:
     if os.path.exists(triplet_file_name):
         triplet_obs = np.load(triplet_file_name)
         logger.info(f'Entry {entry_tag} has triplet information')
+        triplet_obs = None
     else:
         triplet_obs = None
     # The next portion is the optimization of a single entry
@@ -210,6 +230,7 @@ for entry_tag in entry_tags:
     if rank == 0:
         top_unit_cell = dict.fromkeys(bravais_lattices)
         top_M20 = dict.fromkeys(bravais_lattices)
+        top_Minfo = dict.fromkeys(bravais_lattices)
         top_spacegroup = dict.fromkeys(bravais_lattices)
         top_n_indexed = dict.fromkeys(bravais_lattices)
         if not triplet_obs is None:
@@ -235,6 +256,7 @@ for entry_tag in entry_tags:
         if rank == 0 and mpi_organizers[bravais_lattice].manager == 0:
             top_unit_cell[bravais_lattice] = optimizer[bravais_lattice].top_unit_cell
             top_M20[bravais_lattice] = optimizer[bravais_lattice].top_M20
+            top_Minfo[bravais_lattice] = optimizer[bravais_lattice].top_Minfo
             top_spacegroup[bravais_lattice] = optimizer[bravais_lattice].top_spacegroup
             top_n_indexed[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed
             if not triplet_obs is None:
@@ -244,6 +266,7 @@ for entry_tag in entry_tags:
             if rank == 0:
                 top_unit_cell[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_M20[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
+                top_Minfo[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_spacegroup[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_n_indexed[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 if not triplet_obs is None:
@@ -252,6 +275,7 @@ for entry_tag in entry_tags:
             elif rank == mpi_organizers[bravais_lattice].manager:
                 comm.send(optimizer[bravais_lattice].top_unit_cell, dest=0)
                 comm.send(optimizer[bravais_lattice].top_M20, dest=0)
+                comm.send(optimizer[bravais_lattice].top_Minfo, dest=0)
                 comm.send(optimizer[bravais_lattice].top_spacegroup, dest=0)
                 comm.send(optimizer[bravais_lattice].top_n_indexed, dest=0)
                 if not triplet_obs is None:
@@ -306,6 +330,7 @@ for entry_tag in entry_tags:
                     n_indexed_triplets_output = n_indexed_triplets
                 output_data.append({
                     'M20': top_M20[bravais_lattice][result_index],
+                    'Minfo': top_Minfo[bravais_lattice][result_index],
                     'n_indexed': top_n_indexed[bravais_lattice][result_index],
                     'M_triplet': M_triplet_output,
                     'n_indexed_triplet': n_indexed_triplets_output,

@@ -8,6 +8,14 @@ Todo
     - Integrate into optimization
     - Radius of convergence testing
 
+- Data
+    - Materials project as cif files
+        - mp_20 dataset
+    - gsasII
+        - Figure out why La7Ca3MnO3_50K isn't indexing well
+        - Get most probable unit cell predictions and # of indexed peaks
+        - Make a weather plot from the GSAS entries
+
 - Spacegroup assignments:
     - Add a validation
     - https://www.markvardsen.net/projects/ExtSym/main.html
@@ -18,15 +26,6 @@ Todo
 
 - SWE
     - Fix openmp error in pytorch environment
-
-    - Reduce the amount of imports in all files
-
-    - Remove unnecessary options and code:
-        - Indexing
-            - Move inferences_regression and evaluate_regression into Regression
-            - Parameter scaling
-        - PITF
-            - Deep model
     - Reorganize repo
     - Upload models as LFS
 
@@ -51,17 +50,14 @@ Todo
         - Figure out what 
     - Linux testing
     - Windows testing
-    
-- Data
-    - Materials project as cif files
-        - mp_20 dataset
-    - GSASII tutorials
-        - Create a refined peak list and attempt optimization for each powder pattern
-        - https://advancedphotonsource.github.io/GSAS-II-tutorials/tutorials.html
+
+
+- Optimization
+    - Get optimization working with 2D information again
+    - Output M_info for score results even if there is no 2D info
 
 - Integral filter model
 - Model ensemble
-- Optimization
 - Templating
 - Augmentation
 - Documentation
@@ -100,21 +96,10 @@ Readings:
     - Le Bail 2008
     - Harris 2000
 """
-import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
-from sklearn.metrics import ConfusionMatrixDisplay
-
-from Utilities import get_hkl_matrix
-from Utilities import get_xnn_from_reciprocal_unit_cell
-from Utilities import get_unit_cell_from_xnn
-from Utilities import get_unit_cell_volume
-from Utilities import Q2Calculator
-from Utilities import reciprocal_uc_conversion
-from IOManagers import read_params
-from IOManagers import write_params
 
 
 class Indexing:
@@ -259,6 +244,7 @@ class Indexing:
         #    print(f'{key} -> {self.group_mappings[key]}')
 
     def setup_from_tag(self, load_bravais_lattice='all'):
+        from IOManagers import read_params
         params = read_params(os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
         data_params_keys = [
             'augment',
@@ -326,6 +312,7 @@ class Indexing:
                     ))
 
     def save(self):
+        from IOManagers import write_params
         reindexed_hkl = np.stack(self.data['reindexed_hkl'])
         save_to_data = self.data.copy()
         save_to_data['reindexed_h'] = list(reindexed_hkl[:, :, 0])
@@ -533,6 +520,9 @@ class Indexing:
 
     def setup_hkl(self):
         from tqdm import tqdm
+        from Utilities import get_hkl_matrix
+        from Utilities import Q2Calculator
+
         print('Setting up the hkl labels')
         indices = np.logical_and(self.data['train'], ~self.data['augmented'])
         self.hkl_ref = dict.fromkeys(self.data_params['bravais_lattices'])
@@ -658,6 +648,8 @@ class Indexing:
             fig.tight_layout()
             fig.savefig(save_to)
             plt.close()
+        import matplotlib.patches as patches
+        from sklearn.metrics import ConfusionMatrixDisplay
 
         y_labels = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
         plot_volume_scale = 1000
@@ -815,7 +807,7 @@ class Indexing:
                             unit_cell_augmented[indices, index],
                             bins=bins, density=True
                             )
-                        axes[0, index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
+                        axes[index + 2].bar(centers, hist_augmented, width=dbin, alpha=0.5)
 
             axes[0].set_ylabel('Raw data')
             axes[0].set_title('q2')
@@ -1074,7 +1066,7 @@ class Indexing:
                 #    q2_obs=np.array(bl_data.iloc[0]['q2']),
                 #    )
 
-    def setup_regression(self, mode):
+    def setup_regression(self):
         from Regression import Regression
         self.unit_cell_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
@@ -1087,14 +1079,14 @@ class Indexing:
                 )
             self.unit_cell_generator[split_group].setup()
             if self.reg_params[split_group]['load_from_tag']:
-                self.unit_cell_generator[split_group].load_from_tag(mode=mode)
+                self.unit_cell_generator[split_group].load_from_tag()
             else:
                 split_group_indices = self.data['split_group'] == split_group
                 self.unit_cell_generator[split_group].train(data=self.data[split_group_indices])
-                # Loading from tag ensures the onnx models are loaded for evaluation.
-                self.unit_cell_generator[split_group].load_from_tag(mode=mode)
+                self.unit_cell_generator[split_group].load_from_tag()
 
     def inferences_regression(self):
+        from Utilities import get_unit_cell_volume
         reindexed_uc_pred = np.zeros((len(self.data), self.data_params['unit_cell_length']))
         reindexed_uc_pred_var = np.zeros((len(self.data), self.data_params['unit_cell_length']))
 

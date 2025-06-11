@@ -1,17 +1,20 @@
 import numpy as np
-import scipy.optimize
 import scipy.spatial
 
 from Indexing import Indexing
+from numba_functions import fast_assign
 from Reindexing import monoclinic_standardization
 from Reindexing import reindex_entry_basic
 from Reindexing import selling_reduction
 from TargetFunctions import CandidateOptLoss
 from Utilities import fix_unphysical
+from Utilities import get_hkl_matrix
 from Utilities import get_M20
 from Utilities import get_M20_likelihood
 from Utilities import get_M20_likelihood_from_xnn
 from Utilities import get_M_triplet
+from Utilities import get_M_triplet_from_xnn
+from Utilities import get_multiplicity_taupin88
 from Utilities import get_reciprocal_unit_cell_from_xnn
 from Utilities import get_spacegroup_hkl_ref
 from Utilities import get_xnn_from_reciprocal_unit_cell
@@ -21,13 +24,7 @@ from Utilities import get_unit_cell_volume
 from Utilities import get_q2_calc_triplets
 from Utilities import Q2Calculator
 from Utilities import reciprocal_uc_conversion
-from numba_functions import fast_assign
-from Utilities import get_multiplicity_taupin88
 from Utilities import vectorized_subsampling
-from Utilities import get_hkl_matrix
-
-#import psutil
-#import gc
 
 
 class Candidates:
@@ -256,7 +253,7 @@ class Candidates:
         if self.triplets is None:
             improved = refined_M20 > self.best_M20
         else:
-            refined_M_triplets = get_M_triplet(
+            refined_M_triplets = get_M_triplet_from_xnn(
                 self.q2_obs,
                 self.triplets,
                 refined_hkl,
@@ -394,7 +391,7 @@ class Candidates:
             hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
             )[:, 0]
         if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet(
+            self.best_M_triplets = get_M_triplet_from_xnn(
                 self.q2_obs,
                 self.triplets,
                 self.best_hkl,
@@ -495,7 +492,7 @@ class Candidates:
             self.best_hkl = best_hkl
 
         if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet(
+            self.best_M_triplets = get_M_triplet_from_xnn(
                 self.q2_obs,
                 self.triplets,
                 self.best_hkl,
@@ -505,7 +502,7 @@ class Candidates:
                 )
 
     def calculate_peaks_indexed(self):
-        _, probability, _ = get_M20_likelihood_from_xnn(
+        _, probability, self.best_Minfo = get_M20_likelihood_from_xnn(
             q2_obs=self.q2_obs,
             xnn=self.best_xnn,
             hkl=self.best_hkl,
@@ -566,9 +563,6 @@ class OptimizerBase:
             rng=self.rng,
             fom=self.fom
             )
-        #process = psutil.Process()
-        #gc.collect()
-        #print(f'Memory usage after instantiating candidates: {process.memory_info().rss / 1024 ** 2} MB')
         return candidates
 
     def run_common(self, n_top_candidates):
@@ -636,6 +630,7 @@ class OptimizerWorker(OptimizerBase):
 
     def downsample_candidates(self, candidates, n_top_candidates):
         self.comm.Send(candidates.best_M20, dest=self.root)
+        self.comm.Send(candidates.best_Minfo, dest=self.root)
         self.comm.Send(candidates.best_xnn, dest=self.root)
         self.comm.Send(candidates.n_indexed, dest=self.root)
         self.comm.send(candidates.best_spacegroup, dest=self.root)
@@ -691,27 +686,20 @@ class OptimizerManager(OptimizerBase):
         self.indexer.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
         if self.opt_params['convergence_testing'] == False:
             load_random_forest = False
-            load_nn = False
             load_pitf = False
             load_templates = False
             load_random = False
             for generator_info in self.opt_params['generator_info']:
                 if generator_info['generator'] == 'trees':
                     load_random_forest = True
-                elif generator_info['generator'] == 'nn':
-                    load_nn = True
                 elif generator_info['generator'] == 'pitf':
                     load_pitf = True
                 elif generator_info['generator'] == 'templates':
                     load_templates = True
-                elif generator_info['generator'] in ['predicted_volume', 'distribution_volume', 'random']:
+                elif generator_info['generator'] in ['predicted_volume', 'random']:
                     load_random = True
-            if load_nn and load_random_forest:
-                self.indexer.setup_regression(mode='inference:both')
-            elif load_nn:
-                self.indexer.setup_regression(mode='inference:nn')
-            elif load_random_forest:
-                self.indexer.setup_regression(mode='inference:trees')
+            if load_random_forest:
+                self.indexer.setup_regression()
             if load_pitf:
                 self.indexer.setup_pitf(mode='inference')
             if load_templates:
@@ -772,19 +760,10 @@ class OptimizerManager(OptimizerBase):
                     ))
             self.convergence_initial_xnn = np.concatenate(convergence_initial_xnn, axis=0)
         else:
-            #process = psutil.Process()
-            #gc.collect()
-            #print(f'Memory usage before creating candidates: {process.memory_info().rss / 1024 ** 2} MB')
-
             for generator_info in self.opt_params['generator_info']:
-                #gc.collect()
-                #print(f'Memory usage before {generator_info["generator"]}: {process.memory_info().rss / 1024 ** 2} MB')
-                if generator_info['generator'] in ['nn', 'trees']:
+                if generator_info['generator'] == 'trees':
                     generator_unit_cells = self.indexer.unit_cell_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
-                        batch_size=2,
-                        model=generator_info['generator'],
-                        q2_scaler=self.indexer.q2_scaler,
                         )
                 elif generator_info['generator'] == 'templates':
                     generator_unit_cells = self.indexer.miller_index_templator[self.bravais_lattice].generate(
@@ -797,15 +776,12 @@ class OptimizerManager(OptimizerBase):
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         batch_size=2, 
                         )
-                elif generator_info['generator'] in ['random', 'distribution_volume', 'predicted_volume']:
+                elif generator_info['generator'] in ['random', 'predicted_volume']:
                     generator_unit_cells = self.indexer.random_unit_cell_generator[self.bravais_lattice].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         model=generator_info['generator'],
                         )
                 candidate_unit_cells_all.append(generator_unit_cells)
-                #gc.collect()
-                #print(f'Memory usage after {generator_info["generator"]}: {process.memory_info().rss / 1024 ** 2} MB')
-                #print()
         candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
 
         candidate_unit_cells_all = fix_unphysical(
@@ -839,8 +815,6 @@ class OptimizerManager(OptimizerBase):
                 candidate_xnn_rank = candidate_xnn_all[rank_index::self.n_ranks]
             else:
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
-        #gc.collect()
-        #print(f'Memory usage after candidate xnn: {process.memory_info().rss / 1024 ** 2} MB')
         return self.generate_candidates_common(candidate_xnn_rank)
 
     def _redistribution_testing_functional(self, neighbor_radius, xnn, x, N_success):
@@ -861,6 +835,7 @@ class OptimizerManager(OptimizerBase):
         return term_0 + term_1
 
     def redistrubution_testing(self, xnn):
+        import scipy.optimize
         # Steps:
         #   Perform a grid search where max_neighbors is a prespecified grid. At each point, do
         #   an optimization for the best neighbor_radius
@@ -987,6 +962,7 @@ class OptimizerManager(OptimizerBase):
 
     def downsample_candidates(self, candidates, n_top_candidates):
         best_M20_all = []
+        best_Minfo_all = []
         best_xnn_all = []
         best_n_indexed_all = []
         best_spacegroup_all = []
@@ -996,6 +972,7 @@ class OptimizerManager(OptimizerBase):
         for rank_index in range(self.n_ranks):
             if rank_index == self.root:
                 best_M20_all.append(candidates.best_M20)
+                best_Minfo_all.append(candidates.best_Minfo)
                 best_xnn_all.append(candidates.best_xnn)
                 best_n_indexed_all.append(candidates.n_indexed)
                 best_spacegroup_all += candidates.best_spacegroup
@@ -1004,9 +981,11 @@ class OptimizerManager(OptimizerBase):
                     best_M_triplets_all.append(candidates.best_M_triplets)
             else:
                 best_M20_rank = np.zeros(self.sent_candidates[rank_index])
+                best_Minfo_rank = np.zeros(self.sent_candidates[rank_index])
                 best_xnn_rank = np.zeros((self.sent_candidates[rank_index], self.unit_cell_length))
                 best_n_indexed_rank = np.zeros(self.sent_candidates[rank_index], dtype=int)
                 self.comm.Recv(best_M20_rank, source=rank_index)
+                self.comm.Recv(best_Minfo_rank, source=rank_index)
                 self.comm.Recv(best_xnn_rank, source=rank_index)
                 self.comm.Recv(best_n_indexed_rank, source=rank_index)
                 best_spacegroup_rank = self.comm.recv(source=rank_index)
@@ -1020,11 +999,13 @@ class OptimizerManager(OptimizerBase):
                     best_M_triplets_all.append(best_M_triplets_rank)
 
                 best_M20_all.append(best_M20_rank)
+                best_Minfo_all.append(best_Minfo_rank)
                 best_xnn_all.append(best_xnn_rank)
                 best_n_indexed_all.append(best_n_indexed_rank)
                 best_spacegroup_all += best_spacegroup_rank
 
         best_M20_all = np.concatenate(best_M20_all, axis=0)
+        best_Minfo_all = np.concatenate(best_Minfo_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
         if not self.triplets is None:
@@ -1036,6 +1017,7 @@ class OptimizerManager(OptimizerBase):
         # Selling reduction
         good_indices = np.invert(np.any(np.isnan(best_xnn_all), axis=1))
         best_M20_all = best_M20_all[good_indices]
+        best_Minfo_all = best_Minfo_all[good_indices]
         best_xnn_all = best_xnn_all[good_indices]
         best_n_indexed_all = best_n_indexed_all[good_indices]
         if not self.triplets is None:
@@ -1052,6 +1034,7 @@ class OptimizerManager(OptimizerBase):
 
         best_xnn_all = best_xnn_all[sort_indices]
         best_M20_all = best_M20_all[sort_indices]
+        best_Minfo_all = best_Minfo_all[sort_indices]
         best_n_indexed_all = best_n_indexed_all[sort_indices]
         best_spacegroup_all = [best_spacegroup_all[i] for i in sort_indices]
         if not self.triplets is None:
@@ -1063,6 +1046,7 @@ class OptimizerManager(OptimizerBase):
         #radius = self.opt_params['downsample_radius']
         xnn_downsampled = []
         M20_downsampled = []
+        Minfo_downsampled = []
         n_indexed_downsampled = []
         if not self.triplets is None:
             n_indexed_triplets_downsampled = []
@@ -1072,6 +1056,7 @@ class OptimizerManager(OptimizerBase):
             if chunk_index == n_chunks - 1:
                 xnn_chunk = best_xnn_all[chunk_index * chunk_size:]
                 M20_chunk = best_M20_all[chunk_index * chunk_size:]
+                Minfo_chunk = best_Minfo_all[chunk_index * chunk_size:]
                 n_indexed_chunk = best_n_indexed_all[chunk_index * chunk_size:]
                 spacegroup_chunk = best_spacegroup_all[chunk_index * chunk_size:]
                 if not self.triplets is None:
@@ -1080,6 +1065,7 @@ class OptimizerManager(OptimizerBase):
             else:
                 xnn_chunk = best_xnn_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 M20_chunk = best_M20_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
+                Minfo_chunk = best_Minfo_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 n_indexed_chunk = best_n_indexed_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 spacegroup_chunk = best_spacegroup_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
                 if not self.triplets is None:
@@ -1101,6 +1087,7 @@ class OptimizerManager(OptimizerBase):
                             )
                     xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
                     M20_best_neighbor = M20_chunk[neighbor_indices][best_neighbor]
+                    Minfo_best_neighbor = Minfo_chunk[neighbor_indices][best_neighbor]
                     n_indexed_best_neighbor = n_indexed_chunk[neighbor_indices][best_neighbor]
                     spacegroup_best_neighbor = [spacegroup_chunk[i] for i in neighbor_indices][best_neighbor]
                     if not self.triplets is None:
@@ -1113,6 +1100,10 @@ class OptimizerManager(OptimizerBase):
                     M20_chunk = np.concatenate((
                         np.delete(M20_chunk, neighbor_indices), 
                         [M20_best_neighbor]
+                        ))
+                    Minfo_chunk = np.concatenate((
+                        np.delete(Minfo_chunk, neighbor_indices), 
+                        [Minfo_best_neighbor]
                         ))
                     n_indexed_chunk = np.concatenate((
                         np.delete(n_indexed_chunk, neighbor_indices), 
@@ -1136,6 +1127,7 @@ class OptimizerManager(OptimizerBase):
                     status = False
             xnn_downsampled.append(xnn_chunk)
             M20_downsampled.append(M20_chunk)
+            Minfo_downsampled.append(Minfo_chunk)
             n_indexed_downsampled.append(n_indexed_chunk)
             if not self.triplets is None:
                 n_indexed_triplets_downsampled.append(n_indexed_triplets_chunk)
@@ -1143,6 +1135,7 @@ class OptimizerManager(OptimizerBase):
             spacegroup_downsampled += spacegroup_chunk
         xnn_downsampled = np.row_stack(xnn_downsampled)
         M20_downsampled = np.concatenate(M20_downsampled)
+        Minfo_downsampled = np.concatenate(Minfo_downsampled)
         n_indexed_downsampled = np.concatenate(n_indexed_downsampled)
         if not self.triplets is None:
             n_indexed_triplets_downsampled = np.concatenate(n_indexed_triplets_downsampled)
@@ -1156,6 +1149,7 @@ class OptimizerManager(OptimizerBase):
                 )[::-1][:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
         self.top_M20 = M20_downsampled[sort_indices]
+        self.top_Minfo = Minfo_downsampled[sort_indices]
         self.top_n_indexed = n_indexed_downsampled[sort_indices]
         if not self.triplets is None:
             self.top_n_indexed_triplets = n_indexed_triplets_downsampled[sort_indices]

@@ -2,8 +2,6 @@ import keras
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-import scipy.stats
-import scipy.ndimage
 
 
 def tensor_to_numpy(tensor):
@@ -82,6 +80,8 @@ class ExtractionLayer(keras.layers.Layer):
             self.call = self.basic_model_call
 
         if not q2_obs is None:
+            import scipy.stats
+            import scipy.ndimage
             rng = np.random.default_rng(self.seed)
             reciprocal_volume_sorted = np.sort(reciprocal_volume)
             upper_volume_limit = reciprocal_volume_sorted[int(0.990*reciprocal_volume_sorted.size)]

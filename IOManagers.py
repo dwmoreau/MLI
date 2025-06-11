@@ -101,6 +101,10 @@ class SKLearnManager:
             #        n_outputs = 1
             #    else:
             #        n_outputs = self.model.estimators_[0].predict(X).shape[1]
+            if len(X.shape) == 1:
+                X = X[np.newaxis]
+            elif len(X.shape) > 2:
+                assert False
             n_samples = X.shape[0]
             n_estimators = len(self.model.estimators_)
 
