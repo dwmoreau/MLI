@@ -1,30 +1,12 @@
 """
 Todo
-- Figure of Merit
-    - Regenerate data
-    - Put together a new FOM that utilizes data from all Bravais lattices simultaneously
-        - Does this work? Where does this work well?
-        - Use results from indexing attempts
-    - Integrate into optimization
-    - Radius of convergence testing
-
 - Data
     - Materials project as cif files
         - mp_20 dataset
-    - gsasII
-        - Figure out why La7Ca3MnO3_50K isn't indexing well
-        - Get most probable unit cell predictions and # of indexed peaks
-        - Make a weather plot from the GSAS entries
-
-- Spacegroup assignments:
-    - Add a validation
-    - https://www.markvardsen.net/projects/ExtSym/main.html
-    - https://journals.iucr.org/paper?S0021889808031087
-    - https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
-    - https://journals.iucr.org/paper?fe5024
-    - https://journals.iucr.org/paper?buy=yes&cnor=ce5126&showscheme=yes&sing=yes
 
 - SWE
+    - Parallelize the Miller index templating UC generation
+    - numba function for M20 score
     - Fix openmp error in pytorch environment
     - Reorganize repo
     - Upload models as LFS
@@ -54,8 +36,6 @@ Todo
 
 - Optimization
     - Get optimization working with 2D information again
-    - Output M_info for score results even if there is no 2D info
-
 - Integral filter model
 - Model ensemble
 - Templating

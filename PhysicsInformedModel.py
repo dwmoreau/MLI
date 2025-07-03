@@ -44,9 +44,6 @@ class PhysicsInformedModel:
             'filter_length': 3,
             'n_volumes': 200,
             'n_filters': 200,
-            'n_volumes_depth': [256,  64,  16],
-            'n_filters_depth': [200, 200, 200],
-            'depth_layers': [400, 200, 100],
             'initial_layers': [400, 200, 100],
             'final_layers': [200, 100, 50],
             'l1_regularization': 0.0,
@@ -188,9 +185,6 @@ class PhysicsInformedModel:
             'loss_type',
             'augment',
             'model_type',
-            'n_volumes_depth',
-            'n_filters_depth',
-            'depth_layers',
             ]
         self.model_params = dict.fromkeys(params_keys)
         assert mode in ['training', 'inference']
@@ -207,14 +201,6 @@ class PhysicsInformedModel:
             )
         self.model_params['final_layers'] = np.array(
             params['final_layers'].split('[')[1].split(']')[0].split(','),
-            dtype=int
-            )
-        self.model_params['n_volumes_depth'] = np.array(
-            params['n_volumes_depth'].split('[')[1].split(']')[0].split(','),
-            dtype=int
-            )
-        self.model_params['n_filters_depth'] = np.array(
-            params['n_filters_depth'].split('[')[1].split(']')[0].split(','),
             dtype=int
             )
         self.model_params['base_line_layers'] = np.array(
@@ -783,7 +769,6 @@ class PhysicsInformedModel:
         elif not inputs is None:
             q2_obs = np.array(inputs['q2'])[:self.model_params['peak_length']]
         elif not q2_obs is None:
-            print
             q2_obs = q2_obs[:, :self.model_params['peak_length']]
         q2_obs_scaled = q2_obs / self.q2_obs_scale
 

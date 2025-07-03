@@ -299,7 +299,7 @@ def get_split_group(lattice_system, unit_cell=None, reciprocal_reindexed_unit_ce
     elif lattice_system == 'monoclinic':
         # splitting based on reciprocal space
         if reciprocal_reindexed_unit_cell[0] >= reciprocal_reindexed_unit_cell[1]:
-            # a* > b*
+            # a* > b* ~ a < b
             if reciprocal_reindexed_unit_cell[1] >= reciprocal_reindexed_unit_cell[2]:
                 split = 0 # cba* (abc)
             elif reciprocal_reindexed_unit_cell[0] >= reciprocal_reindexed_unit_cell[2]:

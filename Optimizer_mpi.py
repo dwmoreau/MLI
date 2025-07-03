@@ -736,6 +736,34 @@ class OptimizerManager(OptimizerBase):
         if self.opt_params['redistribution_testing']:
             return self.opt_params['max_neighbors'], self.opt_params['neighbor_radius']
 
+    def perform_predictions(self, q2, split_group, top_n=1):
+        template_unit_cells = None
+        tree_unit_cells = None
+        volume_pred = None
+        xnn_pred = None
+        for generator_info in self.opt_params['generator_info']:
+            if generator_info['generator'] == 'pitf':
+                if generator_info['split_group'] == split_group:
+                    xnn_pred, prob = self.indexer.pitf_generator[split_group].predict_xnn(
+                        top_n, q2_obs=q2[np.newaxis], batch_size=2
+                        )
+            elif generator_info['generator'] == 'templates':
+                template_unit_cells = self.indexer.miller_index_templator[self.bravais_lattice].generate(
+                    generator_info['n_unit_cells'], self.rng, q2,
+                    )
+            elif generator_info['generator'] == 'predicted_volume':
+                rec_volume_pred = self.indexer.random_unit_cell_generator[self.bravais_lattice].random_forest_regressor.predict_individual_trees(
+                    q2[np.newaxis],
+                    n_outputs=1
+                    )[0]
+                volume_pred = 1 / rec_volume_pred
+            elif generator_info['generator'] == 'trees':
+                tree_unit_cells = self.indexer.unit_cell_generator[split_group].generate(
+                    generator_info['n_unit_cells'], self.rng, q2,
+                    )
+
+        return xnn_pred, template_unit_cells, volume_pred, tree_unit_cells
+
     def generate_candidates_rank(self):
         candidate_unit_cells_all = []
         if self.opt_params['convergence_testing']:

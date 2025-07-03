@@ -240,6 +240,146 @@ aP | {'Not found': 951, 'Found': 49, 'Off by two': 0, 'Found explainers': 0}
 mC | {'Not found': 790, 'Found': 209, 'Off by two': 1, 'Found explainers': 0}
 mP | {'Not found': 781, 'Found': 208, 'Off by two': 11, 'Found explainers': 0}
 aP | {'Not found': 978, 'Found': 22, 'Off by two': 0, 'Found explainers': 0}
+
+
+- 2x q2 ERROR, 1 contaminant & 50 candidates
+cF | {'Not found': 14, 'Found': 190, 'Off by two': 4, 'Found explainers': 0}
+cI | {'Not found': 23, 'Found': 198, 'Off by two': 2, 'Found explainers': 0}
+cP | {'Not found': 102, 'Found': 361, 'Off by two': 1, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 100 candidates
+cF | {'Not found': 11, 'Found': 193, 'Off by two': 4, 'Found explainers': 0}
+cI | {'Not found': 21, 'Found': 200, 'Off by two': 2, 'Found explainers': 0}
+cP | {'Not found': 90, 'Found': 373, 'Off by two': 1, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 200 candidates
+cF | {'Not found': 14, 'Found': 188, 'Off by two': 6, 'Found explainers': 0}
+cI | {'Not found': 22, 'Found': 198, 'Off by two': 3, 'Found explainers': 0}
+cP | {'Not found': 95, 'Found': 367, 'Off by two': 2, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 400 candidates
+cF | {'Not found': 14, 'Found': 187, 'Off by two': 7, 'Found explainers': 0}
+cI | {'Not found': 20, 'Found': 200, 'Off by two': 3, 'Found explainers': 0}
+cP | {'Not found': 101, 'Found': 361, 'Off by two': 2, 'Found explainers': 0}
+
+
+- 2x q2 ERROR, 1 contaminant & 100 candidates
+hP | {'Not found': 51, 'Found': 949, 'Off by two': 0, 'Found explainers': 0}
+hR | {'Not found': 59, 'Found': 939, 'Off by two': 2, 'Found explainers': 0}
+tI | {'Not found': 68, 'Found': 932, 'Off by two': 0, 'Found explainers': 0}
+tP | {'Not found': 102, 'Found': 898, 'Off by two': 0, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 200 candidates
+hP | {'Not found': 36, 'Found': 964, 'Off by two': 0, 'Found explainers': 0}
+hR | {'Not found': 47, 'Found': 953, 'Off by two': 0, 'Found explainers': 0}
+tI | {'Not found': 55, 'Found': 945, 'Off by two': 0, 'Found explainers': 0}
+tP | {'Not found': 76, 'Found': 924, 'Off by two': 0, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 400 candidates
+hP | {'Not found': 38, 'Found': 962, 'Off by two': 0, 'Found explainers': 0}
+hR | {'Not found': 45, 'Found': 955, 'Off by two': 0, 'Found explainers': 0}
+tI | {'Not found': 49, 'Found': 951, 'Off by two': 0, 'Found explainers': 0}
+tP | {'Not found': 70, 'Found': 929, 'Off by two': 1, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 800 candidates
+hP | {'Not found': 36, 'Found': 964, 'Off by two': 0, 'Found explainers': 0}
+hR | {'Not found': 42, 'Found': 957, 'Off by two': 1, 'Found explainers': 0}
+tI | {'Not found': 46, 'Found': 954, 'Off by two': 0, 'Found explainers': 0}
+tP | {'Not found': 62, 'Found': 937, 'Off by two': 1, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 1600 candidates
+hP | {'Not found': 29, 'Found': 970, 'Off by two': 1, 'Found explainers': 0}
+hR | {'Not found': 41, 'Found': 959, 'Off by two': 0, 'Found explainers': 0}
+tI | {'Not found': 38, 'Found': 962, 'Off by two': 0, 'Found explainers': 0}
+tP | {'Not found': 60, 'Found': 939, 'Off by two': 1, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 2000 candidates
+hP | {'Not found': 31, 'Found': 969, 'Off by two': 0, 'Found explainers': 0}
+hR | {'Not found': 39, 'Found': 961, 'Off by two': 0, 'Found explainers': 0}
+tI | {'Not found': 42, 'Found': 958, 'Off by two': 0, 'Found explainers': 0}
+tP | {'Not found': 57, 'Found': 941, 'Off by two': 2, 'Found explainers': 0
+
+- 2x q2 ERROR, 1 contaminant & 1000 candidates
+oC | {'Not found': 230, 'Found': 766, 'Off by two': 4, 'Found explainers': 0}
+oF |
+oI |
+oP |
+
+- 2x q2 ERROR, 1 contaminant & 1400 candidates
+oC | {'Not found': 223, 'Found': 776, 'Off by two': 1, 'Found explainers': 0}
+oF |
+oI |
+oP |
+
+- 2x q2 ERROR, 1 contaminant & 1800 candidates
+oC | {'Not found': 202, 'Found': 796, 'Off by two': 2, 'Found explainers': 0}
+oF | {'Not found': 106, 'Found': 661, 'Off by two': 0, 'Found explainers': 0}
+oI | {'Not found': 84, 'Found': 412, 'Off by two': 0, 'Found explainers': 0}
+oP |
+
+- 2x q2 ERROR, 1 contaminant & 2200 candidates
+oC | {'Not found': 211, 'Found': 787, 'Off by two': 2, 'Found explainers': 0}
+oF | {'Not found': 96, 'Found': 671, 'Off by two': 0, 'Found explainers': 0}
+oI | {'Not found': 79, 'Found': 417, 'Off by two': 0, 'Found explainers': 0}
+oP | {'Not found': 149, 'Found': 851, 'Off by two': 0, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 2600 candidates
+oC | {'Not found': 196, 'Found': 803, 'Off by two': 1, 'Found explainers': 0}
+oF | {'Not found': 93, 'Found': 674, 'Off by two': 0, 'Found explainers': 0}
+oI | {'Not found': 78, 'Found': 418, 'Off by two': 0, 'Found explainers': 0}
+oP | {'Not found': 143, 'Found': 856, 'Off by two': 1, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 3000 candidates
+oC | {'Not found': 201, 'Found': 799, 'Off by two': 0, 'Found explainers': 0}
+oF | {'Not found': 87, 'Found': 680, 'Off by two': 0, 'Found explainers': 0}
+oI | {'Not found': 76, 'Found': 420, 'Off by two': 0, 'Found explainers': 0}
+oP | {'Not found': 143, 'Found': 856, 'Off by two': 1, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 1000 candidates
+mC |
+mP | {'Not found': 622, 'Found': 375, 'Off by two': 3, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 2000 candidates
+mC | {'Not found': 563, 'Found': 437, 'Off by two': 0, 'Found explainers': 0}
+mP | {'Not found': 596, 'Found': 400, 'Off by two': 4, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 3000 candidates
+mC | {'Not found': 568, 'Found': 431, 'Off by two': 1, 'Found explainers': 0}
+mP | {'Not found': 595, 'Found': 400, 'Off by two': 5, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 4000 candidates
+mC | {'Not found': 563, 'Found': 437, 'Off by two': 0, 'Found explainers': 0}
+mP | {'Not found': 591, 'Found': 406, 'Off by two': 3, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 5000 candidates
+mC | {'Not found': 538, 'Found': 462, 'Off by two': 0, 'Found explainers': 0}
+mP | {'Not found': 584, 'Found': 410, 'Off by two': 6, 'Found explainers': 0}
+
+- 2x q2 ERROR, 1 contaminant & 10000 candidates
+mC | {'Not found': 536, 'Found': 464, 'Off by two': 0, 'Found explainers': 0}
+mP | {'Not found': 618, 'Found': 378, 'Off by two': 4, 'Found explainers': 0}
+
+- 1x q2 ERROR, 1 contaminant & 1000 candidates
+aP | {'Not found': 748, 'Found': 252, 'Off by two': 0, 'Found explainers': 0}
+
+- 1x q2 ERROR, 1 contaminant & 2000 candidates
+aP | {'Not found': 731, 'Found': 269, 'Off by two': 0, 'Found explainers': 0}
+
+- 1x q2 ERROR, 1 contaminant & 3000 candidates
+aP | {'Not found': 733, 'Found': 267, 'Off by two': 0, 'Found explainers': 0}
+
+- 1x q2 ERROR, 1 contaminant & 4000 candidates
+aP | {'Not found': 736, 'Found': 264, 'Off by two': 0, 'Found explainers': 0}
+
+- 1x q2 ERROR, 1 contaminant & 5000 candidates
+aP | {'Not found': 740, 'Found': 260, 'Off by two': 0, 'Found explainers': 0}
+
+- 1x q2 ERROR, 1 contaminant & 6000 candidates
+aP | {'Not found': 743, 'Found': 257, 'Off by two': 0, 'Found explainers': 0}
+
+- 1x q2 ERROR, 1 contaminant & 8000 candidates
+aP | {'Not found': 748, 'Found': 252, 'Off by two': 0, 'Found explainers': 0}
+
 """
 from mpi4py import MPI
 import os
@@ -276,31 +416,33 @@ if __name__ == '__main__':
     load_data = True
     broadening_tag = '1'
     n_entries = 1000
+    n_candidates_scale = 50/100
 
     peak_generation_info = get_peak_generation_info()
-    q2_error_params = 3 * peak_generation_info['q2_error_params']
+    q2_error_params = 1 * peak_generation_info['q2_error_params']
     q2_broadening_params = peak_generation_info['broadening_params']
-    n_contaminants = 0
+    n_contaminants = 1
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+    #bravais_lattices = ['hP', 'hR', 'tI', 'tP']
     bravais_lattices = ['aP']
     optimizer = dict.fromkeys(bravais_lattices)
     rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
         elif bravais_lattice in ['hP']:
-            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
         elif bravais_lattice in ['hR']:
-            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
         elif bravais_lattice in ['aP']:
-            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
 
     if rank == 0:
         if load_data:

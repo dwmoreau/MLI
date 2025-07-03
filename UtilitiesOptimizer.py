@@ -285,7 +285,7 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
     reg_params = {f'{bravais_lattice}_0': {'tag': f'cubic_{broadening_tag}'}}
     pitf_params = {f'{bravais_lattice}_0': {'tag': f'cubic_{broadening_tag}'}}
     random_params = {bravais_lattice: {'tag': f'cubic_{broadening_tag}'}}
-    n_candidates = int(n_candidates_scale * 2000)
+    n_candidates = int(n_candidates_scale * 200)
     generator_info = [
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.4*n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.5*n_candidates)},
@@ -303,7 +303,7 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
         'worker': 'random_subsampling',
         'n_iterations': 100,
         'n_peaks': 10,
-        'n_drop': 6,
+        'n_drop': 7,
         'triplet_opt': True,
         'uniform_sampling': False,
         }
@@ -587,7 +587,7 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     reg_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
     pitf_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'orthorhombic_{broadening_tag}'}}
-    n_candidates = int(n_candidates_scale * 3000)
+    n_candidates = int(n_candidates_scale * 2500)
     if bravais_lattice == 'oF':
         reg_params = {
             f'{bravais_lattice}_0_00': reg_group_params,
@@ -652,11 +652,11 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.1*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/4*0.1*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/4*0.1*n_candidates)},
-            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-            {'generator': 'templates', 'n_unit_cells': int(0.1*n_candidates)},
+            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/4*0.3*n_candidates)},
+            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.3*n_candidates)},
+            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/4*0.3*n_candidates)},
+            {'generator': 'pitf', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/4*0.3*n_candidates)},
+            {'generator': 'templates', 'n_unit_cells': int(0.5*n_candidates)},
             #{'generator': 'random', 'n_unit_cells': int(f*200)},
             {'generator': 'predicted_volume', 'n_unit_cells': int(0.1*n_candidates)},
             ]
@@ -712,7 +712,7 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     reg_group_params = {'tag': f'monoclinic_{broadening_tag}'}
     pitf_group_params = {'tag': f'monoclinic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'monoclinic_{broadening_tag}'}}
-    n_candidates = int(n_candidates_scale * 5000)
+    n_candidates = int(n_candidates_scale * 4000)
     if bravais_lattice == 'mC':
         reg_params = {
             f'{bravais_lattice}_0_02': reg_group_params,
@@ -840,13 +840,13 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     pitf_params = {
         f'{bravais_lattice}_00': pitf_group_params,
         }
-    n_candidates = int(n_candidates_scale * 10000)
+    n_candidates = int(n_candidates_scale * 4000)
     generator_info = [
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.2 * n_candidates)},
         {'generator': 'pitf', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.5 * n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.3 * n_candidates)},
         #{'generator': 'random', 'n_unit_cells': n_candidates},
-        #{'generator': 'predicted_volume', 'n_unit_cells': int(0.15 * n_candidates)},
+        {'generator': 'predicted_volume', 'n_unit_cells': int(0.15 * n_candidates)},
         ]
     iteration_info = [
         {

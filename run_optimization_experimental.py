@@ -149,16 +149,22 @@ entry_tags = [
 
 base_dir = '/Users/DWMoreau/MLI/data/experimental_data/gsas'
 entry_tags = [
-    '11bmb_3844',
-    '11bmb_6231',
-    '11bmb_8716',
-    'Carbidopa',
-    'CuCr2O4',
-    'FAP',
-    'garnet',
-    'La7Ca3MnO3_50K',
-    'LaMnO3_50K',
-    'PBSO4',
+    #'11bmb_3844',
+    #'11bmb_6231',
+    #'11bmb_8716',
+    #'Carbidopa',
+    #'CuCr2O4',
+    #'FAP',
+    #'garnet',
+    #'La7Ca3MnO3_50K',
+    #'LaMnO3_50K',
+    #'PBSO4',
+    'C7N2O2Cl_ca',
+    'C7N2O2Cl_cb',
+    'C7N2O2Cl_da',
+    'C7N2O2Cl_db',
+    'C7N2O2Cl_ec',
+    'C7N2O2Cl_fd',
 ]
 
 
