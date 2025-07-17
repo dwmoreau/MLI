@@ -41,7 +41,6 @@ class PhysicsInformedModel:
         model_params_defaults = {
             'peak_length': 20,
             'extraction_peak_length': 6,
-            'filter_length': 3,
             'n_volumes': 200,
             'n_filters': 200,
             'initial_layers': [400, 200, 100],
@@ -171,7 +170,6 @@ class PhysicsInformedModel:
             'tag',
             'peak_length',
             'extraction_peak_length',
-            'filter_length',
             'n_volumes',
             'n_filters',
             'initial_layers',
@@ -192,7 +190,6 @@ class PhysicsInformedModel:
         self.model_params['tag'] = params['tag']
         self.model_params['peak_length'] = int(params['peak_length'])
         self.model_params['extraction_peak_length'] = int(params['extraction_peak_length'])
-        self.model_params['filter_length'] = int(params['filter_length'])
         self.model_params['n_volumes'] = int(params['n_volumes'])
         self.model_params['n_filters'] = int(params['n_filters'])
         self.model_params['initial_layers'] = np.array(
@@ -279,7 +276,7 @@ class PhysicsInformedModel:
                 self.calibration_onnx_model = model_manager.load_onnx_model(quantized=True)
 
     def build_model(self, data=None):
-        from Networks import ExtractionLayer
+        from mlindex.model_training.Networks import ExtractionLayer
         import keras
         # Build the integral filter model #
         keras.utils.set_random_seed(1)
@@ -395,7 +392,7 @@ class PhysicsInformedModel:
                 kernel_initializer=keras.initializers.HeUniform
                 )(x_initial)
         amplitude_logits = keras.layers.Dense(
-            self.model_params['n_filters']*self.model_params['filter_length']*self.model_params['extraction_peak_length'],
+            self.model_params['n_filters']*self.model_params['extraction_peak_length'],
             activation='linear',
             name='initial_amplitude_logits',
             use_bias=False,
@@ -405,7 +402,6 @@ class PhysicsInformedModel:
             (
                 1,
                 self.model_params['n_filters'],
-                self.model_params['filter_length'],
                 self.model_params['extraction_peak_length']
                 )
             )(amplitude_logits)
@@ -413,11 +409,14 @@ class PhysicsInformedModel:
         #####################
         # Metric prediction #
         #####################
-        x = self.extraction_layer(
+        metric = self.extraction_layer(
             inputs[:, :self.model_params['extraction_peak_length']],
             amplitude_logits,
             name='extraction_layer'
             )
+
+        # x: batch_size, n_volumes, n_peaks + n_filters
+        x = keras.ops.concatenate((keras.ops.expand_dims(inputs, axis=2), metric), axis=2)
 
         #################
         # Hidden layers #
@@ -537,7 +536,7 @@ class PhysicsInformedModel:
 
     def train(self, data):
         import keras
-        from Networks import SigmaDecayCallback
+        from mlindex.model_training.Networks import SigmaDecayCallback
         if self.model_params['augment'] == False:
             data = data[~data['augmented']]
         train = data[data['train']]
