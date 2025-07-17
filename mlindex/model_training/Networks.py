@@ -47,7 +47,7 @@ class ExtractionLayer(keras.layers.Layer):
         self.model_params = model_params
         self.seed = 0
         self.volumes = self.add_weight(
-            shape=(self.model_params['n_volumes'], 1, 1),
+            shape=(self.model_params['n_volumes'], 1),
             initializer=keras.initializers.Zeros(),
             dtype='float32',
             trainable=False,
@@ -55,7 +55,7 @@ class ExtractionLayer(keras.layers.Layer):
             name='volumes'
             )
         self.filters = self.add_weight(
-            shape=(1, self.model_params['n_filters'], self.model_params['filter_length']),
+            shape=(1, self.model_params['n_filters']),
             initializer=keras.initializers.Zeros(),
             dtype='float32',
             trainable=True,
@@ -71,13 +71,6 @@ class ExtractionLayer(keras.layers.Layer):
             constraint=keras.constraints.NonNeg(),
             name='sigma'
             )
-
-        if self.model_params['model_type'] == 'deep':
-            # If the .call method is not used, then the model
-            # weights will not load properly.
-            self.call = self.deep_model_call
-        elif self.model_params['model_type'] == 'metric':
-            self.call = self.basic_model_call
 
         if not q2_obs is None:
             import scipy.stats
@@ -172,19 +165,16 @@ class ExtractionLayer(keras.layers.Layer):
                 #fig.tight_layout()
                 #plt.show()
 
-            q2_filters = np.zeros((self.model_params['n_filters'], self.model_params['filter_length']))
+            q2_filters = np.zeros(self.model_params['n_filters'])
             peak_position_sum = np.zeros(self.model_params['n_filters'])
             for filter_index in range(self.model_params['n_filters']):
                 peak_indices = np.sort(rng.choice(
                     self.model_params['extraction_peak_length'],
-                    self.model_params['filter_length'],
                     replace=False
                     ))
                 peak_position_sum[filter_index] = np.sum(peak_indices)
                 for filter_peak_index, peak_index in enumerate(peak_indices):
                     q2_filters[filter_index, filter_peak_index] = q2_obs_scaled_rv[peak_index].rvs()
-            if self.model_params['model_type'] == 'deep':
-                q2_filters = q2_filters[np.argsort(peak_position_sum)]
             
             self.filters.assign(
                 keras.ops.expand_dims(keras.ops.cast(q2_filters, dtype='float32'), axis=0)
@@ -218,48 +208,30 @@ class ExtractionLayer(keras.layers.Layer):
         else:
             self.filters_init = None
 
-    def basic_model_call(self, q2_obs_scaled, amplitude_logits, **kwargs):
-        # filters:     1, n_filters, filter_length
-        # volumes:     n_volumes, 1, 1
-        # q2_filters:  n_volumes, n_filters, filter_length
+    def call(self, q2_obs_scaled, amplitude_logits, **kwargs):
+        # filters:     1, n_filters
+        # volumes:     n_volumes, 1
+        # q2_filters:  1, n_volumes, n_filters, 1
         # q2_obs:      batch_size, extraction_peak_length
-        # difference: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
+        # difference:  batch_size, n_volumes, n_filters, extraction_peak_length
         q2_filters = keras.ops.expand_dims(
             keras.ops.expand_dims(self.volumes * self.filters, axis=0),
-            axis=4
+            axis=3
             )
-        q2_obs_scaled = keras.ops.expand_dims(
-            keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2), axis=3
-            )
+        q2_obs_scaled = keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2))
         difference = q2_filters - q2_obs_scaled
 
-        # amplitudes: batch_size, 1, n_filters, filter_length, extraction_peak_length
-        amplitudes = self.model_params['filter_length'] * keras.activations.softmax(
+        # amplitudes: batch_size, 1, n_filters, extraction_peak_length
+        amplitudes = keras.activations.softmax(
             amplitude_logits,
-            axis=4
+            axis=3
             ) # peak axis
         # Adding 0.001 to self.sigma prevents NaNs
         distances = amplitudes * keras.ops.exp(-1/2 * (difference / (self.sigma + 0.001))**2)
-        # distances: batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
+        # distances: batch_size, n_volumes, n_filters, extraction_peak_length
         # metric:    batch_size, n_volumes, n_filters
-        metric = keras.ops.sum(distances, axis=(3, 4))
+        metric = keras.ops.sum(distances, axis=3
         return metric
-
-    def deep_model_call(self, q2_obs_scaled, **kwargs):
-        # filters:     1, n_filters, filter_length
-        # volumes:     n_volumes, 1, 1
-        # q2_filters:  n_volumes, n_filters, filter_length
-        # q2_obs:      batch_size, extraction_peak_length
-        # difference:  batch_size, n_volumes, n_filters, filter_length, extraction_peak_length
-        q2_filters = keras.ops.expand_dims(
-            keras.ops.expand_dims(self.volumes * self.filters, axis=0),
-            axis=4
-            )
-        q2_obs_scaled = keras.ops.expand_dims(
-            keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2), axis=3
-            )
-        difference = q2_filters - q2_obs_scaled
-        return keras.ops.exp(-1/2 * (difference / (self.sigma + 0.001))**2)
 
     def loss_function_common(self, y_true, y_pred):
         # y_true: batch_size, unit_cell_length
@@ -292,41 +264,28 @@ class ExtractionLayer(keras.layers.Layer):
             shape=(
                 1, 1,
                 self.model_params['n_filters'],
-                self.model_params['filter_length'],
                 self.model_params['extraction_peak_length']
                 )
             )
         for batch_index in range(n_batchs):
             start = batch_index * batch_size
             stop = (batch_index + 1) * batch_size
-            if self.model_params['model_type'] == 'metric':
-                metric = self.call(
-                    keras.ops.cast(
-                        q2_obs_scaled[start:stop, :self.model_params['extraction_peak_length']],
-                        dtype='float32'
-                        ),
-                    amplitude_logits,
-                    )
-            elif self.model_params['model_type'] == 'deep':
-                metric = self.call(keras.ops.cast(
-                    q2_obs_scaled[start:stop, :self.model_params['extraction_peak_length']],
-                    dtype='float32'
-                    ))
-            metric_max[start: stop] = tensor_to_numpy(metric).max(axis=(1, 2))
-        start = (batch_index + 1) * batch_size
-        if self.model_params['model_type'] == 'metric':
             metric = self.call(
                 keras.ops.cast(
-                    q2_obs_scaled[start:, :self.model_params['extraction_peak_length']],
+                    q2_obs_scaled[start:stop, :self.model_params['extraction_peak_length']],
                     dtype='float32'
                     ),
-                amplitude_logits
+                amplitude_logits,
                 )
-        elif self.model_params['model_type'] == 'deep':
-            metric = self.call(keras.ops.cast(
+            metric_max[start: stop] = tensor_to_numpy(metric).max(axis=(1, 2))
+        start = (batch_index + 1) * batch_size
+        metric = self.call(
+            keras.ops.cast(
                 q2_obs_scaled[start:, :self.model_params['extraction_peak_length']],
                 dtype='float32'
-                ))
+                ),
+            amplitude_logits
+            )
         metric_max[start:] = tensor_to_numpy(metric).max(axis=(1, 2))
 
         fig, axes = plt.subplots(1, 1, figsize=(4, 3))
@@ -413,7 +372,6 @@ class ExtractionLayer(keras.layers.Layer):
             shape=(
                 1, 1,
                 self.model_params['n_filters'],
-                self.model_params['filter_length'],
                 self.model_params['extraction_peak_length']
                 )
             )
@@ -423,20 +381,14 @@ class ExtractionLayer(keras.layers.Layer):
                 stop = -1
             else:
                 stop = (batch_index + 1) * batch_size
-            if self.model_params['model_type'] == 'metric':
-                metric_tensor = self.call(
-                    keras.ops.cast(
-                        q2_obs_scaled[start:stop, :self.model_params['extraction_peak_length']],
-                        dtype='float32'
-                        ),
-                    amplitude_logits
-                    )
-
-            elif self.model_params['model_type'] == 'deep':
-                metric_tensor = self.call(keras.ops.cast(
+            metric_tensor = self.call(
+                keras.ops.cast(
                     q2_obs_scaled[start:stop, :self.model_params['extraction_peak_length']],
                     dtype='float32'
-                    ))
+                    ),
+                amplitude_logits
+                )
+
             metric = tensor_to_numpy(metric_tensor)
             #filter_metric[start: stop, :] = metric.sum(axis=1) / self.model_params['n_volumes']
             filter_metric[start: stop, :] = metric.max(axis=1)
