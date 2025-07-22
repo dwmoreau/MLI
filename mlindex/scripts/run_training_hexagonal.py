@@ -1,14 +1,19 @@
 import os
 os.environ["KERAS_BACKEND"] = "torch"
-
-from Indexing import Indexing
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+import keras
+from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
     broadening_tag = '1'
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
-        'base_directory': '/Users/DWMoreau/MLI',
+        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_hexagonal.xlsx',
         'groupspec_sheet': 'Groups V1',
         'load_from_tag': True,
@@ -23,6 +28,7 @@ if __name__ == '__main__':
     aug_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'max_augmentation': 25,
+        'median_augmentation': 10,
         'augment_method': 'pca',
         'augment_shift': 0.2,
         'n_per_volume': 200,
@@ -33,60 +39,55 @@ if __name__ == '__main__':
         'load_from_tag': False,
         'templates_per_dominant_zone_bin': 2000,
         'parallelization': 'multiprocessing',
-        'n_processes': 4,
-        'max_depth': 10,
-        'min_samples_leaf': 20,
+        'n_processes': 120,
+        'max_depth': 20,
+        'min_samples_leaf': 100,
+        'max_leaf_nodes': 2000,
         'l2_regularization': 0,
-        'n_entries_train': 2000,
-        'n_instances_train': 10000000,
+        'n_entries_train': 10000,
+        'n_instances_train': 100000000,
         'n_peaks_template': 20,
         'n_peaks_calibration': 20,
-        'roc_file_name': '/Users/DWMoreau/MLI/figures/data/radius_of_convergence_drop17_iter100_sampQ2_!!.npy',
-        'max_leaf_nodes': 1000,
-        'max_depth': 20,
-        'min_samples_leaf': 8,
+        'max_distance': 0.1,
+        'roc_file_name': '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/roc/data/!!_roc_peaks20_drop17_iter100_sampQ2.npy',
         'grid_search': None,
-        #'grid_search':
-        #    {
-        #    'max_leaf_nodes': [1000, 1500, 2000],
-        #    'max_depth': [20, 30, 40],
-        #    'min_samples_leaf': [8, 16],
-        #    },
+        'load_training_data': True
         }
     template_params = {
         'hP': template_group_params,
         }
 
-    reg_group_params = {
+    rf_group_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'load_from_tag': False,
-        'n_estimators': 100,
-        'min_samples_leaf': 8,
-        'max_depth': 16,
-        'subsample': 0.75,
+        'n_estimators': 50,
+        'min_samples_leaf': 60,
+        'max_depth': 8,
+        'subsample': 0.5,
         }
 
-    reg_params = {
-        'hP_0_00': reg_group_params,
-        'hP_0_01': reg_group_params,
-        'hP_0_02': reg_group_params,
-        'hP_0_03': reg_group_params,
-        'hP_1_00': reg_group_params,
-        'hP_1_01': reg_group_params,
-        'hP_1_02': reg_group_params,
-        'hP_1_03': reg_group_params,
+    rf_params = {
+        'hP_0_00': rf_group_params,
+        'hP_0_01': rf_group_params,
+        'hP_0_02': rf_group_params,
+        'hP_0_03': rf_group_params,
+        'hP_1_00': rf_group_params,
+        'hP_1_01': rf_group_params,
+        'hP_1_02': rf_group_params,
+        'hP_1_03': rf_group_params,
         }
 
-    pitf_group_params = {
+    integral_filter_group_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 20,
         'extraction_peak_length': 6,
-        'filter_length': 3,
         'n_volumes': 100,
-        'n_filters': 400,
+        'n_filters': 512,
+        'd_model': 256,
+        'n_heads': 8,
         'initial_layers': [400, 200, 100],
-        'final_layers': [1000, 600, 300, 100, 50],
+        'final_layers': [512, 256, 128, 64],
         'l1_regularization': 0.00002,
         'base_line_layers': [1000, 600, 300, 100, 50],
         'base_line_dropout_rate': 0.0,
@@ -107,52 +108,51 @@ if __name__ == '__main__':
             },
         }
 
-    pitf_group_params_load = {
+    integral_filter_group_params_load = {
         'tag': f'hexagonal_{broadening_tag}',
         'load_from_tag': True,
         }
 
-    pitf_params = {
-        'hP_0_00': pitf_group_params,
-        'hP_0_01': pitf_group_params,
-        'hP_0_02': pitf_group_params,
-        'hP_0_03': pitf_group_params,
-        'hP_1_00': pitf_group_params,
-        'hP_1_01': pitf_group_params,
-        'hP_1_02': pitf_group_params,
-        'hP_1_03': pitf_group_params,
+    integral_filter_params = {
+        'hP_0_00': integral_filter_group_params,
+        'hP_0_01': integral_filter_group_params,
+        'hP_0_02': integral_filter_group_params,
+        'hP_0_03': integral_filter_group_params,
+        'hP_1_00': integral_filter_group_params,
+        'hP_1_01': integral_filter_group_params,
+        'hP_1_02': integral_filter_group_params,
+        'hP_1_03': integral_filter_group_params,
         }
 
     random_params_bl = {
         'tag': f'hexagonal_{broadening_tag}',
         'load_from_tag': False,
-        'grid_search': {
-            'n_estimators': [200],
-            'min_samples_leaf': [8],
-            'max_depth': [8],
-            'subsample': [0.75],
-            }
+        'grid_search': None,
+        'n_estimators': 100,
+        'min_samples_leaf': 10,
+        'max_depth': 10,
+        'subsample': 0.5,
         }
     random_params = {
         'hP': random_params_bl,
         }
 
-    indexer = Indexing(
+    wrapper = Wrapper(
         aug_params=aug_params, 
         data_params=data_params,
-        reg_params=reg_params, 
+        rf_params=rf_params, 
         template_params=template_params,
-        pitf_params=pitf_params,
+        integral_filter_params=integral_filter_params,
         random_params=random_params,
         seed=12345, 
         )
     if data_params['load_from_tag']:
-        indexer.load_data_from_tag(load_augmented=True, load_train=True)
+        wrapper.load_data_from_tag(load_augmented=True, load_train=True)
     else:
-        indexer.load_data()
-    #indexer.setup_random()
-    #indexer.setup_miller_index_templates()
-    indexer.setup_regression('training')
-    indexer.inferences_regression()
-    indexer.evaluate_regression()
-    indexer.setup_pitf('training')
+        wrapper.load_data()
+    #wrapper.setup_random()
+    #wrapper.setup_miller_index_templates()
+    #wrapper.setup_random_forest()
+    #wrapper.inferences_random_forest()
+    #wrapper.evaluate_random_forest()
+    wrapper.setup_integral_filter('training')

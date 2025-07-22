@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import sys
 
-from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
+from mlindex.utilities.ErrorAdder import add_q2_error
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_hexagonal_optimizer
@@ -37,22 +37,18 @@ if __name__ == '__main__':
 
     load_data = True
     broadening_tag = '1'
-    q2_error_params = get_peak_generation_info()['q2_error_params']
     
     n_top_candidates = 20
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     #bravais_lattices = ['cF', 'cI', 'cP']
-    bravais_lattices = ['cF']
-    #bravais_lattices = ['hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP']
+    #bravais_lattices = ['cP']
     #bravais_lattices = ['hP', 'hR', 'tI', 'tP']
+    #bravais_lattices = ['tI', 'tP']
+    #bravais_lattices = ['hR']
     #bravais_lattices = ['oC', 'oF', 'oI', 'oP']
-    #bravais_lattices = ['oP']
-    #bravais_lattices = ['oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    #bravais_lattices = ['hP']
-    #bravais_lattices = ['mP', 'mC', 'aP']
+    #bravais_lattices = ['oI']
     #bravais_lattices = ['mP', 'mC']
-    #bravais_lattices = ['mP']
-    #bravais_lattices = ['aP']
+    bravais_lattices = ['aP']
 
     
     if sys.argv[1] == 'random_subsampling':
@@ -148,8 +144,8 @@ if __name__ == '__main__':
     #   ]
 
     output_tag = '_'.join(output_tag_elements)
-    #n_entries = 40
-    n_entries = None
+    n_entries = 2000
+    #n_entries = None
     options = {
         'convergence_testing': True,
         'convergence_candidates': 100,
@@ -160,8 +156,12 @@ if __name__ == '__main__':
     for bravais_lattice in bravais_lattices:
         if bravais_lattice in ['cF', 'cI', 'cP']:
             options['convergence_distances'] = np.logspace(-4, -0, 50)
-        else:
+        elif bravais_lattice in ['hP', 'hR', 'tI', 'tP']:
+            options['convergence_distances'] = np.logspace(-4, -0.5, 50)
+        elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
             options['convergence_distances'] = np.logspace(-4, -1.5, 50)
+        else:
+            options['convergence_distances'] = np.logspace(-4, -2, 40)
         if bravais_lattice in ['cF', 'cI', 'cP']:
             optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
         elif bravais_lattice in ['hP']:
@@ -206,9 +206,7 @@ if __name__ == '__main__':
                 q2 = np.zeros((bravais_lattice_data.shape[0], n_peaks))
                 for entry_index in range(bravais_lattice_data.shape[0]):
                     q2[entry_index] = np.array(bravais_lattice_data[f'q2_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-                sigma_error = q2_error_params[0] + q2 * q2_error_params[1]
-                q2 += rng.normal(loc=0, scale=sigma_error)
-                bravais_lattice_data['q2'] = list(np.sort(np.abs(q2), axis=1))
+                bravais_lattice_data['q2'] = list(add_q2_error(q2, 1, rng))
                 bravais_lattice_data.drop(columns=drop_columns, inplace=True)
                 if not n_entries is None and bravais_lattice_data.shape[0] > n_entries:
                     bravais_lattice_data = bravais_lattice_data.sample(n=n_entries, random_state=rng)

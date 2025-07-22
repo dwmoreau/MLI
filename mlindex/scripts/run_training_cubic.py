@@ -11,7 +11,7 @@ if __name__ == '__main__':
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_cubic.xlsx',
         'groupspec_sheet': 'groups_v0',
-        'load_from_tag': False,
+        'load_from_tag': True,
         'augment': True,
         'hkl_ref_length': 100,
         'n_peaks': 10,
@@ -35,7 +35,7 @@ if __name__ == '__main__':
         'templates_per_dominant_zone_bin': 2000,
         'calibrate': True,
         'parallelization': 'multiprocessing',
-        'n_processes': 2,
+        'n_processes': 10,
         'max_depth': 16,
         'min_samples_leaf': 8,
         'max_leaf_nodes': 400,
@@ -44,7 +44,8 @@ if __name__ == '__main__':
         'n_instances_train': 10000000,
         'n_peaks_template': 10,
         'n_peaks_calibration': 10,
-        'roc_file_name': '/Users/DWMoreau/MLI/figures/data/radius_of_convergence_drop7_iter100_sampQ2_!!.npy',
+        'max_distance': 1,
+        'roc_file_name': '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/roc/data/!!_roc_peaks10_drop8_iter100_sampQ2.npy',
         'grid_search': None,
         #'grid_search':
         #    {
@@ -64,9 +65,9 @@ if __name__ == '__main__':
         'tag': f'cubic_{broadening_tag}',
         'load_from_tag': False,
         'n_estimators': 50,
-        'min_samples_leaf': 2,
-        'max_depth': 15,
-        'subsample': 0.75,
+        'min_samples_leaf': 8,
+        'max_depth': 13,
+        'subsample': 0.5,
         }
 
     rf_group_params_load = {
@@ -122,12 +123,11 @@ if __name__ == '__main__':
     random_params_bl = {
         'tag': f'cubic_{broadening_tag}',
         'load_from_tag': False,
-        'grid_search': {
-            'n_estimators': [50],
-            'min_samples_leaf': [2],
-            'max_depth': [7],
-            'subsample': [0.75],
-            }
+        'grid_search': None,
+        'n_estimators': 50,
+        'min_samples_leaf': 5,
+        'max_depth': 5,
+        'subsample': 0.5,
         }
     random_params = {
         'cF': random_params_bl,
@@ -135,7 +135,7 @@ if __name__ == '__main__':
         'cP': random_params_bl,
         }
 
-    indexer = Wrapper(
+    wrapper = Wrapper(
         aug_params=aug_params, 
         data_params=data_params,
         rf_params=rf_params,
@@ -145,12 +145,12 @@ if __name__ == '__main__':
         seed=12345,
         )
     if data_params['load_from_tag']:
-        indexer.load_data_from_tag(load_augmented=True, load_train=True, load_bravais_lattice='all')
+        wrapper.load_data_from_tag(load_augmented=True, load_train=True, load_bravais_lattice='all')
     else:
-        indexer.load_data()
-    indexer.setup_random()
-    #indexer.setup_miller_index_templates()
-    #indexer.setup_pitf('training')
-    #indexer.setup_regression('training')
-    #indexer.inferences_regression()
-    #indexer.evaluate_regression()
+        wrapper.load_data()
+    #wrapper.setup_random()
+    wrapper.setup_miller_index_templates()
+    #wrapper.setup_pitf('training')
+    #wrapper.setup_random_forest()
+    #wrapper.inferences_random_forest()
+    #wrapper.evaluate_random_forest()

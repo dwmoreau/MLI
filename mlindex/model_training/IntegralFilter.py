@@ -19,7 +19,7 @@ from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
-class PhysicsInformedModel:
+class IntegralFilter:
     def __init__(self, split_group, data_params, model_params, save_to, seed, hkl_ref):
         self.split_group = split_group
         self.data_params = data_params
@@ -49,6 +49,8 @@ class PhysicsInformedModel:
             'base_line_layers': [200, 100, 50],
             'base_line_dropout_rate': 0.0,
             'learning_rate': 0.00005,
+            'd_model': 512,
+            'n_heads': 8,
             'epochs': 20,
             'batch_size': 64,
             'loss_type': 'log_cosh',
@@ -174,6 +176,8 @@ class PhysicsInformedModel:
             'n_filters',
             'initial_layers',
             'final_layers',
+            'd_model',
+            'n_heads',
             'l1_regularization',
             'base_line_layers',
             'base_line_dropout_rate',
@@ -192,6 +196,8 @@ class PhysicsInformedModel:
         self.model_params['extraction_peak_length'] = int(params['extraction_peak_length'])
         self.model_params['n_volumes'] = int(params['n_volumes'])
         self.model_params['n_filters'] = int(params['n_filters'])
+        self.model_params['d_model'] = int(params['d_model'])
+        self.model_params['n_heads'] = int(params['n_heads'])
         self.model_params['initial_layers'] = np.array(
             params['initial_layers'].split('[')[1].split(']')[0].split(','),
             dtype=int
@@ -377,6 +383,7 @@ class PhysicsInformedModel:
 
     def model_builder_metric(self, inputs):
         import keras
+        from mlindex.model_training.Networks import IntraVolume_MultiHeadAttention
         # inputs: batch_size, n_peaks
         # metric: batch_size, n_volumes, n_filters
         ################################################
@@ -416,7 +423,16 @@ class PhysicsInformedModel:
             )
 
         # x: batch_size, n_volumes, n_peaks + n_filters
-        x = keras.ops.concatenate((keras.ops.expand_dims(inputs, axis=2), metric), axis=2)
+        #attended = IntraVolume_MultiHeadAttention(
+        #    d_model=self.model_params['d_model'],
+        #    n_heads=self.model_params['n_heads'],
+        #)(metric)
+        #x = keras.ops.concatenate((
+        #    keras.ops.expand_dims(inputs, axis=2),
+        #    attended
+        #), axis=2)
+        #x = attended
+        x = metric
 
         #################
         # Hidden layers #

@@ -1008,7 +1008,7 @@ class Wrapper:
         self.integral_filter_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
-            self.integral_filter_generator[split_group] = PhysicsInformedModel(
+            self.integral_filter_generator[split_group] = IntegralFilter(
                 split_group,
                 self.data_params,
                 self.integral_filter_params[split_group],
@@ -1029,8 +1029,8 @@ class Wrapper:
                 self.integral_filter_generator[split_group].evaluate(split_group_data, quantitized_model=True)
 
     def evaluate_random_forest(self):
-        from self.model_training.Evaluations import evaluate_regression
-        from self.model_training.Evaluations import calibrate_regression
+        from mlindex.model_training.Evaluations import evaluate_regression
+        from mlindex.model_training.Evaluations import calibrate_regression
         for bravais_lattice in self.data_params['bravais_lattices']:
             evaluate_regression(
                 data=self.data[self.data['bravais_lattice'] == bravais_lattice],

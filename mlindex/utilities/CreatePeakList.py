@@ -1,18 +1,3 @@
-"""
-Improve peak fitting
-    - show difference between fit and data
-    - Plot breadths and asymetry
-
-General
-    - combine redundant functions
-        - slice_refls
-        - get_scattering_vectors
-        - min_separation_check
-
-    - variable rename
-        - s1 to s1_lab
-        - s1_norm to s1
-"""
 from cctbx import sgtbx
 from cctbx import uctbx
 from cctbx.crystal import symmetry
@@ -104,6 +89,53 @@ def calc_pairwise_diff(q, q_ref=None, metric='euclidean'):
         return signs * angles
 
 
+def law_of_cosines(q2_0, q2_1, q2_diff, clip=False):
+    """
+    Calculate angle between vectors using law of cosines
+    
+    Parameters:
+    q2_0 : array_like
+        Magnitude squared of first vectors
+    q2_1 : array_like
+        Magnitude squared of second vectors
+    q2_diff : array_like
+        Magnitude squared of difference vectors
+    clip : bool
+        If True, clip cos_theta to [-1,1]
+        If False, return nans for values outside [-1,1]
+    
+    Returns:
+    angle : array_like
+        Angles between vectors in radians
+    """
+    cos_theta = (q2_0 + q2_1 - q2_diff) / (2 * np.sqrt(q2_0 * q2_1))
+    
+    if clip:
+        return np.arccos(np.clip(cos_theta, -1, 1))
+    else:
+        angles = np.full(cos_theta.shape, np.nan)
+        valid = (cos_theta >= -1) & (cos_theta <= 1)
+        angles[valid] = np.arccos(cos_theta[valid])
+        return angles
+
+
+def apply_simple_symmetry(angles):
+    angles_sym = angles.copy()
+
+    invert_and_rotate = angles_sym > np.pi/2
+    if np.sum(invert_and_rotate) > 0:
+        angles_sym[invert_and_rotate] = np.pi - angles_sym[invert_and_rotate]
+
+    rotate = np.logical_and(-np.pi/2 < angles_sym, angles_sym < 0)
+    if np.sum(rotate) > 0:
+        angles_sym[rotate] = -angles_sym[rotate]
+
+    invert = angles_sym < -np.pi/2
+    if np.sum(invert) > 0:
+        angles_sym[invert] = np.pi + angles_sym[invert]
+    return angles_sym
+
+
 class PeakListCreator:
     def __init__(
         self, 
@@ -111,10 +143,7 @@ class PeakListCreator:
         save_to_directory=None,
         load_combined=False,
         overwrite_combined=False,
-        runs=None,
-        run_limits=None,
-        run_limits_sacla=None,
-        input_path_template=None,
+        input_path_templates=None,
         suffix='_strong.expt',
         min_reflections_per_experiment=3,
         max_reflections_per_experiment=100,
@@ -122,33 +151,7 @@ class PeakListCreator:
         known_space_group=None,
         variable_detector=False,
     ):
-        
-        if type(input_path_template) == str or input_path_template is None:
-            self.multiple_run_groups = False
-            self.input_path_template = [input_path_template]
-        elif type(input_path_template) == list:
-            self.multiple_run_groups = True
-            self.input_path_template = input_path_template
-
-        if not run_limits_sacla is None:
-            assert False
-            self.runs = []
-            for run_index in range(run_limits_sacla[0], run_limits_sacla[1] + 1):
-                for sub_run_index in range(3):
-                    self.runs.append(f'{run_index}-{sub_run_index}')
-        elif not run_limits is None:
-            if self.multiple_run_groups:
-                self.runs = [np.arange(rl[0], rl[1] + 1) for rl in run_limits]
-            else:
-                self.runs = [np.arange(run_limits[0], run_limits[1] + 1)]
-        elif runs is None:
-            self.runs = [[None]]
-        else:
-            if self.multiple_run_groups:
-                self.runs = runs
-            else:
-                self.runs = [runs]
-
+        self.input_path_templates = input_path_templates
         self.max_reflections_per_experiment = max_reflections_per_experiment
         self.min_reflections_per_experiment = min_reflections_per_experiment
 
@@ -238,47 +241,38 @@ class PeakListCreator:
     def _combine_expt_refl_files(self):
         expt_file_names = []
         refl_file_names = []
-        for rg_index in range(len(self.input_path_template)):
-            expt_file_names_rg = []
-            refl_file_names_rg = []
-            for run in self.runs[rg_index]:
-                expt_file_names_run = []
-                refl_file_names_run = []
-                if type(run) == str:
-                    run_str = run
-                elif run is None:
-                    run_str = ''
-                else:
-                    run_str = f'{run:04d}'
-                input_path = self.input_path_template[rg_index].replace('!!!!', run_str)
-                if os.path.exists(input_path):
-                    for file_name in os.listdir(input_path):
-                        if file_name.endswith(self.suffix):
-                            expt_file_name = os.path.join(input_path, file_name)
+        for run_index in range(len(self.input_path_templates)):
+            input_path = self.input_path_templates[run_index]
+            expt_file_names_run = []
+            refl_file_names_run = []
+            if os.path.exists(input_path):
+                for file_name in os.listdir(input_path):
+                    if file_name.endswith(self.suffix):
+                        expt_file_name = os.path.join(input_path, file_name)
+                        if self.suffix.endswith('refined.expt'):
                             refl_file_name = os.path.join(input_path, file_name.replace('.expt', '.refl'))
-                            if os.path.exists(expt_file_name) and os.path.exists(refl_file_name):
-                                expt_file_names_run.append(expt_file_name)
-                                refl_file_names_run.append(refl_file_name)
-                    if len(expt_file_names_run) > 0:
-                        refl_counts = self._run_combine_experiments(
-                            expt_file_names_run, refl_file_names_run, run_str
-                            )
-                        if refl_counts > 0:
-                            expt_file_names_rg.append(os.path.join(
-                                self.save_to_directory, f'{self.tag}_combined_{run_str}.expt'
-                                ))
-                            refl_file_names_rg.append(os.path.join(
-                                self.save_to_directory, f'{self.tag}_combined_{run_str}.refl'
-                                ))
-            self._run_combine_experiments(
-                expt_file_names_rg, refl_file_names_rg, f'rg_index_{rg_index}'
-                )
-            expt_file_names.append(os.path.join(
-                self.save_to_directory, f'{self.tag}_combined_rg_index_{rg_index}.expt'
-                ))
-            refl_file_names.append(os.path.join(
-                self.save_to_directory, f'{self.tag}_combined_rg_index_{rg_index}.refl'
-                ))
+                            if not os.path.exists(refl_file_name):
+                                refl_file_name = os.path.join(
+                                    input_path,
+                                    file_name.replace( '_refined.expt', '_indexed.refl')
+                                )
+                        else:
+                            refl_file_name = os.path.join(input_path, file_name.replace('.expt', '.refl'))
+                        if os.path.exists(expt_file_name) and os.path.exists(refl_file_name):
+                            expt_file_names_run.append(expt_file_name)
+                            refl_file_names_run.append(refl_file_name)
+                if len(expt_file_names_run) > 0:
+                    run_str =  os.path.split(input_path)[1]
+                    refl_counts = self._run_combine_experiments(
+                        expt_file_names_run, refl_file_names_run, run_str
+                        )
+                    if refl_counts > 0:
+                        expt_file_names.append(os.path.join(
+                            self.save_to_directory, f'{self.tag}_combined_{run_str}.expt'
+                            ))
+                        refl_file_names.append(os.path.join(
+                            self.save_to_directory, f'{self.tag}_combined_{run_str}.refl'
+                            ))
         self._run_combine_experiments(
             expt_file_names, refl_file_names, 'all'
             )
@@ -458,6 +452,7 @@ class PeakListCreator:
         axes.set_yticks([])
         axes.set_title('Scatter Plot Of Reflection Coordinates\nMask in red\nThere is a bug and the mask and reflections are offset')
         fig.tight_layout()
+        fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_quick_mask.png'))
         plt.show()
 
         # Make sure the masked reflections actually line up with the mask
@@ -470,6 +465,7 @@ class PeakListCreator:
         axes.set_yticks([])
         axes.set_title('Scatter Plot Of Masked Reflection Coordinates')
         fig.tight_layout()
+        fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_masked_reflection.png'))
         plt.show()
         
         """

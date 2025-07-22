@@ -74,6 +74,7 @@ class RandomForest:
                 min_samples_leaf=self.model_params['min_samples_leaf'],
                 max_depth=self.model_params['max_depth'],
                 max_samples=self.model_params['subsample'],
+                n_jobs=self.model_params['n_jobs'],
                 )
             if self.model_params['grid_search'] is not None:
                 # Set up GridSearchCV
@@ -126,6 +127,7 @@ class RandomForest:
                         min_samples_leaf=self.model_params['min_samples_leaf'],
                         max_depth=self.model_params['max_depth'],
                         max_samples=self.model_params['subsample'],
+                        n_jobs=self.model_params['n_jobs'],
                         ),
                     param_grid=param_grid,
                     cv=5,
@@ -155,6 +157,7 @@ class RandomForest:
                     min_samples_leaf=self.model_params['min_samples_leaf'],
                     max_depth=self.model_params['max_depth'],
                     max_samples=self.model_params['subsample'],
+                    n_jobs=self.model_params['n_jobs'],
                     ) for _ in range(n_ratio_bins)
                 ]
             for ratio_index in range(n_ratio_bins):
@@ -179,6 +182,7 @@ class RandomForest:
             'subsample': 0.05,
             'n_dominant_zone_bins': 10,
             'grid_search': None,
+            'n_jobs': 1,
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():

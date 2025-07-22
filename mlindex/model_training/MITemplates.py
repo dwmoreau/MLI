@@ -6,16 +6,16 @@ import scipy.spatial
 import sklearn.ensemble
 from sklearn.model_selection import GridSearchCV
 
+from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
+from mlindex.utilities.FigureOfMerits import get_M20_sym_reversed
 from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
 from mlindex.utilities.IOManagers import SKLearnManager
 from mlindex.utilities.numba_functions import fast_assign
-from mlindex.utilities.Optimization import CandidateOptLoss
 from mlindex.utilities.Q2Calculator import Q2Calculator
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_hkl_matrix
-from mlindex.utilities.UnitCellTools import get_M20_sym_reversed
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
@@ -38,7 +38,7 @@ class MITemplates:
         template_params_defaults = {
             'templates_per_dominant_zone_bin': 2000,
             'parallelization': 'multiprocessing',
-            'n_processes': 4,
+            'n_processes': 1,
             'n_entries_train': 1000,
             'n_instances_train': 1000000,
             'loss': 'squared_error',
@@ -47,11 +47,15 @@ class MITemplates:
             'max_depth': 4,
             'min_samples_leaf': 100,
             'l2_regularization': 10,
+            'q2_error_multiplier_low': 0.25,
+            'q2_error_multiplier_high': 1.75,
+            'n_contaminants_max': 1,
             'n_peaks': data_params['n_peaks'],
             'n_peaks_template': min(10, data_params['n_peaks']),
             'n_peaks_calibration': min(20, data_params['n_peaks']),
             'max_distance': 0.05,
             'grid_search': None,
+            'load_training_data': False,
             }
         for key in template_params_defaults.keys():
             if key not in self.template_params.keys():
@@ -408,7 +412,17 @@ class MITemplates:
             )
 
     def setup(self, data):
-        self.setup_templates(data)
+        if self.template_params['load_training_data']:
+            self.miller_index_templates = np.load(os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_miller_index_templates_{self.template_params["tag"]}.npy'
+                ))
+            self.miller_index_templates_prob = np.load(os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
+                ))
+        else:
+            self.setup_templates(data)
         train_inputs = self.calibrate_templates(data)
         self.save(train_inputs)
 
@@ -446,7 +460,32 @@ class MITemplates:
             delta_gn = -np.matmul(np.linalg.inv(H), dloss_dxnn[:, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
             xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
+        return self._generate_xnn_common(q2_obs, xnn)
 
+    def generate_xnn_true(self, q2_obs, xnn_true):
+        from mlindex.utilities.ErrorAdder import perturb_xnn
+        if self.bravais_lattice in ['cF', 'cI', 'cP']:
+            convergence_distances = np.logspace(-4, -0, 50)
+        elif self.bravais_lattice in ['hP', 'hR', 'tI', 'tP']:
+            convergence_distances = np.logspace(-4, -0.5, 50)
+        elif self.bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
+            convergence_distances = np.logspace(-4, -1.5, 50)
+        else:
+            convergence_distances = np.logspace(-4, -2, 50)
+        xnn = perturb_xnn(
+            xnn_true,
+            convergence_candidates=10,
+            convergence_distances=convergence_distances,
+            minimum_uc=2,
+            maximum_uc=500,
+            lattice_system=self.lattice_system,
+            rng=self.rng,
+        )
+        return self._generate_xnn_common(q2_obs, xnn)
+        
+    def _generate_xnn_common(self, q2_obs, xnn):
+        q2_obs_template = q2_obs[:self.template_params['n_peaks_template']]
+        q2_obs_calibration = q2_obs[:self.template_params['n_peaks_calibration']]
         # Now prepare each template for calibration, which does not involve the same
         # number of peaks as the templates.
         # First, find the best Miller index assignments using all calibration peaks
@@ -603,10 +642,41 @@ class MITemplates:
         return xnn_downsampled, q2_calc_downsampled
 
     def _get_inputs_worker(self, inputs):
+        from mlindex.utilities.ErrorAdder import add_q2_error
+        from mlindex.utilities.ErrorAdder import add_contaminants
         q2_obs = inputs[0]
         xnn_true = inputs[1]
-        xnn, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs)
-        distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])
+
+        multiplier = self.rng.uniform(
+            low=self.template_params['q2_error_multiplier_low'],
+            high=self.template_params['q2_error_multiplier_high'],
+        )
+        q2_obs = add_q2_error(q2_obs[np.newaxis], None, multiplier, self.rng)[0]
+        q2_obs = add_contaminants(
+            q2=q2_obs[np.newaxis],
+            hkl=None,
+            n_peaks=None,
+            n_contaminants=self.template_params['n_contaminants_max'],
+            rng=self.rng,
+            random_n_contaminants=True
+        )[0]
+
+        xnn0, probability0, N_pred0, q2_calc_max0 = self.generate_xnn(q2_obs)
+        xnn1, probability1, N_pred1, q2_calc_max1 = self.generate_xnn_true(q2_obs, xnn_true)
+        xnn = np.concatenate((xnn0, xnn1), axis=0)
+        probability = np.concatenate((probability0, probability1), axis=0)
+        N_pred = np.concatenate((N_pred0, N_pred1))
+        q2_calc_max = np.concatenate((q2_calc_max0, q2_calc_max1))
+        
+        distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])[:, 0]
+
+        select = distance < self.template_params['max_distance']
+        probability = probability[select]
+        distance = distance[select]
+        xnn = xnn[select]
+        N_pred = N_pred[select]
+        q2_calc_max = q2_calc_max[select]
+
         return probability, distance, xnn, N_pred, q2_calc_max
 
     def get_inputs(self, data, n_entries):
@@ -652,50 +722,108 @@ class MITemplates:
         q2_calc_max = np.concatenate(q2_calc_max)
         return probability, distance, xnn, xnn_true[indices], N_pred, q2_calc_max
 
+    def _sample_training_val_data(self, distance, probability, N_pred, q2_calc_max):
+        # Select only training and validation entries that are within a distance (1/A**2)
+        # of the correct values.
+        # distance_train has shape N
+        select = distance < self.template_params['max_distance']
+        probability = probability[select]
+        distance = distance[select]
+        N_pred = N_pred[select]
+        q2_calc_max = q2_calc_max[select]
+        if distance.size > self.template_params['n_instances_train']:
+            n_bins = 10
+            distance_bins = np.linspace(0, self.template_params['max_distance'], n_bins + 1)
+            probability_new = []
+            distance_new = []
+            N_pred_new = []
+            q2_calc_max_new = []
+            n_per_bin = self.template_params['n_instances_train'] // n_bins
+            n_instances = 0
+            for bin_index in range(n_bins):
+                bin_indices = np.logical_and(
+                    distance >= distance_bins[bin_index],
+                    distance < distance_bins[bin_index + 1],
+                )
+                if bin_indices.sum() > 0:
+                    if bin_indices.sum() > n_per_bin:
+                        select = self.rng.choice(
+                            int(bin_indices.sum()),
+                            size=n_per_bin,
+                            replace=False
+                            )
+                        probability_new.append(probability[bin_indices][select])
+                        distance_new.append(distance[bin_indices][select])
+                        N_pred_new.append(N_pred[bin_indices][select])
+                        q2_calc_max_new.append(q2_calc_max[bin_indices][select])
+                        n_instances += n_per_bin
+                    else:
+                        probability_new.append(probability[bin_indices])
+                        distance_new.append(distance[bin_indices])
+                        N_pred_new.append(N_pred[bin_indices])
+                        q2_calc_max_new.append(q2_calc_max[bin_indices])
+                        if bin_index < (n_bins - 1):
+                            n_instances += bin_indices.sum()
+                            n_per_bins = (self.template_params['n_instances_train'] - n_instances) // (n_bins - bin_index)
+                else:
+                    if bin_index < (n_bins - 1):
+                        n_per_bins = (self.template_params['n_instances_train'] - n_instances) // (n_bins - bin_index)
+            probability = np.concatenate(probability_new, axis=0)
+            distance = np.concatenate(distance_new)
+            N_pred = np.concatenate(N_pred_new)
+            q2_calc_max = np.concatenate(q2_calc_max_new)
+        return distance, probability, N_pred, q2_calc_max
+    
     def calibrate_templates(self, data):
         unaugmented_data = data[~data['augmented']]
         training_data = unaugmented_data[unaugmented_data['train']]
         val_data = unaugmented_data[~unaugmented_data['train']]
         n_val = int(0.2*self.template_params['n_entries_train'])
-        probability_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train = \
-            self.get_inputs(training_data, self.template_params['n_entries_train'])
-        probability_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val = \
-            self.get_inputs(val_data, n_val)
 
-        # Select only training and validation entries that are within 0.01 1/A**2
-        # of the correct values.
-        # distance_train has shape Nx1
-        train_select = distance_train[:, 0] < self.template_params['max_distance']
-        probability_train = probability_train[train_select]
-        distance_train = distance_train[train_select]
-        N_pred_train = N_pred_train[train_select]
-        q2_calc_max_train = q2_calc_max_train[train_select]
-        if distance_train.size > self.template_params['n_instances_train']:
-            train_select = self.rng.choice(
-                distance_train.size,
-                size=self.template_params['n_instances_train'],
-                replace=False
-                )
-            probability_train = probability_train[train_select]
-            distance_train = distance_train[train_select]
-            N_pred_train = N_pred_train[train_select]
-            q2_calc_max_train = q2_calc_max_train[train_select]
-
-        val_select = distance_val[:, 0] < self.template_params['max_distance']
-        probability_val = probability_val[val_select]
-        distance_val = distance_val[val_select]
-        N_pred_val = N_pred_val[val_select]
-        q2_calc_max_val = q2_calc_max_val[val_select]
-        if distance_val.size > self.template_params['n_instances_train']:
-            val_select = self.rng.choice(
-                distance_val.size,
-                size=self.template_params['n_instances_train'],
-                replace=False
-                )
-            probability_val = probability_val[val_select]
-            distance_val = distance_val[val_select]
-            N_pred_val = N_pred_val[val_select]
-            q2_calc_max_val = q2_calc_max_val[val_select]
+        if self.template_params['load_training_data']:
+            training_cache = np.load(os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_train.npy'))
+            distance_train = training_cache[:, 0]
+            N_pred_train = training_cache[:, 1]
+            q2_calc_max_train = training_cache[:, 2]
+            probability_train = training_cache[:, 3:]
+            
+            val_cache = np.load(os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_val.npy'))
+            distance_val = val_cache[:, 0]
+            N_pred_val = val_cache[:, 1]
+            q2_calc_max_val = val_cache[:, 2]
+            probability_val = val_cache[:, 3:]
+        else:
+            probability_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train = \
+                self.get_inputs(training_data, self.template_params['n_entries_train'])
+            probability_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val = \
+                self.get_inputs(val_data, n_val)
+    
+            distance_train, probability_train, N_pred_train, q2_calc_max_train = self._sample_training_val_data(
+                distance_train, probability_train, N_pred_train, q2_calc_max_train
+            )
+            distance_val, probability_val, N_pred_val, q2_calc_max_val = self._sample_training_val_data(
+                distance_val, probability_val, N_pred_val, q2_calc_max_val
+            )
+            if not os.path.exists(os.path.join(f'{self.save_to}', 'data_cache')):
+                os.mkdir(os.path.join(f'{self.save_to}', 'data_cache'))
+            np.save(
+                os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_train.npy'),
+                np.concatenate((
+                    distance_train[:, np.newaxis],
+                    N_pred_train[:, np.newaxis],
+                    q2_calc_max_train[:, np.newaxis],
+                    probability_train,
+                ), axis=1)
+            )
+            np.save(
+                os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_val.npy'),
+                np.concatenate((
+                    distance_val[:, np.newaxis],
+                    N_pred_val[:, np.newaxis],
+                    q2_calc_max_val[:, np.newaxis],
+                    probability_val,
+                ), axis=1)
+            )
 
         # Convert to float32 ensures that the ONNX conversion and the sklearn model
         # provide the same inferences.
@@ -732,6 +860,7 @@ class MITemplates:
                 max_depth=self.template_params['max_depth'],
                 min_samples_leaf=self.template_params['min_samples_leaf'],
                 l2_regularization=self.template_params['l2_regularization'],
+                verbose=2
                 )
             print('Fitting')
             self.hgbc_regressor.fit(train_inputs, train_outputs)

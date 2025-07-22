@@ -3,6 +3,7 @@ import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+from mlindex.utilities.ErrorAdder import perturb_xnn
 from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood_from_xnn
@@ -761,8 +762,8 @@ class OptimizerManager(OptimizerBase):
         return xnn_pred, template_unit_cells, volume_pred, tree_unit_cells
 
     def generate_candidates_rank(self):
-        candidate_unit_cells_all = []
         if self.opt_params['convergence_testing']:
+            """
             size = (self.opt_params['convergence_candidates'], self.wrapper.data_params['unit_cell_length'])
             convergence_initial_xnn = []
             for distance in self.opt_params['convergence_distances']:
@@ -776,14 +777,23 @@ class OptimizerManager(OptimizerBase):
                     maximum_unit_cell=self.opt_params['maximum_uc'],
                     lattice_system=self.lattice_system
                     )
-                convergence_initial_xnn.append(perturbed_xnn)
                 candidate_unit_cells_all.append(get_unit_cell_from_xnn(
                     perturbed_xnn,
                     partial_unit_cell=True,
                     lattice_system=self.lattice_system
                     ))
-            self.convergence_initial_xnn = np.concatenate(convergence_initial_xnn, axis=0)
+            """
+            candidate_unit_cells_all = perturb_xnn(
+                self.xnn_true,
+                convergence_candidates=self.opt_params['convergence_candidates'],
+                convergence_distances=self.opt_params['convergence_distances'],
+                minimum_uc=self.opt_params['minimum_uc'],
+                maximum_uc=self.opt_params['maximum_uc'],
+                lattice_system=self.lattice_system,
+                rng=self.rng
+            )
         else:
+            candidate_unit_cells_all = []
             for generator_info in self.opt_params['generator_info']:
                 if generator_info['generator'] == 'trees':
                     generator_unit_cells = self.wrapper.unit_cell_generator[generator_info['split_group']].generate(
@@ -806,7 +816,7 @@ class OptimizerManager(OptimizerBase):
                         model=generator_info['generator'],
                         )
                 candidate_unit_cells_all.append(generator_unit_cells)
-        candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
+            candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
 
         candidate_unit_cells_all = fix_unphysical(
             unit_cell=candidate_unit_cells_all,

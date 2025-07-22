@@ -1,8 +1,8 @@
 import keras
+import math
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-
 
 def tensor_to_numpy(tensor):
     if os.environ["KERAS_BACKEND"] == 'tensorflow':
@@ -98,12 +98,7 @@ class ExtractionLayer(keras.layers.Layer):
             # large side and the q2_filter distribution is pushed to a much larger region than q2_obs.
             distribution_volumes /= np.median(distribution_volumes)
             self.volumes.assign(
-                keras.ops.expand_dims(
-                    keras.ops.expand_dims(
-                        keras.ops.cast(distribution_volumes, dtype='float32'), axis=1
-                        ),
-                    axis=2
-                    )
+                keras.ops.expand_dims(keras.ops.cast(distribution_volumes, dtype='float32'), axis=1),
                 )
             #fig, axes = plt.subplots(1, 1, figsize=(6, 3))
             #vol_scaled_x = (centers_vol / q2_obs_scale**2)**(2/3)
@@ -166,15 +161,12 @@ class ExtractionLayer(keras.layers.Layer):
                 #plt.show()
 
             q2_filters = np.zeros(self.model_params['n_filters'])
-            peak_position_sum = np.zeros(self.model_params['n_filters'])
             for filter_index in range(self.model_params['n_filters']):
-                peak_indices = np.sort(rng.choice(
+                peak_index = rng.choice(
                     self.model_params['extraction_peak_length'],
                     replace=False
-                    ))
-                peak_position_sum[filter_index] = np.sum(peak_indices)
-                for filter_peak_index, peak_index in enumerate(peak_indices):
-                    q2_filters[filter_index, filter_peak_index] = q2_obs_scaled_rv[peak_index].rvs()
+                    )
+                q2_filters[filter_index] = q2_obs_scaled_rv[peak_index].rvs()
             
             self.filters.assign(
                 keras.ops.expand_dims(keras.ops.cast(q2_filters, dtype='float32'), axis=0)
@@ -218,7 +210,7 @@ class ExtractionLayer(keras.layers.Layer):
             keras.ops.expand_dims(self.volumes * self.filters, axis=0),
             axis=3
             )
-        q2_obs_scaled = keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2))
+        q2_obs_scaled = keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2)
         difference = q2_filters - q2_obs_scaled
 
         # amplitudes: batch_size, 1, n_filters, extraction_peak_length
@@ -230,7 +222,7 @@ class ExtractionLayer(keras.layers.Layer):
         distances = amplitudes * keras.ops.exp(-1/2 * (difference / (self.sigma + 0.001))**2)
         # distances: batch_size, n_volumes, n_filters, extraction_peak_length
         # metric:    batch_size, n_volumes, n_filters
-        metric = keras.ops.sum(distances, axis=3
+        metric = keras.ops.sum(distances, axis=3)
         return metric
 
     def loss_function_common(self, y_true, y_pred):
@@ -326,7 +318,7 @@ class ExtractionLayer(keras.layers.Layer):
 
     def evaluate_init(self, q2_obs_scaled, save_to, split_group, tag):
         q2_filters = tensor_to_numpy(self.volumes * self.filters)
-        volumes = self.volumes.numpy()[:, 0, 0]
+        volumes = self.volumes.numpy()[:, 0]
         volume_differences = volumes[1:] - volumes[:-1]
         fig, axes = plt.subplots(1, 1, figsize=(5, 3))
         axes.plot(volume_differences, marker='.')        
@@ -409,3 +401,137 @@ class ExtractionLayer(keras.layers.Layer):
         fig.tight_layout()
         fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_metric_init_{tag}.png'))
         plt.close()
+
+
+class IntraVolume_MultiHeadAttention(keras.layers.Layer):
+    def __init__(self, d_model, n_heads, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        
+        # Single set of weights applied to all volumes
+        self.W_q = keras.layers.Dense(
+            d_model,
+            use_bias=False,
+            kernel_initializer=keras.initializers.HeUniform,
+            #activation=keras.activations.gelu
+        )
+        self.W_k = keras.layers.Dense(
+            d_model,
+            use_bias=False,
+            kernel_initializer=keras.initializers.HeUniform,
+            #activation=keras.activations.gelu
+        )
+        self.W_v = keras.layers.Dense(
+            d_model,
+            use_bias=False,
+            kernel_initializer=keras.initializers.HeUniform,
+            #activation=keras.activations.gelu
+        )
+        self.W_o = keras.layers.Dense(
+            d_model,
+            use_bias=False,
+            kernel_initializer=keras.initializers.HeUniform,
+            #activation=keras.activations.gelu
+        )
+        
+    def call(self, x):
+        # x shape: (batch_size, n_volumes, n_filters)
+        batch_size = keras.ops.shape(x)[0]
+        n_volumes = keras.ops.shape(x)[1] 
+        n_filters = keras.ops.shape(x)[2]
+        
+        # Reshape to treat each volume as a separate sequence
+        # (batch_size * n_volumes, n_filters, 1)
+        x_flat = keras.ops.reshape(x, (batch_size * n_volumes, n_filters, 1))
+        
+        # Generate Q, K, V - same operation applied to each volume
+        Q = self.W_q(x_flat)
+        K = self.W_k(x_flat)
+        V = self.W_v(x_flat)
+        
+        # Reshape for multi-head attention
+        Q = keras.ops.reshape(Q, (batch_size * n_volumes, n_filters, self.n_heads, self.d_k))
+        K = keras.ops.reshape(K, (batch_size * n_volumes, n_filters, self.n_heads, self.d_k))
+        V = keras.ops.reshape(V, (batch_size * n_volumes, n_filters, self.n_heads, self.d_k))
+        
+        # Transpose to (batch*n_volumes, n_heads, n_filters, d_k)
+        Q = keras.ops.transpose(Q, [0, 2, 1, 3])
+        K = keras.ops.transpose(K, [0, 2, 1, 3])
+        V = keras.ops.transpose(V, [0, 2, 1, 3])
+        
+        # Compute attention scores within each volume
+        # (batch*n_volumes, n_heads, n_filters, n_filters)
+        scores = keras.ops.matmul(Q, keras.ops.transpose(K, [0, 1, 3, 2])) / math.sqrt(self.d_k)
+        attention_weights = keras.ops.softmax(scores, axis=-1)
+        
+        # Apply attention to values
+        # (batch*n_volumes, n_heads, n_filters, d_k)
+        attended = keras.ops.matmul(attention_weights, V)
+        
+        # Concatenate heads and reshape back
+        # (batch*n_volumes, n_filters, d_model)
+        attended = keras.ops.transpose(attended, [0, 2, 1, 3])
+        attended = keras.ops.reshape(attended, (batch_size * n_volumes, n_filters, self.d_model))
+        
+        # Final projection
+        output = self.W_o(attended)
+        
+        # Reshape back to original structure
+        # (batch_size, n_volumes, d_model)
+        output = keras.ops.reshape(output, (batch_size, n_volumes, self.d_model))
+        
+        return output
+
+
+class IntraVolume_Attention(keras.layers.Layer):
+    def __init__(self, d_model, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        
+        self.W_q = keras.layers.Dense(
+            d_model, 
+            use_bias=False,
+            #activation=keras.activations.gelu,
+            kernel_initializer=keras.initializers.HeUniform
+        )
+        self.W_k = keras.layers.Dense(
+            d_model, 
+            use_bias=False,
+            #activation=keras.activations.gelu,
+            kernel_initializer=keras.initializers.HeUniform
+        )
+        self.W_v = keras.layers.Dense(
+            d_model, 
+            use_bias=False,
+            #activation=keras.activations.gelu,
+            kernel_initializer=keras.initializers.HeUniform
+        )
+        
+    def call(self, x):
+        # x shape: (batch_size, n_volumes, n_filters)
+        batch_size = keras.ops.shape(x)[0]
+        n_volumes = keras.ops.shape(x)[1]
+        n_filters = keras.ops.shape(x)[2]
+        
+        # Add feature dimension: (batch_size, n_volumes, n_filters, 1)
+        x_expanded = keras.ops.expand_dims(x, -1)
+        
+        # Apply same linear transformations to each volume
+        Q = self.W_q(x_expanded)  # (batch_size, n_volumes, n_filters, d_model)
+        K = self.W_k(x_expanded)
+        V = self.W_v(x_expanded)
+        
+        # Compute attention scores for each volume independently
+        # (batch_size, n_volumes, n_filters, n_filters)
+        scores = keras.ops.matmul(Q, keras.ops.transpose(K, [0, 1, 3, 2])) / math.sqrt(self.d_model)
+        attention_weights = keras.ops.softmax(scores, axis=-1)
+        
+        # Apply attention: (batch_size, n_volumes, n_filters, d_model)
+        attended = keras.ops.matmul(attention_weights, V)
+        
+        # Reduce to final output: (batch_size, n_volumes, d_model)
+        output = keras.ops.mean(attended, axis=2)  # or keras.ops.sum, depending on what you want
+        
+        return output
