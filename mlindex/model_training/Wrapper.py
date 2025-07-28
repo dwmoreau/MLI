@@ -1017,7 +1017,8 @@ class Wrapper:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.integral_filter_params[split_group]['load_from_tag']:
-                self.integral_filter_generator[split_group].load_from_tag(mode=mode)
+                #self.integral_filter_generator[split_group].load_from_tag(mode=mode)
+                print(split_group)
             else:
                 split_group_data = self.data[self.data['split_group'] == split_group]
                 self.integral_filter_generator[split_group].setup(split_group_data)

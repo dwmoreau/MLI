@@ -43,8 +43,7 @@ class IntegralFilter:
             'extraction_peak_length': 6,
             'n_volumes': 200,
             'n_filters': 200,
-            'initial_layers': [400, 200, 100],
-            'final_layers': [200, 100, 50],
+            'layers': [200, 100, 50],
             'l1_regularization': 0.0,
             'base_line_layers': [200, 100, 50],
             'base_line_dropout_rate': 0.0,
@@ -74,6 +73,7 @@ class IntegralFilter:
         for key in model_params_defaults['calibration_params'].keys():
             if key not in self.model_params['calibration_params'].keys():
                 self.model_params['calibration_params'][key] = model_params_defaults['calibration_params'][key]
+            
         self.model_params['unit_cell_length'] = self.unit_cell_length
         self.build_model(data=data)
         self.build_calibration_model()
@@ -174,8 +174,7 @@ class IntegralFilter:
             'extraction_peak_length',
             'n_volumes',
             'n_filters',
-            'initial_layers',
-            'final_layers',
+            'layers',
             'd_model',
             'n_heads',
             'l1_regularization',
@@ -198,12 +197,8 @@ class IntegralFilter:
         self.model_params['n_filters'] = int(params['n_filters'])
         self.model_params['d_model'] = int(params['d_model'])
         self.model_params['n_heads'] = int(params['n_heads'])
-        self.model_params['initial_layers'] = np.array(
-            params['initial_layers'].split('[')[1].split(']')[0].split(','),
-            dtype=int
-            )
-        self.model_params['final_layers'] = np.array(
-            params['final_layers'].split('[')[1].split(']')[0].split(','),
+        self.model_params['layers'] = np.array(
+            params['layers'].split('[')[1].split(']')[0].split(','),
             dtype=int
             )
         self.model_params['base_line_layers'] = np.array(
@@ -386,60 +381,28 @@ class IntegralFilter:
         from mlindex.model_training.Networks import IntraVolume_MultiHeadAttention
         # inputs: batch_size, n_peaks
         # metric: batch_size, n_volumes, n_filters
-        ################################################
-        # Initial Dense layers that predict amplitudes #
-        ################################################
-        x_initial = inputs
-        for index in range(len(self.model_params['initial_layers'])):
-            x_initial = keras.layers.Dense(
-                self.model_params['initial_layers'][index],
-                activation=keras.activations.gelu,
-                name=f'initial_metric_dense_{index}',
-                use_bias=False,
-                kernel_initializer=keras.initializers.HeUniform
-                )(x_initial)
-        amplitude_logits = keras.layers.Dense(
-            self.model_params['n_filters']*self.model_params['extraction_peak_length'],
-            activation='linear',
-            name='initial_amplitude_logits',
-            use_bias=False,
-            kernel_initializer=keras.initializers.HeUniform
-            )(x_initial)
-        amplitude_logits = keras.layers.Reshape(
-            (
-                1,
-                self.model_params['n_filters'],
-                self.model_params['extraction_peak_length']
-                )
-            )(amplitude_logits)
 
         #####################
         # Metric prediction #
         #####################
         metric = self.extraction_layer(
             inputs[:, :self.model_params['extraction_peak_length']],
-            amplitude_logits,
             name='extraction_layer'
             )
 
-        # x: batch_size, n_volumes, n_peaks + n_filters
-        #attended = IntraVolume_MultiHeadAttention(
-        #    d_model=self.model_params['d_model'],
-        #    n_heads=self.model_params['n_heads'],
-        #)(metric)
-        #x = keras.ops.concatenate((
-        #    keras.ops.expand_dims(inputs, axis=2),
-        #    attended
-        #), axis=2)
-        #x = attended
-        x = metric
+        # attended: batch_size, n_volumes, d_model
+        attended = IntraVolume_MultiHeadAttention(
+            d_model=self.model_params['d_model'],
+            n_heads=self.model_params['n_heads'],
+        )(metric)
 
         #################
         # Hidden layers #
         #################
-        for index in range(len(self.model_params['final_layers'])):
+        x = attended
+        for index in range(len(self.model_params['layers'])):
             x = keras.layers.Dense(
-                self.model_params['final_layers'][index],
+                self.model_params['layers'][index],
                 activation=keras.activations.gelu,
                 name=f'metric_dense_{index}',
                 use_bias=False,
@@ -469,6 +432,7 @@ class IntegralFilter:
 
     def model_builder_calibration(self, inputs):
         import keras
+        from mlindex.model_training.Networks import IntraVolume_MultiHeadAttention
         pairwise_differences_scaled, q2_ref = self.pairwise_difference_calculator.get_pairwise_differences(
             inputs[1], inputs[0], return_q2_ref=True
             )
@@ -479,8 +443,17 @@ class IntegralFilter:
         pairwise_differences_transformed = self.transform_pairwise_differences(
             pairwise_differences_scaled, True
             )
+        # Attention here has potential to outperform just a dense network
+        # Quantization significantly reduces accuracy
+        #attended = IntraVolume_MultiHeadAttention(
+        #    d_model=self.hkl_ref.shape[0],
+        #    n_heads=self.model_params['calibration_params']['n_heads'],
+        #)(pairwise_differences_transformed)
+        #x = attended
+
+        x = pairwise_differences_transformed
         for index in range(self.model_params['calibration_params']['layers']):
-            dense_layer = keras.layers.Dense(
+            x = keras.layers.Dense(
                 self.hkl_ref.shape[0],
                 activation=keras.activations.gelu,
                 name=f'dense_{index}',
@@ -489,11 +462,7 @@ class IntegralFilter:
                 kernel_regularizer=keras.regularizers.L1(
                     l1=self.model_params['calibration_params']['l1_regularization']
                     ),
-                )
-            if index == 0:
-                x = dense_layer(pairwise_differences_transformed)
-            else:
-                x = dense_layer(x)
+                )(x)
 
         hkl_logits = keras.layers.Dense(
             self.hkl_ref.shape[0],
