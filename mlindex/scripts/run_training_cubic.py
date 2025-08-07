@@ -85,12 +85,12 @@ if __name__ == '__main__':
         'load_from_tag': False,
         'peak_length': 10,
         'extraction_peak_length': 6,
-        'filter_length': 3,
         'n_volumes': 150,
-        'n_filters': 400,
-        'initial_layers': [400, 200, 100],
-        'final_layers': [600, 300, 100, 50],
-        'l1_regularization': 0.00001,
+        'n_filters': 800,
+        'd_model': 256,
+        'n_heads': 4,
+        'layers': [600, 300, 100, 50],
+        'l1_regularization': 0.00000,
         'base_line_layers': [600, 300, 100, 50],
         'base_line_dropout_rate': 0.0,
         'learning_rate': 0.0001,
@@ -101,12 +101,12 @@ if __name__ == '__main__':
         'model_type': 'metric',
         'calibration_params': {
             'layers': 3,
-            'l1_regularization': 0.0,
             'epsilon_pds': 0.1,
             'epochs': 20,
             'learning_rate': 0.0002,
             'augment': True,
             'batch_size': 64,
+            'n_heads': 4,
             },
         }
 
@@ -149,8 +149,8 @@ if __name__ == '__main__':
     else:
         wrapper.load_data()
     #wrapper.setup_random()
-    wrapper.setup_miller_index_templates()
-    #wrapper.setup_pitf('training')
+    #wrapper.setup_miller_index_templates()
+    wrapper.setup_integral_filter('calibration_training')
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()

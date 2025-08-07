@@ -1017,12 +1017,15 @@ class Wrapper:
                 self.hkl_ref[bravais_lattice]
                 )
             if self.integral_filter_params[split_group]['load_from_tag']:
-                #self.integral_filter_generator[split_group].load_from_tag(mode=mode)
-                print(split_group)
+                self.integral_filter_generator[split_group].load_from_tag(mode=mode)
             else:
                 split_group_data = self.data[self.data['split_group'] == split_group]
-                self.integral_filter_generator[split_group].setup(split_group_data)
-                self.integral_filter_generator[split_group].train(data=split_group_data)
+                if mode == 'training':
+                    self.integral_filter_generator[split_group].setup(split_group_data)
+                    self.integral_filter_generator[split_group].train(data=split_group_data)
+                elif mode == 'calibration_training':
+                    self.integral_filter_generator[split_group]._load_from_tag_integral_filter(mode='training')
+                    self.integral_filter_generator[split_group]._setup_calibration()
                 self.integral_filter_generator[split_group].train_calibration(data=split_group_data)
                 self.integral_filter_generator[split_group].load_from_tag(mode='training')
                 self.integral_filter_generator[split_group].evaluate(split_group_data)

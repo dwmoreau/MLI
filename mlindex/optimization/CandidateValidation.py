@@ -1,7 +1,5 @@
 import numpy as np
 
-from mlindex.utilities.Reindexing import reindex_entry_triclinic
-
 
 def validate_candidate(entry, top_unit_cell, top_M20):
     found = False
@@ -33,6 +31,7 @@ def validate_candidate(entry, top_unit_cell, top_M20):
 
 def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_pred, rtol=1e-2):
     # This should probably be replace with distance measurements in NCDIST
+    from mlindex.utilities.Reindexing import reindex_entry_triclinic
     if bravais_lattice_pred in ['cF', 'cI', 'cP']:
         lattice_system_pred = 'cubic'
         unit_cell_true = unit_cell_true[0]

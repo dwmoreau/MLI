@@ -14,24 +14,19 @@ def add_q2_error(q2, hkl, multiplier, rng):
         return np.sort(q2, axis=1)
     else:
         sort_indices = np.argsort(q2, axis=1)
-        q2 = np.take_along_axis(q2, sort_indices, axis=1)      
-        hkl = np.take_along_axis(hkl, sort_indices, axis=1)
+        q2 = np.take_along_axis(q2, sort_indices, axis=1)
+        hkl = np.take_along_axis(hkl, sort_indices[:, :, np.newaxis], axis=1)
         return q2, hkl
 
 
-def add_contaminants(q2, hkl, n_peaks, n_contaminants, rng, random_n_contaminants=False):
+def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False):
     q2_broadening_params = get_peak_generation_info()['broadening_params']
-    if n_peaks is None:
-        breadth = q2_broadening_params[0] + q2_broadening_params[1] * q2
-    else:
-        breadth = q2_broadening_params[0] + q2_broadening_params[1] * q2[:, :n_peaks]
+    breadth = q2_broadening_params[0] + q2_broadening_params[1] * q2
+    n_peaks = q2.shape[1]
     for entry_index in range(q2.shape[0]):
         status = True
         while status:
-            if n_peaks is None:
-                high = q2[entry_index, -1]
-            else:
-                high = q2[entry_index, n_peaks - 1]
+            high = q2[entry_index, -1]
             if random_n_contaminants:
                 n_contaminants_add = rng.choice(n_contaminants)
             else:
@@ -53,13 +48,17 @@ def add_contaminants(q2, hkl, n_peaks, n_contaminants, rng, random_n_contaminant
                     ).min(axis=0)
             status = np.any(difference[np.newaxis] < 0.5*breadth[entry_index][:, np.newaxis])
 
-        q2_new = np.concatenate((q2[entry_index, n_peaks:], q2_contaminants))
+        q2_new = np.concatenate((q2[entry_index], q2_contaminants))
+        hkl_new = np.concatenate(
+            (hkl[entry_index], np.zeros((n_contaminants_add, 3))),
+            axis=0
+        )
         sort_indices = np.argsort(q2_new)
-        q2[entry_index] = q2_new[sort_indices]
+        q2[entry_index] = q2_new[sort_indices][:n_peaks]
         if not hkl is None:
-            hkl[entry_index, :, 0] = hkl[entry_index, sort_indices, 0]
-            hkl[entry_index, :, 1] = hkl[entry_index, sort_indices, 1]
-            hkl[entry_index, :, 2] = hkl[entry_index, sort_indices, 2]
+            hkl[entry_index, :, 0] = hkl_new[sort_indices, 0][:n_peaks]
+            hkl[entry_index, :, 1] = hkl_new[sort_indices, 1][:n_peaks]
+            hkl[entry_index, :, 2] = hkl_new[sort_indices, 2][:n_peaks]
     if hkl is None:
         return q2
     else:

@@ -37,7 +37,7 @@ class IntegralFilter:
         self.lattice_system = self.data_params['lattice_system']
         self.hkl_ref = hkl_ref
 
-    def setup(self, data):
+    def _setup_integral_filter(self, data):
         model_params_defaults = {
             'peak_length': 20,
             'extraction_peak_length': 6,
@@ -53,30 +53,38 @@ class IntegralFilter:
             'epochs': 20,
             'batch_size': 64,
             'loss_type': 'log_cosh',
-            'augment': True,
             'model_type': 'metric',
-            'calibration_params': {
-                'layers': 3,
-                'n_peaks': self.n_peaks,
-                'epsilon_pds': 0.1,
-                'epochs': 20,
-                'learning_rate': 0.0001,
-                'augment': True,
-                'batch_size': 64,
-                'l1_regularization': 0.0,
-                },
             }
 
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
                 self.model_params[key] = model_params_defaults[key]
-        for key in model_params_defaults['calibration_params'].keys():
-            if key not in self.model_params['calibration_params'].keys():
-                self.model_params['calibration_params'][key] = model_params_defaults['calibration_params'][key]
-            
+
         self.model_params['unit_cell_length'] = self.unit_cell_length
         self.build_model(data=data)
+
+    def _setup_calibration(self):
+        calibration_params_defaults = {
+            'layers': 3,
+            'n_peaks': self.n_peaks,
+            'epsilon_pds': 0.1,
+            'epochs': 20,
+            'learning_rate': 0.0001,
+            'batch_size': 64,
+            'l1_regularization': 0.0,
+            'n_heads': 5,
+            }
+
+        for key in calibration_params_defaults.keys():
+            if key not in self.model_params['calibration_params'].keys():
+                self.model_params['calibration_params'][key] = calibration_params_defaults[key]
+
+        self.model_params['unit_cell_length'] = self.unit_cell_length
         self.build_calibration_model()
+
+    def setup(self, data):
+        self._setup_integral_filter(data)
+        self._setup_calibration()
 
     def save(self, train_inputs):
         import keras
@@ -162,8 +170,7 @@ class IntegralFilter:
             calibration_data=train_inputs
             )
 
-    def load_from_tag(self, mode):
-        initial_params = self.model_params.copy()
+    def _load_from_tag_integral_filter(self, mode):
         params = read_params(os.path.join(
             f'{self.save_to_split_group}',
             f'{self.split_group}_pitf_params_{self.model_params["tag"]}.csv'
@@ -184,10 +191,9 @@ class IntegralFilter:
             'epochs',
             'batch_size',
             'loss_type',
-            'augment',
             'model_type',
             ]
-        self.model_params = dict.fromkeys(params_keys)
+        #self.model_params = dict.fromkeys(params_keys)
         assert mode in ['training', 'inference']
         self.model_params['mode'] = mode 
         self.model_params['tag'] = params['tag']
@@ -197,24 +203,14 @@ class IntegralFilter:
         self.model_params['n_filters'] = int(params['n_filters'])
         self.model_params['d_model'] = int(params['d_model'])
         self.model_params['n_heads'] = int(params['n_heads'])
-        self.model_params['layers'] = np.array(
-            params['layers'].split('[')[1].split(']')[0].split(','),
-            dtype=int
-            )
-        self.model_params['base_line_layers'] = np.array(
-            params['base_line_layers'].split('[')[1].split(']')[0].split(','),
-            dtype=int
-            )
+        self.model_params['layers'] = [int(i) for i in params['layers'].split('[')[1].split(']')[0].split(',')]
+        self.model_params['base_line_layers'] = [int(i) for i in params['base_line_layers'].split('[')[1].split(']')[0].split(',')]
         self.model_params['l1_regularization'] = float(params['l1_regularization'])
         self.model_params['base_line_dropout_rate'] = float(params['base_line_dropout_rate'])
         self.model_params['learning_rate'] = float(params['learning_rate'])
         self.model_params['epochs'] = int(params['epochs'])
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['loss_type'] = params['loss_type']
-        if self.model_params['augment'] == 'True':
-            self.model_params['augment'] = True
-        else:
-            self.model_params['augment'] = False
         self.model_params['model_type'] = params['model_type']
 
         self.q2_obs_scale = np.load(
@@ -240,6 +236,11 @@ class IntegralFilter:
         elif mode == 'inference':
             self.onnx_model = model_manager.load_onnx_model(quantized=True)
 
+    def _load_from_tag_calibration(self, mode):
+        params = read_params(os.path.join(
+            f'{self.save_to_split_group}',
+            f'{self.split_group}_pitf_params_{self.model_params["tag"]}.csv'
+            ))
         calibration_params_keys = [
             'layers',
             'l1_regularization',
@@ -247,23 +248,18 @@ class IntegralFilter:
             'epsilon_pds',
             'epochs',
             'learning_rate',
-            'augment',
             'batch_size',
+            'n_heads',
             ]
-        self.model_params['calibration_params'] = dict.fromkeys(params_keys)
+        self.model_params['calibration_params'] = dict.fromkeys(calibration_params_keys)
         self.model_params['calibration_params']['l1_regularization'] = 0.0
         for element in params['calibration_params'].split('{')[1].split('}')[0].split(", '"):
             key = element.replace("'", "").split(':')[0]
             value = element.replace("'", "").split(':')[1]
             if key in ['dropout_rate', 'epsilon_pds', 'learning_rate', 'l1_regularization']:
                 self.model_params['calibration_params'][key] = float(value)
-            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers']:
+            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers', 'n_heads']:
                 self.model_params['calibration_params'][key] = int(value)
-            elif key == 'augment':
-                if value == 'True':
-                    self.model_params['calibration_params'][key] = True
-                elif value == 'False':
-                    self.model_params['calibration_params'][key] = False
         if self.model_params['model_type'] != 'base_line':
             model_manager = NeuralNetworkManager(
                 model_name=f'{self.split_group}_calibration_weights_{self.model_params["tag"]}',
@@ -275,6 +271,10 @@ class IntegralFilter:
                 self.calibration_model = model_manager.load_keras_model(self.calibration_model)
             else:
                 self.calibration_onnx_model = model_manager.load_onnx_model(quantized=True)
+
+    def load_from_tag(self, mode):
+        self._load_from_tag_integral_filter(mode)
+        self._load_from_tag_calibration(mode)
 
     def build_model(self, data=None):
         from mlindex.model_training.Networks import ExtractionLayer
@@ -362,7 +362,7 @@ class IntegralFilter:
                 name=f'base_line_layer_norm_{index}',
                 center=False,
                 )(x)
-            x = keras.activations.gelu(x)
+            x = keras.activations.relu(x)
             x = keras.layers.Dropout(
                 rate=self.model_params['base_line_dropout_rate'],
                 name=f'base_line_dropout_{index}',
@@ -389,21 +389,20 @@ class IntegralFilter:
             inputs[:, :self.model_params['extraction_peak_length']],
             name='extraction_layer'
             )
-
         # attended: batch_size, n_volumes, d_model
         attended = IntraVolume_MultiHeadAttention(
             d_model=self.model_params['d_model'],
             n_heads=self.model_params['n_heads'],
         )(metric)
-
+        x = keras.layers.UnitNormalization(axis=2)(attended)
+        
         #################
         # Hidden layers #
         #################
-        x = attended
         for index in range(len(self.model_params['layers'])):
             x = keras.layers.Dense(
                 self.model_params['layers'][index],
-                activation=keras.activations.gelu,
+                activation=keras.activations.elu,
                 name=f'metric_dense_{index}',
                 use_bias=False,
                 kernel_regularizer=keras.regularizers.L1(
@@ -444,18 +443,17 @@ class IntegralFilter:
             pairwise_differences_scaled, True
             )
         # Attention here has potential to outperform just a dense network
-        # Quantization significantly reduces accuracy
-        #attended = IntraVolume_MultiHeadAttention(
+        #x = IntraVolume_MultiHeadAttention(
         #    d_model=self.hkl_ref.shape[0],
         #    n_heads=self.model_params['calibration_params']['n_heads'],
         #)(pairwise_differences_transformed)
-        #x = attended
-
+        #x = keras.layers.UnitNormalization(axis=2)(x)
         x = pairwise_differences_transformed
+
         for index in range(self.model_params['calibration_params']['layers']):
             x = keras.layers.Dense(
                 self.hkl_ref.shape[0],
-                activation=keras.activations.gelu,
+                activation=keras.activations.elu,
                 name=f'dense_{index}',
                 use_bias=False,
                 kernel_initializer=keras.initializers.HeUniform,
@@ -522,8 +520,6 @@ class IntegralFilter:
     def train(self, data):
         import keras
         from mlindex.model_training.Networks import SigmaDecayCallback
-        if self.model_params['augment'] == False:
-            data = data[~data['augmented']]
         train = data[data['train']]
         val = data[~data['train']]
 
@@ -676,8 +672,6 @@ class IntegralFilter:
         import keras
         if self.model_params['model_type'] == 'base_line':
             return None
-        if self.model_params['calibration_params']['augment'] == False:
-            data = data[~data['augmented']]
         train = data[data['train']]
         val = data[~data['train']]
 
@@ -852,33 +846,54 @@ class IntegralFilter:
                     hkl_softmax[start: start + batch_size] = outputs
         return hkl_softmax
 
-    def generate(self, n_unit_cells, rng, q2_obs, top_n=5, batch_size=None):
-        n_unit_cells_per_pred = n_unit_cells // top_n
-        n_extra = n_unit_cells % top_n
-        xnn_gen = np.zeros((n_unit_cells, self.unit_cell_length))
+    def generate(self, n_unit_cells, rng, q2_obs, top_n=None, batch_size=None):
+        from mlindex.utilities.Q2Calculator import Q2Calculator
+        from mlindex.utilities.numba_functions import fast_assign
+        if top_n is None:
+            top_n = self.model_params['n_volumes']
 
-        # If top_n == 5, then self.predict_xnn generates 5 unit cells
-        # xnn_pred: 1, top_n, unit_cell_length
-        xnn_pred, _ = self.predict_xnn(top_n, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
-        xnn_gen[:top_n] = xnn_pred[0]
-
-        # Resampling needs to generate n_unit_cells_per_pred - 1 unit cells from each prediction
-        # hkl_softmax: top_n, n_peaks, hkl_ref_length
-        hkl_softmax = self.predict_hkl(
-            np.repeat(q2_obs[np.newaxis], repeats=top_n, axis=0),
-            xnn_pred[0],
-            batch_size=batch_size
+        q2_calculator = Q2Calculator(
+            lattice_system=self.lattice_system,
+            hkl=self.hkl_ref,
+            tensorflow=False,
+            representation='xnn'
             )
-        hkl_assign = np.zeros((n_unit_cells, self.data_params['n_peaks']), dtype=int)
-        hkl_assign[:top_n] = np.argmax(hkl_softmax, axis=2)
-        start = top_n
-        for gen_index in range(n_unit_cells_per_pred - 1):
-            # This generates top_n unit cells per iteration
-            hkl_assign[start: start + top_n], _ = vectorized_resampling(hkl_softmax, rng)
-            xnn_gen[start: start + top_n] = xnn_pred[0]
-            start += top_n
-        hkl_assign[start: start + n_extra], _ = vectorized_resampling(hkl_softmax[:n_extra], rng)
-        hkl = np.take_along_axis(self.hkl_ref[:, np.newaxis, :], hkl_assign[:, :, np.newaxis], axis=0)
+
+        if top_n > n_unit_cells:
+            xnn_gen, _ = self.predict_xnn(n_unit_cells, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
+            xnn_gen = xnn_gen[0]
+            q2_ref_calc = q2_calculator.get_q2(xnn_gen)
+            hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+            hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+        else:
+            n_unit_cells_per_pred = n_unit_cells // top_n
+            n_extra = n_unit_cells % top_n
+            xnn_gen = np.zeros((n_unit_cells, self.unit_cell_length))
+            hkl_assign = np.zeros((n_unit_cells, self.data_params['n_peaks']), dtype=int)
+
+            # If top_n == 5, then self.predict_xnn generates 5 unit cells
+            # xnn_pred: 1, top_n, unit_cell_length
+            xnn_pred, _ = self.predict_xnn(top_n, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
+            xnn_pred = xnn_pred[0]
+            xnn_gen[:top_n] = xnn_pred
+            q2_ref_calc = q2_calculator.get_q2(xnn_pred)
+            hkl_assign[:top_n] = fast_assign(q2_obs, q2_ref_calc)
+
+            # Resampling needs to generate n_unit_cells_per_pred - 1 unit cells from each prediction
+            # hkl_softmax: top_n, n_peaks, hkl_ref_length
+            hkl_softmax = self.predict_hkl(
+                np.repeat(q2_obs[np.newaxis], repeats=top_n, axis=0),
+                xnn_pred,
+                batch_size=batch_size
+                )
+            start = top_n
+            for gen_index in range(n_unit_cells_per_pred - 1):
+                # This generates top_n unit cells per iteration
+                hkl_assign[start: start + top_n], _ = vectorized_resampling(hkl_softmax, rng)
+                xnn_gen[start: start + top_n] = xnn_pred
+                start += top_n
+            hkl_assign[start: start + n_extra], _ = vectorized_resampling(hkl_softmax[:n_extra], rng)
+            hkl = np.take_along_axis(self.hkl_ref[:, np.newaxis, :], hkl_assign[:, :, np.newaxis], axis=0)
 
         # hkl: n_unit_cells, n_peaks, 3
         target_function = CandidateOptLoss(

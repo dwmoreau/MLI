@@ -1302,7 +1302,7 @@ def reindex_entry_basic(unit_cell, lattice_system, bravais_lattice, space="direc
         if space == "reciprocal":
             # The reciprocal space reindexing algorithm for triclinic is broken...
             # This is here until it gets fixed.
-            from Utilities import reciprocal_uc_conversion
+            from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
             direct_unit_cell = reciprocal_uc_conversion(
                 unit_cell, partial_unit_cell=True, lattice_system="triclinic"

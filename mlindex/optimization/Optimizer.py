@@ -321,7 +321,7 @@ class Candidates:
                 self.best_xnn[~failed] = best_standardized_xnn[~failed]
 
     def correct_off_by_two(self):
-        mult_factor = np.array([1/2, 1, 2, 3, 4])
+        mult_factor = np.array([1/2, 1, np.sqrt(2), 2, 3, 4])
         if self.lattice_system == 'cubic':
             mult_factors = mult_factor[:, np.newaxis]
         elif self.lattice_system in ['hexagonal', 'tetragonal']:
@@ -696,7 +696,7 @@ class OptimizerManager(OptimizerBase):
                 elif generator_info['generator'] in ['predicted_volume', 'random']:
                     load_random = True
             if load_random_forest:
-                self.wrapper.setup_regression()
+                self.wrapper.setup_random_forest()
             if load_integral_filter:
                 self.wrapper.setup_integral_filter(mode='inference')
             if load_templates:
@@ -755,7 +755,7 @@ class OptimizerManager(OptimizerBase):
                     )[0]
                 volume_pred = 1 / rec_volume_pred
             elif generator_info['generator'] == 'trees':
-                tree_unit_cells = self.wrapper.unit_cell_generator[split_group].generate(
+                tree_unit_cells = self.wrapper.random_forest_generator[split_group].generate(
                     generator_info['n_unit_cells'], self.rng, q2,
                     )
 
@@ -763,26 +763,6 @@ class OptimizerManager(OptimizerBase):
 
     def generate_candidates_rank(self):
         if self.opt_params['convergence_testing']:
-            """
-            size = (self.opt_params['convergence_candidates'], self.wrapper.data_params['unit_cell_length'])
-            convergence_initial_xnn = []
-            for distance in self.opt_params['convergence_distances']:
-                perturbations = self.rng.uniform(low=-1, high=1, size=size)
-                perturbations = distance * perturbations / np.linalg.norm(perturbations, axis=1)[:, np.newaxis]
-                perturbed_xnn = self.xnn_true[np.newaxis] + perturbations
-                perturbed_xnn = fix_unphysical(
-                    xnn=perturbed_xnn,
-                    rng=self.rng,
-                    minimum_unit_cell=self.opt_params['minimum_uc'],
-                    maximum_unit_cell=self.opt_params['maximum_uc'],
-                    lattice_system=self.lattice_system
-                    )
-                candidate_unit_cells_all.append(get_unit_cell_from_xnn(
-                    perturbed_xnn,
-                    partial_unit_cell=True,
-                    lattice_system=self.lattice_system
-                    ))
-            """
             candidate_unit_cells_all = perturb_xnn(
                 self.xnn_true,
                 convergence_candidates=self.opt_params['convergence_candidates'],
@@ -796,7 +776,7 @@ class OptimizerManager(OptimizerBase):
             candidate_unit_cells_all = []
             for generator_info in self.opt_params['generator_info']:
                 if generator_info['generator'] == 'trees':
-                    generator_unit_cells = self.wrapper.unit_cell_generator[generator_info['split_group']].generate(
+                    generator_unit_cells = self.wrapper.random_forest_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         )
                 elif generator_info['generator'] == 'templates':

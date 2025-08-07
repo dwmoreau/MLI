@@ -201,7 +201,12 @@ class SKLearnManager:
         model_path = f"{self.filename}.onnx"
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
-        return onnxruntime.InferenceSession(model_path)
+
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.intra_op_num_threads = 1
+        sess_options.inter_op_num_threads = 1
+        sess_options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+        return onnxruntime.InferenceSession(model_path, sess_options)
     
     def _load_custom(self):
         """Load custom version-independent forest predictor"""
@@ -580,7 +585,15 @@ class NeuralNetworkManager:
             raise FileNotFoundError(f"ONNX model not found at {onnx_path}")
         
         # Create an ONNX Runtime inference session
-        self.onnx_session = onnxruntime.InferenceSession(onnx_path)
+        # The code is designed to run with MPI. Threading creates significant competition
+        # between processes for resources. The ensemble testing parallelization runtime
+        # was signficantly degraded by the threading. There should be a smarter way to
+        # manage this than draconian thread bans, but this fixes the issue.
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.intra_op_num_threads = 1
+        sess_options.inter_op_num_threads = 1
+        sess_options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+        self.onnx_session = onnxruntime.InferenceSession(onnx_path, sess_options)
         #print(f"Loaded ONNX model from {onnx_path}")
         return self.onnx_session
     

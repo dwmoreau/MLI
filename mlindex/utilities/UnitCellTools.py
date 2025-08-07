@@ -1,6 +1,35 @@
 import numpy as np
 
 
+def get_partial_unit_cell(unit_cell, lattice_system=None, bravais_lattice=None):
+    if lattice_system:
+        if lattice_system == 'cubic':
+            return unit_cell[[0]]
+        elif lattice_system in ['hexagonal', 'tetragonal']:
+            return unit_cell[[0, 2]]
+        elif lattice_system == 'rhombohedral':
+            return unit_cell[[0, 3]]
+        elif lattice_system == 'orthorhombic':
+            return unit_cell[[0, 1, 2]]
+        elif lattice_system == 'monoclinic':
+            return unit_cell[[0, 1, 2, 4]]
+        else:
+            return unit_cell
+    elif bravais_lattice:
+        if bravais_lattice in ['cP', 'cI', 'cF']:
+            return unit_cell[[0]]
+        elif bravais_lattice in ['hP', 'tP', 'tI']:
+            return unit_cell[[0, 2]]
+        elif bravais_lattice in ['hR']:
+            return unit_cell[[0, 3]]
+        elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
+            return unit_cell[[0, 1, 2]]
+        elif bravais_lattice == ['mP', 'mC']:
+            return unit_cell[[0, 1, 2, 4]]
+        else:
+            return unit_cell
+
+
 def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=None):
     if partial_unit_cell and lattice_system != "triclinic":
         if lattice_system in ["cubic", "rhombohedral"]:

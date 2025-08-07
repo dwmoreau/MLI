@@ -33,7 +33,6 @@ class RandomGenerator:
             'max_depth': 10,
             'subsample': 0.05,
             'grid_search': None,
-            'ccp_alpha': 0,
             }
         for key in model_params_defaults.keys():
             if key not in self.model_params.keys():
@@ -79,7 +78,6 @@ class RandomGenerator:
             min_samples_leaf=self.model_params['min_samples_leaf'],
             max_depth=self.model_params['max_depth'],
             max_samples=self.model_params['subsample'],
-            ccp_alpha=self.model_params['ccp_alpha'],
             )
         if self.model_params['grid_search'] is not None:
             # Set up GridSearchCV
@@ -197,7 +195,6 @@ class RandomGenerator:
             'min_samples_leaf',
             'max_depth',
             'subsample',
-            'ccp_alpha',
             ]
         self.model_params = dict.fromkeys(params_keys)
         self.model_params['tag'] = params['tag']
@@ -209,7 +206,6 @@ class RandomGenerator:
         else:
             self.model_params['max_depth'] = int(params['max_depth'])
         self.model_params['subsample'] = float(params['subsample'])
-        self.model_params['ccp_alpha'] = float(params['ccp_alpha'])
 
         self.random_forest_regressor = SKLearnManager(
             filename=os.path.join(

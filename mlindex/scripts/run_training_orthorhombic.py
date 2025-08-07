@@ -99,31 +99,29 @@ if __name__ == '__main__':
         'tag': f'orthorhombic_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 20,
-        'extraction_peak_length': 8,
-        'filter_length': 3,
+        'extraction_peak_length': 10,
         'n_volumes': 100,
-        'n_filters': 400,
-        'n_volumes_depth': [256,  64,  16],
-        'n_filters_depth': [200, 200, 200],
-        'initial_layers': [400, 200, 100],
-        'final_layers': [1000, 600, 300, 100, 50],
+        'n_filters': 1000,
+        'd_model': 512,
+        'n_heads': 8,
+        'layers': [1000, 600, 300, 100, 50],
         'l1_regularization': 0.00005,
         'base_line_layers': [1000, 600, 300, 100, 50],
         'base_line_dropout_rate': 0.0,
         'learning_rate': 0.0001,
-        'epochs': 20,
+        'epochs': 30,
         'batch_size': 64,
         'loss_type': 'log_cosh',
         'augment': True,
         'model_type': 'metric',
-        'sigma': 0.03,
         'calibration_params': {
             'layers': 3,
             'epsilon_pds': 0.1,
-            'epochs': 20,
+            'epochs': 40,
             'learning_rate': 0.0002,
             'augment': True,
             'batch_size': 64,
+            'n_heads': 5,
             },
         }
 
@@ -190,8 +188,8 @@ if __name__ == '__main__':
     else:
         wrapper.load_data()
     #wrapper.setup_random()
-    wrapper.setup_miller_index_templates()
+    #wrapper.setup_miller_index_templates()
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    #wrapper.setup_integral_filter('training')
+    wrapper.setup_integral_filter('calibration_training')

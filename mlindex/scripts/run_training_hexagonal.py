@@ -1,10 +1,10 @@
 import os
 os.environ["KERAS_BACKEND"] = "torch"
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
+#os.environ['OMP_NUM_THREADS'] = '1'
+#os.environ['OPENBLAS_NUM_THREADS'] = '1'
+#os.environ['MKL_NUM_THREADS'] = '1'
+#os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+#os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import keras
 from mlindex.model_training.Wrapper import Wrapper
 
@@ -21,7 +21,7 @@ if __name__ == '__main__':
         'hkl_ref_length': 750,
         'n_peaks': 20,
         'lattice_system': 'hexagonal',
-        'n_max_group': 1000000,
+        'n_max': 10000,
         'broadening_tag': broadening_tag,
         }
 
@@ -81,13 +81,12 @@ if __name__ == '__main__':
         'tag': f'hexagonal_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 20,
-        'extraction_peak_length': 6,
+        'extraction_peak_length': 8,
         'n_volumes': 100,
-        'n_filters': 512,
-        'd_model': 256,
+        'n_filters': 800,
+        'd_model': 512,
         'n_heads': 8,
-        'initial_layers': [400, 200, 100],
-        'final_layers': [512, 256, 128, 64],
+        'layers': [1000, 600, 300, 100, 50],
         'l1_regularization': 0.00002,
         'base_line_layers': [1000, 600, 300, 100, 50],
         'base_line_dropout_rate': 0.0,
@@ -99,12 +98,12 @@ if __name__ == '__main__':
         'model_type': 'metric',
         'calibration_params': {
             'layers': 3,
-            'dropout_rate': 0.1,
             'epsilon_pds': 0.1,
-            'epochs': 10,
+            'epochs': 40,
             'learning_rate': 0.0002,
             'augment': True,
             'batch_size': 64,
+            'n_heads': 5,
             },
         }
 
@@ -155,4 +154,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('training')
+    wrapper.setup_integral_filter('calibration_training')
