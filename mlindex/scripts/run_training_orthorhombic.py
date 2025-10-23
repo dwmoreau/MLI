@@ -192,4 +192,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('calibration_training')
+    wrapper.setup_integral_filter('training')

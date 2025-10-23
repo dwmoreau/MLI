@@ -523,17 +523,6 @@ class IntegralFilter:
         train = data[data['train']]
         val = data[~data['train']]
 
-        #if self.lattice_system in ['triclinic', 'monoclinic']:
-        #    # This helps with overflow error in the loss function
-        #    train_xnn = np.stack(train['reindexed_xnn'])[:, self.unit_cell_indices]
-        #    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-        #        train_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
-        #        )
-        #    reciprocal_volume = get_unit_cell_volume(
-        #        reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-        #        )
-        #    max_reciprocal_volume = np.sort(reciprocal_volume)[int(0.995*reciprocal_volume.size)]
-        #    train = train[reciprocal_volume < max_reciprocal_volume]
 
         train_q2_obs = np.stack(train['q2'])[:, :self.model_params['peak_length']]
         val_q2_obs = np.stack(val['q2'])[:, :self.model_params['peak_length']]
@@ -616,7 +605,7 @@ class IntegralFilter:
             shuffle=True,
             batch_size=self.model_params['batch_size'], 
             validation_data=(val_inputs, val_true),
-            callbacks=callbacks,
+            #callbacks=callbacks,
             )
         self.save(train_inputs)
 

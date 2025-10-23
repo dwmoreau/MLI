@@ -58,7 +58,7 @@ class ExtractionLayer(keras.layers.Layer):
             shape=(1, self.model_params['n_filters']),
             initializer=keras.initializers.Zeros(),
             dtype='float32',
-            trainable=True,
+            trainable=False,
             constraint=keras.constraints.NonNeg(),
             name='filters'
             )
@@ -100,75 +100,13 @@ class ExtractionLayer(keras.layers.Layer):
             self.volumes.assign(
                 keras.ops.expand_dims(keras.ops.cast(distribution_volumes, dtype='float32'), axis=1),
                 )
-            #fig, axes = plt.subplots(1, 1, figsize=(6, 3))
-            #vol_scaled_x = (centers_vol / q2_obs_scale**2)**(2/3)
-            #vol_scaled_bins = (bins_vol / q2_obs_scale**2)**(2/3)
-            #axes.bar(
-            #    vol_scaled_x, reciprocal_volume_hist,
-            #    width=vol_scaled_bins[1:]- vol_scaled_bins[:-1]
-            #    )
-            #axes.plot(
-            #    vol_scaled_x, reciprocal_volume_hist_smoothed,
-            #    color=[1, 0, 0]
-            #    )
-            #axes.plot(
-            #    vol_scaled_x, reciprocal_volume_rv.pdf(vol_scaled_x),
-            #    color=[0, 1, 0]
-            #    )
-            #axes.set_xlabel(f'Reciprocal Volume - Scaled')
-            #axes.set_ylabel('Distribution')
-            #fig.tight_layout()
-            #plt.show()
-
             volume_differences = distribution_volumes[1:] - distribution_volumes[:-1]
-            sigma = min(max(2*np.median(volume_differences), 0.015), 0.04)
-            self.sigma_init = sigma
-            self.sigma.assign(keras.ops.cast(sigma, dtype='float32'))
 
             q2_obs_scaled = q2_obs / q2_obs_scale
             q2_obs_scaled_sorted = np.sort(
                 q2_obs_scaled[:, :self.model_params['extraction_peak_length']].ravel()
                 )
-            """
-            upper_q2_obs_scaled_limit = q2_obs_scaled_sorted[int(0.995*q2_obs_scaled_sorted.size)]
-            bins_q2_obs_scaled = np.linspace(0, upper_q2_obs_scaled_limit, 201)
-            centers_q2_obs_scaled = (bins_q2_obs_scaled[1:] + bins_q2_obs_scaled[:-1]) / 2
-            q2_obs_scaled_rv = [None for _ in range(self.model_params['extraction_peak_length'])]
-            for index in range(self.model_params['extraction_peak_length']):
-                q2_obs_scaled_hist, _ = np.histogram(
-                    q2_obs_scaled[:, index], bins=bins_q2_obs_scaled, density=True
-                    )
-                q2_obs_scaled_hist_smoothed = scipy.signal.medfilt(q2_obs_scaled_hist, kernel_size=3)
-                q2_obs_scaled_rv[index] = scipy.stats.rv_histogram(
-                    (q2_obs_scaled_hist_smoothed, bins_q2_obs_scaled), density=True
-                    )
 
-                #fig, axes = plt.subplots(1, 1, figsize=(6, 3))
-                #axes.bar(
-                #    centers_q2_obs_scaled, q2_obs_scaled_hist,
-                #    width=centers_q2_obs_scaled[1]- centers_q2_obs_scaled[0]
-                #    )
-                #axes.plot(
-                #    centers_q2_obs_scaled, q2_obs_scaled_hist_smoothed,
-                #    color=[1, 0, 0]
-                #    )
-                #axes.plot(
-                #    centers_q2_obs_scaled, q2_obs_scaled_rv[index].pdf(centers_q2_obs_scaled),
-                #    color=[0, 1, 0]
-                #    )
-                #axes.set_xlabel(f'q2 - Peak {index}')
-                #axes.set_ylabel('Distribution')
-                #fig.tight_layout()
-                #plt.show()
-
-            q2_filters = np.zeros(self.model_params['n_filters'])
-            for filter_index in range(self.model_params['n_filters']):
-                peak_index = rng.choice(
-                    self.model_params['extraction_peak_length'],
-                    replace=False
-                    )
-                q2_filters[filter_index] = q2_obs_scaled_rv[peak_index].rvs()
-            """
             upper_q2_obs_scaled_limit = q2_obs_scaled_sorted[int(0.98*q2_obs_scaled_sorted.size)]
             q2_filters = np.linspace(
                 upper_q2_obs_scaled_limit/self.model_params['n_filters'],
@@ -176,35 +114,14 @@ class ExtractionLayer(keras.layers.Layer):
                 self.model_params['n_filters']
             )
 
+            sigma = min(max(2*np.median(volume_differences), 0.015), 0.04)
+            self.sigma_init = sigma
+            self.sigma.assign(keras.ops.cast(sigma, dtype='float32'))
+
             self.filters.assign(
                 keras.ops.expand_dims(keras.ops.cast(q2_filters, dtype='float32'), axis=0)
                 )
             self.filters_init = self.filters.numpy()[0]
-            #fig, axes = plt.subplots(1, 1, figsize=(6, 3))
-            #q2_filt_scaled_hist, _ = np.histogram(
-            #    q2_filters.ravel(),
-            #    bins=bins_q2_obs_scaled, density=True
-            #    )
-            #q2_obs_scaled_hist, _ = np.histogram(
-            #    q2_obs_scaled[:, :self.model_params['extraction_peak_length']].ravel(),
-            #    bins=bins_q2_obs_scaled, density=True
-            #    )
-            #axes.bar(
-            #    centers_q2_obs_scaled, q2_obs_scaled_hist,
-            #    width=centers_q2_obs_scaled[1]- centers_q2_obs_scaled[0],
-            #    label='Observations'
-            #    )
-            #axes.bar(
-            #    centers_q2_obs_scaled, q2_filt_scaled_hist,
-            #    width=centers_q2_obs_scaled[1]- centers_q2_obs_scaled[0],
-            #    label='Filter',
-            #    alpha=0.5
-            #    )
-            #axes.legend(frameon=False)
-            #axes.set_xlabel(f'q2')
-            #axes.set_ylabel('Distribution')
-            #fig.tight_layout()
-            #plt.show()
         else:
             self.filters_init = None
 
@@ -221,8 +138,7 @@ class ExtractionLayer(keras.layers.Layer):
         q2_obs_scaled = keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2)
         difference = q2_filters - q2_obs_scaled
 
-        # Adding 0.001 to self.sigma prevents NaNs
-        distances = keras.ops.exp(-1/2 * (difference / (self.sigma + 0.001))**2)
+        distances = keras.ops.exp(-1/2 * (difference / self.sigma)**2)
         # distances: batch_size, n_volumes, n_filters, extraction_peak_length
         # metric:    batch_size, n_volumes, n_filters
         metric = keras.ops.sum(distances, axis=3)
@@ -400,25 +316,25 @@ class IntraVolume_MultiHeadAttention(keras.layers.Layer):
         self.W_q = keras.layers.Dense(
             d_model,
             use_bias=False,
-            activation=keras.activations.gelu,
+            activation=keras.activations.elu,
             kernel_initializer=keras.initializers.HeUniform,
         )
         self.W_k = keras.layers.Dense(
             d_model,
             use_bias=False,
-            activation=keras.activations.gelu,
+            activation=keras.activations.elu,
             kernel_initializer=keras.initializers.HeUniform,
         )
         self.W_v = keras.layers.Dense(
             d_model,
             use_bias=False,
-            activation=keras.activations.gelu,
+            activation=keras.activations.elu,
             kernel_initializer=keras.initializers.HeUniform,
         )
         self.W_o = keras.layers.Dense(
             d_model,
             use_bias=False,
-            activation=keras.activations.gelu,
+            activation=keras.activations.elu,
             kernel_initializer=keras.initializers.HeUniform,
         )
         
@@ -470,20 +386,20 @@ class IntraVolume_Attention(keras.layers.Layer):
         self.W_q = keras.layers.Dense(
             d_model, 
             use_bias=False,
-            #activation=keras.activations.gelu,
-            kernel_initializer=keras.initializers.HeUniform
+            activation=keras.activations.elu,
+            kernel_initializer=keras.initializers.HeUniform,
         )
         self.W_k = keras.layers.Dense(
             d_model, 
             use_bias=False,
-            #activation=keras.activations.gelu,
-            kernel_initializer=keras.initializers.HeUniform
+            activation=keras.activations.elu,
+            kernel_initializer=keras.initializers.HeUniform,
         )
         self.W_v = keras.layers.Dense(
             d_model, 
             use_bias=False,
-            #activation=keras.activations.gelu,
-            kernel_initializer=keras.initializers.HeUniform
+            activation=keras.activations.elu,
+            kernel_initializer=keras.initializers.HeUniform,
         )
         
     def call(self, x):
@@ -510,6 +426,5 @@ class IntraVolume_Attention(keras.layers.Layer):
         attended = keras.ops.matmul(attention_weights, V)
         
         # Reduce to final output: (batch_size, n_volumes, d_model)
-        output = keras.ops.mean(attended, axis=2)  # or keras.ops.sum, depending on what you want
-        
+        output = keras.ops.mean(attended, axis=2)
         return output
