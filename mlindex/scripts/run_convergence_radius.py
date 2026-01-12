@@ -112,6 +112,19 @@ if __name__ == '__main__':
            output_tag_elements += ['sampUniform']
         else:
            output_tag_elements += ['sampQ2']
+    elif sys.argv[1] == 'deterministic':
+        n_peaks = int(sys.argv[3])
+        iteration_info = [
+            {
+            'worker': 'deterministic',
+            'n_iterations': int(sys.argv[2]),
+            'n_peaks': n_peaks,
+            }
+            ]
+        output_tag_elements = [
+            f'peaks{iteration_info[0]["n_peaks"]}',
+            f'iter{iteration_info[0]["n_iterations"]}',
+            ]
 
     #iteration_info = [{
     #    'worker': 'random_subsampling',
@@ -205,7 +218,7 @@ if __name__ == '__main__':
                 q2 = np.zeros((bravais_lattice_data.shape[0], n_peaks))
                 for entry_index in range(bravais_lattice_data.shape[0]):
                     q2[entry_index] = np.array(bravais_lattice_data[f'q2_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-                bravais_lattice_data['q2'] = list(add_q2_error(q2, 1, rng))
+                bravais_lattice_data['q2'] = list(add_q2_error(q2, None, 1, rng))
                 bravais_lattice_data.drop(columns=drop_columns, inplace=True)
                 if not n_entries is None and bravais_lattice_data.shape[0] > n_entries:
                     bravais_lattice_data = bravais_lattice_data.sample(n=n_entries, random_state=rng)
