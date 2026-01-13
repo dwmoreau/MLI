@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Usage: mpiexec -n 6 mlindex.run [args]
+exec python -m mlindex.command_line.run "$@"
