@@ -146,7 +146,7 @@ class Wrapper:
 
     def setup_from_tag(self, load_bravais_lattice='all'):
         from mlindex.utilities.IOManagers import read_params
-        print(os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
+
         params = read_params(os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
         data_params_keys = [
             'augment',
@@ -168,7 +168,7 @@ class Wrapper:
 
         self.data_params = dict.fromkeys(data_params_keys)
         self.data_params['load_from_tag'] = True
-        print(params)
+
         bravais_lattices = params['bravais_lattices'].replace(' ', '').replace("'", '')
         self.data_params['bravais_lattices'] = bravais_lattices.split('[')[1].split(']')[0].split(',')
         split_groups = params['split_groups'].replace("'", '').replace('[', '').replace(']', '').replace(',', '')
