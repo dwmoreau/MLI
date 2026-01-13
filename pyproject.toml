@@ -1,3 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mlindex"]
+script-files = [
+    "scripts/mlindex.run"
+]
+
 [project]
 name = "mlindex"
 version = "0.0"
@@ -5,7 +15,7 @@ authors = [{name = "David Mittan-Moreau", email = "dwmoreau@lbl.gov"}]
 description = "A data driven approach to powder diffraction indexing"
 keywords = ["powder diffraction", "diffraction", "crystallography", "indexing", "machine learning"]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.14"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -13,22 +23,22 @@ classifiers = [
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
 
-#dependencies = [
-#    "numpy",
-#    "scipy",
-#    "pandas",
-#    "mpi4py",
-#    "scikit-learn",
-#    "gemmi",
-#    "numba",
-#    "onnxruntime",
-#    "matplotlib",
-#    "tqdm",
-#]
-#[project.optional-dependencies]
-#dataset_generation = ["pyarrow", "openpyxl", "cctbx"]
-#training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "mpi4py",
+    "scikit-learn",
+    "gemmi",
+    "numba",
+    "onnxruntime",
+    "matplotlib",
+    "pandas",
+]
 
 [project.urls]
 Homepage = "https://github.com/dwmoreau/MLI"
 Issues = "https://github.com/dwmoreau/MLI/issues"
+
+#[project.optional-dependencies]
+#dataset_generation = ["pyarrow", "openpyxl", "cctbx", "tqdm"]
+#training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]

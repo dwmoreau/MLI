@@ -49,11 +49,11 @@ def get_mpi_organizer(comm, bravais_lattices, manager_rank, serial):
     return mpi_organizers
 
 
-def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, fom=None, options=None):
+def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path, fom=None, options=None):
     from mlindex.optimization.Optimizer import OptimizerManager
     data_params = {
         'tag': f'cubic_{broadening_tag}',
-        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
+        'base_directory': project_path,
         }
     template_params = {bravais_lattice: {'tag': f'cubic_{broadening_tag}'}}
     rf_params = {f'{bravais_lattice}_0': {'tag': f'cubic_{broadening_tag}'}}
@@ -110,11 +110,11 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
     return optimizer
 
 
-def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, fom=None, options=None):
+def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path, fom=None, options=None):
     from mlindex.optimization.Optimizer import OptimizerManager
     data_params = {
         'tag': f'tetragonal_{broadening_tag}',
-        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
+        'base_directory': project_path,
         }
     template_params = {bravais_lattice: {'tag': f'tetragonal_{broadening_tag}'}}
     rf_group_params = {'tag': f'tetragonal_{broadening_tag}'}
@@ -189,11 +189,11 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     return optimizer
 
 
-def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, fom=None, options=None):
+def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path, fom=None, options=None):
     from mlindex.optimization.Optimizer import OptimizerManager
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
-        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
+        'base_directory': project_path,
         }
     template_params = {bravais_lattice: {'tag': f'hexagonal_{broadening_tag}'}}
     rf_group_params = {'tag': f'hexagonal_{broadening_tag}'}
@@ -284,11 +284,11 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     return optimizer
 
 
-def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, fom=None, options=None):
+def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path, fom=None, options=None):
     from mlindex.optimization.Optimizer import OptimizerManager
     data_params = {
         'tag': f'rhombohedral_{broadening_tag}',
-        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
+        'base_directory': project_path,
         }
     template_params = {bravais_lattice: {'tag': f'rhombohedral_{broadening_tag}'}}
     rf_group_params = {'tag': f'rhombohedral_{broadening_tag}'}
@@ -355,11 +355,11 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     return optimizer
 
 
-def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, fom=None, options=None):
+def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path, fom=None, options=None):
     from mlindex.optimization.Optimizer import OptimizerManager
     data_params = {
         'tag': f'orthorhombic_{broadening_tag}',
-        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
+        'base_directory': project_path,
         }
     template_params = {bravais_lattice: {'tag': f'orthorhombic_{broadening_tag}'}}
     rf_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
@@ -481,11 +481,11 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     return optimizer
 
 
-def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, fom=None, options=None):
+def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path, fom=None, options=None):
     from mlindex.optimization.Optimizer import OptimizerManager
     data_params = {
         'tag': f'monoclinic_{broadening_tag}',
-        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
+        'base_directory': project_path,
         }
     template_params = {bravais_lattice: {'tag': f'monoclinic_{broadening_tag}'}}
     rf_group_params = {'tag': f'monoclinic_{broadening_tag}'}
@@ -604,11 +604,11 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     return optimizer
 
 
-def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, fom=None, options=None):
+def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path, fom=None, options=None):
     from mlindex.optimization.Optimizer import OptimizerManager
     data_params = {
         'tag': f'triclinic_{broadening_tag}',
-        'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
+        'base_directory': project_path,
         }
     template_params = {bravais_lattice: {'tag': f'triclinic_{broadening_tag}'}}
     rf_group_params = {'tag': f'triclinic_{broadening_tag}'}
@@ -673,28 +673,11 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
 
 def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, logger=None):
     from mlindex.optimization.Optimizer import OptimizerWorker
-    """
-    iteration_info = [
-        {
-        'worker': 'deterministic',
-        'n_iterations': 1,
-        'n_peaks': 20,
-        'triplet_opt': True,
-        },
-        {
-        'worker': 'random_subsampling',
-        'n_iterations': 100,
-        'uniform_sampling': False,
-        'triplet_opt': True,
-        }
-        ]
-    opt_params = {
-        'generator_info': generator_info,
-        'iteration_info': iteration_info,
-        'convergence_testing': False,
-        'assignment_threshold': 0.95,
-        }
-    """
+    from importlib.resources import files
+
+    # Get the absolute path to the MLI directory
+    project_path = '/'.join(files('mlindex').parts[:-1])
+
     fom = None
     bravais_lattices = mpi_organizers.keys()
     optimizer = dict.fromkeys(bravais_lattices)
@@ -707,6 +690,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
+                    project_path,
                     fom,
                     )
             elif bravais_lattice in ['hP']:
@@ -715,6 +699,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
+                    project_path,
                     fom,
                     )
             elif bravais_lattice in ['hR']:
@@ -723,6 +708,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
+                    project_path,
                     fom,
                     )
             elif bravais_lattice in ['tI', 'tP']:
@@ -731,6 +717,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
+                    project_path,
                     fom,
                     )
             elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
@@ -739,6 +726,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
+                    project_path,
                     fom,
                     )
             elif bravais_lattice in ['mC', 'mP']:
@@ -747,6 +735,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
+                    project_path,
                     fom,
                     )
             elif bravais_lattice in ['aP']:
@@ -755,6 +744,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
+                    project_path,
                     fom,
                     )
             if not logger is None:
