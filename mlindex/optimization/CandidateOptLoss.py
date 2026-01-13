@@ -99,8 +99,8 @@ class CandidateOptLoss:
         term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
         H = np.sum(self.hessian_prefactor * term0, axis=1)
         # Need to ensure H is invertible before inverting.
-        invertible = np.linalg.det(H) != 0 # This is the fastest
-        #invertible = np.linalg.matrix_rank(H, hermitian=True) == self.uc_length
+        #invertible = np.linalg.det(H) != 0 # This is the fastest, but leaves non-invertible matrices.
+        invertible = np.linalg.matrix_rank(H, hermitian=True) == self.uc_length
         #invertible = np.isfinite(np.linalg.cond(H)) # This is slow
         delta_gn = np.zeros((self.n_entries, self.uc_length))
         try:
