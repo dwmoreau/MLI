@@ -1,4 +1,4 @@
-# MLI - Machine Learning Indexing
+# MLINDEX - A data driven approach to powder diffraction indexing
 
 A powder diffraction indexing program that uses machine learning models to initialize the SVD-Index algorithm. It takes an input peak list and returns a list of unit cells ranked by Figure of Merit.
 
