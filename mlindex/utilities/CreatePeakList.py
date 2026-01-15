@@ -144,6 +144,8 @@ class PeakListCreator:
         load_combined=False,
         overwrite_combined=False,
         input_path_templates=None,
+        expt_file=None,
+        refl_file=None,
         suffix='_strong.expt',
         min_reflections_per_experiment=3,
         max_reflections_per_experiment=100,
@@ -167,11 +169,16 @@ class PeakListCreator:
             self.save_to_directory = os.path.join(save_to_directory, self.tag)
         if not os.path.exists(self.save_to_directory):
             os.mkdir(self.save_to_directory)
-        
-        self.expt_file_name = os.path.join(self.save_to_directory, f'{self.tag}_combined_all.expt')
-        self.refl_file_name = os.path.join(self.save_to_directory, f'{self.tag}_combined_all.refl')
+
+        if expt_file is None:
+            self.expt_file_name = os.path.join(self.save_to_directory, f'{self.tag}_combined_all.expt')
+            self.refl_file_name = os.path.join(self.save_to_directory, f'{self.tag}_combined_all.refl')
+        else:
+            self.expt_file_name = expt_file
+            self.refl_file_name = refl_file
         if self.load_combined == False:
-            self._combine_expt_refl_files()
+            if expt_file is None:
+                self._combine_expt_refl_files()
             self._parse_refl_file()
         else:
             self.q2_obs = np.load(
@@ -306,7 +313,6 @@ class PeakListCreator:
         s0 = []
         expt_indices = []
         refl_counts = []
-        print('Parsing Reflection File')
         for expt_index, expt in enumerate(expts):
             refls_expt = refls.select(refls['id'] == expt_index)
             if len(refls_expt) > 0:
@@ -553,7 +559,7 @@ class PeakListCreator:
             for p in kapton_peaks:
                 if p > self.d_max:
                     axes.plot([1/p**2, 1/p**2], [0, self.q2_hist.max()], linestyle='dotted', linewidth=2, color=[0, 0.7, 0], label='Kapton Peaks')
-        axes.set_xlabel('q2 (1/$\mathrm{\AA}^2$')
+        axes.set_xlabel(r'q2 (1/$\mathrm{\AA}^2$')
         if yscale == 'log':
             axes.set_yscale('log')
         fig.tight_layout()
@@ -912,6 +918,80 @@ class PeakListCreator:
             file_name = os.path.join(self.save_to_directory, f'{self.tag}_info_{extra_file_name}.json')
         pd.Series(output).to_json(file_name)
 
+    def output_optimization(self, exclude_primary=[], exclude_secondary=[]):
+        fig, axes = plt.subplots(2, 1, figsize=(45, 6), sharex=True)
+        axes[0].plot(self.q2_centers, self.q2_hist)
+        axes[1].plot(self.q2_diff_centers, self.q2_diff_hist)
+
+        ylim0 = axes[0].get_ylim()
+        ylim1 = axes[1].get_ylim()
+        for p_index, p in enumerate(self.q2_peaks):
+            if p_index == 0:
+                label = 'Primary Picked'
+            else:
+                label = None
+            axes[0].plot([p, p], ylim0, linestyle='dotted', linewidth=1.5, color=[0, 0, 0])
+            axes[1].plot([p, p], ylim1, linestyle='dotted', linewidth=1.5, color=[0, 0, 0], label=label)
+            axes[0].annotate(p_index, xy=(p, 0.9*ylim0[1]))
+
+        for p_index, p in enumerate(self.q2_peaks_secondary):
+            if p_index == 0:
+                label = 'Secondary Picked'
+            else:
+                label = None
+            axes[0].plot([p, p], ylim0, linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0], label=label)
+            axes[1].plot([p, p], ylim1, linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0], label=label)
+            axes[1].annotate(p_index, xy=(p, 0.9*ylim1[1]))
+        axes[0].set_ylim(ylim0)
+        axes[1].set_ylim(ylim1)
+        axes[0].set_ylabel('Primary Positions')
+        axes[1].set_ylabel('Secondary Positions')
+        axes[1].set_xlabel(r'1 / d_spacing ($\mathrm{\AA}$)')
+        axes[1].legend(loc='upper left', frameon=False)
+        fig.tight_layout()
+        plt.show()
+
+        q2_peaks_primary = np.delete(self.q2_peaks, exclude_primary)
+        q2_peaks_secondary = np.delete(self.q2_peaks_secondary, exclude_secondary)
+        q2_peaks = np.sort(np.concatenate((q2_peaks_primary, q2_peaks_secondary)))
+
+        # self.triplets_obs columns:
+        #   0: peak 0 index
+        #   1: peak 1 index
+        #   2: median difference in q
+        #   3: median angular separation
+        #   4: Some weight
+
+        # delete triplets_obs rows if a primary peak is in exclude_primary
+        indices = np.where(np.logical_or(
+            np.isin(self.triplets_obs[:, 0], exclude_primary),
+            np.isin(self.triplets_obs[:, 1], exclude_primary),
+        ))[0]
+        triplets_obs = np.delete(self.triplets_obs, indices, axis=0)
+
+        # If a primary peak was removed of a lower index than found in triplets_obs,
+        # the index in triplets_obs needs to be decremented
+        for i in range(2):
+            for j in range(triplets_obs.shape[0]):
+                decrement = np.sum(exclude_primary < triplets_obs[j, i])
+                triplets_obs[j, i] -= decrement
+
+        # If a secondary peak is added at a lower scattering angle than the primary,
+        # the index in triplets_obs needs to be incremented
+        for i in range(2):
+            for j in range(triplets_obs.shape[0]):
+                q2 = q2_peaks_primary[int(triplets_obs[j, i])]
+                increment = np.sum(q2_peaks_secondary < q2)
+                triplets_obs[j, i] += increment
+        np.save(
+            os.path.join(self.save_to_directory, f'{self.tag}_mlindex_peak_list.npy'),
+            q2_peaks
+        )
+        np.save(
+            os.path.join(self.save_to_directory, f'{self.tag}_mlindex_triplets.npy'),
+            triplets_obs
+        )
+
     def create_secondary_peaks(self, q2_max=None, max_difference=None, max_refl_counts=None, min_separation=None, n_bins=2000, mask=True):
         start = 0
         q2_diff = []
@@ -1035,7 +1115,7 @@ class PeakListCreator:
         axes[1].set_ylim(ylim1)
         axes[0].set_ylabel('Primary Positions')
         axes[1].set_ylabel('Secondary Positions')
-        axes[1].set_xlabel('1 / d_spacing ($\mathrm{\AA}$)')
+        axes[1].set_xlabel(r'1 / d_spacing ($\mathrm{\AA}$)')
         if yscale == 'log':
             axes[0].set_yscale('log')
             axes[1].set_yscale('log')
@@ -1044,6 +1124,7 @@ class PeakListCreator:
         fig.tight_layout()
         fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_secondary_peaks.png'))
         plt.show()
+        self.q2_peaks_secondary = np.array(self.q2_peaks_secondary)
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_secondary_peaks.npy'),
             1/np.sqrt(np.array(self.q2_peaks_secondary))
