@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Usage: mlindex.run_analytical [args]
+exec python -m mlindex.command_line.run_analytical "$@"

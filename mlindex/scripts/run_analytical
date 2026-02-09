@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Wrapper script for the analytical indexing CLI
+# Usage: mlindex.run_analytical [args]
+# For example:
+#   mlindex.run_analytical --peak-file peaks.npy --output-file results.json
+
+exec python -m mlindex.command_line.run_analytical "$@"

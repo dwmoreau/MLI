@@ -14,6 +14,7 @@ from mlindex.optimization.UtilitiesOptimizer import get_mpi_organizer
 from mlindex.optimization.UtilitiesOptimizer import get_optimizers
 from mlindex.optimization.CandidateValidation import validate_candidate
 from mlindex.utilities.gsas import load_pkslst
+from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 
 
 def main():
@@ -187,6 +188,7 @@ def main():
                     'n_indexed_triplet': n_indexed_triplets_output,
                     'bravais_lattice': bravais_lattice,
                     'spacegroup': top_spacegroup[bravais_lattice][result_index],
+                    "volume": get_unit_cell_volume(unit_cell[np.newaxis])[0],
                     'a': unit_cell[0],
                     'b': unit_cell[1],
                     'c': unit_cell[2],
