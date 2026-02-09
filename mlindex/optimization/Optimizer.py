@@ -254,8 +254,9 @@ class Candidates:
         if self.triplets is None:
             improved = refined_M20 > self.best_M20
         else:
-            refined_M_triplets = get_M_triplet_from_xnn(
+            refined_M_triplets = get_M_triplet(
                 self.q2_obs,
+                refined_q2_calc,
                 self.triplets,
                 refined_hkl,
                 self.xnn,
@@ -391,15 +392,15 @@ class Candidates:
         self.best_hkl[test_indices] = np.take_along_axis(
             hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
             )[:, 0]
-        if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet_from_xnn(
-                self.q2_obs,
-                self.triplets,
-                self.best_hkl,
-                self.best_xnn,
-                self.lattice_system,
-                self.bravais_lattice
-                )
+        #if not self.triplets is None:
+        #    self.best_M_triplets = get_M_triplet(
+        #        self.q2_obs,
+        #        self.triplets,
+        #        self.best_hkl,
+        #        self.best_xnn,
+        #        self.lattice_system,
+        #        self.bravais_lattice
+        #        )
 
         # do quick reindexing to enforce constraints
         if self.lattice_system == 'triclinic':
@@ -492,15 +493,15 @@ class Candidates:
             self.best_M20 = best_M20
             self.best_hkl = best_hkl
 
-        if not self.triplets is None:
-            self.best_M_triplets = get_M_triplet_from_xnn(
-                self.q2_obs,
-                self.triplets,
-                self.best_hkl,
-                self.best_xnn,
-                self.lattice_system,
-                self.bravais_lattice
-                )
+        #if not self.triplets is None:
+        #    self.best_M_triplets = get_M_triplet_from_xnn(
+        #        self.q2_obs,
+        #        self.triplets,
+        #        self.best_hkl,
+        #        self.best_xnn,
+        #        self.lattice_system,
+        #        self.bravais_lattice
+        #        )
 
     def calculate_peaks_indexed(self):
         _, probability, self.best_Minfo = get_M20_likelihood_from_xnn(

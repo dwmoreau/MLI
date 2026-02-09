@@ -43,7 +43,7 @@ def main():
         peak_list = load_pkslst(args.peak_file, args.wavelength)[:20]
 
     if args.triplets_file:
-        triplet_obs = np.load(triplet_file)
+        triplet_obs = np.load(args.triplets_file)
     else:
         triplet_obs = None
 

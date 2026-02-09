@@ -16,9 +16,9 @@ class Wrapper:
         self.template_params = template_params
         self.integral_filter_params = integral_filter_params
 
-        results_directory = os.path.join(
+        results_directory = os.path.normpath(os.path.join(
             self.data_params['base_directory'], 'mlindex', 'models', self.data_params['tag']
-            )
+            ))
         self.save_to = {
             'results': results_directory,
             'augmentor': os.path.join(results_directory, 'augmentor'),
@@ -28,7 +28,7 @@ class Wrapper:
             'template': os.path.join(results_directory, 'template'),
             'integral_filter': os.path.join(results_directory, 'integral_filter'),
             }
-
+        """
         if not os.path.exists(self.save_to['results']):
             os.mkdir(self.save_to['results'])
         if not os.path.exists(self.save_to['augmentor']):
@@ -43,7 +43,7 @@ class Wrapper:
             os.mkdir(self.save_to['template'])
         if not os.path.exists(self.save_to['integral_filter']):
             os.mkdir(self.save_to['integral_filter'])
-
+        """
         if self.data_params['load_from_tag']:
             self.setup_from_tag(load_bravais_lattice)
         else:
