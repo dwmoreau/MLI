@@ -30,10 +30,10 @@ Only cubic, tetragonal and hexagonal systems are currently supported – the
 rhombohedral case is omitted for simplicity.
 '''
 
+from importlib.resources import files
 import itertools
-from pathlib import Path
-
 import numpy as np
+from pathlib import Path
 
 from mlindex.optimization.Optimizer import OptimizerManager
 from mlindex.optimization.Optimizer import Candidates
@@ -66,15 +66,11 @@ class AnalyticOptimizer(OptimizerManager):
         based on the lattice system.
     """
 
-    def __init__(self, bravais_lattice, comm, n_peaks_guess=5, n_ref_hkl_guess=5, opt_params=None):
+    def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5, n_ref_hkl_guess=5, opt_params=None):
         # Basic attributes required by the parent class
-        self.comm = comm
         self.bravais_lattice = bravais_lattice
         self.n_peaks_guess = n_peaks_guess
         self.n_ref_hkl_guess = n_ref_hkl_guess
-        self.root = comm.Get_rank()
-        self.rank = self.root
-        self.n_ranks = comm.Get_size()
 
         # Determine lattice system from bravais label
         if bravais_lattice in ['cP', 'cF', 'cI']:
@@ -91,62 +87,70 @@ class AnalyticOptimizer(OptimizerManager):
             raise ValueError(f'Unsupported bravais lattice for analytic optimizer: {bravais_lattice}')
 
         # Load the pre‑computed HKL reference array (non‑redundant)
-        data_path = (
-            Path('mlindex')
+        # Get the absolute path to the MLI directory
+        hkl_ref_path = (
+            Path('/'.join(files('mlindex').parts[:-1]))
+            / 'mlindex'
             / 'models'
             / f'{self.lattice_system}_1'
             / 'data'
             / f'hkl_ref_{bravais_lattice}.npy'
         )
-        self.hkl_ref = np.load(data_path)
+        self.hkl_ref = np.load(hkl_ref_path)
         self.hkl_ref_length = self.hkl_ref.shape[0]
 
         # Dimensionality of the reciprocal‑space parameter vector (xnn)
         dim_map = {'cubic': 1, 'tetragonal': 2, 'hexagonal': 2, 'orthorhombic': 3}
-        self.uc_length = dim_map.get(self.lattice_system, 2)
+        self.unit_cell_length = dim_map.get(self.lattice_system, 2)
 
         # Default optimisation parameters (matching the user specification)
         if opt_params is None:
             iteration_info = [
                 {
                     'worker': 'deterministic',
-                    'n_iterations': 1,
+                    'n_iterations': 2,
                     'triplet_opt': False,
+                },
+                {
+                    'worker': 'random_subsampling',
+                    'n_iterations': 5,
+                    'n_peaks': n_peaks,
+                    'n_drop': n_peaks // 2,
+                    'triplet_opt': True,
+                    'uniform_sampling': False,
                 }
             ]
             self.opt_params = {
                 'iteration_info': iteration_info,
                 'convergence_testing': False,
                 'redistribution_testing': False,
-                'assignment_threshold': 0.95,
+                'assignment_threshold': 0.90,
                 'figure_of_merit': 'M20',
-                'max_neighbors': 64,
-                'neighbor_radius': 0.000026,
-                'downsample_radius': 0.002,
+                'downsample_radius': 0.0001,
                 'minimum_uc': 2,
-                'maximum_uc': 50,
+                'maximum_uc': 500,
             }
-            if self.lattice_system in {'tetragonal', 'hexagonal'}:
-                self.opt_params.update({
-                    'max_neighbors': 52,
-                    'neighbor_radius': 0.000213,
-                    'downsample_radius': 0.0001,
-                })
-            elif self.lattice_system == 'orthorhombic':
-                self.opt_params.update({
-                    'max_neighbors': 46,
-                    'neighbor_radius': 0.000338,
-                    'downsample_radius': 0.0001,
-                })
         else:
             self.opt_params = opt_params
 
         # Minimal placeholders required for ``run_common``
         self.rng = np.random.default_rng()
+
+        self.comm = comm
+        self.rank = comm.Get_rank()
+        self.root = 0
+        self.n_ranks = comm.Get_size()
         self.fom = 'M20'
         self.q2_obs = None
         self.triplets = None
-        self.n_peaks = None
+        self.n_peaks = n_peaks
+
+        self.lattice_system = self.comm.bcast(self.lattice_system, root=self.root)
+        self.bravais_lattice = self.comm.bcast(self.bravais_lattice, root=self.root)
+        self.opt_params = self.comm.bcast(self.opt_params, root=self.root)
+        self.hkl_ref_length = self.comm.bcast(self.hkl_ref_length, root=self.root)
+        self.comm.Bcast(self.hkl_ref, root=self.root)
+        self.n_peaks = self.comm.bcast(self.n_peaks, root=self.root)
 
     # ---------------------------------------------------------------------
     # Overridden candidate generation – guess‑and‑check
@@ -158,22 +162,20 @@ class AnalyticOptimizer(OptimizerManager):
         by solving ``q2 = H·xnn`` for each permutation of ``dim`` reference HKLs.
         """
         # Use the first ``dim`` observed peaks (assumed sorted low‑angle)
-        dim = self.uc_length
+        dim = self.unit_cell_length
         q2_guess = self.q2_obs[:self.n_peaks_guess]
         # Restrict reference HKLs to the first ``n_ref_hkl`` entries
         ref_hkls = self.hkl_ref[:self.n_ref_hkl_guess]
         # Generate all ordered permutations of size ``dim``
         hkl_permutations = np.stack(list(itertools.permutations(ref_hkls, dim)), axis=0)
-        q2_permutations = np.stack(list(itertools.permutations(q2_guess, dim)), axis=0)
+        q2_permutations = np.stack(list(itertools.combinations(q2_guess, dim)), axis=0)
         n_q2 = q2_permutations.shape[0]
         n_templates = hkl_permutations.shape[0]
         hkl2 = get_hkl_matrix(hkl_permutations, self.lattice_system)
-        candidate_xnn_all = np.zeros((n_templates*n_q2, self.uc_length))
+        candidate_xnn_all = np.zeros((n_templates*n_q2, self.unit_cell_length))
         index = 0
         for template_index in range(n_templates):
             for q2_index in range(n_q2):
-                # Solve linear least‑squares for xnn (shape ``dim``)
-                #print(q2_guess.shape, hkl2[index].shape)
                 candidate_xnn_all[index], *_ = np.linalg.lstsq(
                     hkl2[template_index], q2_permutations[q2_index], rcond=None
                 )
@@ -203,6 +205,11 @@ class AnalyticOptimizer(OptimizerManager):
             partial_unit_cell=True,
             lattice_system=self.lattice_system
             )
+        candidate_xnn_all = np.repeat(
+            candidate_xnn_all,
+            repeats=3,
+            axis=0
+        )
 
         self.sent_candidates = np.zeros(self.n_ranks, dtype=int)
         for rank_index in range(self.n_ranks):
