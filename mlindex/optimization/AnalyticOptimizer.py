@@ -1,35 +1,3 @@
-'''Analytic optimizer for high‑symmetry lattice systems.
-
-This class inherits from ``OptimizerManager`` and replaces the ML‑based candidate
-generation with a deterministic, guess‑and‑check approach that works directly in
-the reciprocal‑space ``xnn`` representation used throughout the code base.
-
-The workflow mirrors ``mlindex.command_line.run`` but uses only the bravais
-lattices ``cF``, ``cI``, ``cP``, ``hP``, ``hR``, ``tI`` and ``tP``.  Candidate
-generation proceeds as follows:
-
-1. Load the pre‑computed, non‑redundant HKL reference array for the supplied
-   ``bravais_lattice`` (e.g. ``mlindex/models/tetragonal_1/data/hkl_ref_tP.npy``).
-2. Take the first ``n_peaks_guess`` observed peaks (low‑angle ``q2`` values) and
-   combine them with every permutation of the first ``n_ref_hkl`` reference HKLs
-   of size equal to the dimensionality of the reciprocal‑space parameter vector
-   (``dim`` = 1 for cubic, 2 for tetragonal/hexagonal, 3 for orthorhombic).
-3. For each HKL permutation build the design matrix ``H`` via
-   ``get_hkl_matrix`` and solve the linear system ``q2 = H·xnn`` using a least‑
-   squares solve.  The resulting ``xnn`` vector is a candidate reciprocal‑space
-   parameter set.
-4. Convert each ``xnn`` to a conventional unit cell with
-   ``get_unit_cell_from_xnn``, enforce physical limits (2 Å ≤ a,b,c ≤ 50 Å) via
-   ``fix_unphysical``, and convert back to ``xnn``.
-5. Feed the collection of ``xnn`` candidates to the existing ``Candidates``
-   implementation.  The standard deterministic optimisation step (Gauss‑Newton
-   refinement, HKL assignment, ``M20`` scoring, off‑by‑two correction, etc.) is
-   then applied.
-
-Only cubic, tetragonal and hexagonal systems are currently supported – the
-rhombohedral case is omitted for simplicity.
-'''
-
 from importlib.resources import files
 import itertools
 import numpy as np
@@ -56,6 +24,8 @@ class AnalyticOptimizer(OptimizerManager):
         Bravais lattice identifier (e.g. ``"cP"``, ``"tI``).
     comm : MPI communicator
         Communicator (serial ``MPI.COMM_SELF`` works for a single‑process run).
+    n_peaks : int, optional
+        Number of peaks to use in the optimization.
     n_peaks_guess : int, optional
         Number of low‑angle peaks to use for the initial linear solve.
     n_ref_hkl : int, optional
@@ -127,7 +97,7 @@ class AnalyticOptimizer(OptimizerManager):
                 'assignment_threshold': 0.90,
                 'figure_of_merit': 'M20',
                 'downsample_radius': 0.0001,
-                'minimum_uc': 2,
+                'minimum_uc': 1,
                 'maximum_uc': 500,
             }
         else:
