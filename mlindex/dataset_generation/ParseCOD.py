@@ -4,7 +4,7 @@ import pandas as pd
 
 from ParseDatabases import ProcessCODEntry
 from RemoveDuplicates import remove_duplicates
-
+from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 
 def get_next_dirs(dir):
     next_dirs = []
@@ -19,7 +19,8 @@ n_ranks = COMM.Get_size()
 # MPI approach
 #   Each rank reads different entries
 #   Output data frames are saved to different .json files
-cod_dir = '/Users/DWMoreau/MLI/data/cod_cifs/'
+cod_dir = '/global/cfs/cdirs/m4064/dwmoreau/cod_cifs'
+opxrd_dir = '/global/cfs/cdirs/m4064/dwmoreau/opxrd'
 if rank == 0:
     cif_file_names = []
     for dir_0_index in range(1, 10):
@@ -39,21 +40,33 @@ n_total = len(cif_file_names)
 dicts = []
 failed_dicts = []
 output_dicts = []
+cnrs_dicts = []
 in_numeric_tag = False
 duplicate_base = ''
 
+cnrs_xnn = get_xnn_from_unit_cell(np.load(os.path.join(opxrd_dir, 'CNRS_lattices.npy')))
+cnrs_tolerance = 0.0001
 for index in range(rank, n_total, n_ranks):
     entry = ProcessCODEntry()
     entry.verify_entry(cif_file_names[index])
     entry.make_output_dict()
 
     if entry.status:
-        dicts.append(entry.output_dict)
+        entry_xnn = get_xnn_from_unit_cell(entry.output_dict['unit_cell'][np.newaxis])
+        difference = np.linalg.norm(entry_xnn - cnrs_xnn, axis=1).min()
+        if difference < cnrs_tolerance:
+            print('Removing a CNRS entry')
+            cnrs_dicts.append(entry.output_dict)
+        else:
+            dicts.append(entry.output_dict)
     else:
         failed_dicts.append(entry.output_dict)
 
     if index % 10000 == 0:
         print(f'{100 * index / n_total: 2.2f}  {index} {len(dicts)} {len(failed_dicts)}')
+
+cnrs_rank = pd.DataFrame(dicts)
+cnrs_rank.to_parquet(os.path.join('data', f'cnrs_{rank:02d}.parquet'))
 
 entries_rank = pd.DataFrame(dicts)
 entries_rank.to_parquet(os.path.join('data', f'cod_{rank:02d}.parquet'))

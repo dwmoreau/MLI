@@ -16,7 +16,7 @@ authors = [{name = "David Mittan-Moreau", email = "dwmoreau@lbl.gov"}]
 description = "A data driven approach to powder diffraction indexing"
 keywords = ["powder diffraction", "diffraction", "crystallography", "indexing", "machine learning"]
 readme = "README.md"
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
