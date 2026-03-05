@@ -1,14 +1,12 @@
 import numpy as np
+import os
 import pandas as pd
 
 
 def remove_duplicates(source, n_ranks):
     print(f'Removing duplicates from {source} dataset')
     entries = pd.concat([
-        pd.read_parquet(os.path.join(
-            'data',
-            f'{source}_{rank:02d}.parquet'
-            )) for rank in range(n_ranks)
+        pd.read_parquet(f'{source}_{rank:02d}.parquet') for rank in range(n_ranks)
         ], ignore_index=True)
 
     all_unique_entries = []
@@ -80,8 +78,8 @@ def remove_duplicates(source, n_ranks):
     all_unique_entries = pd.concat(all_unique_entries)
     all_duplicated_entries = pd.concat(all_duplicated_entries)
 
-    all_unique_entries.to_parquet(os.path.join('data', f'unique_entries_{source}.parquet'))
-    all_duplicated_entries.to_parquet(os.path.join('data', f'duplicate_entries_{source}.parquet'))
+    all_unique_entries.to_parquet(f'unique_entries_{source}.parquet')
+    all_duplicated_entries.to_parquet(f'duplicate_entries_{source}.parquet')
 
 if __name__ == '__main__':
-    remove_duplicates(source='csd', n_ranks=8)
+    remove_duplicates(source='cod', n_ranks=8)

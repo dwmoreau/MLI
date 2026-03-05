@@ -1,4 +1,5 @@
 from mpi4py import MPI
+import numpy as np
 import os
 import pandas as pd
 
@@ -19,8 +20,8 @@ n_ranks = COMM.Get_size()
 # MPI approach
 #   Each rank reads different entries
 #   Output data frames are saved to different .json files
-cod_dir = '/global/cfs/cdirs/m4064/dwmoreau/cod_cifs'
-opxrd_dir = '/global/cfs/cdirs/m4064/dwmoreau/opxrd'
+cod_dir = '/Users/DWMoreau/cod_cifs'
+opxrd_dir = '/Users/DWMoreau/MLI/mlindex/data/opxrd'
 if rank == 0:
     cif_file_names = []
     for dir_0_index in range(1, 10):
@@ -53,9 +54,8 @@ for index in range(rank, n_total, n_ranks):
 
     if entry.status:
         entry_xnn = get_xnn_from_unit_cell(entry.output_dict['unit_cell'][np.newaxis])
-        difference = np.linalg.norm(entry_xnn - cnrs_xnn, axis=1).min()
+        difference = np.nanmin(np.linalg.norm(entry_xnn - cnrs_xnn, axis=1))
         if difference < cnrs_tolerance:
-            print('Removing a CNRS entry')
             cnrs_dicts.append(entry.output_dict)
         else:
             dicts.append(entry.output_dict)
@@ -63,16 +63,16 @@ for index in range(rank, n_total, n_ranks):
         failed_dicts.append(entry.output_dict)
 
     if index % 10000 == 0:
-        print(f'{100 * index / n_total: 2.2f}  {index} {len(dicts)} {len(failed_dicts)}')
+        print(f'{100 * index / n_total: 2.2f}  {index} {len(dicts)} {len(failed_dicts)} {len(cnrs_dicts)}')
 
-cnrs_rank = pd.DataFrame(dicts)
-cnrs_rank.to_parquet(os.path.join('data', f'cnrs_{rank:02d}.parquet'))
+cnrs_rank = pd.DataFrame(cnrs_dicts)
+cnrs_rank.to_parquet(f'cnrs_{rank:02d}.parquet')
 
 entries_rank = pd.DataFrame(dicts)
-entries_rank.to_parquet(os.path.join('data', f'cod_{rank:02d}.parquet'))
+entries_rank.to_parquet(f'cod_{rank:02d}.parquet')
 
 failed_read = pd.DataFrame(failed_dicts)
-failed_read.to_parquet(os.path.join('data', f'failed_read_cod_{rank:02d}.parquet'))
+failed_read.to_parquet(f'failed_read_cod_{rank:02d}.parquet')
 
 if rank == 0:
     remove_duplicates('cod', n_ranks)
