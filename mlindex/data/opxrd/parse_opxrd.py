@@ -14,6 +14,23 @@ from cctbx import crystal
 from cctbx import uctbx
 from cctbx.sgtbx.lattice_symmetry import metric_subgroups
 
+def get_q_lattice(info):
+    unit_cell = info['unit_cell'].copy()
+    unit_cell[3:] *= 180/np.pi
+    input_symmetry = crystal.symmetry(
+        unit_cell=uctbx.unit_cell(parameters=list(unit_cell)),
+        space_group_symbol=info['spacegroup'] if info['spacegroup'] else 'P 1'
+    )
+    # Do it
+    groups = metric_subgroups(
+        input_symmetry,
+        0.1,
+        enforce_max_delta_for_generated_two_folds=True
+    )
+    c = groups.result_groups[0]['best_subsym']
+    miller_indices = c.build_miller_set(d_min=1, d_max=40, anomalous_flag=False)
+    return 1/np.array(list(miller_indices.d_spacings().data()))
+
 
 def get_symmetry(unit_cell):
     unit_cell[3:] *= 180/np.pi

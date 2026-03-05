@@ -289,11 +289,11 @@ def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12
         entries = []
         entry_directories = '/global/cfs/cdirs/m4064/dwmoreau/'
         entries_csd = pd.read_parquet(
-            os.path.join(entry_directories, 'unique_entries_csd.parquet'),
+            os.path.join(entry_directories, 'unique_csd_entries_cnrs_removed.parquet'),
             columns=entry_generator.data_frame_keys_to_keep
             )
         entries_cod = pd.read_parquet(
-            os.path.join(entry_directories, 'unique_cod_entries_not_in_csd.parquet'),
+            os.path.join(entry_directories, 'unique_cod_entries_not_in_csd_cnrs_removed.parquet'),
             columns=entry_generator.data_frame_keys_to_keep
             )
         entries_csd = entries_csd.loc[entries_csd['bravais_lattice'] == bravais_lattice]
@@ -385,10 +385,11 @@ def generate_dataset(bravais_lattice, train_fraction, entries_per_group, seed=12
             f'dataset_{bravais_lattice}.parquet'
             ))
         shutil.rmtree(os.path.join('..', 'data', 'generated_datasets', 'tmp'))
-    else:
-        MPI.Finalize()
+    #else:
+    #    MPI.Finalize()
 
 if __name__ == '__main__':
+    """
     if sys.argv[2] == 'all':
         entries_per_group = 'all'
     else:
@@ -398,4 +399,77 @@ if __name__ == '__main__':
         bravais_lattice=sys.argv[1],
         train_fraction=0.8,
         entries_per_group=entries_per_group
+        )
+    """
+    """
+    generate_dataset(
+        bravais_lattice='cP',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='cF',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='cI',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='tP',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='tI',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='hP',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='hR',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='oC',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='oF',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='oI',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    """
+    generate_dataset(
+        bravais_lattice='oP',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='mP',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='mC',
+        train_fraction=0.8,
+        entries_per_group='all',
+        )
+    generate_dataset(
+        bravais_lattice='aP',
+        train_fraction=0.8,
+        entries_per_group='all',
         )

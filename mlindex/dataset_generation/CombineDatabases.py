@@ -4,18 +4,19 @@ import pandas as pd
 import sys
 
 
+base_dir = '/global/cfs/cdirs/m4064/dwmoreau'
 if sys.argv[1] == 'remove-cod-in-csd':
-    entries_a = pd.read_parquet(os.path.join('data', 'unique_entries_csd.parquet'))
-    entries_b = pd.read_parquet(os.path.join('data', 'unique_cod_entries_cnrs_removed.parquet'))
-    output_file_name = os.path.join('data', 'unique_cod_entries_not_in_csd.parquet')
+    entries_a = pd.read_parquet(os.path.join(base_dir, 'unique_csd_entries_cnrs_removed.parquet'))
+    entries_b = pd.read_parquet(os.path.join(base_dir, 'unique_cod_entries_cnrs_removed.parquet'))
+    output_file_name = os.path.join(base_dir, 'unique_cod_entries_not_in_csd_cnrs_removed.parquet')
 elif sys.argv[1] == 'remove-cnrs-in-csd':
-    entries_a = pd.read_parquet(os.path.join('data', 'cnrs_entries.parquet'))
-    entries_b = pd.read_parquet(os.path.join('data', 'unique_entries_csd.parquet'))
-    output_file_name = os.path.join('data', 'unique_csd_entries_cnrs_removed.parquet')
+    entries_a = pd.read_parquet(os.path.join(base_dir, 'cnrs.parquet'))
+    entries_b = pd.read_parquet(os.path.join(base_dir, 'unique_entries_csd.parquet'))
+    output_file_name = os.path.join(base_dir, 'unique_csd_entries_cnrs_removed.parquet')
 elif sys.argv[1] == 'remove-cnrs-in-cod':
-    entries_a = pd.read_parquet(os.path.join('data', 'cnrs_entries.parquet'))
-    entries_b = pd.read_parquet(os.path.join('data', 'unique_entries_cod.parquet'))
-    output_file_name = os.path.join('data', 'unique_cod_entries_cnrs_removed.parquet')
+    entries_a = pd.read_parquet(os.path.join(base_dir, 'cnrs.parquet'))
+    entries_b = pd.read_parquet(os.path.join(base_dir, 'unique_entries_cod.parquet'))
+    output_file_name = os.path.join(base_dir, 'unique_cod_entries_cnrs_removed.parquet')
 
 all_unique_entries = []
 groups_a = entries_a.groupby('bravais_lattice')

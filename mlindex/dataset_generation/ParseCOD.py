@@ -74,7 +74,7 @@ entries_rank.to_parquet(f'cod_{rank:02d}.parquet')
 failed_read = pd.DataFrame(failed_dicts)
 failed_read.to_parquet(f'failed_read_cod_{rank:02d}.parquet')
 
-if rank == 0:
-    remove_duplicates('cod', n_ranks)
-else:
-    MPI.Finalize()
+#if rank == 0:
+#    remove_duplicates('cod', n_ranks)
+#else:
+#    MPI.Finalize()

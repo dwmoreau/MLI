@@ -6,6 +6,7 @@ def get_peak_generation_info():
     # The CCDC API generates diffraction patterns with the wavelength 1.54 (Cu K alpha)
     # The CCDC powder patterns are generated with 'broadening_fwhm'
     # The cctbx powder patterns are generated with 'broadening_params'
+    #   [intercept, slope]
     # The wavelength of 0.827 is the approximate wavelength during 2024A8043 and 2023B8059
     # experiments at SACLA 
 
@@ -16,16 +17,18 @@ def get_peak_generation_info():
     theta2_pattern = np.arange(theta2_min, theta2_max, dtheta2)
     peak_generation_info = {
         'broadening_fwhm': 0.1,
-        'broadening_params': np.array([0.00007, 0.002]),
-        'broadening_multiples': np.array([2/3, 1, 1.5]),
-        'broadening_tags': ['0.66', '1', '1.5'],
+        #'broadening_params': np.array([0.00007, 0.002]), #smSFX
+        'broadening_params': np.array([0.00034, 0.0042]), #INT
+        'broadening_multiples': np.array([0.5, 1, 1.5]),
+        'broadening_tags': ['0.5', '1', '1.5'],
         'wavelength': wavelength,
         'dtheta2': dtheta2,
         'theta2_min': theta2_min,
         'theta2_max': theta2_max,
         'theta2_pattern': theta2_pattern,
         'q2_pattern': (2 * np.sin(theta2_pattern/2 * np.pi/180) / wavelength)**2,
-        'q2_error_params': np.array([0.000087, 0.00092]),
+        #'q2_error_params': np.array([0.000087, 0.00092]), #smSFX
+        'q2_error_params': np.array([0.0000995, 0.000581]), #CNRS
         }
     return peak_generation_info
 
