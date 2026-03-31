@@ -16,10 +16,11 @@ import matplotlib.pyplot as plt
 from mpi4py import MPI
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from tqdm import tqdm
-import time
 import sys
 
+import mlindex
 from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_hexagonal_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_monoclinic_optimizer
@@ -55,21 +56,14 @@ def evaluate_regression(optimizer, entry, candidates_per_model, rng):
         np.nan
         )
 
-    tree_time = 0
-    integral_filter_time = 0
-    template_time = 0
-    random_time = 0
-
     xnn_true = np.array(entry['reindexed_xnn'])[optimizer.wrapper.data_params['unit_cell_indices']]
     q2 = np.array(entry['q2'])[:optimizer.n_peaks]
 
     for generator_info in optimizer.opt_params['generator_info']:
-        start_time = time.time()
         if generator_info['generator'] == 'trees':
             generator_unit_cells = optimizer.wrapper.random_forest_generator[generator_info['split_group']].generate(
                 candidates_per_sub_model[generator_info['generator']], rng,  q2,
                 )
-            tree_time += time.time() - start_time
         elif generator_info['generator'] == 'integral_filter':
             if integral_filter_top_n is None:
                 integral_filter_top_n = optimizer.wrapper.integral_filter_generator[generator_info['split_group']].model_params['n_volumes']
@@ -78,18 +72,10 @@ def evaluate_regression(optimizer, entry, candidates_per_model, rng):
                 top_n=integral_filter_top_n,
                 batch_size=2,
                 )
-            integral_filter_time += time.time() - start_time
         elif generator_info['generator'] == 'templates':
             generator_unit_cells = optimizer.wrapper.miller_index_templator[optimizer.bravais_lattice].generate(
                 candidates_per_sub_model[generator_info['generator']], rng, q2, 
                 )
-            template_time += time.time() - start_time
-        elif generator_info['generator'] == 'predicted_volume':
-            generator_unit_cells = optimizer.wrapper.random_unit_cell_generator[optimizer.bravais_lattice].generate(
-                candidates_per_sub_model[generator_info['generator']], rng, q2,
-                model=generator_info['generator'],
-                )
-            random_time += time.time() - start_time
 
         generator_unit_cells = fix_unphysical(
             unit_cell=generator_unit_cells,
@@ -149,22 +135,12 @@ def evaluate_regression(optimizer, entry, candidates_per_model, rng):
             rng.permutation(distance_lower)
             ])
 
-    total_time = tree_time + integral_filter_time + template_time + random_time
-    #print('Time Evaluation')
-    #print('Tree', 'integral_filter', 'Template', 'Random')
-    #print(
-    #    np.round(tree_time / total_time, decimals=3),
-    #    np.round(integral_filter_time / total_time, decimals=3),
-    #    np.round(template_time / total_time, decimals=3),
-    #    np.round(random_time / total_time, decimals=3),
-    #    )
     #print('Distance Evaluation')
-    #print('Tree', 'integral_filter', 'Template', 'Random')
+    #print('Tree', 'integral_filter', 'Template')
     #print(
     #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('trees')]), decimals=3),
     #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('integral_filter')]), decimals=3),
     #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('templates')]), decimals=3),
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('predicted_volume')]), decimals=3),
     #    )
     return distance, generator_names
 
@@ -263,6 +239,7 @@ if __name__ == '__main__':
     rank = comm.Get_rank()
     n_ranks = comm.Get_size()
     split_comm = comm.Split(color=rank, key=rank)
+    project_path = Path(mlindex.__path__[0]).parent
 
     load_data = True
     broadening_tag = '1'
@@ -334,19 +311,19 @@ if __name__ == '__main__':
     for bravais_lattice in bravais_lattices:
         print(f'Loading optimizer for {bravais_lattice}')
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
         elif bravais_lattice in ['hP']:
-            optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
         elif bravais_lattice in ['hR']:
-            optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
         elif bravais_lattice in ['aP']:
-            optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm)
+            optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
         
         if rank == 0:
             if bravais_lattice in ['cF', 'cI', 'cP']:
