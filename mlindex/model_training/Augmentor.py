@@ -477,12 +477,11 @@ class Augmentor:
                 # There is a problem with really large q2 values. Like ~100 I believe they are comming from
                 # setting the hkl to [-100, -100, -100] for empty peaks in the peak list
                 if q2_sa[index] < 1:
-                    peak_breadth_std = broadening_multiplier * (broadening_params[0] + q2_sa[index]*broadening_params[1])
+                    peak_breadth_std_q = broadening_multiplier * (broadening_params[0] + broadening_params[1] * np.sqrt(q2_sa[index]))
+                    peak_breadth_std = 2 * peak_breadth_std_q * np.sqrt(q2_sa[index])
                     # STD / FWHM conversion
                     # 2.35 = 2*np.sqrt(2*np.log(2))
-                    overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5 # over rejects
-                    #overlap_threshold = peak_breadth_std / 2 # over rejects
-                    #overlap_threshold = 0 # over rejects
+                    overlap_threshold = peak_breadth_std * 2*np.sqrt(2*np.log(2)) / 1.5
                     distance_previous = q2_sa[index] - q2_sa[previous_kept_index]
                     # Case 1 will not pass beyond this
                     if distance_previous > overlap_threshold: 
@@ -528,9 +527,6 @@ class Augmentor:
         if len(q2) >= self.n_peaks:
             # This sort might be unneccessary, but not harmful.
             q2 = np.array(q2)
-            check = np.sum((q2[1:] - q2[:-1]) < 0)
-            if check > 0:
-                print('q2 is not sorted. This is a bug')
             sort_indices = np.argsort(q2)
             q2 = q2[sort_indices][:self.n_peaks]
 

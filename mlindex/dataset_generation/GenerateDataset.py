@@ -206,7 +206,10 @@ class EntryGenerator:
             q2_peaks = np.delete(q2_peaks, redundant, axis=0)
             hkl_peaks =  np.delete(hkl_peaks, redundant, axis=0)
 
-        breadths_q2_peaks = self.broadening_params[0, :] + self.broadening_params[1, :] * q2_peaks[:, np.newaxis]
+        # Breadth is specified as a linear model in q
+        # Breadth in q^2 comes from error propagation
+        breadths_q_peaks = self.broadening_params[0, :] + self.broadening_params[1, :] * np.sqrt(q2_peaks[:, np.newaxis])
+        breadths_q2_peaks = 2 * breadths_q_peaks * q2_peaks[:, np.newaxis]
         prefactor = 1/np.sqrt(2*np.pi*breadths_q2_peaks[:, np.newaxis]**2)
         arg = (self.q2_pattern[np.newaxis, :, np.newaxis] - q2_peaks[:, np.newaxis, np.newaxis]) / breadths_q2_peaks[:, np.newaxis]
         kernel = prefactor * np.exp(-1/2 * arg**2)
@@ -452,7 +455,6 @@ if __name__ == '__main__':
         train_fraction=0.8,
         entries_per_group='all',
         )
-    """
     generate_dataset(
         bravais_lattice='oP',
         train_fraction=0.8,
@@ -468,6 +470,7 @@ if __name__ == '__main__':
         train_fraction=0.8,
         entries_per_group='all',
         )
+    """
     generate_dataset(
         bravais_lattice='aP',
         train_fraction=0.8,

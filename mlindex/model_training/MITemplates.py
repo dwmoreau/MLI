@@ -646,6 +646,7 @@ class MITemplates:
         from mlindex.utilities.ErrorAdder import add_contaminants
         q2_obs = inputs[0]
         xnn_true = inputs[1]
+        train = inputs[2]
 
         multiplier = self.rng.uniform(
             low=self.template_params['q2_error_multiplier_low'],
@@ -655,19 +656,23 @@ class MITemplates:
         q2_obs = add_contaminants(
             q2=q2_obs[np.newaxis],
             hkl=None,
-            n_peaks=None,
             n_contaminants=self.template_params['n_contaminants_max'],
             rng=self.rng,
             random_n_contaminants=True
         )[0]
 
-        xnn0, probability0, N_pred0, q2_calc_max0 = self.generate_xnn(q2_obs)
-        xnn1, probability1, N_pred1, q2_calc_max1 = self.generate_xnn_true(q2_obs, xnn_true)
-        xnn = np.concatenate((xnn0, xnn1), axis=0)
-        probability = np.concatenate((probability0, probability1), axis=0)
-        N_pred = np.concatenate((N_pred0, N_pred1))
-        q2_calc_max = np.concatenate((q2_calc_max0, q2_calc_max1))
-        
+        xnn, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs)
+        """
+        if type(train) != bool:
+            train = train[0]
+        if train == True:
+            xnn1, probability1, N_pred1, q2_calc_max1 = self.generate_xnn_true(q2_obs, xnn_true)
+            xnn = np.concatenate((xnn, xnn1), axis=0)
+            probability = np.concatenate((probability, probability1), axis=0)
+            N_pred = np.concatenate((N_pred, N_pred1))
+            q2_calc_max = np.concatenate((q2_calc_max, q2_calc_max1))
+        """
+
         distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])[:, 0]
 
         select = distance < self.template_params['max_distance']
@@ -679,7 +684,7 @@ class MITemplates:
 
         return probability, distance, xnn, N_pred, q2_calc_max
 
-    def get_inputs(self, data, n_entries):
+    def get_inputs(self, data, n_entries, train=False):
         from tqdm import tqdm
         q2_obs = np.stack(data['q2'])
         probability = []
@@ -698,7 +703,7 @@ class MITemplates:
             print(f'Setting up {n_entries} entries serially')
             for index in tqdm(indices):
                 probability_entry, distance_entry, xnn_entry, N_pred_entry, q2_calc_max_entry = \
-                    self._get_inputs_worker([q2_obs[index], xnn_true[index]])
+                    self._get_inputs_worker([q2_obs[index], xnn_true[index], train])
                 probability.append(probability_entry)
                 distance.append(distance_entry)
                 xnn.append(xnn_entry)
@@ -707,7 +712,11 @@ class MITemplates:
         elif self.template_params['parallelization'] == 'multiprocessing':
             print(f'Setting up {n_entries} entries using multiprocessing')
             with multiprocessing.Pool(self.template_params['n_processes']) as p:
-                outputs = p.map(self._get_inputs_worker, zip(q2_obs[indices], xnn_true[indices]))
+                if train:
+                    train_array = np.ones(indices.size, dtype=bool)
+                else:
+                    train_array = np.zeros(indices.size, dtype=bool)
+                outputs = p.map(self._get_inputs_worker, zip(q2_obs[indices], xnn_true[indices], train_array))
             for i in range(n_entries):
                 probability.append(outputs[i][0])
                 distance.append(outputs[i][1])
@@ -794,7 +803,7 @@ class MITemplates:
             probability_val = val_cache[:, 3:]
         else:
             probability_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train = \
-                self.get_inputs(training_data, self.template_params['n_entries_train'])
+                self.get_inputs(training_data, self.template_params['n_entries_train'], train=True)
             probability_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val = \
                 self.get_inputs(val_data, n_val)
     
@@ -860,7 +869,8 @@ class MITemplates:
                 max_depth=self.template_params['max_depth'],
                 min_samples_leaf=self.template_params['min_samples_leaf'],
                 l2_regularization=self.template_params['l2_regularization'],
-                verbose=2
+                verbose=2,
+                max_iter=25
                 )
             print('Fitting')
             self.hgbc_regressor.fit(train_inputs, train_outputs)

@@ -7,6 +7,8 @@ def get_peak_generation_info():
     # The CCDC powder patterns are generated with 'broadening_fwhm'
     # The cctbx powder patterns are generated with 'broadening_params'
     #   [intercept, slope]
+    #   sigma_q = intercept + slope * sqrt(q^2)
+    #   sigma_q^2 = 2 * sigma_q * sqrt(q^2)
     # The wavelength of 0.827 is the approximate wavelength during 2024A8043 and 2023B8059
     # experiments at SACLA 
 
@@ -17,8 +19,7 @@ def get_peak_generation_info():
     theta2_pattern = np.arange(theta2_min, theta2_max, dtheta2)
     peak_generation_info = {
         'broadening_fwhm': 0.1,
-        #'broadening_params': np.array([0.00007, 0.002]), #smSFX
-        'broadening_params': np.array([0.00034, 0.0042]), #INT
+        'broadening_params': np.array([0.00091629, 0.00072894]), #INT
         'broadening_multiples': np.array([0.5, 1, 1.5]),
         'broadening_tags': ['0.5', '1', '1.5'],
         'wavelength': wavelength,

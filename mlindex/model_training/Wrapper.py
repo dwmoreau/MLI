@@ -952,21 +952,6 @@ class Wrapper:
                 self.miller_index_templator[bravais_lattice].setup(
                     self.data[self.data['bravais_lattice'] == bravais_lattice]
                     )
-                #generator_test = MITemplates(
-                #    bravais_lattice=bravais_lattice,
-                #    data_params=self.data_params,
-                #    template_params=self.template_params[bravais_lattice],
-                #    hkl_ref=self.hkl_ref[bravais_lattice],
-                #    save_to=self.save_to['template'],
-                #    seed=self.random_seed
-                #    )
-                #generator_test.load_from_tag()
-                #bl_data = self.data[self.data['bravais_lattice'] == bravais_lattice]
-                #generator_test.generate(
-                #    n_templates=10,
-                #    rng=np.random.default_rng(0),
-                #    q2_obs=np.array(bl_data.iloc[0]['q2']),
-                #    )
 
     def setup_random_forest(self):
         from mlindex.model_training.RandomForest import RandomForest
