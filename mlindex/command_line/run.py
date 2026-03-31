@@ -27,14 +27,25 @@ def main():
     parser.add_argument(
         "--wavelength",
         type=float,
-        help="wavelength used when supplying a GSAS-II pkslst file"
+        default=None,
+        help="wavelength used for zero point error or when supplying a GSAS-II pkslst file"
     )
     parser.add_argument(
         "--triplets-file",
         type=str,
+        default=None,
         help="file name of the peak list (numpy array)"
     )
+    parser.add_argument(
+        "--zero-error",
+        type=bool,
+        default=False,
+        help="Apply a correction for zero point error in theta
+    )
     args = parser.parse_args()
+
+    if args.zero_error:
+        assert args.wavelength
 
     if args.peak_file.endswith('.npy'):
         peak_list = np.load(args.peak_file)[:20]
@@ -98,7 +109,13 @@ def main():
                 role = 'worker'
             mpi_organizers[bravais_lattice].split_comm.barrier()
             logger.info(f'Starting optimization of {bravais_lattice} {role}')
-            optimizer[bravais_lattice].run(q2=peak_list, triplets=triplet_obs, n_top_candidates=n_top_candidates)
+            optimizer[bravais_lattice].run(
+                q2=peak_list,
+                triplets=triplet_obs,
+                n_top_candidates=n_top_candidates,
+                zero_error=args.zero_error,
+                wavelength=args.wavelength,
+            )
             logger.info(f'Finishing optimization of {bravais_lattice} {role}')
     comm.barrier()
 

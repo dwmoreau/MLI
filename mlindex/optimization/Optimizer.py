@@ -29,7 +29,7 @@ from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
 class Candidates:
-    def __init__(self, q2_obs, triplets, xnn, hkl_ref, lattice_system, bravais_lattice, opt_params, rng, fom):
+    def __init__(self, q2_obs, triplets, xnn, hkl_ref, lattice_system, bravais_lattice, opt_params, rng, fom, zero_error, wavelength):
         self.lattice_system = lattice_system
         self.bravais_lattice = bravais_lattice
         self.minimum_unit_cell = opt_params['minimum_uc']
@@ -38,6 +38,8 @@ class Candidates:
         self.figure_of_merit = opt_params['figure_of_merit']
         self.rng = rng
         self.fom = fom
+        self.zero_error = zero_error
+        self.wavelength = wavelength
         self.hkl_ref = hkl_ref
         self.hkl_ref_length = hkl_ref.shape[0]
         self.top_n_assignments_triplets = 2
@@ -52,9 +54,6 @@ class Candidates:
         self.xnn = xnn
         self.n = self.xnn.shape[0]
         self.best_xnn = self.xnn.copy()
-        self.best_M20 = np.zeros(self.n)
-        if not self.triplets is None:
-            self.best_M_triplets = np.zeros((self.n, 2))
         self.candidate_index = np.arange(self.n)
         self.fix_out_of_range_candidates()
 
@@ -65,7 +64,13 @@ class Candidates:
             representation='xnn'
             )
         self.assign_hkls()
+        if self.zero_error:
+            self.correct_zero_error()
+            self.best_zeropoint = self.zeropoint.copy()
         self.best_hkl = self.hkl.copy()
+        self.best_M20 = self.M20
+        if not self.triplets is None:
+            self.best_M_triplets = self.M_triplets
 
     def fix_bad_conversions(self):
         bad_conversions = np.sum(np.isnan(self.reciprocal_unit_cell), axis=1) > 0
@@ -112,7 +117,7 @@ class Candidates:
         q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)            
         if not self.triplets is None:
             self.M_triplets = get_M_triplet(
                 self.q2_obs,
@@ -125,10 +130,35 @@ class Candidates:
                 )
         self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
 
+    def correct_zero_error(self):
+        q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
+
+        # Initialize a target function
+        target_function = CandidateOptLoss(
+            np.repeat(self.q2_obs[np.newaxis], self.n, axis=0), 
+            lattice_system=self.lattice_system,
+            )
+        target_function.update(self.hkl, self.xnn)
+
+        # Get a per-peak correction for zero and add these to q_calc
+        delta_gn = target_function.gauss_newton_step_zero_error(self.xnn, self.wavelength)
+        self.xnn += delta_gn[:, :-1]
+        self.zeropoint = delta_gn[:, -1]
+
+        # Reassign hkl's
+        q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
+        q2_ref_calc = target_function.apply_zeropoint(self.zeropoint, self.wavelength, q2_ref_calc)
+        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
+        self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)            
+        self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+
     def iteration_worker_common(self, target_function):
         self.xnn += target_function.gauss_newton_step(self.xnn)
         self.fix_out_of_range_candidates()
         self.assign_hkls()
+        if self.zero_error:
+            self.correct_zero_error()
         if self.triplets is None:
             improved = self.M20 > self.best_M20
         else:
@@ -137,6 +167,8 @@ class Candidates:
         self.best_M20[improved] = self.M20[improved]
         self.best_xnn[improved] = self.xnn[improved]
         self.best_hkl[improved] = self.hkl[improved]
+        if self.zero_error:
+            self.best_zeropoint[improved] = self.zeropoint[improved]
 
     def deterministic(self, iteration_info):
         target_function = CandidateOptLoss(
@@ -241,7 +273,7 @@ class Candidates:
         refined_xnn = fix_unphysical(
             xnn=refined_xnn,
             rng=self.rng,
-            minimum_unit_cell=self.minimum_unit_cell, 
+            minimum_unit_cell=self.minimum_unit_cell,
             maximum_unit_cell=self.maximum_unit_cell,
             lattice_system=self.lattice_system,
             )
@@ -249,7 +281,24 @@ class Candidates:
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
         refined_q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
-            
+
+        if self.zero_error:
+            target_function_zp = CandidateOptLoss(
+                np.repeat(self.q2_obs[np.newaxis], self.n, axis=0),
+                lattice_system=self.lattice_system,
+                )
+            target_function_zp.update(refined_hkl, refined_xnn)
+            # Get a per-peak correction for zero and add these to q_calc
+            delta_gn = target_function_zp.gauss_newton_step_zero_error(refined_xnn, self.wavelength)
+            refined_xnn += delta_gn[:, :-1]
+            refined_zeropoint = delta_gn[:, -1]
+
+            q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
+            q2_ref_calc = target_function_zp.apply_zeropoint(refined_zeropoint, self.wavelength, q2_ref_calc)
+            hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
+            refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
+            refined_q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+
         refined_M20 = get_M20(self.q2_obs, refined_q2_calc, q2_ref_calc)
         if self.triplets is None:
             improved = refined_M20 > self.best_M20
@@ -268,6 +317,8 @@ class Candidates:
         self.best_hkl[improved] = refined_hkl[improved]
         self.best_M20[improved] = refined_M20[improved]
         self.best_xnn[improved] = refined_xnn[improved]
+        if self.zero_error:
+            self.best_zeropoint[improved] = refined_zeropoint[improved]
 
     def standardize_cell(self):
         # These do a quick standardization of monoclinic and triclinic candidates. It is just a
@@ -365,6 +416,8 @@ class Candidates:
             n_test = test_indices.size
         M20 = np.zeros([n_test, mult_factors.shape[0]])
         hkl = np.zeros([n_test, mult_factors.shape[0], self.n_peaks, 3])
+        if self.zero_error:
+            zeropoint = np.zeros([n_test, mult_factors.shape[0]])
         for mf_index in range(mult_factors.shape[0]):
             xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn[test_indices]
             xnn_mult = fix_unphysical(
@@ -378,6 +431,23 @@ class Candidates:
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
             hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
             q2_calc_mult = np.take_along_axis(q2_ref_calc_mult, hkl_assign, axis=1)
+            if self.zero_error:
+                target_function_zp = CandidateOptLoss(
+                    np.repeat(self.q2_obs[np.newaxis], n_test, axis=0),
+                    lattice_system=self.lattice_system,
+                    )
+                target_function_zp.update(hkl[:, mf_index], xnn_mult)
+                # Get a per-peak correction for zero and add these to q_calc
+                delta_gn = target_function_zp.gauss_newton_step_zero_error(xnn_mult, self.wavelength)
+                xnn_mult += delta_gn[:, :-1]
+                zeropoint[:, mf_index] = delta_gn[:, -1]
+
+                q2_ref_calc_mult = target_function_zp.apply_zeropoint(
+                    zeropoint[:, mf_index], self.wavelength, q2_ref_calc_mult
+                )
+                hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
+                hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
+                q2_calc_mult = np.take_along_axis(q2_ref_calc_mult, hkl_assign, axis=1)
             M20[:, mf_index] = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
 
         # Use the M20 score to check for off by two errors even if there are triplets.
@@ -391,6 +461,10 @@ class Candidates:
             )[:, 0]
         self.best_hkl[test_indices] = np.take_along_axis(
             hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
+            )[:, 0]
+        if self.zero_error:
+            self.best_zeropoint[test_indices] = np.take_along_axis(
+                zeropoint, best_index[:, np.newaxis], axis=1
             )[:, 0]
         #if not self.triplets is None:
         #    self.best_M_triplets = get_M_triplet(
@@ -454,10 +528,14 @@ class Candidates:
             M20 = np.zeros((n_test, len(spacegroups)))
             hkl = np.zeros([n_test, self.n_peaks, 3, len(spacegroups)])
             best_xnn = self.best_xnn[test_indices]
+            if self.zero_error:
+                best_zeropoint = self.best_zeropoint[test_indices]
         else:
             M20 = np.zeros((self.n, len(spacegroups)))
             hkl = np.zeros([self.n, self.n_peaks, 3, len(spacegroups)])
             best_xnn = self.best_xnn
+            if self.zero_error:
+                best_zeropoint = self.best_zeropoint
 
         for spacegroup_index, spacegroup in enumerate(spacegroups):
             q2_ref_calc = Q2Calculator(
@@ -467,8 +545,16 @@ class Candidates:
                 representation='xnn'
                 ).get_q2(best_xnn)
 
+            if self.zero_error:
+                target_function_zp = CandidateOptLoss(                        
+                    np.repeat(self.q2_obs[np.newaxis], best_xnn.shape[0], axis=0),
+                    lattice_system=self.lattice_system,
+                )   
+                q2_ref_calc = target_function_zp.apply_zeropoint(
+                    best_zeropoint, self.wavelength, q2_ref_calc
+                )
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
-            hkl[:, :, :, spacegroup_index] = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
+            hkl[:, :, :, spacegroup_index] = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)   
             q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
             M20[:, spacegroup_index] = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
 
@@ -504,13 +590,32 @@ class Candidates:
         #        )
 
     def calculate_peaks_indexed(self):
-        _, probability, self.best_Minfo = get_M20_likelihood_from_xnn(
-            q2_obs=self.q2_obs,
-            xnn=self.best_xnn,
-            hkl=self.best_hkl,
-            lattice_system=self.lattice_system,
-            bravais_lattice=self.bravais_lattice,
-            )
+        if self.zero_error:
+            target_function_zp = CandidateOptLoss(
+                np.repeat(self.q2_obs[np.newaxis], self.n, axis=0),
+                lattice_system=self.lattice_system,
+                )
+            hkl2 = get_hkl_matrix(self.best_hkl, self.lattice_system)
+            q2_calc = np.sum(hkl2 * self.best_xnn[:, np.newaxis, :], axis=2)
+            q2_calc = target_function_zp.apply_zeropoint(self.best_zeropoint, self.wavelength, q2_calc)
+            
+            reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+                self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            reciprocal_volume = get_unit_cell_volume(
+                reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            _, probability, self.best_Minfo = get_M20_likelihood(
+                self.q2_obs, q2_calc, self.bravais_lattice, reciprocal_volume
+                )
+        else:
+            _, probability, self.best_Minfo = get_M20_likelihood_from_xnn(
+                q2_obs=self.q2_obs,
+                xnn=self.best_xnn,
+                hkl=self.best_hkl,
+                lattice_system=self.lattice_system,
+                bravais_lattice=self.bravais_lattice,
+                )
 
         self.n_indexed = np.sum(
             probability > self.assignment_threshold,
@@ -552,6 +657,8 @@ class OptimizerBase:
             self.hkl_ref = np.zeros((self.hkl_ref_length, 3))
         self.comm.Bcast(self.hkl_ref, root=self.root)
         self.n_peaks = self.comm.bcast(self.n_peaks, root=self.root)
+        self.zero_error = False
+        self.wavelength = None
 
     def generate_candidates_common(self, xnn_rank):
         candidates = Candidates(
@@ -563,7 +670,9 @@ class OptimizerBase:
             bravais_lattice=self.bravais_lattice,
             opt_params=self.opt_params,
             rng=self.rng,
-            fom=self.fom
+            fom=self.fom,
+            zero_error=self.zero_error,
+            wavelength=self.wavelength,
             )
         return candidates
 
@@ -621,10 +730,12 @@ class OptimizerWorker(OptimizerBase):
         self.rng = np.random.default_rng(seed)
         super().__init__(comm, fom)
         
-    def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20):
+    def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20, zero_error=False, wavelength=None):
         self.q2_obs = np.zeros(self.n_peaks)
         self.triplets = None
-        self.run_common(n_top_candidates=None)
+        self.zero_error = zero_error
+        self.wavelength = wavelength
+        self.run_common(n_top_candidates=n_top_candidates)
 
     def generate_candidates_rank(self):
         candidate_xnn_rank = self.comm.recv(source=self.root)
@@ -714,7 +825,7 @@ class OptimizerManager(OptimizerBase):
         self.unit_cell_length = self.wrapper.data_params['unit_cell_length']
         super().__init__(comm, fom)
 
-    def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20):
+    def run(self, entry=None, q2=None, triplets=None, n_top_candidates=20, zero_error=False, wavelength=None):
         if (entry is None) and (not q2 is None):
             self.q2_obs = q2[:self.n_peaks]
         elif (not entry is None) and (q2 is None):
@@ -722,6 +833,8 @@ class OptimizerManager(OptimizerBase):
             if self.opt_params['convergence_testing'] or self.opt_params['redistribution_testing']:
                 self.xnn_true = np.array(entry['reindexed_xnn'])[self.wrapper.data_params['unit_cell_indices']]
         self.triplets = triplets
+        self.zero_error = zero_error
+        self.wavelength = wavelength
         if not self.triplets is None:
             good_indices = np.all(np.column_stack((
                 self.triplets[:, 0] < self.n_peaks,
@@ -747,7 +860,7 @@ class OptimizerManager(OptimizerBase):
                         )
             elif generator_info['generator'] == 'templates':
                 template_unit_cells = self.wrapper.miller_index_templator[self.bravais_lattice].generate(
-                    generator_info['n_unit_cells'], self.rng, q2,
+                    top_n, self.rng, q2,
                     )
             elif generator_info['generator'] == 'predicted_volume':
                 rec_volume_pred = self.wrapper.random_unit_cell_generator[self.bravais_lattice].random_forest_regressor.predict_individual_trees(

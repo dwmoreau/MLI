@@ -112,6 +112,60 @@ class CandidateOptLoss:
             print(f'GAUSS-NEWTON INVERSION FAILED: {e}')
         return delta_gn
 
+    def correct_zeropoint(self, xnn, wavelength):
+        # q2_pred:       n_entries, n_peaks
+        q2_pred = self.get_q2_pred(xnn, jac=False)
+        weights = 1 / self.q2_obs
+        theta2 = 2 * np.arcsin(wavelength/2 * np.sqrt(self.q2_obs))
+        prefactor = wavelength**2 / (4 * np.sin(theta2))
+        residuals = self.q2_obs - q2_pred
+        zeropoint = np.sum(weights * prefactor * residuals, axis=1) / np.sum(weights, axis=1)
+        return zeropoint
+
+    def apply_zeropoint(self, zeropoint, wavelength, q2):
+        theta2 = 2 * np.arcsin(np.clip(wavelength/2 * np.sqrt(q2), -1.0, 1.0))
+        return q2 + 4*np.sin(theta2)/wavelength**2 * zeropoint[:, np.newaxis]
+
+    def gauss_newton_step_zero_error(self, xnn, wavelength, zeropoint=None):
+        # q2_pred:       n_entries, n_peaks
+        # dq2_pred_dxnn: n_entries, n_peaks, xnn_length
+        # self.q2_obs:   n_peaks
+        # xnn:           n_entries, xnn_length
+        # hkl2:          n_entries, n_peaks, xnn_length
+
+        sigma = self.sigma
+        
+        theta2 = 2 * np.arcsin(wavelength/2 * np.sqrt(self.q2_obs))
+        prefactor = 4 * np.sin(theta2) / wavelength**2
+        hkl2 = np.concatenate([self.hkl2, prefactor[:, :, np.newaxis]], axis=2)
+        if zeropoint is None:
+            xnn = np.concatenate([xnn, np.zeros([self.n_entries, 1])], axis=1)
+        else:
+            xnn = np.concatenate([xnn, zeropoint[:, np.newaxis]], axis=1)
+
+        arg = hkl2 * xnn[:, np.newaxis, :]
+        q2_pred = np.sum(arg, axis=2)
+        dq2_pred_dxnn = hkl2
+            
+        residuals = (q2_pred - self.q2_obs) / sigma
+        dlikelihood_dq2_pred = residuals / sigma
+        dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
+        term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
+        H = np.sum(self.hessian_prefactor * term0, axis=1)
+        # Need to ensure H is invertible before inverting.
+        #invertible = np.linalg.det(H) != 0 # This is the fastest, but leaves non-invertible matrices.
+        invertible = np.linalg.matrix_rank(H, hermitian=True) == (self.uc_length + 1)
+        #invertible = np.isfinite(np.linalg.cond(H)) # This is slow
+        delta_gn = np.zeros((self.n_entries, self.uc_length + 1))
+        try:
+            delta_gn[invertible] = -np.matmul(
+                np.linalg.inv(H[invertible]),
+                dloss_dxnn[invertible, :, np.newaxis]
+                )[:, :, 0]
+        except np.linalg.LinAlgError as e:
+            print(f'GAUSS-NEWTON INVERSION FAILED: {e}')
+        return delta_gn
+
     def linear_least_squares(self):
         # Weighted linear least squares
         # Results are identical to the gauss newton step - not extensively tested though
