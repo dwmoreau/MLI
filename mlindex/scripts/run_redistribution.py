@@ -13,8 +13,11 @@ from mpi4py import MPI
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from pathlib import Path
 import sys
+from tqdm import tqdm
 
+import mlindex
 from mlindex.utilities.ErrorAdder import add_q2_error
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
@@ -32,6 +35,7 @@ if __name__ == '__main__':
     rank = comm.Get_rank()
     n_ranks = comm.Get_size()
     split_comm = comm.Split(color=rank, key=rank)
+    project_path = Path(mlindex.__path__[0]).parent
 
     broadening_tag = '1'
     cr_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/roc/data'
@@ -68,7 +72,8 @@ if __name__ == '__main__':
     #bravais_lattices = ['aP']
     #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
     #bravais_lattices = ['hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP']
-    bravais_lattices = ['cF', 'cI', 'cP', 'aP']
+    #bravais_lattices = ['cF', 'cI', 'cP']
+    bravais_lattices = ['hP', 'hR', 'tI', 'tP']
 
     n_entries = 10000
     options = {
@@ -79,19 +84,19 @@ if __name__ == '__main__':
     rng = np.random.default_rng(0)
     for bravais_lattice in bravais_lattices:
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path, options=options)
         elif bravais_lattice in ['hP']:
-            optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path, options=options)
         elif bravais_lattice in ['hR']:
-            optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path, options=options)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path, options=options)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path, options=options)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path, options=options)
         elif bravais_lattice in ['aP']:
-            optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path, options=options)
 
         if rank == 0:
             read_columns = [

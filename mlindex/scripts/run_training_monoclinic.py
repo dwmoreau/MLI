@@ -10,13 +10,13 @@ from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = '1'
+    broadening_tag = 'sa'
     data_params = {
         'tag': f'monoclinic_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_monoclinic.xlsx',
         'groupspec_sheet': 'groups_v3',
-        'load_from_tag': True,
+        'load_from_tag': False,
         'augment': True,
         'hkl_ref_length': 1000,
         'n_peaks': 20,
@@ -27,8 +27,8 @@ if __name__ == '__main__':
 
     aug_params = {
         'tag': f'monoclinic_{broadening_tag}',
-        'max_augmentation': 25,
-        'median_augmentation': 5,
+        'max_augmentation': 20,
+        'median_augmentation': 4,
         'augment_method': 'pca',
         'augment_shift': 0.2,
         'n_per_volume': 1000,
@@ -161,9 +161,9 @@ if __name__ == '__main__':
         wrapper.load_data_from_tag(load_augmented=True, load_train=True)
     else:
         wrapper.load_data()
-    #wrapper.setup_random()
     #wrapper.setup_miller_index_templates()
+    #wrapper.setup_random()
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('calibration_training')
+    wrapper.setup_integral_filter('training')

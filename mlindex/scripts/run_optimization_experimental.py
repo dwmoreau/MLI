@@ -18,6 +18,9 @@ broadening_tag = '1'
 optimization_tag = '_0'
 n_top_candidates = 20
 
+opxrd = False
+zero_error = True
+
 """
 base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/experimental_data/SACLA'
 entry_tags = [
@@ -68,29 +71,32 @@ entry_tags = [
     'Lcys-lowph',
     'thiorene',
     ]
-"""
 
 base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/experimental_data/gsas'
 entry_tags = [
-    '11bmb_3844',
-    '11bmb_6231',
-    '11bmb_8716',
-    'Carbidopa',
-    'CuCr2O4',
-    'FAP',
-    'garnet',
-    'La7Ca3MnO3_50K',
-    'LaMnO3_50K',
-    'PBSO4',
-    #'C7N2O2Cl_ca',
-    #'C7N2O2Cl_cb',
-    #'C7N2O2Cl_da',
-    #'C7N2O2Cl_db',
-    #'C7N2O2Cl_ec',
-    #'C7N2O2Cl_fd',
+    #'11bmb_3844',
+    #'11bmb_6231',
+    #'11bmb_8716',
+    #'Carbidopa',
+    #'CuCr2O4',
+    #'FAP',
+    #'garnet',
+    #'La7Ca3MnO3_50K',
+    #'LaMnO3_50K',
+    #'PBSO4',
+    'C7N2O2Cl_ca',
+    'C7N2O2Cl_cb',
+    'C7N2O2Cl_da',
+    'C7N2O2Cl_db',
+    'C7N2O2Cl_ec',
+    'C7N2O2Cl_fd',
 ]
+"""
 
-
+base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/opxrd'
+df = pd.read_json(os.path.join(base_dir, 'CNRS_output_data_verified_final2.json'))
+opxrd = True
+failed_entries = np.load(os.path.join(base_dir, 'failed_entries.npy'))
 rng = np.random.default_rng()
 
 comm = MPI.COMM_WORLD
@@ -104,8 +110,10 @@ logger.info('Starting process')
 #serial =           [True, True, True, True, True, True, True]
 
 bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+##manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
+##serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,     0]
+serial =           [True, True, True, True, True, True, True, True, True, True, True, True, True, True]
 
 #bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
 #manager_rank =     [    0,     0,     1,     1]
@@ -115,7 +123,7 @@ serial =           [True, True, True, True, True, True, True, False, False, Fals
 #manager_rank =     [   0,    0,    0]
 #serial =           [True, True, True]
 
-#bravais_lattices = ['cP']
+#bravais_lattices = ['tP']
 #manager_rank =     [   0]
 #serial =           [True]
 
@@ -144,10 +152,31 @@ logger.info(f'Including Bravais lattices {bl_string}')
 logger.info('Starting loading optimizers')
 optimizer = get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale=1, logger=logger)
 
-for entry_tag in entry_tags:
+if opxrd:
+    n = len(df)
+else:
+    n = len(entry_tags)
+#for index in range(n):
+for index in failed_entries:
+    if opxrd:
+        entry = df.iloc[index]
+        print(entry)
+        entry_tag = entry.file_name
+        peak_list = np.array(entry.peak_positions)[:20]**2
+        triplet_file_name = '/foo/bar/bam'
+        if zero_error:
+            wavelength = entry.primary_wavelength
+        else:
+            wavelength = None
+    else:
+        entry_tag = entry_tags[index]
+        peak_list = np.load(base_dir + f'/{entry_tag}/{entry_tag}_peak_list.npy')[:20]
+        triplet_file_name = base_dir + f'/{entry_tag}/{entry_tag}_triplets.npy'
+        wavelength = None
+        zero_error = False
+
     logger.info(f'Starting entry {entry_tag}')
-    peak_list = np.load(base_dir + f'/{entry_tag}/{entry_tag}_peak_list.npy')[:20]
-    triplet_file_name = base_dir + f'/{entry_tag}/{entry_tag}_triplets.npy'
+
     if os.path.exists(triplet_file_name):
         triplet_obs = np.load(triplet_file_name)
         logger.info(f'Entry {entry_tag} has triplet information')
@@ -175,7 +204,13 @@ for entry_tag in entry_tags:
                 role = 'worker'
             mpi_organizers[bravais_lattice].split_comm.barrier()
             logger.info(f'Starting optimization of {bravais_lattice} {role}')
-            optimizer[bravais_lattice].run(q2=peak_list, triplets=triplet_obs, n_top_candidates=n_top_candidates)
+            optimizer[bravais_lattice].run(
+                q2=peak_list,
+                triplets=triplet_obs,
+                n_top_candidates=n_top_candidates,
+                zero_error=zero_error,
+                wavelength=wavelength
+            )
             logger.info(f'Finishing optimization of {bravais_lattice} {role}')
     comm.barrier()
 
@@ -272,9 +307,18 @@ for entry_tag in entry_tags:
                     'beta': unit_cell[4],
                     'gamma': unit_cell[5],
                     })
-                print(output_data[-1])
-                print()
+                #print(output_data[-1])
+                #print()
         output_df = pd.DataFrame(output_data)
         output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
-        output_df.to_json(base_dir + f'/{entry_tag}/{entry_tag}_indexing_results_{optimization_tag}.json')
+        if opxrd:
+            file_name = entry.file_name.replace('.json', '_opt.json')
+        else:
+            file_name = base_dir + f'/{entry_tag}/{entry_tag}_indexing_results_{optimization_tag}.json'
+        output_df.to_json(file_name)
+        if opxrd:
+            print(entry.bravais_lattice, entry.unit_cell)
+            for i in range(min(5, len(output_df))):
+                print(output_df.iloc[i])
+                print()
     logger.info(f'Finished gathering optimization results of {entry_tag}')

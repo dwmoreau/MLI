@@ -14,7 +14,9 @@ import time
 from mpi4py import MPI
 import json
 import sys
+from pathlib import Path
 
+import mlindex
 from mlindex.utilities.ErrorAdder import add_q2_error
 from mlindex.utilities.ErrorAdder import add_contaminants
 from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
@@ -32,6 +34,7 @@ if __name__ == '__main__':
     rank = comm.Get_rank()
     n_ranks = comm.Get_size()
     split_comm = comm.Split(color=rank, key=rank)
+    project_path = Path(mlindex.__path__[0]).parent
 
     broadening_tag = '1'
     n_entries = 10000
@@ -46,19 +49,19 @@ if __name__ == '__main__':
     n_top_candidates = 20
     rng = np.random.default_rng(0)
     if bravais_lattice in ['cF', 'cI', 'cP']:
-        optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
+        optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, project_path)
     elif bravais_lattice in ['hP']:
-        optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
+        optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, project_path)
     elif bravais_lattice in ['hR']:
-        optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
+        optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, project_path)
     elif bravais_lattice in ['tI', 'tP']:
-        optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
+        optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, project_path)
     elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-        optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
+        optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, project_path)
     elif bravais_lattice in ['mC', 'mP']:
-        optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
+        optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, project_path)
     elif bravais_lattice in ['aP']:
-        optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm)
+        optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, project_path)
     optimizer.opt_params['iteration_info'][1]['n_iterations'] = n_iterations
 
     if rank == 0:

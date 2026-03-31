@@ -10,13 +10,13 @@ from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = '1'
+    broadening_tag = 'sa'
     data_params = {
         'tag': f'orthorhombic_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_orthorhombic.xlsx',
         'groupspec_sheet': 'Groups_V6',
-        'load_from_tag': True,
+        'load_from_tag': False,
         'augment': True,
         'hkl_ref_length': 750,
         'n_peaks': 20,
@@ -51,7 +51,7 @@ if __name__ == '__main__':
         'max_distance': 0.03,
         'roc_file_name': '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/roc/data/!!_roc_peaks20_drop16_iter100_sampQ2.npy',
         'grid_search': None,
-        'load_training_data': True,
+        'load_training_data': False,
         }
     template_group_params_load = {
         'tag': f'orthorhombic_{broadening_tag}',
@@ -59,9 +59,9 @@ if __name__ == '__main__':
     }
 
     template_params = {
-        'oC': template_group_params_load,
-        'oF': template_group_params_load,
-        'oI': template_group_params_load,
+        'oC': template_group_params,
+        'oF': template_group_params,
+        'oI': template_group_params,
         'oP': template_group_params,
         }
 
@@ -188,8 +188,8 @@ if __name__ == '__main__':
     else:
         wrapper.load_data()
     #wrapper.setup_random()
-    #wrapper.setup_miller_index_templates()
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
+    #wrapper.setup_miller_index_templates()
     wrapper.setup_integral_filter('training')

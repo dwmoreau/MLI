@@ -1,22 +1,22 @@
 import os
 os.environ["KERAS_BACKEND"] = "torch"
-#os.environ['OMP_NUM_THREADS'] = '1'
-#os.environ['OPENBLAS_NUM_THREADS'] = '1'
-#os.environ['MKL_NUM_THREADS'] = '1'
-#os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-#os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import keras
 from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = '1'
+    broadening_tag = 'sa'
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_hexagonal.xlsx',
         'groupspec_sheet': 'Groups V1',
-        'load_from_tag': True,
+        'load_from_tag': False,
         'augment': True,
         'hkl_ref_length': 750,
         'n_peaks': 20,
@@ -51,7 +51,7 @@ if __name__ == '__main__':
         'max_distance': 0.1,
         'roc_file_name': '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/roc/data/!!_roc_peaks20_drop17_iter100_sampQ2.npy',
         'grid_search': None,
-        'load_training_data': True
+        'load_training_data': False,
         }
     template_params = {
         'hP': template_group_params,
@@ -154,4 +154,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('calibration_training')
+    wrapper.setup_integral_filter('training')

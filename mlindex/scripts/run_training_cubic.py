@@ -1,11 +1,15 @@
 import os
 os.environ["KERAS_BACKEND"] = "torch"
-
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = '1'
+    broadening_tag = 'sa'
     data_params = {
         'tag': f'cubic_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
@@ -84,11 +88,11 @@ if __name__ == '__main__':
         'tag': f'cubic_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 10,
-        'extraction_peak_length': 6,
-        'n_volumes': 150,
+        'extraction_peak_length': 8,
+        'n_volumes': 100,
         'n_filters': 800,
-        'd_model': 256,
-        'n_heads': 4,
+        'd_model': 512,
+        'n_heads': 8,
         'layers': [600, 300, 100, 50],
         'l1_regularization': 0.00000,
         'base_line_layers': [600, 300, 100, 50],
@@ -150,7 +154,7 @@ if __name__ == '__main__':
         wrapper.load_data()
     #wrapper.setup_random()
     #wrapper.setup_miller_index_templates()
-    wrapper.setup_integral_filter('calibration_training')
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
+    wrapper.setup_integral_filter('training')

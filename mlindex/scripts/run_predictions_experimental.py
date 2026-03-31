@@ -66,9 +66,9 @@ def print_results(save_to_dir, material, tag, broadening_tag, lattice_system, un
 
 
 broadening_tag = '1'
-n_top_candidates = 20
+top_n = 10
 
-"""
+
 base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/experimental_data/gsas'
 entry_tags = {
     '11bmb_3844': ['cP_0', [4.15686, 4.15686, 4.15686, 90, 90, 90]],
@@ -126,7 +126,8 @@ entry_tags = {
     'cybu': ['tP_1_00', [14.623, 14.623,  4.248,   90,  90,  90]],
     'cyhx': ['tI_1_00', [17.6836, 17.6836, 4.6046,  90,  90,  90]],
     }
-
+"""
+               
 rng = np.random.default_rng()
 
 comm = MPI.COMM_WORLD
@@ -178,10 +179,10 @@ for entry_tag in entry_tags.keys():
     xnn_pred, template_unit_cells, volume_pred, tree_unit_cells = optimizer[bravais_lattice].perform_predictions(
         peak_list,
         split_group,
-        100
+        top_n
         )
     xnn_pred = xnn_pred[0]
-    volume_pred = volume_pred[0]
+    #volume_pred = volume_pred[0]
 
     unit_cell_pred = get_unit_cell_from_xnn(
         xnn_pred,
@@ -205,13 +206,13 @@ for entry_tag in entry_tags.keys():
         lattice_system, unit_cell_partial, tree_unit_cells, True, False
         )
 
-    volume_difference = np.abs(volume - volume_pred)
-    volume_order = np.argsort(volume_difference)
-    print('Volume')
-    print(volume_pred.mean())
-    print(volume_pred[volume_order][0])
-    np.save(
-        os.path.join(base_dir, entry_tag, f'{entry_tag}_volume_{broadening_tag}.npy'),
-        np.array((volume_pred.mean(), volume_pred[volume_order][0]))
-        )
+    #volume_difference = np.abs(volume - volume_pred)
+    #volume_order = np.argsort(volume_difference)
+    #print('Volume')
+    #print(volume_pred.mean())
+    #print(volume_pred[volume_order][0])
+    #np.save(
+    #    os.path.join(base_dir, entry_tag, f'{entry_tag}_volume_{broadening_tag}.npy'),
+    #    np.array((volume_pred.mean(), volume_pred[volume_order][0]))
+    #    )
     print()

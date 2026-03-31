@@ -10,13 +10,13 @@ from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = '1'
+    broadening_tag = 'sa'
     data_params = {
         'tag': f'rhombohedral_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_rhombohedral.xlsx',
         'groupspec_sheet': 'Groups V0',
-        'load_from_tag': True,
+        'load_from_tag': False,
         'augment': True,
         'hkl_ref_length': 1000,
         'n_peaks': 20,
@@ -142,4 +142,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('calibration_training')
+    wrapper.setup_integral_filter('training')
