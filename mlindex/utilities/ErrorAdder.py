@@ -21,7 +21,10 @@ def add_q2_error(q2, hkl, multiplier, rng):
 
 def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False):
     q2_broadening_params = get_peak_generation_info()['broadening_params']
-    breadth = q2_broadening_params[0] + q2_broadening_params[1] * q2
+    # Breadth is specified as a linear model in q
+    # Breadth in q^2 comes from error propagation
+    breadth_q = q2_broadening_params[0] + q2_broadening_params[1] * np.sqrt(q2)
+    breadth = 2 * breadth_q * np.sqrt(q2)
     n_peaks = q2.shape[1]
     for entry_index in range(q2.shape[0]):
         status = True
@@ -49,10 +52,11 @@ def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False):
             status = np.any(difference[np.newaxis] < 0.5*breadth[entry_index][:, np.newaxis])
 
         q2_new = np.concatenate((q2[entry_index], q2_contaminants))
-        hkl_new = np.concatenate(
-            (hkl[entry_index], np.zeros((n_contaminants_add, 3))),
-            axis=0
-        )
+        if not hkl is None:
+            hkl_new = np.concatenate(
+                (hkl[entry_index], np.zeros((n_contaminants_add, 3))),
+                axis=0
+            )
         sort_indices = np.argsort(q2_new)
         q2[entry_index] = q2_new[sort_indices][:n_peaks]
         if not hkl is None:
