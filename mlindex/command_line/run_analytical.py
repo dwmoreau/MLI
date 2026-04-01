@@ -18,7 +18,7 @@ from mpi4py import MPI
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.gsas import load_pkslst
 from mlindex.optimization.AnalyticOptimizer import AnalyticOptimizer
-from mlindex.optimization.Optimizer import OptimizerWorker
+from mlindex.optimization.MPIOptimizer import OptimizerWorker
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analytical high‑symmetry indexing")

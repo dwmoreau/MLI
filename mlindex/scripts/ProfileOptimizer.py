@@ -5,9 +5,9 @@ import os
 from mpi4py import MPI
 import pandas as pd
 
-from mlindex.optimization.Optimizer import OptimizerBase
-from mlindex.optimization.Optimizer import OptimizerManager
-from mlindex.optimization.Optimizer import Candidates
+from mlindex.optimization.MPIOptimizer import OptimizerBase
+from mlindex.optimization.MPIOptimizer import OptimizerManager
+from mlindex.optimization.Candidates import Candidates
 from mlindex.optimization.UtilitiesOptimizer import get_triclinic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_orthorhombic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_monoclinic_optimizer

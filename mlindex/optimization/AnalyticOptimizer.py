@@ -3,8 +3,8 @@ import itertools
 import numpy as np
 from pathlib import Path
 
-from mlindex.optimization.Optimizer import OptimizerManager
-from mlindex.optimization.Optimizer import Candidates
+from mlindex.optimization.MPIOptimizer import OptimizerManager
+from mlindex.optimization.Candidates import Candidates
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.UnitCellTools import (
     get_hkl_matrix,
