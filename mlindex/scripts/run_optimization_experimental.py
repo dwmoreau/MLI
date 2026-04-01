@@ -71,7 +71,7 @@ entry_tags = [
     'Lcys-lowph',
     'thiorene',
     ]
-
+"""
 base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/experimental_data/gsas'
 entry_tags = [
     #'11bmb_3844',
@@ -84,19 +84,25 @@ entry_tags = [
     #'La7Ca3MnO3_50K',
     #'LaMnO3_50K',
     #'PBSO4',
-    'C7N2O2Cl_ca',
-    'C7N2O2Cl_cb',
-    'C7N2O2Cl_da',
-    'C7N2O2Cl_db',
-    'C7N2O2Cl_ec',
-    'C7N2O2Cl_fd',
+    'C7N2O2Cl_aa',
+    'C7N2O2Cl_ab',
+    'C7N2O2Cl_ba',
+    'C7N2O2Cl_bb',
+    #'C7N2O2Cl_ca',
+    #'C7N2O2Cl_cb',
+    #'C7N2O2Cl_da',
+    #'C7N2O2Cl_db',
+    #'C7N2O2Cl_ec',
+    #'C7N2O2Cl_fd',
 ]
 """
 
 base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/opxrd'
 df = pd.read_json(os.path.join(base_dir, 'CNRS_output_data_verified_final2.json'))
 opxrd = True
-failed_entries = np.load(os.path.join(base_dir, 'failed_entries.npy'))
+"""
+#failed_entries = np.load(os.path.join(base_dir, 'failed_entries.npy'))
+failed_entries = [37, 57, 110, 251, 337, 467, 496, 508]
 rng = np.random.default_rng()
 
 comm = MPI.COMM_WORLD
@@ -156,8 +162,8 @@ if opxrd:
     n = len(df)
 else:
     n = len(entry_tags)
-#for index in range(n):
-for index in failed_entries:
+#for index in failed_entries:
+for index in range(n):
     if opxrd:
         entry = df.iloc[index]
         print(entry)
@@ -172,8 +178,10 @@ for index in failed_entries:
         entry_tag = entry_tags[index]
         peak_list = np.load(base_dir + f'/{entry_tag}/{entry_tag}_peak_list.npy')[:20]
         triplet_file_name = base_dir + f'/{entry_tag}/{entry_tag}_triplets.npy'
-        wavelength = None
-        zero_error = False
+        #wavelength = None
+        #zero_error = False
+        wavelength = 1.5418
+        zero_error = True
 
     logger.info(f'Starting entry {entry_tag}')
 

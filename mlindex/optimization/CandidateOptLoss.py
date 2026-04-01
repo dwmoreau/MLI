@@ -123,7 +123,7 @@ class CandidateOptLoss:
         return zeropoint
 
     def apply_zeropoint(self, zeropoint, wavelength, q2):
-        theta2 = 2 * np.arcsin(np.clip(wavelength/2 * np.sqrt(q2), -1.0, 1.0))
+        theta2 = 2 * np.arcsin(np.clip(wavelength/2 * np.sqrt(np.abs(q2)), -1.0, 1.0))
         return q2 + 4*np.sin(theta2)/wavelength**2 * zeropoint[:, np.newaxis]
 
     def gauss_newton_step_zero_error(self, xnn, wavelength, zeropoint=None):

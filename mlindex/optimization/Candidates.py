@@ -370,7 +370,7 @@ class Candidates:
                 self.best_xnn[~failed] = best_standardized_xnn[~failed]
 
     def correct_off_by_two(self):
-        mult_factor = np.array([1/2, 1, np.sqrt(2), 2, 3, 4])
+        mult_factor = np.array([1, 1/2, np.sqrt(2), 2, 3, 4])
         if self.lattice_system == 'cubic':
             mult_factors = mult_factor[:, np.newaxis]
         elif self.lattice_system in ['hexagonal', 'tetragonal']:
@@ -402,7 +402,7 @@ class Candidates:
                             mult_factors[mf_index, 5] = np.sqrt(mf0 * mf1)
                         mf_index += 1
 
-        # This is really slow. So only look at the top 5% of candidates.
+        # This is really slow. So only look at the top 10% of candidates.
         n_test = int(0.1 * self.n)
         test_indices = np.argsort(self.best_M20)[::-1][:n_test]
         if not self.triplets is None:
@@ -413,6 +413,7 @@ class Candidates:
             n_test = test_indices.size
         M20 = np.zeros([n_test, mult_factors.shape[0]])
         hkl = np.zeros([n_test, mult_factors.shape[0], self.n_peaks, 3])
+        xnn_all = np.zeros([n_test, mult_factors.shape[0], self.best_xnn.shape[1]])
         if self.zero_error:
             zeropoint = np.zeros([n_test, mult_factors.shape[0]])
         for mf_index in range(mult_factors.shape[0]):
@@ -445,24 +446,35 @@ class Candidates:
                 hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
                 hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
                 q2_calc_mult = np.take_along_axis(q2_ref_calc_mult, hkl_assign, axis=1)
+            xnn_all[:, mf_index] = xnn_mult
             M20[:, mf_index] = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
 
         # Use the M20 score to check for off by two errors even if there are triplets.
         # The M20 score is more sensitive to unindexed peaks than M_triplet is incorrect unit
-        # cell volume
+        # cell volume.
+        # Index 0 of mult_factors is always the identity transformation (mult_factor[0]=1).
+        # When a non-identity factor gives a better M20, keep the original candidate and
+        # append the off-by-two corrected version rather than replacing the original.
         best_index = np.argmax(M20, axis=1)
-        final_mult_factor = np.take(mult_factors, best_index, axis=0)
-        self.best_xnn[test_indices] *= final_mult_factor**2
-        self.best_M20[test_indices] = np.take_along_axis(
-            M20, best_index[:, np.newaxis], axis=1
-            )[:, 0]
-        self.best_hkl[test_indices] = np.take_along_axis(
-            hkl, best_index[:, np.newaxis, np.newaxis, np.newaxis], axis=1
-            )[:, 0]
-        if self.zero_error:
-            self.best_zeropoint[test_indices] = np.take_along_axis(
-                zeropoint, best_index[:, np.newaxis], axis=1
-            )[:, 0]
+        improved = best_index != 0
+        if np.any(improved):
+            imp_idx = best_index[improved]
+            new_xnn = xnn_all[improved, imp_idx, :]
+            new_M20 = M20[improved, imp_idx]
+            new_hkl = hkl[improved, imp_idx, :, :]
+            self.best_xnn = np.concatenate([self.best_xnn, new_xnn], axis=0)
+            self.best_M20 = np.concatenate([self.best_M20, new_M20])
+            self.best_hkl = np.concatenate([self.best_hkl, new_hkl], axis=0)
+            if self.zero_error:
+                new_zeropoint = zeropoint[improved, imp_idx]
+                self.best_zeropoint = np.concatenate([self.best_zeropoint, new_zeropoint])
+            if self.triplets is not None:
+                n_new = int(np.sum(improved))
+                self.best_M_triplets = np.concatenate(
+                    [self.best_M_triplets, np.zeros((n_new, self.best_M_triplets.shape[1]))],
+                    axis=0
+                    )
+            self.n = self.best_xnn.shape[0]
         #if not self.triplets is None:
         #    self.best_M_triplets = get_M_triplet(
         #        self.q2_obs,
@@ -492,7 +504,7 @@ class Candidates:
             unit_cell = fix_unphysical(
                 unit_cell=unit_cell,
                 rng=self.rng,
-                minimum_unit_cell=self.minimum_unit_cell,
+                minimum_unit_cell=self.minimum_unit_cell, 
                 maximum_unit_cell=self.maximum_unit_cell,
                 lattice_system=self.lattice_system,
                 )
