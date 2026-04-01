@@ -13,6 +13,7 @@ from mlindex.utilities.UnitCellTools import (
     fix_unphysical,
     get_unit_cell_volume,
 )
+from mlindex.optimization.MPOptimizer import LocalComm
 
 
 class AnalyticOptimizer(OptimizerManager):
@@ -125,24 +126,20 @@ class AnalyticOptimizer(OptimizerManager):
     # ---------------------------------------------------------------------
     # Overridden candidate generation – guess‑and‑check
     # ---------------------------------------------------------------------
-    def generate_candidates_rank(self):
-        """Create a ``Candidates`` instance from all HKL permutations.
+    def _generate_analytic_candidates(self):
+        """Build the full array of candidate xnn vectors from HKL permutations.
 
-        The method builds a list of candidate reciprocal‑space vectors ``xnn``
-        by solving ``q2 = H·xnn`` for each permutation of ``dim`` reference HKLs.
+        Returns ``candidate_xnn_all`` with shape ``(n_candidates, unit_cell_length)``.
         """
-        # Use the first ``dim`` observed peaks (assumed sorted low‑angle)
         dim = self.unit_cell_length
         q2_guess = self.q2_obs[:self.n_peaks_guess]
-        # Restrict reference HKLs to the first ``n_ref_hkl`` entries
         ref_hkls = self.hkl_ref[:self.n_ref_hkl_guess]
-        # Generate all ordered permutations of size ``dim``
         hkl_permutations = np.stack(list(itertools.permutations(ref_hkls, dim)), axis=0)
         q2_permutations = np.stack(list(itertools.combinations(q2_guess, dim)), axis=0)
         n_q2 = q2_permutations.shape[0]
         n_templates = hkl_permutations.shape[0]
         hkl2 = get_hkl_matrix(hkl_permutations, self.lattice_system)
-        candidate_xnn_all = np.zeros((n_templates*n_q2, self.unit_cell_length))
+        candidate_xnn_all = np.zeros((n_templates * n_q2, self.unit_cell_length))
         index = 0
         for template_index in range(n_templates):
             for q2_index in range(n_q2):
@@ -151,7 +148,6 @@ class AnalyticOptimizer(OptimizerManager):
                 )
                 index += 1
 
-        # Physical‑parameter cleanup using the existing utilities
         candidate_xnn_all = fix_unphysical(
             xnn=candidate_xnn_all,
             rng=self.rng,
@@ -163,24 +159,23 @@ class AnalyticOptimizer(OptimizerManager):
         candidate_unit_cells_all = get_unit_cell_from_xnn(
             candidate_xnn_all, partial_unit_cell=True, lattice_system=self.lattice_system
         )
-
         candidate_unit_cells_all = reindex_entry_basic(
             candidate_unit_cells_all,
             lattice_system=self.lattice_system,
             bravais_lattice=self.bravais_lattice,
             space='direct'
-            )
+        )
         candidate_xnn_all = get_xnn_from_unit_cell(
             candidate_unit_cells_all,
             partial_unit_cell=True,
             lattice_system=self.lattice_system
-            )
-        candidate_xnn_all = np.repeat(
-            candidate_xnn_all,
-            repeats=3,
-            axis=0
         )
+        candidate_xnn_all = np.repeat(candidate_xnn_all, repeats=3, axis=0)
+        return candidate_xnn_all
 
+    def generate_candidates_rank(self):
+        """Distribute analytic candidates across MPI ranks."""
+        candidate_xnn_all = self._generate_analytic_candidates()
         self.sent_candidates = np.zeros(self.n_ranks, dtype=int)
         for rank_index in range(self.n_ranks):
             self.sent_candidates[rank_index] = candidate_xnn_all[rank_index::self.n_ranks].shape[0]
@@ -189,3 +184,94 @@ class AnalyticOptimizer(OptimizerManager):
             else:
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
         return self.generate_candidates_common(candidate_xnn_rank)
+
+
+class MPAnalyticOptimizer(AnalyticOptimizer):
+    """Multiprocessing variant of AnalyticOptimizer.
+
+    Class-level queue attributes are set by setup_mp_analytic_optimizers() before
+    any instances are constructed, then cleared after construction completes.
+    """
+    _mp_data_queues = None
+    _mp_result_queues = None
+    _mp_n_ranks = None
+
+    def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5,
+                 n_ref_hkl_guess=5, opt_params=None):
+        self._data_queues = MPAnalyticOptimizer._mp_data_queues
+        self._result_queues = MPAnalyticOptimizer._mp_result_queues
+        n_ranks = MPAnalyticOptimizer._mp_n_ranks
+        # comm arg is ignored; LocalComm lets AnalyticOptimizer.__init__ run without MPI
+        super().__init__(bravais_lattice, comm=LocalComm(n_ranks),
+                         n_peaks=n_peaks, n_peaks_guess=n_peaks_guess,
+                         n_ref_hkl_guess=n_ref_hkl_guess, opt_params=opt_params)
+        self._init_workers()
+
+    def _init_workers(self):
+        init_data = (self.lattice_system, self.bravais_lattice, self.opt_params,
+                     self.hkl_ref_length, self.hkl_ref.copy(), self.n_peaks)
+        for r in range(1, self.n_ranks):
+            self._data_queues[r].put(init_data)
+
+    def run_common(self, n_top_candidates):
+        for r in range(1, self.n_ranks):
+            self._data_queues[r].put(self.q2_obs.copy())
+            self._data_queues[r].put(self.triplets)
+        self._run_loop(n_top_candidates)
+
+    def generate_candidates_rank(self):
+        candidate_xnn_all = self._generate_analytic_candidates()
+        self.sent_candidates = np.zeros(self.n_ranks, dtype=int)
+        for rank_index in range(self.n_ranks):
+            self.sent_candidates[rank_index] = candidate_xnn_all[rank_index::self.n_ranks].shape[0]
+            if rank_index == self.root:
+                candidate_xnn_rank = candidate_xnn_all[rank_index::self.n_ranks]
+            else:
+                self._data_queues[rank_index].put(candidate_xnn_all[rank_index::self.n_ranks])
+        return self.generate_candidates_common(candidate_xnn_rank)
+
+    def downsample_candidates(self, candidates, n_top_candidates):
+        from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
+        best_M20_all = [candidates.best_M20]
+        best_Minfo_all = [candidates.best_Minfo]
+        best_xnn_all = [candidates.best_xnn]
+        best_n_indexed_all = [candidates.n_indexed]
+        best_spacegroup_all = list(candidates.best_spacegroup)
+        if self.triplets is not None:
+            best_n_indexed_triplets_all = [candidates.n_indexed_triplets]
+            best_M_triplets_all = [candidates.best_M_triplets]
+        else:
+            best_n_indexed_triplets_all = None
+            best_M_triplets_all = None
+        for r in range(1, self.n_ranks):
+            result = self._result_queues[r].get()
+            if isinstance(result, Exception):
+                raise RuntimeError(f"Worker {r} failed: {result}") from result
+            best_M20_all.append(result['M20'])
+            best_Minfo_all.append(result['Minfo'])
+            best_xnn_all.append(result['xnn'])
+            best_n_indexed_all.append(result['n_indexed'])
+            best_spacegroup_all += result['spacegroup']
+            if self.triplets is not None:
+                best_n_indexed_triplets_all.append(result['n_indexed_triplets'])
+                best_M_triplets_all.append(result['M_triplets'])
+        self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
+                                     best_n_indexed_all, best_spacegroup_all,
+                                     best_n_indexed_triplets_all, best_M_triplets_all,
+                                     n_top_candidates)
+
+    def convergence_testing(self, candidates):
+        from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
+        n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])
+        self.top_M20 = np.zeros(n_candidates)
+        self.top_xnn = np.zeros((n_candidates, self.unit_cell_length))
+        self.top_M20[self.root::self.n_ranks] = candidates.best_M20
+        self.top_xnn[self.root::self.n_ranks] = candidates.best_xnn
+        for r in range(1, self.n_ranks):
+            result = self._result_queues[r].get()
+            if isinstance(result, Exception):
+                raise RuntimeError(f"Worker {r} failed: {result}") from result
+            self.top_M20[r::self.n_ranks] = result['M20']
+            self.top_xnn[r::self.n_ranks] = result['xnn']
+        self.top_unit_cell = get_unit_cell_from_xnn(
+            self.top_xnn, partial_unit_cell=True, lattice_system=self.lattice_system)

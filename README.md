@@ -73,6 +73,39 @@ MPI mode is available for use on HPC clusters with MPI infrastructure. It requir
 mpiexec -n 6 mlindex.run --peak-file /path/to/your/file/peaks.pkslst --wavelength 0.413128 --mpi
 ```
 
+### Analytical Indexer (lightweight alternative)
+
+`mlindex.run_analytical` uses a geometry-based guess-and-check approach instead of ML models. It covers the 11 higher-symmetry Bravais lattices (cF, cI, cP, hP, hR, tI, tP, oC, oF, oI, oP) and requires no model files.
+
+#### Basic usage
+```bash
+mlindex.run_analytical --peak-file /path/to/your/file/peaks.npy
+```
+
+#### Using a GSAS-II pkslst file
+```bash
+mlindex.run_analytical --peak-file /path/to/your/file/peaks.pkslst --wavelength 0.413128
+```
+
+#### Parallel execution
+```bash
+mlindex.run_analytical --peak-file /path/to/your/file/peaks.npy --nproc 4
+```
+
+#### Zero-point error correction
+```bash
+mlindex.run_analytical --peak-file /path/to/your/file/peaks.pkslst --wavelength 0.413128 --zero-error
+```
+
+#### MPI mode
+```bash
+mpiexec -n 6 mlindex.run_analytical --peak-file /path/to/your/file/peaks.pkslst --wavelength 0.413128 --mpi
+```
+
+Results are written to `analytic_results.json`.
+
+---
+
 ### Results Interpretation
 
 The program outputs the top 20 unit cell candidates ranked by M20 score and writes them to `indexing_results.json`:

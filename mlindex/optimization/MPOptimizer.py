@@ -264,3 +264,72 @@ def shutdown_mp_workers(processes, task_queues):
         task_queues[r].put('shutdown')
     for p in processes:
         p.join()
+
+
+def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None):
+    """Worker function for the analytic optimizer (11 Bravais lattices, no ML models).
+
+    Like _mp_worker_fn but restricted to the analytic BL set so workers don't
+    block waiting for init data from unsupported lattices.
+    """
+    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                        'oC', 'oF', 'oI', 'oP']
+    workers = {}
+    try:
+        for bl in bravais_lattices:
+            workers[bl] = MPOptimizerWorker(data_queue, result_queue, rank, n_ranks,
+                                            fom, seed=rank)
+        while True:
+            msg = task_queue.get()
+            if msg == 'shutdown':
+                break
+            bl, n_top, zero_error, wavelength = msg
+            workers[bl].run(zero_error=zero_error, wavelength=wavelength,
+                            n_top_candidates=n_top)
+    except Exception as e:
+        result_queue.put(e)
+
+
+def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess):
+    """Spawn worker processes and construct MPAnalyticOptimizer managers for 11 analytic BLs.
+
+    Returns (optimizers, processes, task_queues).
+    Call shutdown_mp_workers(processes, task_queues) when done.
+    """
+    from mlindex.optimization.AnalyticOptimizer import MPAnalyticOptimizer
+
+    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                        'oC', 'oF', 'oI', 'oP']
+
+    data_queues   = [Queue() for _ in range(n_procs)]
+    result_queues = [Queue() for _ in range(n_procs)]
+    task_queues   = [Queue() for _ in range(n_procs)]
+
+    processes = []
+    for r in range(1, n_procs):
+        p = Process(target=_mp_analytic_worker_fn,
+                    args=(r, n_procs, data_queues[r], result_queues[r], task_queues[r]))
+        p.start()
+        processes.append(p)
+
+    # Inject MP context into MPAnalyticOptimizer class before construction.
+    # Workers drain init tuples from data_queues as managers are constructed.
+    MPAnalyticOptimizer._mp_data_queues   = data_queues
+    MPAnalyticOptimizer._mp_result_queues = result_queues
+    MPAnalyticOptimizer._mp_n_ranks       = n_procs
+
+    optimizers = {}
+    for bl in bravais_lattices:
+        optimizers[bl] = MPAnalyticOptimizer(
+            bravais_lattice=bl,
+            comm=None,
+            n_peaks=n_peaks,
+            n_ref_hkl_guess=n_ref_hkl_guess[bl],
+        )
+
+    # Clean up class-level injection
+    MPAnalyticOptimizer._mp_data_queues   = None
+    MPAnalyticOptimizer._mp_result_queues = None
+    MPAnalyticOptimizer._mp_n_ranks       = None
+
+    return optimizers, processes, task_queues
