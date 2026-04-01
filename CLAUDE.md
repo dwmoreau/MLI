@@ -23,11 +23,17 @@ git lfs fetch --all && git lfs checkout
 Accepts either a GSAS-II `.pkslst` file (requires wavelength) or a numpy `.npy` array of q² values (1/Å²):
 
 ```bash
-# Serial (1 rank)
+# Serial (1 process, no workers spawned)
 python -m mlindex.command_line.run --peak-file peaks.npy
 
-# Parallel (exactly 6 ranks — required for full Bravais lattice coverage)
-mpiexec -n 6 mlindex.run --peak-file peaks.pkslst --wavelength 0.413128
+# Multiprocessing with N processes (recommended over MPI for local runs)
+python -m mlindex.command_line.run --peak-file peaks.npy --nproc 4
+
+# MPI mode (exactly 6 ranks — requires mpiexec, legacy parallel mode)
+mpiexec -n 6 python -m mlindex.command_line.run --peak-file peaks.pkslst --wavelength 0.413128 --mpi
+
+# Zero-point error correction (requires wavelength)
+python -m mlindex.command_line.run --peak-file peaks.pkslst --wavelength 0.413128 --zero-error
 ```
 
 Outputs `indexing_results.json` and prints top-20 candidates ranked by M20.
@@ -50,8 +56,11 @@ Covers high-symmetry lattices (cF, cI, cP, hP, hR, tI, tP, oC, oF, oI, oP) seria
 2. For each of 14 Bravais lattices, an `OptimizerManager` generates unit cell candidates using three ML components, then refines them with Gauss-Newton optimization and scores by M20/Minfo
 3. Rank 0 collects all results, sorts by M20, writes JSON
 
-### MPI parallelism
-With 6 ranks: cubic (cF/cI/cP) and triclinic/monoclinic lattices run serially on dedicated ranks; orthorhombic lattices (oC/oF/oI/oP) run in parallel across all ranks. The mapping is hardcoded in `run.py`. With 1 rank: everything runs serially.
+### Parallelism
+
+**Multiprocessing mode** (`--nproc N`): Worker processes are spawned once at startup and kept alive across all 14 Bravais lattices to avoid re-import overhead. The main process acts as manager for every lattice. Uses `multiprocessing.Queue` for communication; `mpi4py` is never imported. Supports arbitrary N; `--nproc 1` runs fully serially with no workers spawned.
+
+**MPI mode** (`--mpi`): With 6 ranks, cubic (cF/cI/cP) and triclinic/monoclinic lattices run serially on dedicated ranks; orthorhombic lattices (oC/oF/oI/oP) run in parallel across all ranks. The mapping is hardcoded in `run.py`. With 1 rank, everything runs serially. Requires `--mpi` flag; `mpi4py` is only imported when this flag is passed.
 
 ### Model training pipeline (`mlindex/model_training/Wrapper.py`)
 `Wrapper` is the central training orchestrator. The three ML components trained per split group:
@@ -71,7 +80,11 @@ All trained models are saved under `mlindex/models/{tag}/` (e.g., `mlindex/model
 - Output goes to `../data/generated_datasets/` relative to where the script is run
 
 ### Optimization (`mlindex/optimization/`)
-- `Optimizer.py`: `OptimizerManager` (rank-0) + `OptimizerWorker` (other ranks). Loads the three ML models via `Wrapper.setup_from_tag()`, generates candidates, runs refinement loops.
+- `Candidates.py`: `Candidates` class — runs the refinement loop, computes M20/Minfo, handles reindexing and spacegroup assignment for a single rank's candidate set.
+- `MPIOptimizer.py`: `OptimizerBase`, `OptimizerWorker`, `OptimizerManager` — MPI-based parallel optimizer. Contains extracted helpers `_run_loop`, `_generate_candidates_xnn`, `_downsample_computation` that are reused by the MP subclasses.
+- `MPOptimizer.py`: `MPOptimizerManager`, `MPOptimizerWorker` — multiprocessing subclasses that override only the communication methods, replacing MPI calls with `multiprocessing.Queue`. Also contains `setup_mp_optimizers`, `run_mp_bl`, `shutdown_mp_workers`.
+- `Optimizer.py`: Backward-compatibility re-export shim — imports from `Candidates` and `MPIOptimizer`. Existing notebooks and scripts that import from `Optimizer` continue to work.
+- `UtilitiesOptimizer.py`: Factory functions (`get_cubic_optimizer`, etc.) and `get_optimizers`. All factory functions accept an `optimizer_class=None` parameter — pass `MPOptimizerManager` to use multiprocessing instead of MPI.
 - `CandidateOptLoss.py`: Gauss-Newton least-squares update for xnn given hkl assignments.
 - `AnalyticOptimizer.py`: Geometry-based candidate generation (no ML), used by the analytical CLI.
 - `CandidateValidation.py`: Post-optimization spacegroup assignment based on systematic absences.
