@@ -60,7 +60,7 @@ class AnalyticOptimizer(OptimizerManager):
         # Load the pre‑computed HKL reference array (non‑redundant)
         # Get the absolute path to the MLI directory
         hkl_ref_path = (
-            Path('/'.join(files('mlindex').parts[:-1]))
+            Path(*files('mlindex').parts[:-1])
             / 'mlindex'
             / 'models'
             / f'{self.lattice_system}_1'
