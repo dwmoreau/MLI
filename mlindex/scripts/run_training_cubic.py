@@ -9,7 +9,7 @@ from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = 'sa'
+    broadening_tag = '1'
     data_params = {
         'tag': f'cubic_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
@@ -119,9 +119,9 @@ if __name__ == '__main__':
         'load_from_tag': True,
         }
     integral_filter_params = {
-        'cP_0': integral_filter_group_params,
-        'cI_0': integral_filter_group_params,
-        'cF_0': integral_filter_group_params,
+        'cP_0': integral_filter_group_params_load,
+        'cI_0': integral_filter_group_params_load,
+        'cF_0': integral_filter_group_params_load,
         }
 
     random_params_bl = {
@@ -157,4 +157,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('training')
+    wrapper.setup_integral_filter('inference')

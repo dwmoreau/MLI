@@ -33,6 +33,37 @@ def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell):
     return rhombohedral_unit_cell, hkl_reindexer
 
 
+def rhombohedral_to_hexagonal(rhombohedral_unit_cell):
+    a = rhombohedral_unit_cell[0]
+    alpha = rhombohedral_unit_cell[3]
+
+    ax = a
+    bx = a * np.cos(alpha)
+    by = a * np.sin(alpha)
+    cx = a * np.cos(alpha)
+    arg = (np.cos(alpha) - np.cos(alpha) ** 2) / np.sin(alpha)
+    cy = a * arg
+    cz = a * np.sqrt(np.sin(alpha) ** 2 - arg**2)
+    ucm = np.array([[ax, bx, cx], [0, by, cy], [0, 0, cz]])
+
+    transform = np.array(
+        [
+            [1, 0, 1],
+            [-1, 1, 1],
+            [0, -1, 1],
+        ]
+    )
+
+    ucm_transformed = ucm @ transform
+    a = np.linalg.norm(ucm_transformed[:, 0])
+    b = np.linalg.norm(ucm_transformed[:, 1])
+    c = np.linalg.norm(ucm_transformed[:, 2])
+    alpha = np.arccos(np.sum(ucm_transformed[:, 1] * ucm_transformed[:, 2]) / (b * c))
+    beta = np.arccos(np.sum(ucm_transformed[:, 0] * ucm_transformed[:, 2]) / (a * c))
+    gamma = np.arccos(np.sum(ucm_transformed[:, 0] * ucm_transformed[:, 1]) / (a * b))
+    return np.array([a, b, c, alpha, beta, gamma])
+
+
 def hexagonal_to_rhombohedral_hkl(hkl_hexagonal):
     RM = (
         1

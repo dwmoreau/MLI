@@ -10,13 +10,13 @@ from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = 'sa'
+    broadening_tag = '1'
     data_params = {
         'tag': f'orthorhombic_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_orthorhombic.xlsx',
         'groupspec_sheet': 'Groups_V6',
-        'load_from_tag': False,
+        'load_from_tag': True,
         'augment': True,
         'hkl_ref_length': 750,
         'n_peaks': 20,
@@ -97,7 +97,7 @@ if __name__ == '__main__':
 
     integral_filter_group_params = {
         'tag': f'orthorhombic_{broadening_tag}',
-        'load_from_tag': False,
+        'load_from_tag': True,
         'peak_length': 20,
         'extraction_peak_length': 10,
         'n_volumes': 100,
@@ -132,16 +132,16 @@ if __name__ == '__main__':
         }
 
     integral_filter_params = {
-        'oC_0_00': integral_filter_group_params,
-        'oC_1_00': integral_filter_group_params,
-        'oC_2_00': integral_filter_group_params,
-        'oF_0_00': integral_filter_group_params,
-        'oF_0_01': integral_filter_group_params,
-        'oI_0_00': integral_filter_group_params,
-        'oP_0_00': integral_filter_group_params,
-        'oP_0_01': integral_filter_group_params,
-        'oP_0_02': integral_filter_group_params,
-        'oP_0_03': integral_filter_group_params,
+        'oC_0_00': integral_filter_group_params_load,
+        'oC_1_00': integral_filter_group_params_load,
+        'oC_2_00': integral_filter_group_params_load,
+        'oF_0_00': integral_filter_group_params_load,
+        'oF_0_01': integral_filter_group_params_load,
+        'oI_0_00': integral_filter_group_params_load,
+        'oP_0_00': integral_filter_group_params_load,
+        'oP_0_01': integral_filter_group_params_load,
+        'oP_0_02': integral_filter_group_params_load,
+        'oP_0_03': integral_filter_group_params_load,
         }
 
     random_params_bl0 = {
@@ -192,4 +192,4 @@ if __name__ == '__main__':
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
     #wrapper.setup_miller_index_templates()
-    wrapper.setup_integral_filter('training')
+    wrapper.setup_integral_filter('inference')

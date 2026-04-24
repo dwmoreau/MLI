@@ -10,13 +10,13 @@ from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = 'sa'
+    broadening_tag = '1'
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
         'groupspec_file_name': 'GroupSpec_hexagonal.xlsx',
         'groupspec_sheet': 'Groups V1',
-        'load_from_tag': False,
+        'load_from_tag': True,
         'augment': True,
         'hkl_ref_length': 750,
         'n_peaks': 20,
@@ -79,7 +79,7 @@ if __name__ == '__main__':
 
     integral_filter_group_params = {
         'tag': f'hexagonal_{broadening_tag}',
-        'load_from_tag': False,
+        'load_from_tag': True,
         'peak_length': 20,
         'extraction_peak_length': 8,
         'n_volumes': 100,
@@ -113,14 +113,14 @@ if __name__ == '__main__':
         }
 
     integral_filter_params = {
-        'hP_0_00': integral_filter_group_params,
-        'hP_0_01': integral_filter_group_params,
-        'hP_0_02': integral_filter_group_params,
-        'hP_0_03': integral_filter_group_params,
-        'hP_1_00': integral_filter_group_params,
-        'hP_1_01': integral_filter_group_params,
-        'hP_1_02': integral_filter_group_params,
-        'hP_1_03': integral_filter_group_params,
+        'hP_0_00': integral_filter_group_params_load,
+        'hP_0_01': integral_filter_group_params_load,
+        'hP_0_02': integral_filter_group_params_load,
+        'hP_0_03': integral_filter_group_params_load,
+        'hP_1_00': integral_filter_group_params_load,
+        'hP_1_01': integral_filter_group_params_load,
+        'hP_1_02': integral_filter_group_params_load,
+        'hP_1_03': integral_filter_group_params_load,
         }
 
     random_params_bl = {
@@ -154,4 +154,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('training')
+    wrapper.setup_integral_filter('inference')
