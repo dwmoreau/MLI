@@ -235,18 +235,42 @@ class SKLearnManager:
         return onnxruntime.InferenceSession(model_path, sess_options)
     
     def _load_custom(self):
-        """Load custom version-independent forest predictor"""
-        model_path = f"{self.filename}_trees.json"
-        if not os.path.exists(model_path):
+        """Load custom version-independent forest predictor.
+
+        Fast path: load pre-built numpy arrays from _trees.npz if present.
+        Slow path: parse _trees.json, build arrays, then cache as _trees.npz
+        for future loads (silently skips caching on read-only filesystems).
+        """
+        json_path = f"{self.filename}_trees.json"
+        npz_path  = f"{self.filename}_trees.npz"
+
+        if not os.path.exists(json_path):
             raise FileNotFoundError(
-                f"Model file not found: {model_path}\n"
+                f"Model file not found: {json_path}\n"
                 "Run 'mlindex-download-models' to fetch the ML models."
             )
-            
-        with open(model_path, 'r') as f:
+
+        if os.path.exists(npz_path):
+            return self.VersionIndependentForestPredictor.from_npz(np.load(npz_path))
+
+        with open(json_path, 'r') as f:
             forest_data = json.load(f)
-        
-        return self.VersionIndependentForestPredictor(forest_data)
+
+        predictor = self.VersionIndependentForestPredictor(forest_data)
+
+        try:
+            np.savez(npz_path,
+                     n_estimators=predictor.n_estimators,
+                     n_features=predictor.n_features,
+                     children_left=predictor.children_left,
+                     children_right=predictor.children_right,
+                     features_arr=predictor.features_arr,
+                     thresholds=predictor.thresholds,
+                     leaf_values_arr=predictor.leaf_values_arr)
+        except OSError:
+            pass  # read-only filesystem; run without cache
+
+        return predictor
     
     class VersionIndependentForestPredictor:
         """Custom tree-based model implementation that works across sklearn versions.
@@ -272,22 +296,37 @@ class SKLearnManager:
             thresholds      = np.zeros((n_est, max_nodes), dtype=np.float64)
             leaf_values_arr = np.zeros((n_est, max_nodes, n_outputs_actual), dtype=np.float64)
 
+            # nodes are stored in sequential order (node['id'] == list index),
+            # so we can extract each field with a list comprehension and assign
+            # as a numpy slice — one C-level call instead of per-node Python ops.
             for tree_idx, tree in enumerate(trees):
-                for node in tree['nodes']:
-                    nid = node['id']
-                    children_left[tree_idx, nid]  = node['left_child']
-                    children_right[tree_idx, nid] = node['right_child']
-                    features_arr[tree_idx, nid]   = node['feature']
-                    thresholds[tree_idx, nid]      = node['threshold']
-                    v = tree['values'][nid]
-                    for oi in range(n_outputs_actual):
-                        leaf_values_arr[tree_idx, nid, oi] = v[oi][0]
+                nodes = tree['nodes']
+                n = len(nodes)
+                children_left[tree_idx, :n]  = [nd['left_child']  for nd in nodes]
+                children_right[tree_idx, :n] = [nd['right_child'] for nd in nodes]
+                features_arr[tree_idx, :n]   = [nd['feature']     for nd in nodes]
+                thresholds[tree_idx, :n]     = [nd['threshold']   for nd in nodes]
+                # tree['values'] is (n_nodes, n_outputs_actual, 1); squeeze last dim
+                vals = np.array(tree['values'], dtype=np.float64)  # (n, n_out, 1)
+                leaf_values_arr[tree_idx, :n, :] = vals[:, :, 0]
 
             self.children_left   = children_left
             self.children_right  = children_right
             self.features_arr    = features_arr
             self.thresholds      = thresholds
             self.leaf_values_arr = leaf_values_arr
+
+        @classmethod
+        def from_npz(cls, data):
+            obj = cls.__new__(cls)
+            obj.n_estimators    = int(data['n_estimators'])
+            obj.n_features      = int(data['n_features'])
+            obj.children_left   = data['children_left']
+            obj.children_right  = data['children_right']
+            obj.features_arr    = data['features_arr']
+            obj.thresholds      = data['thresholds']
+            obj.leaf_values_arr = data['leaf_values_arr']
+            return obj
 
         def predict(self, X):
             # Returns (n_samples,) for single-output regression.
