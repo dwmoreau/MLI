@@ -1,8 +1,28 @@
 import csv
 import joblib
 import json
+import numba
 import numpy as np
 import os
+
+
+@numba.njit(cache=True)
+def _traverse_forest(X, children_left, children_right, features,
+                     thresholds, leaf_values, n_outputs, out):
+    n_trees = children_left.shape[0]
+    n_samples = X.shape[0]
+    for tree_idx in range(n_trees):
+        for sample_idx in range(n_samples):
+            node_id = 0
+            while True:
+                if children_left[tree_idx, node_id] == -1:
+                    for oi in range(n_outputs):
+                        out[sample_idx, oi, tree_idx] = leaf_values[tree_idx, node_id, oi]
+                    break
+                if X[sample_idx, features[tree_idx, node_id]] <= thresholds[tree_idx, node_id]:
+                    node_id = children_left[tree_idx, node_id]
+                else:
+                    node_id = children_right[tree_idx, node_id]
 
 
 class SKLearnManager:
@@ -240,7 +260,34 @@ class SKLearnManager:
         def __init__(self, forest_data):
             self.n_estimators = forest_data['n_estimators']
             self.n_features = forest_data['n_features']
-            self.trees = forest_data['trees']
+
+            trees = forest_data['trees']
+            n_outputs_actual = len(trees[0]['values'][0])
+            max_nodes = max(len(t['nodes']) for t in trees)
+            n_est = self.n_estimators
+
+            children_left   = np.full((n_est, max_nodes), -1, dtype=np.int32)
+            children_right  = np.full((n_est, max_nodes), -1, dtype=np.int32)
+            features_arr    = np.zeros((n_est, max_nodes), dtype=np.int32)
+            thresholds      = np.zeros((n_est, max_nodes), dtype=np.float64)
+            leaf_values_arr = np.zeros((n_est, max_nodes, n_outputs_actual), dtype=np.float64)
+
+            for tree_idx, tree in enumerate(trees):
+                for node in tree['nodes']:
+                    nid = node['id']
+                    children_left[tree_idx, nid]  = node['left_child']
+                    children_right[tree_idx, nid] = node['right_child']
+                    features_arr[tree_idx, nid]   = node['feature']
+                    thresholds[tree_idx, nid]      = node['threshold']
+                    v = tree['values'][nid]
+                    for oi in range(n_outputs_actual):
+                        leaf_values_arr[tree_idx, nid, oi] = v[oi][0]
+
+            self.children_left   = children_left
+            self.children_right  = children_right
+            self.features_arr    = features_arr
+            self.thresholds      = thresholds
+            self.leaf_values_arr = leaf_values_arr
 
         def predict(self, X):
             # Returns (n_samples,) for single-output regression.
@@ -253,33 +300,20 @@ class SKLearnManager:
             if X.ndim == 1:
                 X = X.reshape(1, -1)
 
-            n_samples = X.shape[0]
+            X = np.ascontiguousarray(X, dtype=np.float64)
 
             if n_outputs is None:
-                # values[node_id] has shape (n_outputs, max_n_classes); n_outputs = len(...)
-                n_outputs = len(self.trees[0]['values'][0])
+                n_outputs = self.leaf_values_arr.shape[2]
 
-            individual_preds = np.zeros((n_samples, n_outputs, self.n_estimators))
-
-            for tree_idx, tree in enumerate(self.trees):
-                nodes = tree['nodes']
-                values = tree['values']
-
-                for sample_idx, sample in enumerate(X):
-                    node_id = 0
-                    while True:
-                        node = nodes[node_id]
-                        if node['left_child'] == -1:
-                            leaf_value = values[node['value_index']]
-                            for out_idx in range(n_outputs):
-                                individual_preds[sample_idx, out_idx, tree_idx] = leaf_value[out_idx][0]
-                            break
-                        if sample[node['feature']] <= node['threshold']:
-                            node_id = node['left_child']
-                        else:
-                            node_id = node['right_child']
-
-            return individual_preds
+            n_samples = X.shape[0]
+            out = np.zeros((n_samples, n_outputs, self.n_estimators), dtype=np.float64)
+            _traverse_forest(
+                X,
+                self.children_left, self.children_right,
+                self.features_arr, self.thresholds,
+                self.leaf_values_arr, n_outputs, out,
+            )
+            return out
 
 
 class NeuralNetworkManager:
