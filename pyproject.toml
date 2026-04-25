@@ -25,15 +25,14 @@ license = "MIT"
 license-files = ["LICEN[CS]E*"]
 
 dependencies = [
-    "numpy",
-    "scipy",
-    "mpi4py",
-    "scikit-learn",
     "gemmi",
+    "matplotlib",
+    "numpy",
     "numba",
     "onnxruntime",
-    "matplotlib",
     "pandas",
+    "scikit-learn",
+    "scipy",
 ]
 
 [project.urls]

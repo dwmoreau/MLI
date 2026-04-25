@@ -14,6 +14,7 @@ from mlindex.optimization.UtilitiesOptimizer import get_optimizers
 from mlindex.optimization.CandidateValidation import validate_candidate
 from mlindex.utilities.gsas import load_pkslst
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
+from mlindex.utilities.Reindexing import rhombohedral_to_hexagonal
 
 
 BRAVAIS_LATTICES = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
@@ -22,15 +23,27 @@ BRAVAIS_LATTICES = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Start the display application")
     parser.add_argument(
+        "--peaks",
+        type=str,
+        help="Comma- or space-separated list of peak positions; units set by --peak-units (default: d-spacing in Å)"
+    )
+    parser.add_argument(
         "--peak-file",
         type=str,
-        help="file name of the peak list (numpy array)"
+        help="Path to peak list file (.npy array or GSAS-II .pkslst). For .npy, units set by --peak-units. For .pkslst, peaks are in 2θ and --wavelength is required."
+    )
+    parser.add_argument(
+        "--peak-units",
+        type=str,
+        choices=['d', 'q', 'q2', '2theta'],
+        default="d",
+        help="Units for peaks from --peaks or .npy files: 'd' = d-spacing (Å, default), 'q' = 1/d (Å⁻¹), 'q2' = 1/d² (Å⁻²), '2theta' = degrees (requires --wavelength). Not applied to .pkslst files.",
     )
     parser.add_argument(
         "--wavelength",
         type=float,
         default=None,
-        help="wavelength used for zero point error or when supplying a GSAS-II pkslst file"
+        help="X-ray wavelength (Å); required for .pkslst files, --zero-error, and --peak-units 2theta"
     )
     parser.add_argument(
         "--triplets-file",
@@ -57,23 +70,44 @@ def _parse_args():
     return parser.parse_args()
 
 
+def _convert_to_q2(peaks, units, wavelength):
+    if units == 'q2':
+        return peaks
+    elif units == 'd':
+        return 1.0 / peaks**2
+    elif units == 'q':
+        return peaks**2
+    elif units == '2theta':
+        assert wavelength, "--wavelength is required for --peak-units 2theta"
+        theta_rad = peaks * (np.pi / 360.0)
+        return (2.0 * np.sin(theta_rad) / wavelength) ** 2
+
+
 def _load_peaks(args):
     if args.zero_error:
         assert args.wavelength, "--wavelength is required when --zero-error is set"
 
-    if args.peak_file.endswith('.npy'):
-        peak_list = np.load(args.peak_file)[:20]
-    elif args.peak_file.endswith('.pkslst'):
-        assert args.wavelength, "--wavelength is required for .pkslst files"
-        peak_list = load_pkslst(args.peak_file, args.wavelength)[:20]
+    if args.peaks is not None:
+        raw = args.peaks.replace(',', ' ').split()
+        peak_list = np.array([float(p) for p in raw])
+        peak_list = _convert_to_q2(peak_list, args.peak_units, args.wavelength)
+    elif args.peak_file is not None:
+        if args.peak_file.endswith('.npy'):
+            peak_list = np.load(args.peak_file)[:20]
+            peak_list = _convert_to_q2(peak_list, args.peak_units, args.wavelength)
+        elif args.peak_file.endswith('.pkslst'):
+            assert args.wavelength, "--wavelength is required for .pkslst files"
+            peak_list = load_pkslst(args.peak_file, args.wavelength)[:20]
+        else:
+            raise ValueError(f"Unsupported peak file format: {args.peak_file}")
     else:
-        raise ValueError(f"Unsupported peak file format: {args.peak_file}")
+        raise ValueError("Either --peaks or --peak-file must be provided")
 
     if args.triplets_file:
         triplet_obs = np.load(args.triplets_file)
     else:
         triplet_obs = None
-
+    peak_list.sort()
     return peak_list, triplet_obs
 
 
@@ -98,6 +132,7 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
                     partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[0],
                     partial_unit_cell[1], partial_unit_cell[1], partial_unit_cell[1],
                     ])
+                unit_cell = rhombohedral_to_hexagonal(unit_cell)
             elif bravais_lattice in ['tI', 'tP']:
                 unit_cell = np.array([
                     partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[1],
@@ -133,16 +168,34 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
                 'a': unit_cell[0],
                 'b': unit_cell[1],
                 'c': unit_cell[2],
-                'alpha': unit_cell[3],
-                'beta': unit_cell[4],
-                'gamma': unit_cell[5],
+                'alpha': 180/np.pi*unit_cell[3],
+                'beta': 180/np.pi*unit_cell[4],
+                'gamma': 180/np.pi*unit_cell[5],
                 })
     output_df = pd.DataFrame(output_data)
     output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
+    drop_columns = ['Minfo']
     if args.triplets_file is None:
-        output_df.drop(columns=['M_triplet', 'n_indexed_triplet'], inplace=True)
+        drop_columns += ['M_triplet', 'n_indexed_triplet']
+    output_df.drop(columns=drop_columns, inplace=True)
     output_df.to_json('indexing_results.json')
-    print(output_df[:20])
+    output_df.to_string(
+        'indexing_results.txt',
+        index=False,
+        columns=['bravais_lattice', 'M20', 'n_indexed', 'a', 'b', 'c', 'alpha', 'beta', 'gamma', 'volume', 'spacegroup'],
+        header=['Bravais Lattice', 'M20', '# Indexed peaks', 'A (Å)', 'B (Å)', 'C (Å)', 'Alpha (°)', 'Beta (°)', 'Gamma (°)', 'Volume (Å^3)', 'Space Group'],
+        formatters={
+            'volume': lambda x: f'{x:0.1f}',
+            'a': lambda x: f'{x:0.4f}',
+            'b': lambda x: f'{x:0.4f}',
+            'c': lambda x: f'{x:0.4f}',
+            'alpha': lambda x: f'{x:0.2f}',
+            'beta': lambda x: f'{x:0.2f}',
+            'gamma': lambda x: f'{x:0.2f}',
+        }
+    )
+    
+    print(output_df[:20].to_string())
 
 
 def _run_mpi(args, peak_list, triplet_obs):
