@@ -212,7 +212,7 @@ class RandomGenerator:
                 f'{self.save_to}',
                 f'{self.bravais_lattice}_random_forest_regressor'
                 ),
-            model_type='sklearn'
+            model_type='custom'
             )
         self.random_forest_regressor.load()
 

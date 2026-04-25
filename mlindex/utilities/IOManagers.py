@@ -192,7 +192,10 @@ class SKLearnManager:
         """Load sklearn model using joblib"""
         model_path = f"{self.filename}.joblib"
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}\n"
+                "Run 'mlindex-download-models' to fetch the ML models."
+            )
         return joblib.load(model_path)
     
     def _load_onnx(self):
@@ -200,7 +203,10 @@ class SKLearnManager:
         import onnxruntime
         model_path = f"{self.filename}.onnx"
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}\n"
+                "Run 'mlindex-download-models' to fetch the ML models."
+            )
 
         sess_options = onnxruntime.SessionOptions()
         sess_options.intra_op_num_threads = 1
@@ -212,7 +218,10 @@ class SKLearnManager:
         """Load custom version-independent forest predictor"""
         model_path = f"{self.filename}_trees.json"
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}\n"
+                "Run 'mlindex-download-models' to fetch the ML models."
+            )
             
         with open(model_path, 'r') as f:
             forest_data = json.load(f)
@@ -220,83 +229,51 @@ class SKLearnManager:
         return self.VersionIndependentForestPredictor(forest_data)
     
     class VersionIndependentForestPredictor:
-        """Custom tree-based model implementation that works across sklearn versions"""
-        
+        """Custom tree-based model implementation that works across sklearn versions.
+
+        tree.tree_.value has shape (n_nodes, n_outputs, max_n_classes), so each stored
+        leaf value is a list-of-lists: [[v]] for single-output regression.
+        predict_individual_trees returns (n_samples, n_outputs, n_estimators) to match
+        the shape expected by the sklearn path in SKLearnManager.predict_individual_trees.
+        """
+
         def __init__(self, forest_data):
             self.n_estimators = forest_data['n_estimators']
             self.n_features = forest_data['n_features']
             self.trees = forest_data['trees']
-        
-        def predict(self, X, n_outputs=None):
-            """
-            Get ensemble prediction, supporting both single-output and multi-output trees.
-            
-            Args:
-                X: Input features
-                
-            Returns:
-                Ensemble predictions
-            """
-            predictions = self.predict_individual_trees(X, n_outputs)
-            
-            # For multi-output, we need to average over the first axis (trees)
-            if predictions.ndim == 3:  # (n_estimators, n_samples, n_outputs)
-                return np.mean(predictions, axis=0)  # -> (n_samples, n_outputs)
-            else:  # (n_estimators, n_samples)
-                return np.mean(predictions, axis=0)  # -> (n_samples,)
-        
+
+        def predict(self, X):
+            # Returns (n_samples,) for single-output regression.
+            preds = self.predict_individual_trees(X, n_outputs=1)
+            # preds: (n_samples, 1, n_estimators) → mean over estimators → (n_samples, 1) → squeeze
+            return np.mean(preds, axis=2)[:, 0]
+
         def predict_individual_trees(self, X, n_outputs=None):
-            """
-            Get predictions from each individual tree, supporting both single-output
-            and multi-output trees.
-            
-            Args:
-                X: Input features of shape (n_samples, n_features)
-                
-            Returns:
-                Individual tree predictions of shape:
-                - For single output: (n_estimators, n_samples)
-                - For multi output: (n_estimators, n_samples, n_outputs)
-            """
+            """Return (n_samples, n_outputs, n_estimators), matching the sklearn backend."""
             if X.ndim == 1:
                 X = X.reshape(1, -1)
-                
+
             n_samples = X.shape[0]
-            
-            # Determine output dimensionality from the first tree's values
+
             if n_outputs is None:
-                first_leaf_value = self.trees[0]['values'][0]
-                n_outputs = len(first_leaf_value)
-            # Initialize predictions array with appropriate dimensions
-            if n_outputs == 1:
-                individual_preds = np.zeros((n_samples, self.n_estimators))
-            else:
-                individual_preds = np.zeros((n_samples, n_outputs, self.n_estimators))
+                # values[node_id] has shape (n_outputs, max_n_classes); n_outputs = len(...)
+                n_outputs = len(self.trees[0]['values'][0])
+
+            individual_preds = np.zeros((n_samples, n_outputs, self.n_estimators))
 
             for tree_idx, tree in enumerate(self.trees):
                 nodes = tree['nodes']
                 values = tree['values']
-                
+
                 for sample_idx, sample in enumerate(X):
-                    # Start at root and traverse tree
                     node_id = 0
-                    
-                    # Traverse until we reach a leaf
                     while True:
                         node = nodes[node_id]
-                        
-                        # Check if we're at a leaf node
-                        if node['left_child'] == -1:  # Leaf node
+                        if node['left_child'] == -1:
                             leaf_value = values[node['value_index']]
-                            
-                            if n_outputs == 1:
-                                individual_preds[sample_idx, tree_idx] = leaf_value[0]
-                            else:
-                                for output_index in range(n_outputs):
-                                    individual_preds[sample_idx, output_index, tree_idx] = leaf_value[output_index][0]
+                            for out_idx in range(n_outputs):
+                                individual_preds[sample_idx, out_idx, tree_idx] = leaf_value[out_idx][0]
                             break
-                            
-                        # If not leaf, go left or right based on feature comparison
                         if sample[node['feature']] <= node['threshold']:
                             node_id = node['left_child']
                         else:

@@ -1,6 +1,46 @@
 from collections import namedtuple
 import logging
 import numpy as np
+import os
+from pathlib import Path
+
+
+def _resolve_project_path():
+    """Return base directory such that base_dir/mlindex/models/{tag} points to model files.
+
+    Resolution order:
+    1. MLINDEX_MODELS_DIR env var: path to the directory containing crystal system
+       subdirectories (e.g. cubic_1/, hexagonal_1/). We step two levels up so the
+       existing Wrapper.py path construction (base_dir/mlindex/models/{tag}) still works.
+    2. XDG data home: ~/.local/share (models expected at ~/.local/share/mlindex/models/)
+    3. Package directory fallback (editable installs / legacy repo checkouts).
+    """
+    env = os.environ.get('MLINDEX_MODELS_DIR')
+    if env:
+        models_dir = Path(env)
+        if not models_dir.exists():
+            raise FileNotFoundError(
+                f"MLINDEX_MODELS_DIR={env} does not exist. "
+                "Run 'mlindex-download-models' or set MLINDEX_MODELS_DIR to the directory "
+                "containing model subdirectories (e.g. cubic_1/, hexagonal_1/, ...)."
+            )
+        return models_dir.parent.parent
+
+    xdg_base = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
+    if (xdg_base / 'mlindex' / 'models').exists():
+        return xdg_base
+
+    import mlindex
+    pkg_project = Path(mlindex.__path__[0]).parent
+    pkg_models = pkg_project / 'mlindex' / 'models'
+    if not pkg_models.exists():
+        raise FileNotFoundError(
+            "ML models not found. Run 'mlindex-download-models' to fetch them.\n"
+            f"Searched:\n  {xdg_base / 'mlindex' / 'models'}\n  {pkg_models}\n"
+            "Or set the MLINDEX_MODELS_DIR environment variable to the directory "
+            "containing model subdirectories (e.g. cubic_1/, hexagonal_1/, ...)."
+        )
+    return pkg_project
 
 
 def get_logger(comm, optimization_tag):
@@ -679,12 +719,9 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
 
 
 def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, logger=None, optimizer_class=None):
-    import mlindex
     from mlindex.optimization.MPIOptimizer import OptimizerWorker
-    from pathlib import Path
 
-    # Get the absolute path to the MLI directory
-    project_path = Path(mlindex.__path__[0]).parent
+    project_path = _resolve_project_path()
 
     fom = None
     bravais_lattices = mpi_organizers.keys()
