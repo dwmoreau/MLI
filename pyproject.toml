@@ -41,9 +41,9 @@ dataset_generation = ["pyarrow", "openpyxl", "tqdm"]
 training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]
 
 [project.scripts]
-mlindex-run = "mlindex.command_line.run:main"
-mlindex-run-analytical = "mlindex.command_line.run_analytical:main"
-mlindex-download-models = "mlindex.command_line.download_models:main"
+"mlindex.run" = "mlindex.command_line.run:main"
+"mlindex.run_analytical" = "mlindex.command_line.run_analytical:main"
+"mlindex.download_models" = "mlindex.command_line.download_models:main"
 
 [project.urls]
 Homepage = "https://github.com/dwmoreau/MLI"
