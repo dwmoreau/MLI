@@ -169,44 +169,44 @@ class SKLearnManager:
             f.write(onnx_model.SerializeToString())
     
     def _save_custom(self, model) -> None:
-        """Save model in custom version-independent format, supporting multi-output trees"""
-        # Save with joblib as backup
-        joblib.dump(model, f"{self.filename}.joblib")
-        
-        # Extract and save essential tree information
+        """Save model in version-independent NPZ format.
+
+        Extracts tree arrays directly from sklearn internals into padded numpy
+        arrays and writes _trees.npz. No joblib or JSON is written here; call
+        _save_sklearn separately if a joblib copy is also needed.
+        """
         if not hasattr(model, 'estimators_'):
             raise ValueError("Custom format only supports ensemble models with estimators_")
-            
-        forest_data = {
-            'n_estimators': len(model.estimators_),
-            'n_features': model.n_features_in_,
-            'trees': []
-        }
-        
-        # Extract each tree's node structure
-        for tree in model.estimators_:
-            tree_dict = {
-                'nodes': [],
-                'values': tree.tree_.value.tolist()
-            }
-            
-            # Convert tree structure to list of node dictionaries
-            for node_id in range(tree.tree_.node_count):
-                node = {
-                    'id': node_id,
-                    'left_child': int(tree.tree_.children_left[node_id]),
-                    'right_child': int(tree.tree_.children_right[node_id]),
-                    'feature': int(tree.tree_.feature[node_id]),
-                    'threshold': float(tree.tree_.threshold[node_id]),
-                    'value_index': node_id
-                }
-                tree_dict['nodes'].append(node)
-            
-            forest_data['trees'].append(tree_dict)
-        
-        # Save as JSON
-        with open(f"{self.filename}_trees.json", 'w') as f:
-            json.dump(forest_data, f)
+
+        n_estimators = len(model.estimators_)
+        n_features   = model.n_features_in_
+        n_outputs    = model.estimators_[0].n_outputs_
+        max_nodes    = max(t.tree_.node_count for t in model.estimators_)
+
+        children_left   = np.full((n_estimators, max_nodes), -1, dtype=np.int32)
+        children_right  = np.full((n_estimators, max_nodes), -1, dtype=np.int32)
+        features_arr    = np.zeros((n_estimators, max_nodes), dtype=np.int32)
+        thresholds      = np.zeros((n_estimators, max_nodes), dtype=np.float64)
+        leaf_values_arr = np.zeros((n_estimators, max_nodes, n_outputs), dtype=np.float64)
+
+        for i, tree in enumerate(model.estimators_):
+            n = tree.tree_.node_count
+            children_left[i, :n]      = tree.tree_.children_left
+            children_right[i, :n]     = tree.tree_.children_right
+            features_arr[i, :n]       = tree.tree_.feature
+            thresholds[i, :n]         = tree.tree_.threshold
+            # tree.tree_.value shape: (n_nodes, n_outputs, max_n_classes)
+            # regression always has max_n_classes == 1
+            leaf_values_arr[i, :n, :] = tree.tree_.value[:, :, 0]
+
+        np.savez(f"{self.filename}_trees.npz",
+                 n_estimators=n_estimators,
+                 n_features=n_features,
+                 children_left=children_left,
+                 children_right=children_right,
+                 features_arr=features_arr,
+                 thresholds=thresholds,
+                 leaf_values_arr=leaf_values_arr)
     
     def _load_sklearn(self):
         """Load sklearn model using joblib"""
@@ -235,42 +235,14 @@ class SKLearnManager:
         return onnxruntime.InferenceSession(model_path, sess_options)
     
     def _load_custom(self):
-        """Load custom version-independent forest predictor.
-
-        Fast path: load pre-built numpy arrays from _trees.npz if present.
-        Slow path: parse _trees.json, build arrays, then cache as _trees.npz
-        for future loads (silently skips caching on read-only filesystems).
-        """
-        json_path = f"{self.filename}_trees.json"
-        npz_path  = f"{self.filename}_trees.npz"
-
-        if not os.path.exists(json_path):
+        """Load version-independent forest predictor from NPZ."""
+        npz_path = f"{self.filename}_trees.npz"
+        if not os.path.exists(npz_path):
             raise FileNotFoundError(
-                f"Model file not found: {json_path}\n"
+                f"Model file not found: {npz_path}\n"
                 "Run 'mlindex-download-models' to fetch the ML models."
             )
-
-        if os.path.exists(npz_path):
-            return self.VersionIndependentForestPredictor.from_npz(np.load(npz_path))
-
-        with open(json_path, 'r') as f:
-            forest_data = json.load(f)
-
-        predictor = self.VersionIndependentForestPredictor(forest_data)
-
-        try:
-            np.savez(npz_path,
-                     n_estimators=predictor.n_estimators,
-                     n_features=predictor.n_features,
-                     children_left=predictor.children_left,
-                     children_right=predictor.children_right,
-                     features_arr=predictor.features_arr,
-                     thresholds=predictor.thresholds,
-                     leaf_values_arr=predictor.leaf_values_arr)
-        except OSError:
-            pass  # read-only filesystem; run without cache
-
-        return predictor
+        return self.VersionIndependentForestPredictor.from_npz(np.load(npz_path))
     
     class VersionIndependentForestPredictor:
         """Custom tree-based model implementation that works across sklearn versions.
@@ -280,41 +252,6 @@ class SKLearnManager:
         predict_individual_trees returns (n_samples, n_outputs, n_estimators) to match
         the shape expected by the sklearn path in SKLearnManager.predict_individual_trees.
         """
-
-        def __init__(self, forest_data):
-            self.n_estimators = forest_data['n_estimators']
-            self.n_features = forest_data['n_features']
-
-            trees = forest_data['trees']
-            n_outputs_actual = len(trees[0]['values'][0])
-            max_nodes = max(len(t['nodes']) for t in trees)
-            n_est = self.n_estimators
-
-            children_left   = np.full((n_est, max_nodes), -1, dtype=np.int32)
-            children_right  = np.full((n_est, max_nodes), -1, dtype=np.int32)
-            features_arr    = np.zeros((n_est, max_nodes), dtype=np.int32)
-            thresholds      = np.zeros((n_est, max_nodes), dtype=np.float64)
-            leaf_values_arr = np.zeros((n_est, max_nodes, n_outputs_actual), dtype=np.float64)
-
-            # nodes are stored in sequential order (node['id'] == list index),
-            # so we can extract each field with a list comprehension and assign
-            # as a numpy slice — one C-level call instead of per-node Python ops.
-            for tree_idx, tree in enumerate(trees):
-                nodes = tree['nodes']
-                n = len(nodes)
-                children_left[tree_idx, :n]  = [nd['left_child']  for nd in nodes]
-                children_right[tree_idx, :n] = [nd['right_child'] for nd in nodes]
-                features_arr[tree_idx, :n]   = [nd['feature']     for nd in nodes]
-                thresholds[tree_idx, :n]     = [nd['threshold']   for nd in nodes]
-                # tree['values'] is (n_nodes, n_outputs_actual, 1); squeeze last dim
-                vals = np.array(tree['values'], dtype=np.float64)  # (n, n_out, 1)
-                leaf_values_arr[tree_idx, :n, :] = vals[:, :, 0]
-
-            self.children_left   = children_left
-            self.children_right  = children_right
-            self.features_arr    = features_arr
-            self.thresholds      = thresholds
-            self.leaf_values_arr = leaf_values_arr
 
         @classmethod
         def from_npz(cls, data):
