@@ -5,6 +5,7 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import argparse
+import types
 import numpy as np
 import pandas as pd
 
@@ -111,79 +112,62 @@ def _load_peaks(args):
     return peak_list, triplet_obs
 
 
-def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
-                  top_n_indexed, top_M_triplets, top_n_indexed_triplets, triplet_obs):
-    output_data = []
-    for bravais_lattice in BRAVAIS_LATTICES:
-        for result_index in range(top_M20[bravais_lattice].size):
-            partial_unit_cell = top_unit_cell[bravais_lattice][result_index]
-            if bravais_lattice in ['cF', 'cI', 'cP']:
-                unit_cell = np.array([
-                    partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[0],
-                    np.pi/2, np.pi/2, np.pi/2
-                    ])
-            elif bravais_lattice == 'hP':
-                unit_cell = np.array([
-                    partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[1],
-                    2*np.pi/3, np.pi/2, np.pi/2
-                    ])
-            elif bravais_lattice == 'hR':
-                unit_cell = np.array([
-                    partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[0],
-                    partial_unit_cell[1], partial_unit_cell[1], partial_unit_cell[1],
-                    ])
-                unit_cell = rhombohedral_to_hexagonal(unit_cell)
-            elif bravais_lattice in ['tI', 'tP']:
-                unit_cell = np.array([
-                    partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[1],
-                    np.pi/2, np.pi/2, np.pi/2
-                    ])
-            elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-                unit_cell = np.array([
-                    partial_unit_cell[0], partial_unit_cell[1], partial_unit_cell[2],
-                    np.pi/2, np.pi/2, np.pi/2
-                    ])
-            elif bravais_lattice in ['mC', 'mP']:
-                unit_cell = np.array([
-                    partial_unit_cell[0], partial_unit_cell[1], partial_unit_cell[2],
-                    np.pi/2, partial_unit_cell[3], np.pi/2
-                    ])
-            elif bravais_lattice == 'aP':
-                unit_cell = partial_unit_cell
-            if triplet_obs is None:
-                M_triplet_output = None
-                n_indexed_triplets_output = None
-            else:
-                M_triplet_output = list(top_M_triplets[bravais_lattice][result_index])
-                n_indexed_triplets_output = top_n_indexed_triplets[bravais_lattice][result_index]
-            output_data.append({
-                'M20': top_M20[bravais_lattice][result_index],
-                'Minfo': top_Minfo[bravais_lattice][result_index],
-                'n_indexed': top_n_indexed[bravais_lattice][result_index],
-                'M_triplet': M_triplet_output,
-                'n_indexed_triplet': n_indexed_triplets_output,
-                'bravais_lattice': bravais_lattice,
-                'spacegroup': top_spacegroup[bravais_lattice][result_index],
-                "volume": get_unit_cell_volume(unit_cell[np.newaxis])[0],
-                'a': unit_cell[0],
-                'b': unit_cell[1],
-                'c': unit_cell[2],
-                'alpha': 180/np.pi*unit_cell[3],
-                'beta': 180/np.pi*unit_cell[4],
-                'gamma': 180/np.pi*unit_cell[5],
-                })
+def _collect_results(optimizer, bl, all_results,
+                     Minfos=None, spacegroups=None, M_triplets=None, n_indexed_triplets=None):
+    for i in range(optimizer.top_M20.size):
+        partial = optimizer.top_unit_cell[i]
+        if bl in ['cF', 'cI', 'cP']:
+            unit_cell = np.array([partial[0], partial[0], partial[0], np.pi/2, np.pi/2, np.pi/2])
+        elif bl == 'hP':
+            unit_cell = np.array([partial[0], partial[0], partial[1], 2*np.pi/3, np.pi/2, np.pi/2])
+        elif bl == 'hR':
+            unit_cell = rhombohedral_to_hexagonal(
+                np.array([partial[0], partial[0], partial[0], partial[1], partial[1], partial[1]]))
+        elif bl in ['tI', 'tP']:
+            unit_cell = np.array([partial[0], partial[0], partial[1], np.pi/2, np.pi/2, np.pi/2])
+        elif bl in ['oC', 'oF', 'oI', 'oP']:
+            unit_cell = np.array([partial[0], partial[1], partial[2], np.pi/2, np.pi/2, np.pi/2])
+        elif bl in ['mC', 'mP']:
+            unit_cell = np.array([partial[0], partial[1], partial[2], np.pi/2, partial[3], np.pi/2])
+        else:
+            unit_cell = partial
+        entry = {
+            'M20': optimizer.top_M20[i],
+            'n_indexed': int(optimizer.top_n_indexed[i]),
+            'bravais_lattice': bl,
+            'volume': get_unit_cell_volume(unit_cell[np.newaxis])[0],
+            'a': unit_cell[0], 'b': unit_cell[1], 'c': unit_cell[2],
+            'alpha': 180/np.pi * unit_cell[3],
+            'beta':  180/np.pi * unit_cell[4],
+            'gamma': 180/np.pi * unit_cell[5],
+        }
+        if Minfos is not None:             entry['Minfo']             = Minfos[i]
+        if spacegroups is not None:        entry['spacegroup']        = spacegroups[i]
+        if M_triplets is not None:         entry['M_triplet']         = list(M_triplets[i])
+        if n_indexed_triplets is not None: entry['n_indexed_triplet'] = n_indexed_triplets[i]
+        all_results.append(entry)
+    return all_results
+
+
+def _write_results(output_data, output_file_base='indexing_results'):
     output_df = pd.DataFrame(output_data)
     output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
-    drop_columns = ['Minfo']
-    if args.triplets_file is None:
-        drop_columns += ['M_triplet', 'n_indexed_triplet']
+    drop_columns = [c for c in ['Minfo'] if c in output_df.columns]
     output_df.drop(columns=drop_columns, inplace=True)
-    output_df.to_json('indexing_results.json')
+    output_df.to_json(output_file_base + '.json')
+    txt_cols = [c for c in ['bravais_lattice', 'M20', 'n_indexed', 'a', 'b', 'c',
+                             'alpha', 'beta', 'gamma', 'volume', 'spacegroup'] if c in output_df.columns]
+    txt_headers = {
+        'bravais_lattice': 'Bravais Lattice', 'M20': 'M20', 'n_indexed': '# Indexed peaks',
+        'a': 'A (Å)', 'b': 'B (Å)', 'c': 'C (Å)',
+        'alpha': 'Alpha (°)', 'beta': 'Beta (°)', 'gamma': 'Gamma (°)',
+        'volume': 'Volume (Å^3)', 'spacegroup': 'Space Group',
+    }
     output_df.to_string(
-        'indexing_results.txt',
+        output_file_base + '.txt',
         index=False,
-        columns=['bravais_lattice', 'M20', 'n_indexed', 'a', 'b', 'c', 'alpha', 'beta', 'gamma', 'volume', 'spacegroup'],
-        header=['Bravais Lattice', 'M20', '# Indexed peaks', 'A (Å)', 'B (Å)', 'C (Å)', 'Alpha (°)', 'Beta (°)', 'Gamma (°)', 'Volume (Å^3)', 'Space Group'],
+        columns=txt_cols,
+        header=[txt_headers[c] for c in txt_cols],
         formatters={
             'volume': lambda x: f'{x:0.1f}',
             'a': lambda x: f'{x:0.4f}',
@@ -194,8 +178,26 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
             'gamma': lambda x: f'{x:0.2f}',
         }
     )
-    
     print(output_df[:20].to_string())
+
+
+def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
+                  top_n_indexed, top_M_triplets, top_n_indexed_triplets, triplet_obs):
+    output_data = []
+    for bl in BRAVAIS_LATTICES:
+        mock = types.SimpleNamespace(
+            top_unit_cell=top_unit_cell[bl],
+            top_M20=top_M20[bl],
+            top_n_indexed=top_n_indexed[bl],
+        )
+        _collect_results(
+            mock, bl, output_data,
+            Minfos=top_Minfo[bl],
+            spacegroups=top_spacegroup[bl],
+            M_triplets=top_M_triplets[bl] if triplet_obs is not None else None,
+            n_indexed_triplets=top_n_indexed_triplets[bl] if triplet_obs is not None else None,
+        )
+    _write_results(output_data, output_file_base='indexing_results')
 
 
 def _run_mpi(args, peak_list, triplet_obs):

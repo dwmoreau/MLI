@@ -370,7 +370,8 @@ class Candidates:
                 self.best_xnn[~failed] = best_standardized_xnn[~failed]
 
     def correct_off_by_two(self):
-        mult_factor = np.array([1, 1/2, np.sqrt(2), 2, 3, 4])
+        #mult_factor = np.array([1, 1/2, np.sqrt(2), 2, 3, 4])
+        mult_factor = np.array([1, 1/2, np.sqrt(2), 2])
         if self.lattice_system == 'cubic':
             mult_factors = mult_factor[:, np.newaxis]
         elif self.lattice_system in ['hexagonal', 'tetragonal']:
