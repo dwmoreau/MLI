@@ -57,13 +57,36 @@ def _run(cmd, **kwargs):
         sys.exit(result.returncode)
 
 
+def _verify_no_lfs_pointers(models_dir: Path) -> None:
+    """Exit with a clear error if any model files are still LFS pointer stubs."""
+    lfs_marker = b'version https://git-lfs'
+    pointers = []
+    for f in models_dir.rglob('*'):
+        if f.is_file() and f.stat().st_size <= 200:
+            try:
+                with open(f, 'rb') as fh:
+                    if fh.read(22) == lfs_marker:
+                        pointers.append(f.relative_to(models_dir))
+            except OSError:
+                pass
+    if pointers:
+        sample = '\n  '.join(str(p) for p in pointers[:5])
+        print(
+            f"\nERROR: {len(pointers)} model file(s) are still LFS pointer stubs after download.\n"
+            f"  {sample}\n"
+            "Ensure git-lfs is installed ('git lfs version') and re-run with --force.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _download(repo_url, branch, models_dir):
     """Clone the repo sparsely and pull LFS model files into models_dir."""
     with tempfile.TemporaryDirectory(prefix='mlindex_download_') as tmpdir:
         tmpdir = Path(tmpdir)
-        print(f"\nCloning repository (sparse, no blobs) ...")
+        print(f"\nCloning repository (sparse, no checkout) ...")
         _run(
-            ['git', 'clone', '--filter=blob:none', '--no-checkout',
+            ['git', 'clone', '--no-checkout',
              '--depth=1', '--branch', branch, repo_url, str(tmpdir / 'repo')]
         )
         repo = tmpdir / 'repo'
@@ -72,11 +95,8 @@ def _download(repo_url, branch, models_dir):
         _run(['git', '-C', str(repo), 'sparse-checkout', 'init', '--cone'])
         _run(['git', '-C', str(repo), 'sparse-checkout', 'set', 'mlindex/models'])
 
-        env = {**os.environ, 'GIT_LFS_SKIP_SMUDGE': '1'}
-        _run(['git', '-C', str(repo), 'checkout', 'HEAD'], env=env)
-
-        print("\nDownloading model files via git LFS (this may take a while) ...")
-        _run(['git', '-C', str(repo), 'lfs', 'pull'])
+        print("\nChecking out model files (LFS blobs will be fetched automatically) ...")
+        _run(['git', '-C', str(repo), 'checkout', 'HEAD'])
 
         src = repo / 'mlindex' / 'models'
         if not src.exists():
@@ -89,6 +109,7 @@ def _download(repo_url, branch, models_dir):
             shutil.rmtree(models_dir)
         shutil.move(str(src), str(models_dir))
 
+    _verify_no_lfs_pointers(models_dir)
     print(f"Models installed to: {models_dir}")
 
 

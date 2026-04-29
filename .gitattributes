@@ -263,3 +263,5 @@ mlindex/models/orthorhombic_1/template/oP_template_regressor_orthorhombic_1.onnx
 mlindex/models/cubic_1/template/cF_template_regressor_cubic_1.onnx filter=lfs diff=lfs merge=lfs -text
 *.xlsx filter=lfs diff=lfs merge=lfs -text
 *_trees.npz filter=lfs diff=lfs merge=lfs -text
+*_pitf_weights_*_quantized.onnx filter=lfs diff=lfs merge=lfs -text
+*_calibration_weights_*_quantized.onnx filter=lfs diff=lfs merge=lfs -text
