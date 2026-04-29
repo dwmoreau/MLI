@@ -7,7 +7,7 @@ include = ["mlindex*"]
 exclude = ["mlindex.dataset_generation*", "mlindex.comparisons*", "mlindex.characterization*"]
 
 [tool.setuptools.package-data]
-mlindex = ["model_metadata.json"]
+mlindex = ["model_metadata.json", "models/*/data/hkl_ref_*.npy"]
 
 [project]
 name = "mlindex"

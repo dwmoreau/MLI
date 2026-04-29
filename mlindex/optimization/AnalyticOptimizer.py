@@ -63,15 +63,10 @@ class AnalyticOptimizer(OptimizerManager):
 
         # Load the pre‑computed HKL reference array (non‑redundant)
         # Get the absolute path to the MLI directory
-        hkl_ref_path = (
-            Path(*files('mlindex').parts[:-1])
-            / 'mlindex'
-            / 'models'
-            / f'{self.lattice_system}_1'
-            / 'data'
-            / f'hkl_ref_{bravais_lattice}.npy'
-        )
-        self.hkl_ref = np.load(hkl_ref_path)
+        with files('mlindex').joinpath(
+            'models', f'{self.lattice_system}_1', 'data', f'hkl_ref_{bravais_lattice}.npy'
+        ).open('rb') as _f:
+            self.hkl_ref = np.load(_f)
         self.hkl_ref_length = self.hkl_ref.shape[0]
 
         # Dimensionality of the reciprocal‑space parameter vector (xnn)

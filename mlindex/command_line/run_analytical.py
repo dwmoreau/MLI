@@ -83,8 +83,8 @@ def main() -> None:
 
 
 def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
-    from mpi4py import MPI
-    comm = MPI.COMM_SELF
+    from mlindex.optimization.MPOptimizer import LocalComm
+    comm = LocalComm(n_ranks=1)
 
     all_results = []
     for bl in bravais_lattices:
