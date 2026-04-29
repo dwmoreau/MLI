@@ -295,6 +295,13 @@ class Candidates:
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
             refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
             refined_q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+            refined_xnn = fix_unphysical(
+                xnn=refined_xnn,
+                rng=self.rng,
+                minimum_unit_cell=self.minimum_unit_cell,
+                maximum_unit_cell=self.maximum_unit_cell,
+                lattice_system=self.lattice_system,
+                )
 
         refined_M20 = get_M20(self.q2_obs, refined_q2_calc, q2_ref_calc)
         if self.triplets is None:
@@ -337,7 +344,7 @@ class Candidates:
             # Find these and replace them with the initial unit cell.
             failed = np.any(np.isnan(best_standardized_unit_cell), axis=1)
             if np.sum(failed) > 0:
-                print('Failure in Standardization - NaN check\n    numpy warning has been caught and corrected')
+                #print('Failure in Standardization - NaN check\n    numpy warning has been caught and corrected')
                 best_standardized_unit_cell[failed] = best_unit_cell[failed]
 
             # Some of the standardized unit cells are unphysical. The standardization fails but does
@@ -354,7 +361,7 @@ class Candidates:
                 axis=1
                 )
             if np.sum(failed) > 0:
-                print('Failure Standardization - unphysical check\n    numpy warning has been caught and corrected')
+                #print('Failure Standardization - unphysical check\n    numpy warning has been caught and corrected')
                 best_standardized_unit_cell[failed] = best_unit_cell[failed]
 
             # Still some unphysical unit cells make it through. These cannot be converted between
@@ -366,7 +373,7 @@ class Candidates:
                 )
             failed = np.any(np.isnan(best_standardized_xnn), axis=1)
             if np.sum(failed) > 0:
-                print('Failure in Standardization - Final check\n    numpy warning has been caught and corrected')
+                #print('Failure in Standardization - Final check\n    numpy warning has been caught and corrected')
                 self.best_xnn[~failed] = best_standardized_xnn[~failed]
 
     def correct_off_by_two(self):

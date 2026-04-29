@@ -20,6 +20,14 @@ from mlindex.utilities.Reindexing import rhombohedral_to_hexagonal
 
 BRAVAIS_LATTICES = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
 
+_BL_MPI6_CFG = {
+    'cF': (0, True),  'cI': (0, True),  'cP': (0, True),
+    'hP': (1, True),  'hR': (2, True),
+    'tI': (3, True),  'tP': (4, True),
+    'oC': (1, False), 'oF': (2, False), 'oI': (3, False), 'oP': (4, False),
+    'mC': (5, False), 'mP': (0, False), 'aP': (5, False),
+}
+
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Start the display application")
@@ -67,6 +75,12 @@ def _parse_args():
         type=int,
         default=1,
         help="Number of processes for multiprocessing mode (default: 1 = serial)"
+    )
+    parser.add_argument(
+        "--bravais-lattices",
+        type=str,
+        default=",".join(BRAVAIS_LATTICES),
+        help=f"Comma-separated Bravais lattices to attempt (default: {','.join(BRAVAIS_LATTICES)})",
     )
     return parser.parse_args()
 
@@ -184,7 +198,7 @@ def _write_results(output_data, output_file_base='indexing_results'):
 def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
                   top_n_indexed, top_M_triplets, top_n_indexed_triplets, triplet_obs):
     output_data = []
-    for bl in BRAVAIS_LATTICES:
+    for bl in args.bravais_lattices:
         mock = types.SimpleNamespace(
             top_unit_cell=top_unit_cell[bl],
             top_M20=top_M20[bl],
@@ -215,32 +229,33 @@ def _run_mpi(args, peak_list, triplet_obs):
 
     assert (n_ranks == 6) or (n_ranks == 1)
 
+    bravais_lattices = args.bravais_lattices
     if n_ranks == 6:
-        manager_rank = [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-        serial =       [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
+        manager_rank = [_BL_MPI6_CFG[bl][0] for bl in bravais_lattices]
+        serial = [_BL_MPI6_CFG[bl][1] for bl in bravais_lattices]
     else:
-        manager_rank = [0 for _ in range(len(BRAVAIS_LATTICES))]
-        serial = [True for _ in range(len(BRAVAIS_LATTICES))]
+        manager_rank = [0] * len(bravais_lattices)
+        serial = [True] * len(bravais_lattices)
 
-    mpi_organizers = get_mpi_organizer(comm, BRAVAIS_LATTICES, manager_rank, serial)
+    mpi_organizers = get_mpi_organizer(comm, bravais_lattices, manager_rank, serial)
 
-    bl_string = ' '.join(BRAVAIS_LATTICES)
+    bl_string = ' '.join(bravais_lattices)
     logger.info(f'Including Bravais lattices {bl_string}')
     logger.info('Starting loading optimizers')
     optimizer = get_optimizers(rank, mpi_organizers, broadening_tag,
                                n_candidates_scale=1, logger=logger)
 
     if rank == 0:
-        top_unit_cell = dict.fromkeys(BRAVAIS_LATTICES)
-        top_M20 = dict.fromkeys(BRAVAIS_LATTICES)
-        top_Minfo = dict.fromkeys(BRAVAIS_LATTICES)
-        top_spacegroup = dict.fromkeys(BRAVAIS_LATTICES)
-        top_n_indexed = dict.fromkeys(BRAVAIS_LATTICES)
+        top_unit_cell = dict.fromkeys(bravais_lattices)
+        top_M20 = dict.fromkeys(bravais_lattices)
+        top_Minfo = dict.fromkeys(bravais_lattices)
+        top_spacegroup = dict.fromkeys(bravais_lattices)
+        top_n_indexed = dict.fromkeys(bravais_lattices)
         if triplet_obs is not None:
-            top_M_triplets = dict.fromkeys(BRAVAIS_LATTICES)
-            top_n_indexed_triplets = dict.fromkeys(BRAVAIS_LATTICES)
+            top_M_triplets = dict.fromkeys(bravais_lattices)
+            top_n_indexed_triplets = dict.fromkeys(bravais_lattices)
 
-    for bravais_lattice in BRAVAIS_LATTICES:
+    for bravais_lattice in bravais_lattices:
         if rank in mpi_organizers[bravais_lattice].workers:
             if rank == mpi_organizers[bravais_lattice].manager:
                 role = 'manager'
@@ -259,7 +274,7 @@ def _run_mpi(args, peak_list, triplet_obs):
     comm.barrier()
 
     logger.info('Gathering optimization results')
-    for bravais_lattice in BRAVAIS_LATTICES:
+    for bravais_lattice in bravais_lattices:
         if rank == 0 and mpi_organizers[bravais_lattice].manager == 0:
             top_unit_cell[bravais_lattice] = optimizer[bravais_lattice].top_unit_cell
             top_M20[bravais_lattice] = optimizer[bravais_lattice].top_M20
@@ -316,7 +331,7 @@ def _run_mp(args, peak_list, triplet_obs, n_procs):
     top_M_triplets = {}
     top_n_indexed_triplets = {}
 
-    for bravais_lattice in BRAVAIS_LATTICES:
+    for bravais_lattice in args.bravais_lattices:
         run_mp_bl(
             optimizers[bravais_lattice],
             bravais_lattice,
@@ -348,6 +363,11 @@ def _run_mp(args, peak_list, triplet_obs, n_procs):
 
 def main():
     args = _parse_args()
+    selected = [bl.strip() for bl in args.bravais_lattices.split(',')]
+    invalid = [bl for bl in selected if bl not in BRAVAIS_LATTICES]
+    if invalid:
+        raise SystemExit(f"Unknown Bravais lattices: {', '.join(invalid)}")
+    args.bravais_lattices = selected
     peak_list, triplet_obs = _load_peaks(args)
     if args.mpi:
         _run_mpi(args, peak_list, triplet_obs)

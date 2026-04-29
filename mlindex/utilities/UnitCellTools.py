@@ -714,6 +714,7 @@ def fix_unphysical_rhombohedral(
                 low=-0.5, high=-0.49, size=np.sum(large_angle)
             )
             xnn[large_angle, 1] = cos_ralpha[large_angle] * 2 * xnn[large_angle, 0]
+        xnn[:, 0] = np.abs(xnn[:, 0])
         return xnn
 
     elif not unit_cell is None:

@@ -15,6 +15,9 @@ from mlindex.optimization.AnalyticOptimizer import AnalyticOptimizer
 from mlindex.optimization.MPIOptimizer import OptimizerWorker
 from mlindex.command_line.run import _load_peaks, _collect_results, _write_results
 
+_ALL_ANALYTIC_BL = ["cF", "cI", "cP", "hP", "hR", "tI", "tP", "oC", "oF", "oI", "oP", "mC", "mP", "aP"]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analytical high‑symmetry indexing")
     parser.add_argument(
@@ -53,13 +56,22 @@ def main() -> None:
         action='store_true',
         help="Use MPI for parallelism (requires mpiexec)",
     )
+    parser.add_argument(
+        "--bravais-lattices",
+        type=str,
+        default=",".join(_ALL_ANALYTIC_BL),
+        help=f"Comma-separated Bravais lattices to attempt (default: {','.join(_ALL_ANALYTIC_BL)})",
+    )
     args = parser.parse_args()
     args.triplets_file = None   # _load_peaks requires this attribute; analytical mode has no triplets
 
+    bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
+    invalid = [bl for bl in bravais_lattices if bl not in _ALL_ANALYTIC_BL]
+    if invalid:
+        parser.error(f"Unknown Bravais lattices: {', '.join(invalid)}")
+
     q2_obs, _ = _load_peaks(args)
 
-    # Bravais lattices to process (the high‑symmetry set)
-    bravais_lattices = ["cF", "cI", "cP", "hP", "hR", "tI", "tP", "oC", "oF", "oI", "oP"]
     n_ref_hkl_guess = {bl: 10 for bl in bravais_lattices}
 
     if args.mpi:
@@ -93,9 +105,8 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
     from mlindex.optimization.MPOptimizer import (
         setup_mp_analytic_optimizers, run_mp_bl, shutdown_mp_workers
     )
-
     optimizers, processes, task_queues = setup_mp_analytic_optimizers(
-        args.nproc, q2_obs.size, n_ref_hkl_guess
+        args.nproc, q2_obs.size, n_ref_hkl_guess, bravais_lattices
     )
 
     all_results = []
@@ -110,7 +121,6 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
             all_results = _collect_results(optimizers[bl], bl, all_results)
     finally:
         shutdown_mp_workers(processes, task_queues)
-
     output_file_base = str(Path(args.output_file).with_suffix(''))
     _write_results(all_results, output_file_base=output_file_base)
 
