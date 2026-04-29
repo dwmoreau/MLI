@@ -95,8 +95,11 @@ def _download(repo_url, branch, models_dir):
         _run(['git', '-C', str(repo), 'sparse-checkout', 'init', '--cone'])
         _run(['git', '-C', str(repo), 'sparse-checkout', 'set', 'mlindex/models'])
 
-        print("\nChecking out model files (LFS blobs will be fetched automatically) ...")
+        print("\nChecking out model files ...")
         _run(['git', '-C', str(repo), 'checkout', 'HEAD'])
+
+        print("Fetching LFS objects ...")
+        _run(['git', '-C', str(repo), 'lfs', 'pull', '--include', 'mlindex/models/**'])
 
         src = repo / 'mlindex' / 'models'
         if not src.exists():
