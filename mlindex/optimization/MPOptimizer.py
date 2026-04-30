@@ -181,7 +181,7 @@ class MPOptimizerWorker(OptimizerWorker):
         self._result_q.put({'M20': candidates.best_M20, 'xnn': candidates.best_xnn})
 
 
-def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None):
+def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None, seed=12345):
     """Module-level worker function (picklable for macOS spawn start method).
 
     Builds all 14 MPOptimizerWorker objects at startup (reusing imports across
@@ -193,7 +193,7 @@ def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None)
     try:
         for bl in bravais_lattices:
             workers[bl] = MPOptimizerWorker(data_queue, result_queue, rank, n_ranks,
-                                            fom, seed=rank)
+                                            fom, seed=seed + rank)
         while True:
             msg = task_queue.get()
             if msg == 'shutdown':
@@ -205,7 +205,7 @@ def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None)
         result_queue.put(e)
 
 
-def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None):
+def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345):
     """Spawn worker processes and construct manager optimizers for all 14 BLs.
 
     Returns (optimizers, processes, task_queues).
@@ -223,7 +223,8 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
     processes = []
     for r in range(1, n_procs):
         p = Process(target=_mp_worker_fn,
-                    args=(r, n_procs, data_queues[r], result_queues[r], task_queues[r]))
+                    args=(r, n_procs, data_queues[r], result_queues[r], task_queues[r]),
+                    kwargs={'seed': seed})
         p.start()
         processes.append(p)
 
@@ -240,7 +241,7 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
                      for bl in bravais_lattices}
 
     optimizers = get_optimizers(0, mp_organizers, broadening_tag, n_candidates_scale,
-                                logger=logger, optimizer_class=MPOptimizerManager)
+                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed)
 
     # Clean up class-level injection
     MPOptimizerManager._mp_data_queues   = None
@@ -267,12 +268,12 @@ def shutdown_mp_workers(processes, task_queues):
 
 
 def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue,
-                           bravais_lattices, fom=None):
+                           bravais_lattices, fom=None, seed=12345):
     workers = {}
     try:
         for bl in bravais_lattices:
             workers[bl] = MPOptimizerWorker(data_queue, result_queue, rank, n_ranks,
-                                            fom, seed=rank)
+                                            fom, seed=seed + rank)
         while True:
             msg = task_queue.get()
             if msg == 'shutdown':
@@ -284,7 +285,7 @@ def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue,
         result_queue.put(e)
 
 
-def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_lattices):
+def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_lattices, seed=12345):
     """Spawn worker processes and construct MPAnalyticOptimizer managers for the given BLs.
 
     Returns (optimizers, processes, task_queues).
@@ -300,7 +301,8 @@ def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_latt
     for r in range(1, n_procs):
         p = Process(target=_mp_analytic_worker_fn,
                     args=(r, n_procs, data_queues[r], result_queues[r], task_queues[r],
-                          bravais_lattices))
+                          bravais_lattices),
+                    kwargs={'seed': seed})
         p.start()
         processes.append(p)
 
@@ -317,6 +319,7 @@ def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_latt
             comm=None,
             n_peaks=n_peaks,
             n_ref_hkl_guess=n_ref_hkl_guess[bl],
+            seed=seed,
         )
 
     # Clean up class-level injection

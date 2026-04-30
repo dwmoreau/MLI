@@ -7,6 +7,12 @@ It operates serially (MPI ``COMM_SELF``) and loops over the bravais lattices
 ``cF``, ``cI``, ``cP``, ``hP``, ``hR``, ``tI`` and ``tP``.
 """
 
+import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import argparse
 from pathlib import Path
 import numpy as np
@@ -62,6 +68,12 @@ def main() -> None:
         default=",".join(_ALL_ANALYTIC_BL),
         help=f"Comma-separated Bravais lattices to attempt (default: {','.join(_ALL_ANALYTIC_BL)})",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=12345,
+        help="Random seed for reproducibility (default: 12345)",
+    )
     args = parser.parse_args()
     args.triplets_file = None   # _load_peaks requires this attribute; analytical mode has no triplets
 
@@ -75,14 +87,14 @@ def main() -> None:
     n_ref_hkl_guess = {bl: 10 for bl in bravais_lattices}
 
     if args.mpi:
-        _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess)
+        _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=args.seed)
     elif args.nproc > 1:
-        _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess)
+        _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=args.seed)
     else:
-        _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess)
+        _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=args.seed)
 
 
-def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
+def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
     from mlindex.optimization.MPOptimizer import LocalComm
     comm = LocalComm(n_ranks=1)
 
@@ -93,6 +105,7 @@ def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
             comm=comm,
             n_peaks=q2_obs.size,
             n_ref_hkl_guess=n_ref_hkl_guess[bl],
+            seed=seed,
         )
         optimizer.run(q2=q2_obs, zero_error=args.zero_error, wavelength=args.wavelength)
         all_results = _collect_results(optimizer, bl, all_results)
@@ -101,12 +114,12 @@ def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
     _write_results(all_results, output_file_base=output_file_base)
 
 
-def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
+def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
     from mlindex.optimization.MPOptimizer import (
         setup_mp_analytic_optimizers, run_mp_bl, shutdown_mp_workers
     )
     optimizers, processes, task_queues = setup_mp_analytic_optimizers(
-        args.nproc, q2_obs.size, n_ref_hkl_guess, bravais_lattices
+        args.nproc, q2_obs.size, n_ref_hkl_guess, bravais_lattices, seed=seed
     )
 
     all_results = []
@@ -125,7 +138,7 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
     _write_results(all_results, output_file_base=output_file_base)
 
 
-def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
+def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -139,9 +152,10 @@ def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess):
                 comm=comm,
                 n_peaks=q2_obs.size,
                 n_ref_hkl_guess=n_ref_hkl_guess[bl],
+                seed=seed,
             )
         else:
-            optimizer = OptimizerWorker(comm=comm, fom='M20')
+            optimizer = OptimizerWorker(comm=comm, fom='M20', seed=seed + rank)
 
         optimizer.run(q2=q2_obs, zero_error=args.zero_error, wavelength=args.wavelength)
         comm.barrier()

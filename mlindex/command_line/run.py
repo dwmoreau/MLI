@@ -82,6 +82,12 @@ def _parse_args():
         default=",".join(BRAVAIS_LATTICES),
         help=f"Comma-separated Bravais lattices to attempt (default: {','.join(BRAVAIS_LATTICES)})",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=12345,
+        help="Random seed for reproducibility (default: 12345)",
+    )
     return parser.parse_args()
 
 
@@ -214,7 +220,7 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
     _write_results(output_data, output_file_base='indexing_results')
 
 
-def _run_mpi(args, peak_list, triplet_obs):
+def _run_mpi(args, peak_list, triplet_obs, seed=12345):
     from mpi4py import MPI
 
     broadening_tag = '1'
@@ -243,7 +249,7 @@ def _run_mpi(args, peak_list, triplet_obs):
     logger.info(f'Including Bravais lattices {bl_string}')
     logger.info('Starting loading optimizers')
     optimizer = get_optimizers(rank, mpi_organizers, broadening_tag,
-                               n_candidates_scale=1, logger=logger)
+                               n_candidates_scale=1, logger=logger, seed=seed)
 
     if rank == 0:
         top_unit_cell = dict.fromkeys(bravais_lattices)
@@ -313,14 +319,14 @@ def _run_mpi(args, peak_list, triplet_obs):
     logger.info('Finished gathering optimization results')
 
 
-def _run_mp(args, peak_list, triplet_obs, n_procs):
+def _run_mp(args, peak_list, triplet_obs, n_procs, seed=12345):
     from mlindex.optimization.MPOptimizer import setup_mp_optimizers, run_mp_bl, shutdown_mp_workers
 
     broadening_tag = '1'
     n_top_candidates = 20
 
     optimizers, processes, task_queues = setup_mp_optimizers(
-        n_procs, broadening_tag, n_candidates_scale=1
+        n_procs, broadening_tag, n_candidates_scale=1, seed=seed
     )
 
     top_unit_cell = {}
@@ -370,9 +376,9 @@ def main():
     args.bravais_lattices = selected
     peak_list, triplet_obs = _load_peaks(args)
     if args.mpi:
-        _run_mpi(args, peak_list, triplet_obs)
+        _run_mpi(args, peak_list, triplet_obs, seed=args.seed)
     else:
-        _run_mp(args, peak_list, triplet_obs, n_procs=args.nproc)
+        _run_mp(args, peak_list, triplet_obs, n_procs=args.nproc, seed=args.seed)
 
 
 if __name__ == "__main__":

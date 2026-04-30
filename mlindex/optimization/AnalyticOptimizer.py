@@ -37,7 +37,7 @@ class AnalyticOptimizer(OptimizerManager):
         based on the lattice system.
     """
 
-    def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5, n_ref_hkl_guess=5, opt_params=None):
+    def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5, n_ref_hkl_guess=5, opt_params=None, seed=12345):
         # Basic attributes required by the parent class
         self.bravais_lattice = bravais_lattice
         self.n_peaks_guess = n_peaks_guess
@@ -108,7 +108,7 @@ class AnalyticOptimizer(OptimizerManager):
             self.opt_params = opt_params
 
         # Minimal placeholders required for ``run_common``
-        self.rng = np.random.default_rng()
+        self.rng = np.random.default_rng(seed)
 
         self.comm = comm
         self.rank = comm.Get_rank()
@@ -208,14 +208,14 @@ class MPAnalyticOptimizer(AnalyticOptimizer):
     _mp_n_ranks = None
 
     def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5,
-                 n_ref_hkl_guess=5, opt_params=None):
+                 n_ref_hkl_guess=5, opt_params=None, seed=12345):
         self._data_queues = MPAnalyticOptimizer._mp_data_queues
         self._result_queues = MPAnalyticOptimizer._mp_result_queues
         n_ranks = MPAnalyticOptimizer._mp_n_ranks
         # comm arg is ignored; LocalComm lets AnalyticOptimizer.__init__ run without MPI
         super().__init__(bravais_lattice, comm=LocalComm(n_ranks),
                          n_peaks=n_peaks, n_peaks_guess=n_peaks_guess,
-                         n_ref_hkl_guess=n_ref_hkl_guess, opt_params=opt_params)
+                         n_ref_hkl_guess=n_ref_hkl_guess, opt_params=opt_params, seed=seed)
         self._init_workers()
 
     def _init_workers(self):
