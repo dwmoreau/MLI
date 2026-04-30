@@ -3,3 +3,5 @@
 __pycache__
 *weights.h5
 *_base_line*
+dist/
+*.egg-info/

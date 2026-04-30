@@ -21,7 +21,7 @@ def _resolve_project_path():
         if not models_dir.exists():
             raise FileNotFoundError(
                 f"MLINDEX_MODELS_DIR={env} does not exist. "
-                "Run 'mlindex-download-models' or set MLINDEX_MODELS_DIR to the directory "
+                "Run 'mlindex.download_models' or set MLINDEX_MODELS_DIR to the directory "
                 "containing model subdirectories (e.g. cubic_1/, hexagonal_1/, ...)."
             )
         return models_dir.parent.parent
@@ -33,9 +33,10 @@ def _resolve_project_path():
     import mlindex
     pkg_project = Path(mlindex.__path__[0]).parent
     pkg_models = pkg_project / 'mlindex' / 'models'
-    if not pkg_models.exists():
+    # Check for a directory that only exists after mlindex.download_models (not just bundled hkl_ref)
+    if not (pkg_models / 'cubic_1' / 'integral_filter').exists():
         raise FileNotFoundError(
-            "ML models not found. Run 'mlindex-download-models' to fetch them.\n"
+            "ML models not found. Run 'mlindex.download_models' to fetch them.\n"
             f"Searched:\n  {xdg_base / 'mlindex' / 'models'}\n  {pkg_models}\n"
             "Or set the MLINDEX_MODELS_DIR environment variable to the directory "
             "containing model subdirectories (e.g. cubic_1/, hexagonal_1/, ...)."

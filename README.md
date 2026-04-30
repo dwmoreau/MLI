@@ -6,20 +6,32 @@ A powder diffraction indexing program that uses machine learning models to initi
 
 ## Installation
 
-Currently the only way to install the program is by cloning the repository. The machine learning models take roughly 1 GB of hard-drive space and are version controlled through [git-lfs](https://www.git-lfs.com). You will need to install git-lfs to download the models from GitHub.
+### Standard installation (pip)
 
-### Prerequisites
-- Git LFS installed on your system
-- Conda environment (recommended)
+```bash
+pip install mlindex
+mlindex.download_models
+```
 
-### Installation Steps
+`mlindex.download_models` fetches the ML model files (~1 GB) from GitHub using git and git-lfs and installs them to `~/.local/share/mlindex/models/`. [git-lfs](https://www.git-lfs.com) must be installed before running this step.
+
+The model directory can be customized with `--models-dir` or the `MLINDEX_MODELS_DIR` environment variable:
+
+```bash
+mlindex.download_models --models-dir /path/to/models
+export MLINDEX_MODELS_DIR=/path/to/models
+```
+
+### Developer installation (git clone)
+
+Required for model training, dataset generation, or contributing to the codebase. The machine learning models are version controlled through [git-lfs](https://www.git-lfs.com).
 
 1. **Clone the repository:**
    ```bash
    git clone git@github.com:dwmoreau/MLI.git
    ```
 
-2. **Retrieve the large files:**
+2. **Retrieve the model files:**
    ```bash
    git lfs fetch --all
    git lfs checkout
