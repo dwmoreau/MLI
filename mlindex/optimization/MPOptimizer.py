@@ -266,14 +266,8 @@ def shutdown_mp_workers(processes, task_queues):
         p.join()
 
 
-def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None):
-    """Worker function for the analytic optimizer (11 Bravais lattices, no ML models).
-
-    Like _mp_worker_fn but restricted to the analytic BL set so workers don't
-    block waiting for init data from unsupported lattices.
-    """
-    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
-                        'oC', 'oF', 'oI', 'oP']
+def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue,
+                           bravais_lattices, fom=None):
     workers = {}
     try:
         for bl in bravais_lattices:
@@ -290,16 +284,13 @@ def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, 
         result_queue.put(e)
 
 
-def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess):
-    """Spawn worker processes and construct MPAnalyticOptimizer managers for 11 analytic BLs.
+def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_lattices):
+    """Spawn worker processes and construct MPAnalyticOptimizer managers for the given BLs.
 
     Returns (optimizers, processes, task_queues).
     Call shutdown_mp_workers(processes, task_queues) when done.
     """
     from mlindex.optimization.AnalyticOptimizer import MPAnalyticOptimizer
-
-    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
-                        'oC', 'oF', 'oI', 'oP']
 
     data_queues   = [Queue() for _ in range(n_procs)]
     result_queues = [Queue() for _ in range(n_procs)]
@@ -308,7 +299,8 @@ def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess):
     processes = []
     for r in range(1, n_procs):
         p = Process(target=_mp_analytic_worker_fn,
-                    args=(r, n_procs, data_queues[r], result_queues[r], task_queues[r]))
+                    args=(r, n_procs, data_queues[r], result_queues[r], task_queues[r],
+                          bravais_lattices))
         p.start()
         processes.append(p)
 

@@ -1,8 +1,28 @@
 import csv
 import joblib
 import json
+import numba
 import numpy as np
 import os
+
+
+@numba.njit(cache=True)
+def _traverse_forest(X, children_left, children_right, features,
+                     thresholds, leaf_values, n_outputs, out):
+    n_trees = children_left.shape[0]
+    n_samples = X.shape[0]
+    for tree_idx in range(n_trees):
+        for sample_idx in range(n_samples):
+            node_id = 0
+            while True:
+                if children_left[tree_idx, node_id] == -1:
+                    for oi in range(n_outputs):
+                        out[sample_idx, oi, tree_idx] = leaf_values[tree_idx, node_id, oi]
+                    break
+                if X[sample_idx, features[tree_idx, node_id]] <= thresholds[tree_idx, node_id]:
+                    node_id = children_left[tree_idx, node_id]
+                else:
+                    node_id = children_right[tree_idx, node_id]
 
 
 class SKLearnManager:
@@ -149,50 +169,53 @@ class SKLearnManager:
             f.write(onnx_model.SerializeToString())
     
     def _save_custom(self, model) -> None:
-        """Save model in custom version-independent format, supporting multi-output trees"""
-        # Save with joblib as backup
-        joblib.dump(model, f"{self.filename}.joblib")
-        
-        # Extract and save essential tree information
+        """Save model in version-independent NPZ format.
+
+        Extracts tree arrays directly from sklearn internals into padded numpy
+        arrays and writes _trees.npz. No joblib or JSON is written here; call
+        _save_sklearn separately if a joblib copy is also needed.
+        """
         if not hasattr(model, 'estimators_'):
             raise ValueError("Custom format only supports ensemble models with estimators_")
-            
-        forest_data = {
-            'n_estimators': len(model.estimators_),
-            'n_features': model.n_features_in_,
-            'trees': []
-        }
-        
-        # Extract each tree's node structure
-        for tree in model.estimators_:
-            tree_dict = {
-                'nodes': [],
-                'values': tree.tree_.value.tolist()
-            }
-            
-            # Convert tree structure to list of node dictionaries
-            for node_id in range(tree.tree_.node_count):
-                node = {
-                    'id': node_id,
-                    'left_child': int(tree.tree_.children_left[node_id]),
-                    'right_child': int(tree.tree_.children_right[node_id]),
-                    'feature': int(tree.tree_.feature[node_id]),
-                    'threshold': float(tree.tree_.threshold[node_id]),
-                    'value_index': node_id
-                }
-                tree_dict['nodes'].append(node)
-            
-            forest_data['trees'].append(tree_dict)
-        
-        # Save as JSON
-        with open(f"{self.filename}_trees.json", 'w') as f:
-            json.dump(forest_data, f)
+
+        n_estimators = len(model.estimators_)
+        n_features   = model.n_features_in_
+        n_outputs    = model.estimators_[0].n_outputs_
+        max_nodes    = max(t.tree_.node_count for t in model.estimators_)
+
+        children_left   = np.full((n_estimators, max_nodes), -1, dtype=np.int32)
+        children_right  = np.full((n_estimators, max_nodes), -1, dtype=np.int32)
+        features_arr    = np.zeros((n_estimators, max_nodes), dtype=np.int32)
+        thresholds      = np.zeros((n_estimators, max_nodes), dtype=np.float64)
+        leaf_values_arr = np.zeros((n_estimators, max_nodes, n_outputs), dtype=np.float64)
+
+        for i, tree in enumerate(model.estimators_):
+            n = tree.tree_.node_count
+            children_left[i, :n]      = tree.tree_.children_left
+            children_right[i, :n]     = tree.tree_.children_right
+            features_arr[i, :n]       = tree.tree_.feature
+            thresholds[i, :n]         = tree.tree_.threshold
+            # tree.tree_.value shape: (n_nodes, n_outputs, max_n_classes)
+            # regression always has max_n_classes == 1
+            leaf_values_arr[i, :n, :] = tree.tree_.value[:, :, 0]
+
+        np.savez(f"{self.filename}_trees.npz",
+                 n_estimators=n_estimators,
+                 n_features=n_features,
+                 children_left=children_left,
+                 children_right=children_right,
+                 features_arr=features_arr,
+                 thresholds=thresholds,
+                 leaf_values_arr=leaf_values_arr)
     
     def _load_sklearn(self):
         """Load sklearn model using joblib"""
         model_path = f"{self.filename}.joblib"
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}\n"
+                "Run 'mlindex-download-models' to fetch the ML models."
+            )
         return joblib.load(model_path)
     
     def _load_onnx(self):
@@ -200,7 +223,10 @@ class SKLearnManager:
         import onnxruntime
         model_path = f"{self.filename}.onnx"
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}\n"
+                "Run 'mlindex-download-models' to fetch the ML models."
+            )
 
         sess_options = onnxruntime.SessionOptions()
         sess_options.intra_op_num_threads = 1
@@ -209,100 +235,61 @@ class SKLearnManager:
         return onnxruntime.InferenceSession(model_path, sess_options)
     
     def _load_custom(self):
-        """Load custom version-independent forest predictor"""
-        model_path = f"{self.filename}_trees.json"
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
-            
-        with open(model_path, 'r') as f:
-            forest_data = json.load(f)
-        
-        return self.VersionIndependentForestPredictor(forest_data)
+        """Load version-independent forest predictor from NPZ."""
+        npz_path = f"{self.filename}_trees.npz"
+        if not os.path.exists(npz_path):
+            raise FileNotFoundError(
+                f"Model file not found: {npz_path}\n"
+                "Run 'mlindex-download-models' to fetch the ML models."
+            )
+        return self.VersionIndependentForestPredictor.from_npz(np.load(npz_path))
     
     class VersionIndependentForestPredictor:
-        """Custom tree-based model implementation that works across sklearn versions"""
-        
-        def __init__(self, forest_data):
-            self.n_estimators = forest_data['n_estimators']
-            self.n_features = forest_data['n_features']
-            self.trees = forest_data['trees']
-        
-        def predict(self, X, n_outputs=None):
-            """
-            Get ensemble prediction, supporting both single-output and multi-output trees.
-            
-            Args:
-                X: Input features
-                
-            Returns:
-                Ensemble predictions
-            """
-            predictions = self.predict_individual_trees(X, n_outputs)
-            
-            # For multi-output, we need to average over the first axis (trees)
-            if predictions.ndim == 3:  # (n_estimators, n_samples, n_outputs)
-                return np.mean(predictions, axis=0)  # -> (n_samples, n_outputs)
-            else:  # (n_estimators, n_samples)
-                return np.mean(predictions, axis=0)  # -> (n_samples,)
-        
+        """Custom tree-based model implementation that works across sklearn versions.
+
+        tree.tree_.value has shape (n_nodes, n_outputs, max_n_classes), so each stored
+        leaf value is a list-of-lists: [[v]] for single-output regression.
+        predict_individual_trees returns (n_samples, n_outputs, n_estimators) to match
+        the shape expected by the sklearn path in SKLearnManager.predict_individual_trees.
+        """
+
+        @classmethod
+        def from_npz(cls, data):
+            obj = cls.__new__(cls)
+            obj.n_estimators    = int(data['n_estimators'])
+            obj.n_features      = int(data['n_features'])
+            obj.children_left   = data['children_left']
+            obj.children_right  = data['children_right']
+            obj.features_arr    = data['features_arr']
+            obj.thresholds      = data['thresholds']
+            obj.leaf_values_arr = data['leaf_values_arr']
+            return obj
+
+        def predict(self, X):
+            # Returns (n_samples,) for single-output regression.
+            preds = self.predict_individual_trees(X, n_outputs=1)
+            # preds: (n_samples, 1, n_estimators) → mean over estimators → (n_samples, 1) → squeeze
+            return np.mean(preds, axis=2)[:, 0]
+
         def predict_individual_trees(self, X, n_outputs=None):
-            """
-            Get predictions from each individual tree, supporting both single-output
-            and multi-output trees.
-            
-            Args:
-                X: Input features of shape (n_samples, n_features)
-                
-            Returns:
-                Individual tree predictions of shape:
-                - For single output: (n_estimators, n_samples)
-                - For multi output: (n_estimators, n_samples, n_outputs)
-            """
+            """Return (n_samples, n_outputs, n_estimators), matching the sklearn backend."""
             if X.ndim == 1:
                 X = X.reshape(1, -1)
-                
-            n_samples = X.shape[0]
-            
-            # Determine output dimensionality from the first tree's values
+
+            X = np.ascontiguousarray(X, dtype=np.float64)
+
             if n_outputs is None:
-                first_leaf_value = self.trees[0]['values'][0]
-                n_outputs = len(first_leaf_value)
-            # Initialize predictions array with appropriate dimensions
-            if n_outputs == 1:
-                individual_preds = np.zeros((n_samples, self.n_estimators))
-            else:
-                individual_preds = np.zeros((n_samples, n_outputs, self.n_estimators))
+                n_outputs = self.leaf_values_arr.shape[2]
 
-            for tree_idx, tree in enumerate(self.trees):
-                nodes = tree['nodes']
-                values = tree['values']
-                
-                for sample_idx, sample in enumerate(X):
-                    # Start at root and traverse tree
-                    node_id = 0
-                    
-                    # Traverse until we reach a leaf
-                    while True:
-                        node = nodes[node_id]
-                        
-                        # Check if we're at a leaf node
-                        if node['left_child'] == -1:  # Leaf node
-                            leaf_value = values[node['value_index']]
-                            
-                            if n_outputs == 1:
-                                individual_preds[sample_idx, tree_idx] = leaf_value[0]
-                            else:
-                                for output_index in range(n_outputs):
-                                    individual_preds[sample_idx, output_index, tree_idx] = leaf_value[output_index][0]
-                            break
-                            
-                        # If not leaf, go left or right based on feature comparison
-                        if sample[node['feature']] <= node['threshold']:
-                            node_id = node['left_child']
-                        else:
-                            node_id = node['right_child']
-
-            return individual_preds
+            n_samples = X.shape[0]
+            out = np.zeros((n_samples, n_outputs, self.n_estimators), dtype=np.float64)
+            _traverse_forest(
+                X,
+                self.children_left, self.children_right,
+                self.features_arr, self.thresholds,
+                self.leaf_values_arr, n_outputs, out,
+            )
+            return out
 
 
 class NeuralNetworkManager:

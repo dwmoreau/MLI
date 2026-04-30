@@ -54,25 +54,28 @@ class AnalyticOptimizer(OptimizerManager):
             self.lattice_system = 'rhombohedral'
         elif bravais_lattice in ['oC', 'oP', 'oF', 'oI']:
             self.lattice_system = 'orthorhombic'
+        elif bravais_lattice in ['mC', 'mP']:
+            self.lattice_system = 'monoclinic'
+        elif bravais_lattice == 'aP':
+            self.lattice_system = 'triclinic'
         else:
             raise ValueError(f'Unsupported bravais lattice for analytic optimizer: {bravais_lattice}')
 
         # Load the pre‑computed HKL reference array (non‑redundant)
         # Get the absolute path to the MLI directory
-        hkl_ref_path = (
-            Path(*files('mlindex').parts[:-1])
-            / 'mlindex'
-            / 'models'
-            / f'{self.lattice_system}_1'
-            / 'data'
-            / f'hkl_ref_{bravais_lattice}.npy'
-        )
-        self.hkl_ref = np.load(hkl_ref_path)
+        with files('mlindex').joinpath(
+            'models', f'{self.lattice_system}_1', 'data', f'hkl_ref_{bravais_lattice}.npy'
+        ).open('rb') as _f:
+            self.hkl_ref = np.load(_f)
         self.hkl_ref_length = self.hkl_ref.shape[0]
 
         # Dimensionality of the reciprocal‑space parameter vector (xnn)
-        dim_map = {'cubic': 1, 'tetragonal': 2, 'hexagonal': 2, 'orthorhombic': 3}
-        self.unit_cell_length = dim_map.get(self.lattice_system, 2)
+        dim_map = {
+            'cubic': 1, 'tetragonal': 2, 'hexagonal': 2, 'rhombohedral': 2,
+            'orthorhombic': 3, 'monoclinic': 4, 'triclinic': 6,
+        }
+        self.unit_cell_length = dim_map[self.lattice_system]
+        self.n_peaks_guess = max(self.n_peaks_guess, self.unit_cell_length)
 
         # Default optimisation parameters (matching the user specification)
         if opt_params is None:
@@ -139,14 +142,14 @@ class AnalyticOptimizer(OptimizerManager):
         n_q2 = q2_permutations.shape[0]
         n_templates = hkl_permutations.shape[0]
         hkl2 = get_hkl_matrix(hkl_permutations, self.lattice_system)
-        candidate_xnn_all = np.zeros((n_templates * n_q2, self.unit_cell_length))
-        index = 0
-        for template_index in range(n_templates):
-            for q2_index in range(n_q2):
-                candidate_xnn_all[index], *_ = np.linalg.lstsq(
-                    hkl2[template_index], q2_permutations[q2_index], rcond=None
-                )
-                index += 1
+        A = np.repeat(hkl2, n_q2, axis=0)
+        b = np.tile(q2_permutations, (n_templates, 1))
+        candidate_xnn_all = np.zeros((n_templates * n_q2, dim))
+        nonsingular = np.abs(np.linalg.det(A)) > 1e-12
+        # linalg.solve gufunc signature is (m,m),(m,n)->(m,n); b needs a trailing dim
+        candidate_xnn_all[nonsingular] = np.linalg.solve(
+            A[nonsingular], b[nonsingular, :, np.newaxis]
+        )[:, :, 0]
 
         candidate_xnn_all = fix_unphysical(
             xnn=candidate_xnn_all,
@@ -155,15 +158,23 @@ class AnalyticOptimizer(OptimizerManager):
             maximum_unit_cell=self.opt_params['maximum_uc'],
             lattice_system=self.lattice_system,
         )
-
+    
         candidate_unit_cells_all = get_unit_cell_from_xnn(
             candidate_xnn_all, partial_unit_cell=True, lattice_system=self.lattice_system
         )
+
         candidate_unit_cells_all = reindex_entry_basic(
             candidate_unit_cells_all,
             lattice_system=self.lattice_system,
             bravais_lattice=self.bravais_lattice,
             space='direct'
+        )
+        candidate_unit_cells_all = fix_unphysical(
+            unit_cell=candidate_unit_cells_all,
+            rng=self.rng,
+            minimum_unit_cell=self.opt_params['minimum_uc'],
+            maximum_unit_cell=self.opt_params['maximum_uc'],
+            lattice_system=self.lattice_system,
         )
         candidate_xnn_all = get_xnn_from_unit_cell(
             candidate_unit_cells_all,

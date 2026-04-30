@@ -1,11 +1,11 @@
 import numpy as np
 
-from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 
 
 def add_q2_error(q2, hkl, multiplier, rng):
+    from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
     q2_error_params = get_peak_generation_info()['q2_error_params']
     sigma_error = multiplier * (q2_error_params[0] + q2 * q2_error_params[1])
     q2 += rng.normal(loc=0, scale=sigma_error)
@@ -20,6 +20,7 @@ def add_q2_error(q2, hkl, multiplier, rng):
 
 
 def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False):
+    from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
     q2_broadening_params = get_peak_generation_info()['broadening_params']
     # Breadth is specified as a linear model in q
     # Breadth in q^2 comes from error propagation

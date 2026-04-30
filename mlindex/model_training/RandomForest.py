@@ -257,41 +257,23 @@ class RandomForest:
                     self.model_params['max_depth'] = int(params[key])
 
         if self.lattice_system == 'cubic':
-            #self.random_forest_regressor = SKLearnManager(
-            #    filename=os.path.join(
-            #        f'{self.save_to}',
-            #        f'{self.group}_random_forest_regressor'
-            #        ),
-            #    model_type='custom'
-            #    )
             self.random_forest_regressor = SKLearnManager(
                 filename=os.path.join(
                     f'{self.save_to}',
                     f'{self.group}_random_forest_regressor'
                     ),
-                model_type='sklearn'
+                model_type='custom'
                 )
             self.random_forest_regressor.load()
         else:
             self.random_forest_regressor = []
             for ratio_index in range(self.model_params['n_dominant_zone_bins']):
-                """
                 model_manager = SKLearnManager(
                     filename=os.path.join(
                         f'{self.save_to}',
                         f'{self.group}_{ratio_index}_random_forest_regressor'
                         ),
                     model_type='custom'
-                    )
-                model_manager.load()
-                self.random_forest_regressor.append(model_manager)
-                """
-                model_manager = SKLearnManager(
-                    filename=os.path.join(
-                        f'{self.save_to}',
-                        f'{self.group}_{ratio_index}_random_forest_regressor'
-                        ),
-                    model_type='sklearn'
                     )
                 model_manager.load()
                 self.random_forest_regressor.append(model_manager)

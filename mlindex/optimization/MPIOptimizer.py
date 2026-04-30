@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import scipy.spatial
 
@@ -11,6 +12,54 @@ from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
+
+
+def _downsample_chunk(args):
+    (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk,
+     n_indexed_triplets_chunk, M_triplets_chunk, downsample_radius, has_triplets) = args
+    while True:
+        distance = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk)
+        neighbor_array = distance < downsample_radius
+        neighbor_count = np.sum(neighbor_array, axis=1)
+        if neighbor_count.size == 0 or neighbor_count.max() <= 1:
+            break
+        highest_density_index = np.argmax(neighbor_count)
+        neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
+        if has_triplets:
+            best_neighbor = np.argmax(np.sum(M_triplets_chunk[neighbor_indices], axis=1))
+        else:
+            best_neighbor = np.argmax(M20_chunk[neighbor_indices])
+        xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
+        M20_best_neighbor = M20_chunk[neighbor_indices][best_neighbor]
+        Minfo_best_neighbor = Minfo_chunk[neighbor_indices][best_neighbor]
+        n_indexed_best_neighbor = n_indexed_chunk[neighbor_indices][best_neighbor]
+        spacegroup_best_neighbor = [spacegroup_chunk[i] for i in neighbor_indices][best_neighbor]
+        if has_triplets:
+            n_indexed_triplets_best_neighbor = n_indexed_triplets_chunk[neighbor_indices][best_neighbor]
+            M_triplets_best_neighbor = M_triplets_chunk[neighbor_indices][best_neighbor]
+        else:
+            n_indexed_triplets_best_neighbor = None
+            M_triplets_best_neighbor = None
+        xnn_chunk = np.row_stack((np.delete(xnn_chunk, neighbor_indices, axis=0), xnn_best_neighbor))
+        M20_chunk = np.concatenate((np.delete(M20_chunk, neighbor_indices), [M20_best_neighbor]))
+        Minfo_chunk = np.concatenate((np.delete(Minfo_chunk, neighbor_indices), [Minfo_best_neighbor]))
+        n_indexed_chunk = np.concatenate((np.delete(n_indexed_chunk, neighbor_indices), [n_indexed_best_neighbor]))
+        if has_triplets:
+            n_indexed_triplets_chunk = np.concatenate((
+                np.delete(n_indexed_triplets_chunk, neighbor_indices),
+                [n_indexed_triplets_best_neighbor]
+            ))
+            M_triplets_chunk = np.row_stack((
+                np.delete(M_triplets_chunk, neighbor_indices, axis=0),
+                M_triplets_best_neighbor
+            ))
+        # neighbor indices are sorted in increasing order and must be reversed
+        # for this pop to remove them correctly.
+        for i in neighbor_indices[::-1]:
+            spacegroup_chunk.pop(i)
+        spacegroup_chunk += [spacegroup_best_neighbor]
+    return (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk,
+            n_indexed_triplets_chunk, M_triplets_chunk)
 
 
 class OptimizerBase:
@@ -501,92 +550,43 @@ class OptimizerManager(OptimizerBase):
         chunk_size = 1000
         n_chunks = best_xnn_all.shape[0] // chunk_size + 1
 
+        has_triplets = self.triplets is not None
+        downsample_radius = self.opt_params['downsample_radius']
+
+        chunk_args = []
+        for chunk_index in range(n_chunks):
+            start = chunk_index * chunk_size
+            end = None if chunk_index == n_chunks - 1 else (chunk_index + 1) * chunk_size
+            chunk_args.append((
+                best_xnn_all[start:end],
+                best_M20_all[start:end],
+                best_Minfo_all[start:end],
+                best_n_indexed_all[start:end],
+                best_spacegroup_all[start:end],
+                best_n_indexed_triplets_all[start:end] if has_triplets else None,
+                best_M_triplets_all[start:end] if has_triplets else None,
+                downsample_radius,
+                has_triplets,
+            ))
+
+        with ThreadPoolExecutor(max_workers=self.n_ranks) as ex:
+            chunk_results = list(ex.map(_downsample_chunk, chunk_args))
+
         xnn_downsampled = []
         M20_downsampled = []
         Minfo_downsampled = []
         n_indexed_downsampled = []
-        if not self.triplets is None:
+        if has_triplets:
             n_indexed_triplets_downsampled = []
             M_triplets_downsampled = []
         spacegroup_downsampled = []
-        for chunk_index in range(n_chunks):
-            if chunk_index == n_chunks - 1:
-                xnn_chunk = best_xnn_all[chunk_index * chunk_size:]
-                M20_chunk = best_M20_all[chunk_index * chunk_size:]
-                Minfo_chunk = best_Minfo_all[chunk_index * chunk_size:]
-                n_indexed_chunk = best_n_indexed_all[chunk_index * chunk_size:]
-                spacegroup_chunk = best_spacegroup_all[chunk_index * chunk_size:]
-                if not self.triplets is None:
-                    n_indexed_triplets_chunk = best_n_indexed_triplets_all[chunk_index * chunk_size:]
-                    M_triplets_chunk = best_M_triplets_all[chunk_index * chunk_size:]
-            else:
-                xnn_chunk = best_xnn_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                M20_chunk = best_M20_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                Minfo_chunk = best_Minfo_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                n_indexed_chunk = best_n_indexed_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                spacegroup_chunk = best_spacegroup_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                if not self.triplets is None:
-                    n_indexed_triplets_chunk = best_n_indexed_triplets_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-                    M_triplets_chunk = best_M_triplets_all[chunk_index * chunk_size: (chunk_index + 1) * chunk_size]
-            status = True
-            while status:
-                distance = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk)
-                neighbor_array = distance < self.opt_params['downsample_radius']
-                neighbor_count = np.sum(neighbor_array, axis=1)
-                if neighbor_count.size > 0 and neighbor_count.max() > 1:
-                    highest_density_index = np.argmax(neighbor_count)
-                    neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
-                    if self.triplets is None:
-                        best_neighbor = np.argmax(M20_chunk[neighbor_indices])
-                    else:
-                        best_neighbor = np.argmax(
-                            np.sum(M_triplets_chunk[neighbor_indices], axis=1)
-                            )
-                    xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
-                    M20_best_neighbor = M20_chunk[neighbor_indices][best_neighbor]
-                    Minfo_best_neighbor = Minfo_chunk[neighbor_indices][best_neighbor]
-                    n_indexed_best_neighbor = n_indexed_chunk[neighbor_indices][best_neighbor]
-                    spacegroup_best_neighbor = [spacegroup_chunk[i] for i in neighbor_indices][best_neighbor]
-                    if not self.triplets is None:
-                        n_indexed_triplets_best_neighbor = n_indexed_triplets_chunk[neighbor_indices][best_neighbor]
-                        M_triplets_best_neighbor = M_triplets_chunk[neighbor_indices][best_neighbor]
-                    xnn_chunk = np.row_stack((
-                        np.delete(xnn_chunk, neighbor_indices, axis=0),
-                        xnn_best_neighbor
-                        ))
-                    M20_chunk = np.concatenate((
-                        np.delete(M20_chunk, neighbor_indices),
-                        [M20_best_neighbor]
-                        ))
-                    Minfo_chunk = np.concatenate((
-                        np.delete(Minfo_chunk, neighbor_indices),
-                        [Minfo_best_neighbor]
-                        ))
-                    n_indexed_chunk = np.concatenate((
-                        np.delete(n_indexed_chunk, neighbor_indices),
-                        [n_indexed_best_neighbor]
-                        ))
-                    if not self.triplets is None:
-                        n_indexed_triplets_chunk = np.concatenate((
-                            np.delete(n_indexed_triplets_chunk, neighbor_indices),
-                            [n_indexed_triplets_best_neighbor]
-                            ))
-                        M_triplets_chunk = np.row_stack((
-                            np.delete(M_triplets_chunk, neighbor_indices, axis=0),
-                            M_triplets_best_neighbor
-                            ))
-                    # neighbor indices are sorted in increasing order and must be reversed
-                    # for this pop to remove them correctly.
-                    for i in neighbor_indices[::-1]:
-                        spacegroup_chunk.pop(i)
-                    spacegroup_chunk += [spacegroup_best_neighbor]
-                else:
-                    status = False
+        for (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk,
+             n_indexed_triplets_chunk, M_triplets_chunk) in chunk_results:
             xnn_downsampled.append(xnn_chunk)
             M20_downsampled.append(M20_chunk)
             Minfo_downsampled.append(Minfo_chunk)
             n_indexed_downsampled.append(n_indexed_chunk)
-            if not self.triplets is None:
+            if has_triplets:
                 n_indexed_triplets_downsampled.append(n_indexed_triplets_chunk)
                 M_triplets_downsampled.append(M_triplets_chunk)
             spacegroup_downsampled += spacegroup_chunk
