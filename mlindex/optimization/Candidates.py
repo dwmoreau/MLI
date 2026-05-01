@@ -423,22 +423,13 @@ class Candidates:
                             mult_factors[mf_index, 5] = np.sqrt(mf0 * mf1)
                         mf_index += 1
 
-        # This is really slow. So only look at the top 10% of candidates.
-        n_test = int(0.1 * self.n)
-        test_indices = np.argsort(self.best_M20)[::-1][:n_test]
-        if not self.triplets is None:
-            test_indices = np.unique(np.concatenate((
-                test_indices,
-                np.argsort(np.sum(self.best_M_triplets, axis=1))[::-1][:n_test]
-                )))
-            n_test = test_indices.size
-        M20 = np.zeros([n_test, mult_factors.shape[0]])
-        hkl = np.zeros([n_test, mult_factors.shape[0], self.n_peaks, 3])
-        xnn_all = np.zeros([n_test, mult_factors.shape[0], self.best_xnn.shape[1]])
+        M20 = np.zeros([self.n, mult_factors.shape[0]])
+        hkl = np.zeros([self.n, mult_factors.shape[0], self.n_peaks, 3])
+        xnn_all = np.zeros([self.n, mult_factors.shape[0], self.best_xnn.shape[1]])
         if self.zero_error:
-            zeropoint = np.zeros([n_test, mult_factors.shape[0]])
+            zeropoint = np.zeros([self.n, mult_factors.shape[0]])
         for mf_index in range(mult_factors.shape[0]):
-            xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn[test_indices]
+            xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn
             xnn_mult = fix_unphysical(
                 xnn=xnn_mult,
                 rng=self.rng,
@@ -452,7 +443,7 @@ class Candidates:
             q2_calc_mult = np.take_along_axis(q2_ref_calc_mult, hkl_assign, axis=1)
             if self.zero_error:
                 target_function_zp = CandidateOptLoss(
-                    np.repeat(self.q2_obs[np.newaxis], n_test, axis=0),
+                    np.repeat(self.q2_obs[np.newaxis], self.n, axis=0),
                     lattice_system=self.lattice_system,
                     )
                 target_function_zp.update(hkl[:, mf_index], xnn_mult)
@@ -550,22 +541,10 @@ class Candidates:
         hkl_ref_sg = get_spacegroup_hkl_ref(self.hkl_ref, bravais_lattice=self.bravais_lattice)
         spacegroups = list(hkl_ref_sg.keys())
 
-        if self.bravais_lattice == 'oP':
-            # This is only significantly time consuming for primitive orthorhombic.
-            # So just look at the top 10% of candidates.
-            n_test = int(0.1*self.n)
-            test_indices = np.argsort(self.best_M20)[::-1][:n_test]
-            M20 = np.zeros((n_test, len(spacegroups)))
-            hkl = np.zeros([n_test, self.n_peaks, 3, len(spacegroups)])
-            best_xnn = self.best_xnn[test_indices]
-            if self.zero_error:
-                best_zeropoint = self.best_zeropoint[test_indices]
-        else:
-            M20 = np.zeros((self.n, len(spacegroups)))
-            hkl = np.zeros([self.n, self.n_peaks, 3, len(spacegroups)])
-            best_xnn = self.best_xnn
-            if self.zero_error:
-                best_zeropoint = self.best_zeropoint
+        M20 = np.zeros((self.n, len(spacegroups)))
+        hkl = np.zeros([self.n, self.n_peaks, 3, len(spacegroups)])
+        if self.zero_error:
+            best_zeropoint = self.best_zeropoint
 
         for spacegroup_index, spacegroup in enumerate(spacegroups):
             q2_ref_calc = Q2Calculator(
@@ -573,11 +552,11 @@ class Candidates:
                 hkl=hkl_ref_sg[spacegroup],
                 tensorflow=False,
                 representation='xnn'
-                ).get_q2(best_xnn)
+                ).get_q2(self.best_xnn)
 
             if self.zero_error:
                 target_function_zp = CandidateOptLoss(
-                    np.repeat(self.q2_obs[np.newaxis], best_xnn.shape[0], axis=0),
+                    np.repeat(self.q2_obs[np.newaxis], self.best_xnn.shape[0], axis=0),
                     lattice_system=self.lattice_system,
                 )
                 q2_ref_calc = target_function_zp.apply_zeropoint(
@@ -590,24 +569,11 @@ class Candidates:
 
         # M_triplet is unaffected by unindexed peaks and therefore spacegroup assignment.
         best_indices = np.argmax(M20, axis=1)
-        best_spacegroup = list(np.take(spacegroups, best_indices))
-        best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
-        best_hkl = np.take_along_axis(
+        self.best_spacegroup = list(np.take(spacegroups, best_indices))
+        self.best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
+        self.best_hkl = np.take_along_axis(
             hkl, best_indices[:, np.newaxis, np.newaxis, np.newaxis], axis=3
             )[:, :, :, 0]
-
-        if self.bravais_lattice == 'oP':
-            # The first element of the returned spacegroups should be the lowest symmetry case.
-            # This should be verified
-            self.best_spacegroup = [spacegroups[0] for i in range(self.n)]
-            for index, test_index in enumerate(test_indices):
-                self.best_spacegroup[test_index] = best_spacegroup[index]
-            self.best_M20[test_indices] = best_M20
-            self.best_hkl[test_indices] = best_hkl
-        else:
-            self.best_spacegroup = best_spacegroup
-            self.best_M20 = best_M20
-            self.best_hkl = best_hkl
 
         #if not self.triplets is None:
         #    self.best_M_triplets = get_M_triplet_from_xnn(
