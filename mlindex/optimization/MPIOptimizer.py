@@ -124,6 +124,7 @@ class OptimizerBase:
         # each axis. This also performs a quick reindexing.
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
+        candidates.prune_below_m20()
         candidates.refine_cell()
         candidates.standardize_cell()
         candidates.correct_off_by_two()

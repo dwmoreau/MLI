@@ -82,7 +82,7 @@ class AnalyticOptimizer(OptimizerManager):
             iteration_info = [
                 {
                     'worker': 'deterministic',
-                    'n_iterations': 2,
+                    'n_iterations': 1,
                     'triplet_opt': False,
                 },
                 {

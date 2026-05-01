@@ -324,6 +324,19 @@ class Candidates:
         if self.zero_error:
             self.best_zeropoint[improved] = refined_zeropoint[improved]
 
+    def prune_below_m20(self, threshold=5.0):
+        keep = self.best_M20 >= threshold
+        if not np.any(keep):
+            keep[np.argmax(self.best_M20)] = True
+        self.best_xnn = self.best_xnn[keep]
+        self.best_M20 = self.best_M20[keep]
+        self.best_hkl = self.best_hkl[keep]
+        if self.triplets is not None:
+            self.best_M_triplets = self.best_M_triplets[keep]
+        if self.zero_error:
+            self.best_zeropoint = self.best_zeropoint[keep]
+        self.n = self.best_xnn.shape[0]
+
     def standardize_cell(self):
         # These do a quick standardization of monoclinic and triclinic candidates. It is just a
         # Selling reduction.
