@@ -16,6 +16,12 @@ from mlindex.utilities.UnitCellTools import (
 from mlindex.optimization.MPOptimizer import LocalComm
 
 
+_N_PEAKS_KEPT = {
+    'cubic': 2, 'tetragonal': 3, 'hexagonal': 3, 'rhombohedral': 3,
+    'orthorhombic': 6, 'monoclinic': 6, 'triclinic': 8,
+}
+
+
 class AnalyticOptimizer(OptimizerManager):
     """Analytic optimizer using a guess‑and‑check candidate generation.
 
@@ -89,7 +95,7 @@ class AnalyticOptimizer(OptimizerManager):
                     'worker': 'random_subsampling',
                     'n_iterations': 5,
                     'n_peaks': n_peaks,
-                    'n_drop': n_peaks // 2,
+                    'n_drop': max(0, n_peaks - _N_PEAKS_KEPT[self.lattice_system]),
                     'triplet_opt': True,
                     'uniform_sampling': False,
                 }
