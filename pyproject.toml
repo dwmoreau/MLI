@@ -39,6 +39,13 @@ dependencies = [
 mpi = ["mpi4py"]
 dataset_generation = ["pyarrow", "openpyxl", "tqdm"]
 training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: CLI integration tests (run with --runslow)",
+]
 
 [project.scripts]
 "mlindex.run" = "mlindex.command_line.run:main"
