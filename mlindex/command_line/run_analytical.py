@@ -19,7 +19,7 @@ import numpy as np
 
 from mlindex.optimization.AnalyticOptimizer import AnalyticOptimizer
 from mlindex.optimization.MPIOptimizer import OptimizerWorker
-from mlindex.command_line.run import _load_peaks, _collect_results, _write_results
+from mlindex.command_line.run import _load_peaks, _collect_results, _write_results, _conventional_cell
 
 _ALL_ANALYTIC_BL = ["cF", "cI", "cP", "hP", "hR", "tI", "tP", "oC", "oF", "oI", "oP", "mC", "mP", "aP"]
 
@@ -110,6 +110,7 @@ def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed
         optimizer.run(q2=q2_obs, zero_error=args.zero_error, wavelength=args.wavelength)
         all_results = _collect_results(optimizer, bl, all_results)
 
+    all_results = _conventional_cell(all_results)
     output_file_base = str(Path(args.output_file).with_suffix(''))
     _write_results(all_results, output_file_base=output_file_base)
 
@@ -134,6 +135,7 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=123
             all_results = _collect_results(optimizers[bl], bl, all_results)
     finally:
         shutdown_mp_workers(processes, task_queues)
+    all_results = _conventional_cell(all_results)
     output_file_base = str(Path(args.output_file).with_suffix(''))
     _write_results(all_results, output_file_base=output_file_base)
 
@@ -164,6 +166,7 @@ def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12
             all_results = _collect_results(optimizer, bl, all_results)
 
     if rank == 0:
+        all_results = _conventional_cell(all_results)
         output_file_base = str(Path(args.output_file).with_suffix(''))
         _write_results(all_results, output_file_base=output_file_base)
 

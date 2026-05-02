@@ -201,6 +201,94 @@ def _write_results(output_data, output_file_base='indexing_results'):
     print(output_df[:20].to_string())
 
 
+_CS_CENTRING_TO_BL = {
+    ('Cubic', 'P'): 'cP', ('Cubic', 'I'): 'cI', ('Cubic', 'F'): 'cF',
+    ('Hexagonal', 'P'): 'hP',
+    ('Trigonal', 'R'): 'hR', ('Trigonal', 'P'): 'hP',
+    ('Tetragonal', 'P'): 'tP', ('Tetragonal', 'I'): 'tI',
+    ('Orthorhombic', 'P'): 'oP', ('Orthorhombic', 'C'): 'oC',
+    ('Orthorhombic', 'F'): 'oF', ('Orthorhombic', 'I'): 'oI',
+    ('Monoclinic', 'P'): 'mP', ('Monoclinic', 'C'): 'mC',
+    ('Triclinic', 'P'): 'aP',
+}
+
+_BL_RANK = {
+    'aP': 0,
+    'mP': 1, 'mC': 1,
+    'oP': 2, 'oC': 2, 'oF': 2, 'oI': 2,
+    'tP': 3, 'tI': 3,
+    'hP': 4, 'hR': 4,
+    'cP': 5, 'cI': 5, 'cF': 5,
+}
+
+
+def _is_same_cell(e1, e2, rtol, atol_deg):
+    for key in ('a', 'b', 'c'):
+        mean = 0.5 * (e1[key] + e2[key])
+        if abs(e1[key] - e2[key]) / mean > rtol:
+            return False
+    for key in ('alpha', 'beta', 'gamma'):
+        if abs(e1[key] - e2[key]) > atol_deg:
+            return False
+    return True
+
+
+def _conventional_cell(output_data, delta=0.1):
+    """Promote entries to their highest-symmetry equivalent Bravais lattice
+    using cctbx metric_subgroups, update spacegroup/BL fields, then deduplicate
+    near-identical cells within the same Bravais lattice (keeping highest M20).
+    """
+    from cctbx import crystal as cctbx_crystal
+    from cctbx.sgtbx.lattice_symmetry import metric_subgroups
+
+    updated = []
+    for entry in output_data:
+        uc_params = (entry['a'], entry['b'], entry['c'],
+                     entry['alpha'], entry['beta'], entry['gamma'])
+        sym = cctbx_crystal.symmetry(unit_cell=uc_params, space_group_symbol='P 1')
+        groups = metric_subgroups(sym, delta, enforce_max_delta_for_generated_two_folds=True)
+
+        best_bl = entry['bravais_lattice']
+        best_uc = uc_params
+        best_volume = entry['volume']
+        best_sg = entry.get('spacegroup')
+
+        for group in groups.result_groups:
+            best_subsym = group['best_subsym']
+            sg = best_subsym.space_group()
+            cs = sg.crystal_system()
+            centring = sg.conventional_centring_type_symbol()
+            candidate_bl = _CS_CENTRING_TO_BL.get((cs, centring))
+            if candidate_bl is None:
+                continue
+            if _BL_RANK.get(candidate_bl, 0) > _BL_RANK.get(best_bl, 0):
+                best_bl = candidate_bl
+                best_uc = best_subsym.unit_cell().parameters()
+                best_volume = best_subsym.unit_cell().volume()
+                best_sg = best_subsym.space_group_info().type().lookup_symbol()
+
+        new_entry = dict(entry)
+        new_entry['bravais_lattice'] = best_bl
+        new_entry['a'], new_entry['b'], new_entry['c'] = best_uc[0], best_uc[1], best_uc[2]
+        new_entry['alpha'], new_entry['beta'], new_entry['gamma'] = best_uc[3], best_uc[4], best_uc[5]
+        new_entry['volume'] = best_volume
+        if 'spacegroup' in new_entry:
+            new_entry['spacegroup'] = best_sg
+        updated.append(new_entry)
+
+    updated.sort(key=lambda e: e['M20'], reverse=True)
+    kept = []
+    for entry in updated:
+        is_dup = any(
+            ref['bravais_lattice'] == entry['bravais_lattice']
+            and _is_same_cell(entry, ref, rtol=0.005, atol_deg=0.5)
+            for ref in kept
+        )
+        if not is_dup:
+            kept.append(entry)
+    return kept
+
+
 def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
                   top_n_indexed, top_M_triplets, top_n_indexed_triplets, triplet_obs):
     output_data = []
@@ -217,6 +305,7 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
             M_triplets=top_M_triplets[bl] if triplet_obs is not None else None,
             n_indexed_triplets=top_n_indexed_triplets[bl] if triplet_obs is not None else None,
         )
+    output_data = _conventional_cell(output_data)
     _write_results(output_data, output_file_base='indexing_results')
 
 
