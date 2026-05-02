@@ -25,7 +25,7 @@ license = "MIT"
 license-files = ["LICEN[CS]E*"]
 
 dependencies = [
-    "gemmi",
+    "cctbx-base",
     "matplotlib",
     "numpy",
     "numba",
@@ -37,7 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mpi = ["mpi4py"]
-dataset_generation = ["pyarrow", "openpyxl", "tqdm"]
+dataset_generation = ["gemmi", "pyarrow", "openpyxl", "tqdm"]
 training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]
 dev = ["pytest"]
 

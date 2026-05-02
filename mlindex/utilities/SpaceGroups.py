@@ -2,7 +2,7 @@ import numpy as np
 
 
 def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
-    import gemmi
+    from cctbx import sgtbx
 
     # https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
     if bravais_lattice == "cF":
@@ -342,28 +342,16 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
     elif bravais_lattice == "aP":
         spacegroups = ["P 1"]
         extinction_groups = ["P -"]
-    """
-    hkl_ref_sg = dict.fromkeys(spacegroups)
-    for spacegroup in spacegroups:
-        if bravais_lattice == 'hR':
-            # gemmi gives the systematic absences for rhombohedral in the hexagonal setting.
-            # The ':R' component tells gemmi to use the rhombohedral setting
-            ops = gemmi.SpaceGroup(f'{spacegroup}:R').operations()
-        else:
-            ops = gemmi.SpaceGroup(spacegroup).operations()
-        systematically_absent = ops.systematic_absences(hkl_ref)
-        hkl_ref_sg[spacegroup] = hkl_ref[np.invert(systematically_absent)]
-    """
+
     keys = [f"{i} e.g. {j}" for i, j in zip(extinction_groups, spacegroups)]
     hkl_ref_sg = dict.fromkeys(keys)
     for index, key in enumerate(keys):
         if bravais_lattice == "hR":
-            # gemmi gives the systematic absences for rhombohedral in the hexagonal setting.
-            # The ':R' component tells gemmi to use the rhombohedral setting
-            ops = gemmi.SpaceGroup(f"{spacegroups[index]}:R").operations()
+            # sgtbx defaults to the hexagonal setting for R groups; ':R' requests rhombohedral
+            sg = sgtbx.space_group_info(f"{spacegroups[index]} :R").group()
         else:
-            ops = gemmi.SpaceGroup(spacegroups[index]).operations()
-        systematically_absent = ops.systematic_absences(hkl_ref)
+            sg = sgtbx.space_group_info(spacegroups[index]).group()
+        systematically_absent = np.array([sg.is_sys_absent(tuple(hkl)) for hkl in hkl_ref])
         hkl_ref_sg[key] = hkl_ref[np.invert(systematically_absent)]
     return hkl_ref_sg
 
