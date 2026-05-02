@@ -265,3 +265,5 @@ mlindex/models/cubic_1/template/cF_template_regressor_cubic_1.onnx filter=lfs di
 *_trees.npz filter=lfs diff=lfs merge=lfs -text
 *_pitf_weights_*_quantized.onnx filter=lfs diff=lfs merge=lfs -text
 *_calibration_weights_*_quantized.onnx filter=lfs diff=lfs merge=lfs -text
+tests/expected/*.npy filter=lfs diff=lfs merge=lfs -text
+tests/expected/*.json filter=lfs diff=lfs merge=lfs -text
