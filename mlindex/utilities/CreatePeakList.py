@@ -15,22 +15,22 @@ import sklearn.metrics
 import subprocess
 
 
-def slice_refls(q2_obs, s1, start, refl_counts, refl_mask, mask):
+def slice_refls(q2_obs, s1_lab, start, refl_counts, refl_mask, mask):
     if mask:
         expt_refl_mask = refl_mask[start: start + refl_counts]
         expt_q2_obs = q2_obs[start: start + refl_counts][expt_refl_mask]
-        expt_s1 = s1[start: start + refl_counts][expt_refl_mask]
+        expt_s1_lab = s1_lab[start: start + refl_counts][expt_refl_mask]
     else:
         expt_q2_obs = q2_obs[start: start + refl_counts]
-        expt_s1 = s1[start: start + refl_counts]
+        expt_s1_lab = s1_lab[start: start + refl_counts]
     start += refl_counts
-    return expt_q2_obs, expt_s1, start
+    return expt_q2_obs, expt_s1_lab, start
 
 
-def get_scattering_vectors(s0, s1):
+def get_scattering_vectors(s0, s1_lab):
     wavelength = 1 / np.linalg.norm(s0)
-    s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
-    q = s1_normed - s0
+    s1 = s1_lab / (wavelength * np.linalg.norm(s1_lab, axis=1)[:, np.newaxis])
+    q = s1 - s0
     return q
 
 
@@ -193,7 +193,7 @@ class PeakListCreator:
             self.s0 = np.load(
                 os.path.join(self.save_to_directory, f'{self.tag}_s0.npy'),
                 )
-            self.s1 = np.load(
+            self.s1_lab = np.load(
                 os.path.join(self.save_to_directory, f'{self.tag}_s1.npy'),
                 )
         self.beam_delta = np.zeros(2)
@@ -285,15 +285,15 @@ class PeakListCreator:
             )
     
     def _get_s1_from_xyz(self, panel, xyz, wavelength):
-        s1 = flumpy.to_numpy(
+        s1_lab = flumpy.to_numpy(
                 panel.get_lab_coord(panel.pixel_to_millimeter(flex.vec2_double(
                     flex.double(xyz[:, 0].ravel()),
                     flex.double(xyz[:, 1].ravel())
                 )))
             )
-        # s1 is the vector going from the interation point to the peak with magnitude 1/wavelength
-        s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
-        return s1_normed, s1
+        # s1 has magnitude 1/wavelength
+        s1 = s1_lab / (wavelength * np.linalg.norm(s1_lab, axis=1)[:, np.newaxis])
+        return s1, s1_lab
 
     def _get_q2_from_xyz(self, panel, xyz, s0):
         return np.array([1 / panel.get_resolution_at_pixel(s0, xyz[i][0:2])**2 for i in range(len(xyz))])
@@ -309,7 +309,7 @@ class PeakListCreator:
         expts = ExperimentList.from_file(self.expt_file_name, check_format=False)
         refls = flex.reflection_table.from_file(self.refl_file_name)
         q2 = []
-        s1 = []
+        s1_lab = []
         s0 = []
         expt_indices = []
         refl_counts = []
@@ -318,35 +318,34 @@ class PeakListCreator:
             if len(refls_expt) > 0:
                 wavelength = expt.beam.get_wavelength()
                 s0_lattice = expt.beam.get_s0() #|s0| = 1/wavelength
-                # s1 is the vector going from the interaction point to the crystal
-                # s1_normed has magnitude 1/wavelength
-                s1_normed_lattice = []
+                # s1 has magnitude 1/wavelength; s1_lab is the raw lab coordinate vector
                 s1_lattice = []
+                s1_lab_lattice = []
                 for panel_index, panel in enumerate(expt.detector):
                     refls_panel = refls_expt.select(refls_expt['panel'] == panel_index)
                     if len(refls_panel) > 0:
-                        s1_normed_panel, s1_panel = self._get_s1_from_xyz(
-                            panel, 
-                            flumpy.to_numpy(refls_panel['xyzobs.px.value']), 
+                        s1_panel, s1_lab_panel = self._get_s1_from_xyz(
+                            panel,
+                            flumpy.to_numpy(refls_panel['xyzobs.px.value']),
                             wavelength,
                             )
-                        s1_normed_lattice.append(s1_normed_panel)
                         s1_lattice.append(s1_panel)
-                s1_lattice = np.row_stack(s1_lattice)
-                refl_counts.append(s1_lattice.shape[0])
-                # s0 and s1 are retained for constructing secondary peaks and beam center optimization
-                s1.append(np.row_stack(s1_lattice))
+                        s1_lab_lattice.append(s1_lab_panel)
+                s1_lab_lattice = np.row_stack(s1_lab_lattice)
+                refl_counts.append(s1_lab_lattice.shape[0])
+                # s0 and s1_lab are retained for constructing secondary peaks and beam center optimization
+                s1_lab.append(np.row_stack(s1_lab_lattice))
                 s0.append(s0_lattice)
-                expt_indices.append(expt_index*np.ones(s1_lattice.shape[0], dtype=int))
+                expt_indices.append(expt_index*np.ones(s1_lab_lattice.shape[0], dtype=int))
                 # q2_lattice is the magnitude**2 of the scattering vector
                 q2.append(self._get_q2_spacing(
-                    np.row_stack(s1_normed_lattice), s0_lattice)
+                    np.row_stack(s1_lattice), s0_lattice)
                     )
         self.q2_obs = np.concatenate(q2)
         self.refl_counts = np.array(refl_counts)
         self.expt_indices = np.concatenate(expt_indices)
         self.s0 = np.row_stack(s0)
-        self.s1 = np.row_stack(s1)
+        self.s1_lab = np.row_stack(s1_lab)
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_q2_obs.npy'),
             self.q2_obs
@@ -365,7 +364,7 @@ class PeakListCreator:
             )
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_s1.npy'),
-            self.s1
+            self.s1_lab
             )
 
     def quick_mask(self, n_bins=1000, threshold=20, pad=5, llur=None):
@@ -378,17 +377,17 @@ class PeakListCreator:
         """
         # Array rows are coordinate y
         # Array cols are coordinate x
-        bins_x = np.linspace(self.s1[:, 1].min(), self.s1[:, 1].max(), n_bins + 1)
-        bins_y = np.linspace(self.s1[:, 0].min(), self.s1[:, 0].max(), n_bins + 1)
+        bins_x = np.linspace(self.s1_lab[:, 1].min(), self.s1_lab[:, 1].max(), n_bins + 1)
+        bins_y = np.linspace(self.s1_lab[:, 0].min(), self.s1_lab[:, 0].max(), n_bins + 1)
         centers_x = (bins_x[1:] + bins_x[:-1]) / 2
         centers_y = (bins_y[1:] + bins_y[:-1]) / 2
 
         # 2D histogram of the reflection positions
-        hist, _, _ = np.histogram2d(x=self.s1[:, 1], y=self.s1[:, 0], bins=[bins_x, bins_y])
+        hist, _, _ = np.histogram2d(x=self.s1_lab[:, 1], y=self.s1_lab[:, 0], bins=[bins_x, bins_y])
 
         # This maps the reflections onto the histogram coordinates
-        refl_x = np.searchsorted(bins_x, self.s1[:, 1]) - 1
-        refl_y = np.searchsorted(bins_y, self.s1[:, 0]) - 1
+        refl_x = np.searchsorted(bins_x, self.s1_lab[:, 1]) - 1
+        refl_y = np.searchsorted(bins_y, self.s1_lab[:, 0]) - 1
         refl_x[refl_x == -1] = 0
         refl_y[refl_y == -1] = 0
 
@@ -396,14 +395,14 @@ class PeakListCreator:
         # the detector distance of the reflections in the xy bin. This does not work though.
         # Using the same detector distance of 
         #centers_z, _, _, _ = scipy.stats.binned_statistic_2d(
-        #    x=self.s1[:, 1],
-        #    y=self.s1[:, 0], 
-        #    values=self.s1[:, 2],
+        #    x=self.s1_lab[:, 1],
+        #    y=self.s1_lab[:, 0], 
+        #    values=self.s1_lab[:, 2],
         #    bins=[bins_x, bins_y],
         #    statistic='mean'
         #    )
         #centers_z[np.isnan(centers_z)] = np.nanmean(centers_z)
-        centers_z = self.s1[:, 2].mean()
+        centers_z = self.s1_lab[:, 2].mean()
 
         # This performs the azimuthal average and projection onto the detector surface.
         s1_lab_mag_centers = centers_x[np.newaxis, :]**2 + centers_y[:, np.newaxis]**2 + centers_z**2
@@ -447,7 +446,7 @@ class PeakListCreator:
         
         fig, axes = plt.subplots(1, 1, figsize=(8, 8))
         axes.scatter(
-            self.s1[:, 0], self.s1[:, 1],
+            self.s1_lab[:, 0], self.s1_lab[:, 1],
             s=0.01, color=[0, 0, 0], alpha=0.1
             )
         axes.imshow(
@@ -464,7 +463,7 @@ class PeakListCreator:
         # Make sure the masked reflections actually line up with the mask
         fig, axes = plt.subplots(1, 1, figsize=(8, 8))
         axes.scatter(
-            self.s1[self.refl_mask, 0], self.s1[self.refl_mask, 1],
+            self.s1_lab[self.refl_mask, 0], self.s1_lab[self.refl_mask, 1],
             s=0.01, color=[0, 0, 0], alpha=0.1
             )
         axes.set_xticks([])
@@ -480,7 +479,7 @@ class PeakListCreator:
         # Make sure the masked reflections actually line up with the mask
         fig, axes = plt.subplots(1, 1, figsize=(8, 8))
         axes.scatter(
-            self.s1[self.refl_mask, 0], self.s1[self.refl_mask, 1],
+            self.s1_lab[self.refl_mask, 0], self.s1_lab[self.refl_mask, 1],
             s=0.01, color=[0, 0, 0], alpha=0.1
             )
         axes.set_xticks([])
@@ -731,79 +730,79 @@ class PeakListCreator:
         plt.show()
 
     def optimize_beam_center(self, primary_peak_indices, mask=True):
-        def get_q2_spacing(s1, s0):
+        def get_q2_spacing(s1_lab, s0):
             wavelength = 1 / np.linalg.norm(s0)
-            dot_product = np.matmul(s1, s0)
-            magnitudes = np.linalg.norm(s1) * np.linalg.norm(s0)
+            dot_product = np.matmul(s1_lab, s0)
+            magnitudes = np.linalg.norm(s1_lab) * np.linalg.norm(s0)
             theta2 = np.arccos(dot_product / magnitudes)
             return ((2 * np.sin(theta2 / 2)) / wavelength)**2
-    
-        def functional(delta, s1_list, s0_list):
+
+        def functional(delta, s1_lab_list, s0_list):
             L = 0
-            for peak_index in range(len(s1_list)):
-                s1 = s1_list[peak_index]
+            for peak_index in range(len(s1_lab_list)):
+                s1_lab = s1_lab_list[peak_index]
                 s0 = s0_list[peak_index]
-                q2_calc = np.zeros(s1.shape[0])
-                for i in range(s1.shape[0]):
-                    s1_delta = s1[i].copy()
-                    s1_delta[:2] += delta
-                    q2_calc[i] = get_q2_spacing(s1_delta, s0[i])
+                q2_calc = np.zeros(s1_lab.shape[0])
+                for i in range(s1_lab.shape[0]):
+                    s1_lab_delta = s1_lab[i].copy()
+                    s1_lab_delta[:2] += delta
+                    q2_calc[i] = get_q2_spacing(s1_lab_delta, s0[i])
                 L += q2_calc.std()
             return L
 
-        s1 = []
+        s1_lab = []
         s0 = []
         if mask:
             q2_obs_masked = self.q2_obs[self.refl_mask]
-            s1_masked = self.s1[self.refl_mask]
+            s1_lab_masked = self.s1_lab[self.refl_mask]
             expt_indices_masked = self.expt_indices[self.refl_mask]
         else:
             q2_obs_masked = self.q2_obs
-            s1_masked = self.s1
+            s1_lab_masked = self.s1_lab
             expt_indices_masked = self.expt_indices
 
         for peak_index in primary_peak_indices:
             differences = np.abs(q2_obs_masked - self.q2_peaks[peak_index])
             indices = differences < 3*self.q2_breadths[peak_index]
-            s1.append(s1_masked[indices])
+            s1_lab.append(s1_lab_masked[indices])
             s0.append(self.s0[expt_indices_masked[indices]])
-    
+
         initial_simplex = np.array([
             [0.05, 0.025],
             [0.001, -0.01],
             [-0.025, -0.05],
             ])
-        print(functional(np.zeros(2), s1, s0))
-        
+        print(functional(np.zeros(2), s1_lab, s0))
+
         results = scipy.optimize.minimize(
             fun=functional,
             x0=[0, 0],
-            args=(s1, s0),
+            args=(s1_lab, s0),
             method='Nelder-Mead',
             options={'initial_simplex': initial_simplex}
             )
         print(results)
         self.beam_delta = results.x[:2]
-        self.s1[:, :2] += self.beam_delta
+        self.s1_lab[:, :2] += self.beam_delta
         start = 0
         for expt_index, refl_counts in enumerate(self.refl_counts):
             self.q2_obs[start: start + refl_counts] = self._get_q2_spacing(
-                self.s1[start: start + refl_counts], self.s0[expt_index]
+                self.s1_lab[start: start + refl_counts], self.s0[expt_index]
                 )
             start += refl_counts
 
     def bump_detector_distance(self, bump):
-        self.s1[:, 2] += bump
+        self.s1_lab[:, 2] += bump
         q2 = []
         start = 0
         for expt_index, refl_counts in enumerate(self.refl_counts):
             q2_obs = self.q2_obs[start: start + refl_counts]
-            s1 = self.s1[start: start + refl_counts]
+            s1_lab = self.s1_lab[start: start + refl_counts]
             s0 = self.s0[expt_index]
             wavelength = 1 / np.linalg.norm(s0)
-            s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
+            s1 = s1_lab / (wavelength * np.linalg.norm(s1_lab, axis=1)[:, np.newaxis])
             # q2_lattice is the magnitude**2 of the scattering vector
-            q2.append(self._get_q2_spacing(s1_normed, s0))
+            q2.append(self._get_q2_spacing(s1, s0))
             start += refl_counts
         self.q2_obs = np.concatenate(q2)
 
@@ -1000,11 +999,11 @@ class PeakListCreator:
             if mask:
                 expt_refl_mask = self.refl_mask[start: start + refl_counts]
                 q2_obs = self.q2_obs[start: start + refl_counts][expt_refl_mask]
-                s1 = self.s1[start: start + refl_counts][expt_refl_mask]
+                s1_lab = self.s1_lab[start: start + refl_counts][expt_refl_mask]
                 masked_refl_counts = np.sum(expt_refl_mask)
             else:
                 q2_obs = self.q2_obs[start: start + refl_counts]
-                s1 = self.s1[start: start + refl_counts]
+                s1_lab = self.s1_lab[start: start + refl_counts]
                 masked_refl_counts = refl_counts
             if masked_refl_counts > 0:
                 if max_refl_counts is None or masked_refl_counts < max_refl_counts:
@@ -1017,16 +1016,16 @@ class PeakListCreator:
                             )
                         indices = min_error < max_difference
                         q2_obs = q2_obs[indices]
-                        s1 = s1[indices]
+                        s1_lab = s1_lab[indices]
                     if not q2_max is None:
                         indices = q2_obs < q2_max
                         q2_obs = q2_obs[indices]
-                        s1 = s1[indices]
+                        s1_lab = s1_lab[indices]
 
                     if q2_obs.size > 1:
-                        s1_normed = s1 / (wavelength * np.linalg.norm(s1, axis=1)[:, np.newaxis])
+                        s1 = s1_lab / (wavelength * np.linalg.norm(s1_lab, axis=1)[:, np.newaxis])
                         q2_diff_all = np.linalg.norm(
-                            s1_normed[np.newaxis, :, :] - s1_normed[:, np.newaxis, :],
+                            s1[np.newaxis, :, :] - s1[:, np.newaxis, :],
                             axis=2
                             )**2
                         indices = np.triu_indices(s1.shape[0], k=1)
@@ -1171,10 +1170,10 @@ class PeakListCreator:
         for key in triplet_keys:
             self.triplets[key] = []
         for expt_index, refl_counts in enumerate(self.refl_counts):
-            q2_obs, s1, start = slice_refls(self.q2_obs, self.s1, start, refl_counts, self.refl_mask, mask)
+            q2_obs, s1_lab, start = slice_refls(self.q2_obs, self.s1_lab, start, refl_counts, self.refl_mask, mask)
             # If there are too many refls on a frame, it might have multiple lattices.
             if q2_obs.size >= 2 and q2_obs.size < max_refl_counts:
-                q = get_scattering_vectors(self.s0[expt_index], s1)
+                q = get_scattering_vectors(self.s0[expt_index], s1_lab)
                 
                 # This removes peaks that are larger than the 1D peak list
                 indices = q2_obs < (self.q2_peaks[-1] + delta*self.q2_breadths[-1])
