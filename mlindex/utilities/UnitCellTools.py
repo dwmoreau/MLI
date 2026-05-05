@@ -30,6 +30,44 @@ def get_partial_unit_cell(unit_cell, lattice_system=None, bravais_lattice=None):
             return unit_cell
 
 
+def get_full_unit_cell(partial_unit_cell, lattice_system):
+    """Reconstruct a full [a, b, c, alpha, beta, gamma] (angles in radians) from
+    a lattice-system-specific partial unit cell (angles in radians where present).
+
+    Inverse of get_partial_unit_cell. Constrained angles are filled with their
+    lattice-system values.
+
+    Parameters
+    ----------
+    partial_unit_cell : array, shape (n_params,)
+    lattice_system : str
+
+    Returns
+    -------
+    np.ndarray, shape (6,)  — angles in radians
+    """
+    if lattice_system == 'cubic':
+        a = partial_unit_cell[0]
+        return np.array([a, a, a, np.pi/2, np.pi/2, np.pi/2])
+    elif lattice_system == 'tetragonal':
+        a, c = partial_unit_cell[0], partial_unit_cell[1]
+        return np.array([a, a, c, np.pi/2, np.pi/2, np.pi/2])
+    elif lattice_system == 'hexagonal':
+        a, c = partial_unit_cell[0], partial_unit_cell[1]
+        return np.array([a, a, c, np.pi/2, np.pi/2, 2*np.pi/3])
+    elif lattice_system == 'rhombohedral':
+        a, alpha = partial_unit_cell[0], partial_unit_cell[1]
+        return np.array([a, a, a, alpha, alpha, alpha])
+    elif lattice_system == 'orthorhombic':
+        a, b, c = partial_unit_cell[0], partial_unit_cell[1], partial_unit_cell[2]
+        return np.array([a, b, c, np.pi/2, np.pi/2, np.pi/2])
+    elif lattice_system == 'monoclinic':
+        a, b, c, beta = partial_unit_cell[0], partial_unit_cell[1], partial_unit_cell[2], partial_unit_cell[3]
+        return np.array([a, b, c, np.pi/2, beta, np.pi/2])
+    else:  # triclinic: partial IS the full 6-param cell (angles already in radians)
+        return np.array(partial_unit_cell, dtype=float)
+
+
 def reciprocal_uc_conversion(unit_cell, partial_unit_cell=False, lattice_system=None):
     if partial_unit_cell and lattice_system != "triclinic":
         if lattice_system in ["cubic", "rhombohedral"]:

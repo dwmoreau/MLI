@@ -136,6 +136,17 @@ def apply_simple_symmetry(angles):
     return angles_sym
 
 
+_BL_TO_LATTICE_SYSTEM = {
+    'cP': 'cubic',  'cI': 'cubic',  'cF': 'cubic',
+    'tP': 'tetragonal', 'tI': 'tetragonal',
+    'hP': 'hexagonal',
+    'hR': 'rhombohedral',
+    'oP': 'orthorhombic', 'oC': 'orthorhombic', 'oF': 'orthorhombic', 'oI': 'orthorhombic',
+    'mP': 'monoclinic', 'mC': 'monoclinic',
+    'aP': 'triclinic',
+}
+
+
 class PeakListCreator:
     def __init__(
         self, 
@@ -1458,3 +1469,77 @@ class PeakListCreator:
                             triplets_obs.append(triplets_obs_pair[index])
                 plt.close()
         self.triplets_obs = np.stack(triplets_obs)
+
+    def refine_unit_cell(self, unit_cell, bravais_lattice, n_iterations=10):
+        """Refine a unit cell against self.q2_peaks using Gauss-Newton optimization.
+
+        Parameters
+        ----------
+        unit_cell : array-like, shape (6,)
+            [a, b, c, alpha, beta, gamma] with angles in degrees.
+        bravais_lattice : str
+            Bravais lattice identifier, e.g. 'hP', 'cF'.
+        n_iterations : int, optional
+            Number of Gauss-Newton refinement steps (default: 10).
+
+        Returns
+        -------
+        np.ndarray, shape (6,)
+            Refined [a, b, c, alpha, beta, gamma] with angles in degrees.
+        """
+        from importlib.resources import files
+        from mlindex.utilities.UnitCellTools import (
+            get_partial_unit_cell,
+            get_xnn_from_unit_cell,
+            get_unit_cell_from_xnn,
+            get_full_unit_cell,
+        )
+        from mlindex.utilities.Q2Calculator import Q2Calculator
+        from mlindex.utilities.numba_functions import fast_assign
+        from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+        from mlindex.utilities.FigureOfMerits import get_M20_from_xnn
+
+        lattice_system = _BL_TO_LATTICE_SYSTEM[bravais_lattice]
+
+        with files('mlindex').joinpath(
+            'models', f'{lattice_system}_1', 'data', f'hkl_ref_{bravais_lattice}.npy'
+        ).open('rb') as f:
+            hkl_ref = np.load(f)
+
+        uc = np.array(unit_cell, dtype=float)
+        uc[3:] *= np.pi / 180
+
+        partial_uc = get_partial_unit_cell(uc, lattice_system=lattice_system)[np.newaxis]
+        xnn = get_xnn_from_unit_cell(partial_uc, partial_unit_cell=True, lattice_system=lattice_system)
+
+        q2_calculator = Q2Calculator(
+            lattice_system=lattice_system,
+            hkl=hkl_ref,
+            tensorflow=False,
+            representation='xnn',
+        )
+
+        q2_obs = self.q2_peaks[:20]
+        target_function = CandidateOptLoss(q2_obs[np.newaxis], lattice_system=lattice_system)
+
+        q2_ref_calc = q2_calculator.get_q2(xnn)
+        hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+        hkl = np.take(hkl_ref, hkl_assign, axis=0)
+        m20 = get_M20_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system)
+        print(f'Initial M20: {m20[0]:.2f}')
+
+        for i in range(n_iterations):
+            target_function.update(hkl, xnn)
+            xnn += target_function.gauss_newton_step(xnn)
+            q2_ref_calc = q2_calculator.get_q2(xnn)
+            hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+            hkl = np.take(hkl_ref, hkl_assign, axis=0)
+            m20 = get_M20_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system)
+            print(f'Iteration {i + 1}: M20 = {m20[0]:.2f}')
+
+        partial_refined = get_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=lattice_system
+        )[0]
+        full_rad = get_full_unit_cell(partial_refined, lattice_system)
+        full_rad[3:] *= 180 / np.pi
+        return full_rad
