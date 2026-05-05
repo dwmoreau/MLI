@@ -6,6 +6,7 @@ os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import argparse
 import types
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -29,8 +30,9 @@ _BL_MPI6_CFG = {
 }
 
 
-def _parse_args():
-    parser = argparse.ArgumentParser(description="Start the display application")
+def build_base_parser(description="Start the display application"):
+    """Return a parser pre-loaded with arguments common to all CLI entry points."""
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--peaks",
         type=str,
@@ -60,6 +62,12 @@ def _parse_args():
         help="Apply a correction for zero point error in theta"
     )
     parser.add_argument(
+        "--output-file",
+        type=str,
+        default="indexing_results.json",
+        help="Output file path for results; a matching .txt file is also written (default: indexing_results.json)",
+    )
+    parser.add_argument(
         "--mpi",
         action='store_true',
         help="Use MPI parallelism (requires mpiexec -n 6)"
@@ -81,6 +89,17 @@ def _parse_args():
         type=int,
         default=12345,
         help="Random seed for reproducibility (default: 12345)",
+    )
+    return parser
+
+
+def _parse_args():
+    parser = build_base_parser()
+    parser.add_argument(
+        "--triplets-file",
+        type=str,
+        default=None,
+        help="file name of the triplets file (numpy array)"
     )
     return parser.parse_args()
 
@@ -292,7 +311,8 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
             spacegroups=top_spacegroup[bl],
         )
     output_data = _conventional_cell(output_data)
-    _write_results(output_data, output_file_base='indexing_results')
+    output_file_base = str(Path(args.output_file).with_suffix(''))
+    _write_results(output_data, output_file_base=output_file_base)
 
 
 def _run_mpi(args, peak_list, seed=12345):

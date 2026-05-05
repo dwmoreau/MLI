@@ -13,71 +13,24 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
-import argparse
 from pathlib import Path
 import numpy as np
 
 from mlindex.optimization.AnalyticOptimizer import AnalyticOptimizer
 from mlindex.optimization.MPIOptimizer import OptimizerWorker
-from mlindex.command_line.run import _load_peaks, _collect_results, _write_results, _conventional_cell
-
-_ALL_ANALYTIC_BL = ["cF", "cI", "cP", "hP", "hR", "tI", "tP", "oC", "oF", "oI", "oP", "mC", "mP", "aP"]
+from mlindex.command_line.run import (
+    _load_peaks, _collect_results, _write_results, _conventional_cell,
+    build_base_parser, BRAVAIS_LATTICES,
+)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analytical high‑symmetry indexing")
-    parser.add_argument(
-        "--peaks",
-        type=str,
-        help="Comma- or space-separated list of peak positions; units set by --peak-units (default: d-spacing in Å)"
-    )
-    parser.add_argument("--peak-file", type=str, help="Peak list file (.npy or .pkslst)")
-    parser.add_argument(
-        "--peak-units",
-        type=str,
-        choices=['d', 'q', 'q2', '2theta'],
-        default="d",
-        help="Units for peaks from --peaks or .npy files: 'd' = d-spacing (Å, default), 'q' = 1/d (Å⁻¹), 'q2' = 1/d² (Å⁻²), '2theta' = degrees (requires --wavelength). Not applied to .pkslst files.",
-    )
-    parser.add_argument("--wavelength", type=float, help="Wavelength for .pkslst files and --peak-units 2theta")
-    parser.add_argument(
-        "--zero-error",
-        action='store_true',
-        help="Apply a correction for zero point error in theta (requires --wavelength)",
-    )
-    parser.add_argument(
-        "--output-file",
-        type=str,
-        default="analytic_results.json",
-        help="File to write JSON results (a matching .txt file is also written)",
-    )
-    parser.add_argument(
-        "--nproc",
-        type=int,
-        default=1,
-        help="Number of processes for multiprocessing mode (default: 1 = serial)",
-    )
-    parser.add_argument(
-        "--mpi",
-        action='store_true',
-        help="Use MPI for parallelism (requires mpiexec)",
-    )
-    parser.add_argument(
-        "--bravais-lattices",
-        type=str,
-        default=",".join(_ALL_ANALYTIC_BL),
-        help=f"Comma-separated Bravais lattices to attempt (default: {','.join(_ALL_ANALYTIC_BL)})",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=12345,
-        help="Random seed for reproducibility (default: 12345)",
-    )
+    parser = build_base_parser(description="Analytical high‑symmetry indexing")
+    parser.set_defaults(output_file="analytic_results.json")
     args = parser.parse_args()
 
     bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
-    invalid = [bl for bl in bravais_lattices if bl not in _ALL_ANALYTIC_BL]
+    invalid = [bl for bl in bravais_lattices if bl not in BRAVAIS_LATTICES]
     if invalid:
         parser.error(f"Unknown Bravais lattices: {', '.join(invalid)}")
 
