@@ -10,130 +10,9 @@ import numpy as np
 import os
 import pandas as pd
 import scipy.signal
-import scipy.spatial.distance
 import sklearn.metrics
 import subprocess
 
-
-def slice_refls(q2_obs, s1_lab, start, refl_counts, refl_mask, mask):
-    if mask:
-        expt_refl_mask = refl_mask[start: start + refl_counts]
-        expt_q2_obs = q2_obs[start: start + refl_counts][expt_refl_mask]
-        expt_s1_lab = s1_lab[start: start + refl_counts][expt_refl_mask]
-    else:
-        expt_q2_obs = q2_obs[start: start + refl_counts]
-        expt_s1_lab = s1_lab[start: start + refl_counts]
-    start += refl_counts
-    return expt_q2_obs, expt_s1_lab, start
-
-
-def get_scattering_vectors(s0, s1_lab):
-    wavelength = 1 / np.linalg.norm(s0)
-    s1 = s1_lab / (wavelength * np.linalg.norm(s1_lab, axis=1)[:, np.newaxis])
-    q = s1 - s0
-    return q
-
-
-def min_separation_check(q, min_separation):
-    if min_separation is None:
-        return True
-    else:
-        q2_diff_all = np.linalg.norm(q[:, np.newaxis, :] - q[np.newaxis, :, :], axis=2)**2
-        indices = np.triu_indices(q.shape[0], k=1)
-        q2_diff_lattice = q2_diff_all[indices[0], indices[1]]
-        if np.min(q2_diff_lattice) > min_separation:
-            return True
-        else:
-            return False
-
-
-def calc_pairwise_diff(q, q_ref=None, metric='euclidean'):
-    """
-    Calculate pairwise differences between vectors
-    
-    Parameters:
-    q : array of shape (N, 3)
-        Array of N 3D vectors
-    metric : str
-        'euclidean' for Euclidean distance
-        'angular' for angular distance in radians
-    
-    Returns:
-    distances : array of shape (N*(N-1)/2,)
-        Condensed distance matrix
-    """
-    if metric == 'euclidean':
-        return scipy.spatial.distance.pdist(q, metric='euclidean')
-    
-    elif metric == 'angular':
-        if q_ref is None:
-            assert False
-        # Normalize vectors
-        q_norm = q / np.linalg.norm(q, axis=1)[:, np.newaxis]
-        
-        # Calculate cosine distances and convert to angles
-        #cos_angles = scipy.spatial.distance.pdist(q_norm, metric='cosine')
-        i, j = np.triu_indices(len(q), k=1)
-        cos_angles = np.dot(q_norm, q_norm.T)
-        valid = np.logical_and(cos_angles >= -1, cos_angles <= 1)
-        angles = np.full(cos_angles.shape, np.nan)
-        angles[valid] = np.arccos(cos_angles[valid])
-        angles = angles[i, j]
-        
-        # Calculate cross products for handedness
-        # Convert to full matrix indices
-        cross_products = np.cross(q_norm[i], q_norm[j])
-        
-        # Use z-component sign for handedness
-        signs = np.sign(np.matmul(q_ref, cross_products.T))
-        return signs * angles
-
-
-def law_of_cosines(q2_0, q2_1, q2_diff, clip=False):
-    """
-    Calculate angle between vectors using law of cosines
-    
-    Parameters:
-    q2_0 : array_like
-        Magnitude squared of first vectors
-    q2_1 : array_like
-        Magnitude squared of second vectors
-    q2_diff : array_like
-        Magnitude squared of difference vectors
-    clip : bool
-        If True, clip cos_theta to [-1,1]
-        If False, return nans for values outside [-1,1]
-    
-    Returns:
-    angle : array_like
-        Angles between vectors in radians
-    """
-    cos_theta = (q2_0 + q2_1 - q2_diff) / (2 * np.sqrt(q2_0 * q2_1))
-    
-    if clip:
-        return np.arccos(np.clip(cos_theta, -1, 1))
-    else:
-        angles = np.full(cos_theta.shape, np.nan)
-        valid = (cos_theta >= -1) & (cos_theta <= 1)
-        angles[valid] = np.arccos(cos_theta[valid])
-        return angles
-
-
-def apply_simple_symmetry(angles):
-    angles_sym = angles.copy()
-
-    invert_and_rotate = angles_sym > np.pi/2
-    if np.sum(invert_and_rotate) > 0:
-        angles_sym[invert_and_rotate] = np.pi - angles_sym[invert_and_rotate]
-
-    rotate = np.logical_and(-np.pi/2 < angles_sym, angles_sym < 0)
-    if np.sum(rotate) > 0:
-        angles_sym[rotate] = -angles_sym[rotate]
-
-    invert = angles_sym < -np.pi/2
-    if np.sum(invert) > 0:
-        angles_sym[invert] = np.pi + angles_sym[invert]
-    return angles_sym
 
 
 _BL_TO_LATTICE_SYSTEM = {
@@ -163,12 +42,22 @@ class PeakListCreator:
         known_unit_cell=None, 
         known_space_group=None,
         variable_detector=False,
+        mask_file=None,
+        mask_pad=2,
     ):
         self.input_path_templates = input_path_templates
         self.max_reflections_per_experiment = max_reflections_per_experiment
         self.min_reflections_per_experiment = min_reflections_per_experiment
 
         self.variable_detector = variable_detector
+
+        self.mask_pad = mask_pad
+        if mask_file is not None:
+            from libtbx import easy_pickle
+            mask = easy_pickle.load(mask_file)
+            self.panel_masks = [p.as_numpy_array() for p in mask]
+        else:
+            self.panel_masks = None
         
         self.suffix = suffix
         self.tag = tag
@@ -212,7 +101,6 @@ class PeakListCreator:
         self.known_unit_cell = known_unit_cell
         self.known_space_group = known_space_group
         self.error = None
-        self.triplets_obs = None
 
     def _run_combine_experiments(self, expt_file_names, refl_file_names, run_str):
         command = ['dials.combine_experiments']
@@ -335,9 +223,27 @@ class PeakListCreator:
                 for panel_index, panel in enumerate(expt.detector):
                     refls_panel = refls_expt.select(refls_expt['panel'] == panel_index)
                     if len(refls_panel) > 0:
+                        xyz = flumpy.to_numpy(refls_panel['xyzobs.px.value'])
+                        if self.panel_masks is not None:
+                            panel_mask = self.panel_masks[panel_index]
+                            pad = self.mask_pad
+                            n_slow, n_fast = panel_mask.shape
+                            keep = np.ones(xyz.shape[0], dtype=bool)
+                            for i in range(xyz.shape[0]):
+                                px = int(round(xyz[i, 0]))
+                                py = int(round(xyz[i, 1]))
+                                y0 = max(0, py - pad)
+                                y1 = min(n_slow, py + pad + 1)
+                                x0 = max(0, px - pad)
+                                x1 = min(n_fast, px + pad + 1)
+                                if not panel_mask[y0:y1, x0:x1].all():
+                                    keep[i] = False
+                            xyz = xyz[keep]
+                            if xyz.shape[0] == 0:
+                                continue
                         s1_panel, s1_lab_panel = self._get_s1_from_xyz(
                             panel,
-                            flumpy.to_numpy(refls_panel['xyzobs.px.value']),
+                            xyz,
                             wavelength,
                             )
                         s1_lattice.append(s1_panel)
@@ -524,19 +430,19 @@ class PeakListCreator:
         plt.show()
         """
 
-    def make_histogram(self, n_bins=1000, d_min=60, d_max=3.5, q2_min=None, q2_max=None, mask=True):
+    def pick_peaks(self, n_bins=1000, d_min=60, d_max=3.5, q2_min=None, q2_max=None, mask=True, exclude_max=20, prominence=30):
         if q2_min is None:
             self.d_min = d_min
             self.q2_min = 1 / self.d_min**2
         else:
             self.q2_min = q2_min
-            self.d_min = 1/np.sqrt(q2_min)
+            self.d_min = 1 / np.sqrt(q2_min)
         if q2_max is None:
             self.d_max = d_max
             self.q2_max = 1 / self.d_max**2
         else:
             self.q2_max = q2_max
-            self.d_max = 1/np.sqrt(q2_max)
+            self.d_max = 1 / np.sqrt(q2_max)
         self.q2_bins = np.linspace(self.q2_min, self.q2_max, n_bins + 11)
         self.q2_centers = (self.q2_bins[1:] + self.q2_bins[:-1]) / 2
         if mask:
@@ -544,46 +450,112 @@ class PeakListCreator:
         else:
             self.q2_hist, _ = np.histogram(self.q2_obs, bins=self.q2_bins)
 
-    def pick_peaks(self, exclude_list=[], exclude_max=20, add_peaks=[], shift={}, prominence=30, plot_kapton_peaks=False, yscale=None):
         found_peak_indices = scipy.signal.find_peaks(self.q2_hist, prominence=prominence)
-        found_peaks = self.q2_centers[found_peak_indices[0]]
-        found_peaks = np.delete(found_peaks[:exclude_max], exclude_list)
-        peaks = np.sort(np.concatenate((found_peaks, add_peaks)))
-    
+        peaks = list(self.q2_centers[found_peak_indices[0]][:exclude_max])
+
         fig, axes = plt.subplots(1, 1, figsize=(30, 6))
         axes.plot(self.q2_centers, self.q2_hist, label='Histogram')
-        for p_index, p in enumerate(peaks):
-            if p_index in shift.keys():
-                peaks[p_index] += shift[p_index]
-            if p in add_peaks:
-                color = [0.8, 0, 0]
-            else:
-                color = [0, 0, 0]
-            axes.plot(
-                [p, p], [0, self.q2_hist.max()],
-                linestyle='dotted', linewidth=1, color=color
-                )
-            axes.annotate(p_index, xy=(p-0.001, (1-p_index/peaks.size) * self.q2_hist.max()))
-        if plot_kapton_peaks:
-            kapton_peaks = [15.25, 7.625, 5.083333333, 3.8125, 3.05]
-            for p in kapton_peaks:
-                if p > self.d_max:
-                    axes.plot([1/p**2, 1/p**2], [0, self.q2_hist.max()], linestyle='dotted', linewidth=2, color=[0, 0.7, 0], label='Kapton Peaks')
-        axes.set_xlabel(r'q2 (1/$\mathrm{\AA}^2$')
-        if yscale == 'log':
-            axes.set_yscale('log')
+        axes.set_xlabel(r'q2 (1/$\mathrm{\AA}^2$)')
+        axes.set_title('Click to add peak  |  Shift+click to remove nearest peak  |  Close window when done')
         fig.tight_layout()
-        fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_peaks.png'))
-        plt.show()
-        self.q2_peaks = peaks
-        np.save(
-            os.path.join(self.save_to_directory, f'{self.tag}_peaks.npy'),
-            self.q2_peaks
-            )
-        print(repr(self.q2_peaks))
-        print(repr(1/np.sqrt(self.q2_peaks)))
 
-    def fit_peaks(self, n_max, ind_peak_indices, fit_shift=True, exclude_fit_shift=[]):
+        line_objs = []
+        ann_objs = []
+
+        def redraw():
+            for obj in line_objs:
+                obj.remove()
+            for obj in ann_objs:
+                obj.remove()
+            line_objs.clear()
+            ann_objs.clear()
+            peaks.sort()
+            ymax = self.q2_hist.max()
+            n = len(peaks)
+            for p_index, p in enumerate(peaks):
+                ln, = axes.plot([p, p], [0, ymax], linestyle='dotted', linewidth=1, color=[0, 0, 0])
+                line_objs.append(ln)
+                ann = axes.annotate(p_index, xy=(p - 0.001, (1 - p_index / max(n, 1)) * ymax))
+                ann_objs.append(ann)
+            fig.canvas.draw_idle()
+
+        def on_click(event):
+            if fig.canvas.toolbar is not None and fig.canvas.toolbar.mode != '':
+                return
+            if event.inaxes is not axes or event.button != 1 or event.xdata is None:
+                return
+            x = event.xdata
+            if event.key == 'shift':
+                if peaks:
+                    nearest = min(range(len(peaks)), key=lambda i: abs(peaks[i] - x))
+                    peaks.pop(nearest)
+            else:
+                peaks.append(x)
+            redraw()
+
+        def on_close(event):
+            self.q2_peaks = np.sort(np.array(peaks))
+            fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_peaks.png'))
+            np.save(os.path.join(self.save_to_directory, f'{self.tag}_peaks.npy'), self.q2_peaks)
+            print(repr(self.q2_peaks))
+            print(repr(1 / np.sqrt(self.q2_peaks)))
+
+        fig.canvas.mpl_connect('button_press_event', on_click)
+        fig.canvas.mpl_connect('close_event', on_close)
+        redraw()
+        plt.show()
+
+    def fit_peaks(self, n_max, fit_shift=True, exclude_fit_shift=[]):
+        # Interactively select individual peaks used to initialise the broadening model.
+        ind_peak_indices = []
+
+        fig_sel, axes_sel = plt.subplots(1, 1, figsize=(30, 6))
+        axes_sel.plot(self.q2_centers, self.q2_hist)
+        axes_sel.set_xlabel(r'q2 (1/$\mathrm{\AA}^2$)')
+        axes_sel.set_title('Click to select isolated peaks for broadening fit  |  Shift+click to remove  |  Close window when done')
+        fig_sel.tight_layout()
+
+        line_objs_sel = []
+        ann_objs_sel = []
+
+        def redraw_sel():
+            for obj in line_objs_sel:
+                obj.remove()
+            for obj in ann_objs_sel:
+                obj.remove()
+            line_objs_sel.clear()
+            ann_objs_sel.clear()
+            ind_peak_indices.sort()
+            ymax = self.q2_hist.max()
+            for i, idx in enumerate(ind_peak_indices):
+                p = self.q2_peaks[idx]
+                ln, = axes_sel.plot([p, p], [0, ymax], linestyle='dotted', linewidth=1, color=[0.8, 0, 0])
+                line_objs_sel.append(ln)
+                ann = axes_sel.annotate(idx, xy=(p - 0.001, (1 - i / max(len(ind_peak_indices), 1)) * ymax))
+                ann_objs_sel.append(ann)
+            fig_sel.canvas.draw_idle()
+
+        def on_click_sel(event):
+            if event.inaxes is not axes_sel or event.button != 1 or event.xdata is None:
+                return
+            x = event.xdata
+            diffs = np.abs(self.q2_peaks - x)
+            nearest_idx = int(np.argmin(diffs))
+            if event.key == 'shift':
+                if nearest_idx in ind_peak_indices:
+                    ind_peak_indices.remove(nearest_idx)
+            else:
+                if nearest_idx not in ind_peak_indices:
+                    ind_peak_indices.append(nearest_idx)
+            redraw_sel()
+
+        fig_sel.canvas.mpl_connect('button_press_event', on_click_sel)
+        fig_sel.canvas.mpl_connect('close_event', lambda e: None)
+        redraw_sel()
+        plt.show()
+
+        ind_peak_indices = np.array(ind_peak_indices, dtype=int)
+
         def get_I_calc(amplitudes, q2_centers, broadening_params, q2, jac=False):
             breadths = (broadening_params[0] + broadening_params[1]*q2_centers)[:, np.newaxis]
             prefactor = 1 / np.sqrt(2*np.pi * breadths**2)
@@ -722,7 +694,7 @@ class PeakListCreator:
         axes.plot(self.q2_centers[:max_index], I_calc)
         ylim = axes.get_ylim()
         for peak_index, p in enumerate(self.q2_peaks[:n_max]):
-            if p in ind_peak_indices:
+            if peak_index in ind_peak_indices:
                 color = [0.8, 0, 0]
             else:
                 color = [0, 0, 0]
@@ -917,7 +889,6 @@ class PeakListCreator:
             'secondary_peaks': self.q2_peaks_secondary,
             'primary_hist': np.column_stack((self.q2_centers, self.q2_hist)),
             'secondary_hist': np.column_stack((self.q2_diff_centers, self.q2_diff_hist)),
-            'triplet_obs': self.triplets_obs,
             'broadening_params': self.broadening_params,
             'error': self.error,
             'note': note,
@@ -931,27 +902,25 @@ class PeakListCreator:
     def output_optimization(self, exclude_primary=[], exclude_secondary=[]):
         fig, axes = plt.subplots(2, 1, figsize=(45, 6), sharex=True)
         axes[0].plot(self.q2_centers, self.q2_hist)
-        axes[1].plot(self.q2_diff_centers, self.q2_diff_hist)
+        if hasattr(self, 'q2_diff_centers'):
+            axes[1].plot(self.q2_diff_centers, self.q2_diff_hist)
 
         ylim0 = axes[0].get_ylim()
         ylim1 = axes[1].get_ylim()
         for p_index, p in enumerate(self.q2_peaks):
-            if p_index == 0:
-                label = 'Primary Picked'
-            else:
-                label = None
+            label = 'Primary Picked' if p_index == 0 else None
             axes[0].plot([p, p], ylim0, linestyle='dotted', linewidth=1.5, color=[0, 0, 0])
-            axes[1].plot([p, p], ylim1, linestyle='dotted', linewidth=1.5, color=[0, 0, 0], label=label)
+            if hasattr(self, 'q2_diff_centers'):
+                axes[1].plot([p, p], ylim1, linestyle='dotted', linewidth=1.5, color=[0, 0, 0], label=label)
             axes[0].annotate(p_index, xy=(p, 0.9*ylim0[1]))
 
-        for p_index, p in enumerate(self.q2_peaks_secondary):
-            if p_index == 0:
-                label = 'Secondary Picked'
-            else:
-                label = None
-            axes[0].plot([p, p], ylim0, linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0], label=label)
-            axes[1].plot([p, p], ylim1, linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0], label=label)
-            axes[1].annotate(p_index, xy=(p, 0.9*ylim1[1]))
+        if hasattr(self, 'q2_peaks_secondary'):
+            for p_index, p in enumerate(self.q2_peaks_secondary):
+                label = 'Secondary Picked' if p_index == 0 else None
+                axes[0].plot([p, p], ylim0, linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0], label=label)
+                if hasattr(self, 'q2_diff_centers'):
+                    axes[1].plot([p, p], ylim1, linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0], label=label)
+                    axes[1].annotate(p_index, xy=(p, 0.9*ylim1[1]))
         axes[0].set_ylim(ylim0)
         axes[1].set_ylim(ylim1)
         axes[0].set_ylabel('Primary Positions')
@@ -962,44 +931,16 @@ class PeakListCreator:
         plt.show()
 
         q2_peaks_primary = np.delete(self.q2_peaks, exclude_primary)
-        q2_peaks_secondary = np.delete(self.q2_peaks_secondary, exclude_secondary)
-        q2_peaks = np.sort(np.concatenate((q2_peaks_primary, q2_peaks_secondary)))
+        if hasattr(self, 'q2_peaks_secondary'):
+            q2_peaks_secondary = np.delete(self.q2_peaks_secondary, exclude_secondary)
+            q2_peaks = np.sort(np.concatenate((q2_peaks_primary, q2_peaks_secondary)))
+        else:
+            q2_peaks_secondary = np.array([])
+            q2_peaks = q2_peaks_primary
 
-        # self.triplets_obs columns:
-        #   0: peak 0 index
-        #   1: peak 1 index
-        #   2: median difference in q
-        #   3: median angular separation
-        #   4: Some weight
-
-        # delete triplets_obs rows if a primary peak is in exclude_primary
-        indices = np.where(np.logical_or(
-            np.isin(self.triplets_obs[:, 0], exclude_primary),
-            np.isin(self.triplets_obs[:, 1], exclude_primary),
-        ))[0]
-        triplets_obs = np.delete(self.triplets_obs, indices, axis=0)
-
-        # If a primary peak was removed of a lower index than found in triplets_obs,
-        # the index in triplets_obs needs to be decremented
-        for i in range(2):
-            for j in range(triplets_obs.shape[0]):
-                decrement = np.sum(exclude_primary < triplets_obs[j, i])
-                triplets_obs[j, i] -= decrement
-
-        # If a secondary peak is added at a lower scattering angle than the primary,
-        # the index in triplets_obs needs to be incremented
-        for i in range(2):
-            for j in range(triplets_obs.shape[0]):
-                q2 = q2_peaks_primary[int(triplets_obs[j, i])]
-                increment = np.sum(q2_peaks_secondary < q2)
-                triplets_obs[j, i] += increment
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_mlindex_peak_list.npy'),
             q2_peaks
-        )
-        np.save(
-            os.path.join(self.save_to_directory, f'{self.tag}_mlindex_triplets.npy'),
-            triplets_obs
         )
 
     def create_secondary_peaks(self, q2_max=None, max_difference=None, max_refl_counts=None, min_separation=None, n_bins=2000, mask=True):
@@ -1094,9 +1035,9 @@ class PeakListCreator:
         fig.tight_layout()
         plt.show()
         
-    def pick_secondary_peaks(self, include_list=[], prominence=30, yscale=None):
-        indices = scipy.signal.find_peaks(self.q2_diff_hist, prominence=prominence)
-        self.q2_peaks_secondary = []
+    def pick_secondary_peaks(self, prominence=30, yscale=None):
+        found_peak_indices = scipy.signal.find_peaks(self.q2_diff_hist, prominence=prominence)
+        peaks = list(self.q2_diff_centers[found_peak_indices[0]])
 
         fig, axes = plt.subplots(2, 1, figsize=(45, 6), sharex=True)
         axes[0].plot(self.q2_centers, self.q2_hist)
@@ -1105,41 +1046,68 @@ class PeakListCreator:
         ylim0 = axes[0].get_ylim()
         ylim1 = axes[1].get_ylim()
         for p_index, p in enumerate(self.q2_peaks):
-            if p_index == 0:
-                label = 'Primary Picked'
-            else:
-                label = None
+            label = 'Primary Picked' if p_index == 0 else None
             axes[0].plot([p, p], ylim0, linestyle='dotted', linewidth=1.5, color=[0, 0, 0])
             axes[1].plot([p, p], ylim1, linestyle='dotted', linewidth=1.5, color=[0, 0, 0], label=label)
-
-        for p_index, p in enumerate(self.q2_diff_centers[indices[0]]):
-            if p_index == 0:
-                label = 'Secondary Found'
-            else:
-                label = None
-            if p_index in include_list:
-                self.q2_peaks_secondary.append(p)
-            axes[1].plot([p, p], ylim1, linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0], label=label)
-            axes[1].annotate(p_index, xy=(p, 0.9*ylim1[1]))
         axes[0].set_ylim(ylim0)
         axes[1].set_ylim(ylim1)
         axes[0].set_ylabel('Primary Positions')
         axes[1].set_ylabel('Secondary Positions')
         axes[1].set_xlabel(r'1 / d_spacing ($\mathrm{\AA}$)')
+        axes[1].set_title('Click to add peak  |  Shift+click to remove nearest peak  |  Close window when done')
         if yscale == 'log':
             axes[0].set_yscale('log')
             axes[1].set_yscale('log')
         axes[1].legend(loc='upper left', frameon=False)
 
-        fig.tight_layout()
-        fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_secondary_peaks.png'))
-        plt.show()
-        self.q2_peaks_secondary = np.array(self.q2_peaks_secondary)
-        np.save(
-            os.path.join(self.save_to_directory, f'{self.tag}_secondary_peaks.npy'),
-            1/np.sqrt(np.array(self.q2_peaks_secondary))
+        line_objs = []
+        ann_objs = []
+
+        def redraw():
+            for obj in line_objs:
+                obj.remove()
+            for obj in ann_objs:
+                obj.remove()
+            line_objs.clear()
+            ann_objs.clear()
+            peaks.sort()
+            ymax = ylim1[1]
+            n = len(peaks)
+            for p_index, p in enumerate(peaks):
+                ln, = axes[1].plot([p, p], [0, ymax], linestyle='dashed', linewidth=1.5, color=[0.8, 0, 0])
+                line_objs.append(ln)
+                ann = axes[1].annotate(p_index, xy=(p - 0.001, (1 - p_index / max(n, 1)) * ymax))
+                ann_objs.append(ann)
+            fig.canvas.draw_idle()
+
+        def on_click(event):
+            if fig.canvas.toolbar is not None and fig.canvas.toolbar.mode != '':
+                return
+            if event.inaxes is not axes[1] or event.button != 1 or event.xdata is None:
+                return
+            x = event.xdata
+            if event.key == 'shift':
+                if peaks:
+                    nearest = min(range(len(peaks)), key=lambda i: abs(peaks[i] - x))
+                    peaks.pop(nearest)
+            else:
+                peaks.append(x)
+            redraw()
+
+        def on_close(event):
+            self.q2_peaks_secondary = np.sort(np.array(peaks))
+            fig.savefig(os.path.join(self.save_to_directory, f'{self.tag}_secondary_peaks.png'))
+            np.save(
+                os.path.join(self.save_to_directory, f'{self.tag}_secondary_peaks.npy'),
+                1 / np.sqrt(self.q2_peaks_secondary),
             )
-        print(repr(1/np.sqrt(self.q2_peaks_secondary)))
+            print(repr(1 / np.sqrt(self.q2_peaks_secondary)))
+
+        fig.canvas.mpl_connect('button_press_event', on_click)
+        fig.canvas.mpl_connect('close_event', on_close)
+        fig.tight_layout()
+        redraw()
+        plt.show()
 
     def plot_known_unit_cell(self, q2_max=0.5, unit_cell=None, space_group=None):
         if unit_cell is None:
@@ -1165,310 +1133,6 @@ class PeakListCreator:
         axes.set_ylim(ylim0)
         fig.tight_layout()
         plt.show()
-
-    def make_triplets(self, triplet_peak_indices, delta=1, max_difference=False, min_separation=None, max_refl_counts=None, mask=True):
-        if max_refl_counts is None:
-            max_refl_counts = np.inf
-        start = 0
-        triplet_keys = []
-        triplet_peaks = self.q2_peaks[triplet_peak_indices]
-        triplet_breadths = np.abs(self.q2_breadths[triplet_peak_indices])
-        for p0 in range(triplet_peaks.size):
-            for p1 in range(p0, triplet_peaks.size):
-                triplet_keys.append((triplet_peak_indices[p0], triplet_peak_indices[p1]))
-        print(triplet_keys)
-        self.triplets = dict.fromkeys(triplet_keys)
-        for key in triplet_keys:
-            self.triplets[key] = []
-        for expt_index, refl_counts in enumerate(self.refl_counts):
-            q2_obs, s1_lab, start = slice_refls(self.q2_obs, self.s1_lab, start, refl_counts, self.refl_mask, mask)
-            # If there are too many refls on a frame, it might have multiple lattices.
-            if q2_obs.size >= 2 and q2_obs.size < max_refl_counts:
-                q = get_scattering_vectors(self.s0[expt_index], s1_lab)
-                
-                # This removes peaks that are larger than the 1D peak list
-                indices = q2_obs < (self.q2_peaks[-1] + delta*self.q2_breadths[-1])
-                q2_obs = q2_obs[indices]
-                q = q[indices]
-
-                # Only consider peaks close to a peak in the picked peak list.
-                if max_difference:
-                    min_error = np.min(
-                        np.abs(q2_obs[:, np.newaxis] - self.q2_peaks[np.newaxis]) / self.q2_breadths,
-                        axis=1
-                        )
-                    indices = min_error < delta
-                    q2_obs = q2_obs[indices]
-                    q = q[indices]
-
-                if q2_obs.size > 1:
-                    q2_diff_lattice = calc_pairwise_diff(q, metric='euclidean')**2
-                    angular_diff_lattice = calc_pairwise_diff(q, q_ref=self.s0[expt_index], metric='angular')
-                    indices = np.triu_indices(q.shape[0], k=1)
-                    q20_obs = q2_obs[indices[0]]
-                    q21_obs = q2_obs[indices[1]]
-                    # If there are peaks that are very close, it might be a multiple lattice.
-                    if min_separation_check(q, min_separation):
-                        q20_triplet_index = np.argmin(
-                            np.abs(q20_obs[:, np.newaxis] - triplet_peaks[np.newaxis]) / triplet_breadths[np.newaxis],
-                            axis=1
-                            )
-                        q21_triplet_index = np.argmin(
-                            np.abs(q21_obs[:, np.newaxis] - triplet_peaks[np.newaxis]) / triplet_breadths[np.newaxis],
-                            axis=1
-                            )
-                        for pair_index in range(q2_diff_lattice.size):
-                            p0 = q20_triplet_index[pair_index]
-                            p1 = q21_triplet_index[pair_index]
-                            key = (
-                                triplet_peak_indices[p0],
-                                triplet_peak_indices[p1]
-                                ) 
-                            check0 = np.logical_and(
-                                q20_obs[pair_index] > triplet_peaks[p0] - delta*triplet_breadths[p0],
-                                q20_obs[pair_index] < triplet_peaks[p0] + delta*triplet_breadths[p0],
-                                )
-                            check1 = np.logical_and(
-                                q21_obs[pair_index] > triplet_peaks[p1] - delta*triplet_breadths[p1],
-                                q21_obs[pair_index] < triplet_peaks[p1] + delta*triplet_breadths[p1],
-                                )
-                            check2 = np.invert(np.isnan(angular_diff_lattice[pair_index]))
-                            check3 = np.abs(angular_diff_lattice[pair_index]) < 2.8
-                            if check0 and check1 and check2 and check3:
-                                if key[0] < key[1]:
-                                    q20_triplet_peak = triplet_peaks[p0]
-                                    q21_triplet_peak = triplet_peaks[p1]
-                                else:
-                                    key = (key[1], key[0])
-                                    q20_triplet_peak = triplet_peaks[p1]
-                                    q21_triplet_peak = triplet_peaks[p0]
-                                self.triplets[key].append([
-                                    q20_triplet_peak,
-                                    q21_triplet_peak,
-                                    q2_diff_lattice[pair_index],
-                                    angular_diff_lattice[pair_index],
-                                    ])
-        for key in triplet_keys:
-            if len(self.triplets[key]) > 0:
-                self.triplets[key] = np.row_stack(self.triplets[key])
-
-    def pick_triplets(self, prominence_factor=5, hkl=None, xnn=None, lattice_system=None, auto=False):
-        triplet_keys = list(self.triplets.keys())
-        triplets_obs = []
-        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        for key_index, key in enumerate(triplet_keys):
-            if len(self.triplets[key]) > 0:
-                triplets_obs_pair = []
-                fig, axes = plt.subplots(1, 1, figsize=(10, 3), sharex=False)
-                bins_full = np.linspace(-np.pi, np.pi, 401)
-                centers_full = (bins_full[1:] + bins_full[:-1]) / 2
-                bins_half = np.linspace(0, np.pi/2, 101)
-                centers_half = (bins_half[1:] + bins_half[:-1]) / 2
-                
-                q2_0 = self.triplets[key][0, 0]
-                q2_1 = self.triplets[key][0, 1]
-                q2_diff = self.triplets[key][:, 2]
-                angles = self.triplets[key][:, 3]
-
-                # Angles are between two points, A & B, on a common plane
-                # Angles are between -180 to +180 where the sign comes from the dot product with
-                #     the negative beam.
-                # "Rotation about A" refer to a 180 degree rotation about the vector between 0 and A.
-                # We can always find an angle between A & B such that 0 < angle < 90. This is
-                #   because two points cannot fully define the orientation of the crystal.
-                #   Inversions of B are valid - the rest of reciprocal space remains the same.
-                #   Rotations about A are only valid if there is a mirror symmetry. Otherwise the
-                #   rest of reciprocal space is changed.
-                # If 0 < angle < 90: keep.
-                #   angle_sym = angle
-                # If 90 < angle < 180: Invert B, then rotate 180 about A.
-                #   angle_sym = np.pi - angle
-                # If -90 < angle < 0: Rotate 180 about A
-                #   angle_sym = -angle
-                # If -180 < angle < -90: Invert B
-                #   angle_sym = np.pi + angle
-                angles_sym = apply_simple_symmetry(angles)
-
-                # Get the expected angle for peaks in the 1D primary peak list
-                angles_peaks = law_of_cosines(q2_0, q2_1, self.q2_peaks)
-
-                # Get the expected angle for peaks in the 1D secondary peak list
-                angles_secondary_peaks = []
-                if len(self.q2_peaks_secondary) > 0:
-                    angles_secondary_peaks = law_of_cosines(q2_0, q2_1, self.q2_peaks_secondary)
-
-                hist_half, _ = np.histogram(angles_sym, bins=bins_half)
-                hist_full, _ = np.histogram(angles, bins=bins_full)
-                axes.bar(centers_full, hist_full, width=bins_full[1] - bins_full[0], color=colors[0], label='Obs Diff.')
-                axes.bar(centers_half, hist_half, width=bins_half[1] - bins_half[0], color=colors[3], alpha=0.5, label='Obs Diff. Sym.')
-                ylim = axes.get_ylim()
-                ylim = [ylim[0], ylim[1]*1.1]
-
-                # scipy.signal.find_peaks does not find peaks at the first and last index.
-                # Padding zeros at the start and end are attempts to pick them up.
-                n_pad = 5
-
-                diff_peak_indices, _ = scipy.signal.find_peaks(
-                    np.concatenate((np.zeros(n_pad), hist_half, np.zeros(n_pad))),
-                    prominence=prominence_factor*(np.std(hist_half) + 1)
-                    )
-                diff_peak_indices -= n_pad
-                diff_peak_indices = diff_peak_indices[diff_peak_indices >= 0]
-                diff_peak_indices = diff_peak_indices[diff_peak_indices <= hist_half.size]
-                if diff_peak_indices.size > 0:
-                    # This gets the peak positions in units of angle
-                    diff_peaks = centers_half[diff_peak_indices]
-                    weights = hist_half[diff_peak_indices]
-                    for p_index, p in enumerate(diff_peaks):
-                        selection = np.logical_and(
-                            angles_sym > p - 0.02,
-                            angles_sym < p + 0.02,
-                            )
-                        median_angle = np.nanmedian(angles_sym[selection])                        
-                        median_difference = q2_0 + q2_1 - 2*np.sqrt(q2_0*q2_1)*np.cos(median_angle)
-                        triplets_obs_pair.append([
-                            key[0], key[1],
-                            median_difference, median_angle,
-                            weights[p_index]
-                            ])
-                        if p_index == 0:
-                            label = 'Found Differences'
-                        else:
-                            label = None
-                        axes.plot(
-                            [median_angle, median_angle], ylim,
-                            color=colors[1], alpha=0.75, label=label, linestyle='dotted'
-                            )
-                        axes.annotate(
-                            f'{np.round(median_angle, decimals=3)}',
-                            xy=[median_angle, ylim[1]*0.85],
-                            )
-                    axes.set_ylim(ylim)
-                if hkl is None:
-                    axes.set_ylabel(
-                        str(key)
-                        + f'\n{np.round(q2_0, decimals=5)} {np.round(q2_1, decimals=5)}'
-                        )
-                else:
-                    from Utilities import get_hkl_matrix
-                    axes.set_ylabel(
-                        str(key)
-                        + f'\n{np.round(q2_0, decimals=5)} {np.round(q2_1, decimals=5)}'
-                        + f'\n{hkl[key[0]]}, {hkl[key[1]]}'
-                        )
-                    
-                    mi_sym = [
-                        np.array([1, 1, 1]),
-                        np.array([1, 1, -1]),
-                        np.array([1, -1, 1]),
-                        np.array([-1, 1, 1]),
-                        ]
-                    permutations = [np.array([
-                        [1, 0, 0],
-                        [0, 1, 0],
-                        [0, 0, 1],
-                        ])]
-                    if lattice_system == 'cubic':
-                        permutations.append(np.array([
-                            [0, 1, 0],
-                            [1, 0, 0],
-                            [0, 0, 1],
-                            ]))
-                        permutations.append(np.array([
-                            [0, 0, 1],
-                            [0, 1, 0],
-                            [1, 0, 0],
-                            ]))
-                        permutations.append(np.array([
-                            [1, 0, 0],
-                            [0, 0, 1],
-                            [0, 1, 0],
-                            ]))
-                    elif lattice_system in ['tetragonal', 'hexagonal']:
-                        permutations.append(np.array([
-                            [0, 1, 0],
-                            [1, 0, 0],
-                            [0, 0, 1],
-                            ]))
-                        permutations.append(np.array([
-                            [0, 0, 1],
-                            [0, 1, 0],
-                            [1, 0, 0],
-                            ]))
-                        permutations.append(np.array([
-                            [1, 0, 0],
-                            [0, 0, 1],
-                            [0, 1, 0],
-                            ]))
-                    make_label = True
-                    for i in range(len(mi_sym)):
-                        for j in range(len(mi_sym)):
-                            for k0 in range(len(permutations)):
-                                for k1 in range(len(permutations)):
-                                    hkl0 = np.matmul(permutations[k0], mi_sym[i]*hkl[key[0]])
-                                    hkl1 = np.matmul(permutations[k1], mi_sym[j]*hkl[key[1]])
-                                    hkl_diff = hkl0 - hkl1
-                                    hkl2_diff = get_hkl_matrix(hkl_diff[np.newaxis], lattice_system)
-                                    q2_diff_calc = np.sum(xnn * hkl2_diff, axis=1)[0]
-                                    angle_diff_calc = law_of_cosines(q2_0, q2_1, q2_diff_calc, clip=False)
-                                    if make_label:
-                                        label = 'Pred Diff'
-                                    else:
-                                        label = None
-                                    axes.plot(
-                                        [angle_diff_calc, angle_diff_calc], [ylim[0], 0.15*ylim[1]],
-                                        color=[0, 0.8, 0], label=label
-                                        )
-                                    axes.annotate(
-                                        np.round(angle_diff_calc, decimals=3),
-                                        xy=[angle_diff_calc, ylim[1]*0.2],
-                                        )
-                                    make_label = False
-                for p_index, peak_angle in enumerate(angles_peaks):
-                    if not np.isnan(peak_angle):
-                        if p_index == 0:
-                            label = 'Obs Peaks'
-                        else:
-                            label = None
-                        axes.plot(
-                            [peak_angle, peak_angle], [ylim[0], 0.1*ylim[1]],
-                            color=[0, 0, 0], label=label
-                            )
-                for p_index, peak_angle in enumerate(angles_secondary_peaks):
-                    if not np.isnan(peak_angle):
-                        if p_index == 0:
-                            label = 'Secondary Peaks'
-                        else:
-                            label = None
-                        axes.plot(
-                            [peak_angle, peak_angle], [ylim[0], 0.1*ylim[1]],
-                            color=[0, 0, 0], linestyle='dashed', label=label
-                            )
-                axes.set_ylim()
-                axes.legend(frameon=False)
-                fig.tight_layout()
-                plt.show(block=False)
-                for index in range(len(triplets_obs_pair)):
-                    if auto:
-                        print(f'Found triplet at angle {triplets_obs_pair[index][3]:0.4f}')
-                        if triplets_obs_pair[index][3] < 0.05:
-                            triplets_obs_pair[index][3] = 0
-                        elif triplets_obs_pair[index][3] > np.pi/2 - 0.05:
-                            triplets_obs_pair[index][3] = np.pi/2
-                        triplets_obs.append(triplets_obs_pair[index])
-                    else:
-                        print(f'Found triplet at angle {triplets_obs_pair[index][3]:0.4f}')
-                        accept = input(f'   Accept with y, specify angle with 0 and 90$^o$ with 90')
-                        if accept == 'y':
-                            triplets_obs.append(triplets_obs_pair[index])
-                        elif accept in [0, 0.0, '0']:
-                            triplets_obs_pair[index][3] = 0
-                            triplets_obs.append(triplets_obs_pair[index])
-                        elif accept in [90, 90.0, '90']:
-                            triplets_obs_pair[index][3] = np.pi/2
-                            triplets_obs.append(triplets_obs_pair[index])
-                plt.close()
-        self.triplets_obs = np.stack(triplets_obs)
 
     def refine_unit_cell(self, unit_cell, bravais_lattice, n_iterations=10):
         """Refine a unit cell against self.q2_peaks using Gauss-Newton optimization.
