@@ -85,16 +85,14 @@ if __name__ == '__main__':
         }
 
     integral_filter_params_group = {
-        'tag': f'monoclinic_{broadening_tag}_intravolume',
+        'tag': f'monoclinic_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 20,
         'extraction_peak_length': 10,
         'n_volumes': 150,
         'n_filters': 1000,
-        'd_model': 128,
-        'attention_l1': 1e-5,
-        'n_heads': 4,
-        'pool_factor': 10,
+        'd_model': 512,
+        'n_heads': 8,
         'layers': [1000, 600, 300, 100, 50],
         'l1_regularization': 0.0001,
         'base_line_layers': [1000, 600, 300, 100, 50],
@@ -105,11 +103,10 @@ if __name__ == '__main__':
         'loss_type': 'log_cosh',
         'augment': True,
         'model_type': 'metric',
-        'within_volume_block_type': 'intra_attention',
         'calibration_params': {
             'layers': 3,
             'epsilon_pds': 0.1,
-            'epochs': 10,
+            'epochs': 40,
             'learning_rate': 0.0002,
             'augment': True,
             'batch_size': 64,
@@ -169,4 +166,7 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
+    # HACK: retrain mP_0_01 only -- the other groups' models were moved to
+    # integral_filter_fwhmbug/ and would fail to load. Remove to retrain everything.
+    wrapper.data_params['split_groups'] = ['mP_0_01']
     wrapper.setup_integral_filter('training')

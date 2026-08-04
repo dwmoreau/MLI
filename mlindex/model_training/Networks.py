@@ -96,11 +96,11 @@ class ExtractionLayer(keras.layers.Layer):
             # Ideally this scaling of distribution_volumes should not be needed.
             # For primitive monoclinic and triclinic, the distribution of the volumes skews to the
             # large side and the q2_filter distribution is pushed to a much larger region than q2_obs.
-            distribution_volumes /= np.median(distribution_volumes)
+            volume_normalization = np.median(distribution_volumes)
+            distribution_volumes /= volume_normalization
             self.volumes.assign(
                 keras.ops.expand_dims(keras.ops.cast(distribution_volumes, dtype='float32'), axis=1),
                 )
-            volume_differences = distribution_volumes[1:] - distribution_volumes[:-1]
 
             q2_obs_scaled = q2_obs / q2_obs_scale
             q2_obs_scaled_sorted = np.sort(
@@ -114,9 +114,42 @@ class ExtractionLayer(keras.layers.Layer):
                 self.model_params['n_filters']
             )
 
-            sigma = min(max(2*np.median(volume_differences), 0.015), 0.04)
+            # sigma is the width of a peak on the fixed filter grid, so it is measured there. Each
+            # training entry is projected onto the grid by its own volume scale, exactly as its
+            # matched branch will project it, and sigma is set so that adjacent peaks of that
+            # volume-normalized pattern stay resolved: two Gaussians of width sigma separated by d
+            # only show a dip when d > 2*sigma. The 5% quantile rather than the minimum keeps a
+            # handful of pathological entries from setting the width for the whole split group.
+            entry_scales = (reciprocal_volume / q2_obs_scale**2)**(2/3) / volume_normalization
+            projected_q2 = np.sort(
+                q2_obs_scaled[:, :self.model_params['extraction_peak_length']]
+                / entry_scales[:, np.newaxis],
+                axis=1
+                )
+            peak_separations = np.diff(projected_q2, axis=1).ravel()
+            peak_separations = peak_separations[peak_separations > 0]
+            sigma_measured = np.quantile(peak_separations, 0.05) / 2
+            # Kept so evaluate_init can plot the distribution sigma was actually fitted to.
+            self.peak_separations_init = peak_separations
+
+            # Safeguard. Too wide merges the peaks into a featureless blob; too narrow falls between
+            # filters and will not train. Both bounds are multiples of the filter spacing so they
+            # track n_filters instead of silently inverting if it changes.
+            filter_spacing = q2_filters[1] - q2_filters[0]
+            sigma = min(max(sigma_measured, 2*filter_spacing), 6*filter_spacing)
             self.sigma_init = sigma
             self.sigma.assign(keras.ops.cast(sigma, dtype='float32'))
+
+            if sigma > sigma_measured:
+                clipped = f'CLIPPED UP from {sigma_measured:0.5f} (floor 2*spacing)'
+            elif sigma < sigma_measured:
+                clipped = f'CLIPPED DOWN from {sigma_measured:0.5f} (ceiling 6*spacing)'
+            else:
+                clipped = 'not clipped'
+            print(
+                f'sigma = {sigma:0.5f} = {sigma/filter_spacing:0.2f} x filter spacing '
+                f'({filter_spacing:0.5f}); {clipped}'
+                )
 
             self.filters.assign(
                 keras.ops.expand_dims(keras.ops.cast(q2_filters, dtype='float32'), axis=0)
@@ -126,17 +159,19 @@ class ExtractionLayer(keras.layers.Layer):
             self.filters_init = None
 
     def call(self, q2_obs_scaled, **kwargs):
-        # filters:     1, n_filters
-        # volumes:     n_volumes, 1
-        # q2_filters:  1, n_volumes, n_filters, 1
-        # q2_obs:      batch_size, extraction_peak_length
+        # filters:     1, 1, n_filters, 1
+        # volumes:     1, n_volumes, 1, 1
+        # q2_obs:      batch_size, 1, 1, extraction_peak_length
         # difference:  batch_size, n_volumes, n_filters, extraction_peak_length
-        q2_filters = keras.ops.expand_dims(
-            keras.ops.expand_dims(self.volumes * self.filters, axis=0),
-            axis=3
-            )
+        filters = keras.ops.reshape(self.filters, (1, 1, -1, 1))
+        volumes = keras.ops.reshape(self.volumes, (1, -1, 1, 1))
         q2_obs_scaled = keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2)
-        difference = q2_filters - q2_obs_scaled
+
+        # q2_obs is projected onto the fixed filter grid by the trial volume, rather than the filter
+        # grid being stretched out to meet q2_obs. Both place peak p of branch v at q2_p / v, but
+        # this form gives every branch the same Gaussian width instead of sigma / v, so a given unit
+        # cell shape reaches the shared attention embedding as the same pattern at every volume.
+        difference = filters - q2_obs_scaled / volumes
 
         distances = keras.ops.exp(-1/2 * (difference / self.sigma)**2)
         # distances: batch_size, n_volumes, n_filters, extraction_peak_length
@@ -227,33 +262,63 @@ class ExtractionLayer(keras.layers.Layer):
             print(self.filters_init)
 
     def evaluate_init(self, q2_obs_scaled, save_to, split_group, tag):
-        q2_filters = tensor_to_numpy(self.volumes * self.filters)
         volumes = self.volumes.numpy()[:, 0]
-        volume_differences = volumes[1:] - volumes[:-1]
+        filters = self.filters.numpy()[0]
+        sigma = self.sigma.numpy()
+        filter_spacing = filters[1] - filters[0]
+
+        # Every peak is rendered with the same width now, so what matters is how that width compares
+        # to the grid it is sampled on and to how far a peak walks between adjacent volume branches.
+        # A shift below ~1 sigma means adjacent branches overlap for that peak.
         fig, axes = plt.subplots(1, 1, figsize=(5, 3))
-        axes.plot(volume_differences, marker='.')        
-        xlim = axes.get_xlim()
-        axes.plot(xlim, [self.sigma.numpy(), self.sigma.numpy()], linestyle='dashed')
-        axes.plot(xlim, [0.01, 0.01], linestyle='dotted', color=[0, 0, 0])
-        axes.plot(xlim, [0.04, 0.04], linestyle='dotted', color=[0, 0, 0])
-        axes.set_xlim(xlim)
-        axes.set_ylim([0, axes.get_ylim()[1]])
-        axes.set_ylabel('Volume\nDifference')
+        for q2_representative in (0.5, 4.0):
+            branch_shift = q2_representative * np.diff(volumes) / (volumes[1:] * volumes[:-1])
+            axes.plot(branch_shift / sigma, marker='.', label=f'q2 = {q2_representative}')
+        axes.axhline(1.0, linestyle='dashed', color=[0, 0, 0])
+        axes.set_yscale('log')
+        axes.set_ylabel('Branch-to-branch\nshift / sigma')
         axes.set_xlabel('Volume Index')
+        axes.set_title(
+            f'sigma {sigma:0.5f} = {sigma/filter_spacing:0.2f} x spacing {filter_spacing:0.5f}'
+            )
+        axes.legend()
         fig.tight_layout()
         fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_volume_diff_{tag}.png'))
         plt.close()
 
+        # The volume-normalized peak separations sigma was fitted to, against the 2*sigma resolution
+        # limit. Everything left of the dashed line is a peak pair that merges.
+        if hasattr(self, 'peak_separations_init'):
+            peak_separations = self.peak_separations_init
+            fig, axes = plt.subplots(1, 1, figsize=(4, 3))
+            axes.hist(peak_separations, bins=np.linspace(0, 0.5, 101), density=True)
+            axes.axvline(2*sigma, linestyle='dashed', color=[0, 0, 0])
+            merged = 100 * (peak_separations < 2*sigma).mean()
+            axes.set_title(f'{merged:0.1f}% of peak pairs merge')
+            axes.set_xlabel('Volume-normalized peak separation')
+            axes.set_ylabel('distribution')
+            fig.tight_layout()
+            fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_separations_{tag}.png'))
+            plt.close()
+
+        # Grid coverage. Post-fix the grid is fixed and what moves across it is q2_obs / v, so that
+        # projection is what has to land inside [filters.min(), filters.max()].
         bins = np.linspace(0, 5, 101)
         fig, axes = plt.subplots(1, 1, figsize=(4, 3))
         axes.hist(
             q2_obs_scaled[:, :self.model_params['extraction_peak_length']].ravel(),
             bins=bins, label='q2_obs_scaled', density=True
             )
+        # Subsampled: the full projection is n_entries x n_volumes x n_peaks.
+        projection_sample = q2_obs_scaled[
+            ::max(1, q2_obs_scaled.shape[0] // 2000), :self.model_params['extraction_peak_length']
+            ]
         axes.hist(
-            q2_filters.ravel(),
-            bins=bins, alpha=0.75, label='q2_filters', density=True
+            (projection_sample[:, np.newaxis, :] / volumes[np.newaxis, :, np.newaxis]).ravel(),
+            bins=bins, alpha=0.75, label='q2_obs_scaled / volumes', density=True
             )
+        axes.axvline(filters.min(), linestyle='dotted', color=[0, 0, 0])
+        axes.axvline(filters.max(), linestyle='dotted', color=[0, 0, 0])
         axes.set_xlabel('q2 scaled')
         axes.set_ylabel('distribution')
         axes.legend()
