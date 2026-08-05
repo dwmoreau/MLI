@@ -478,13 +478,35 @@ class MetricVolumeRescale(keras.layers.Layer):
 
 
 class IntraVolume_MultiHeadAttention(keras.layers.Layer):
-    def __init__(self, d_model, n_heads, **kwargs):
+    """Attention across the volume branches.
+
+    The branches form an ordered sequence -- branch i and i+1 are neighbouring trial volumes -- but
+    without a positional encoding the attention is permutation invariant over them, so it cannot
+    tell that two branches are adjacent. That matters because the correct volume shows up as a hill
+    of near misses: if a branch is right, its neighbours are almost right and distant branches are
+    not, and recognising that shape is most of the work of picking the branch.
+
+    volumes_fn supplies the branch volumes, read live at call time rather than copied in, because on
+    the load path the graph is built while that weight is still zeros and only filled afterwards.
+    """
+    def __init__(self, d_model, n_heads, volumes_fn, **kwargs):
         super().__init__(**kwargs)
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_k = d_model // n_heads
         assert d_model % n_heads == 0
-        
+        self.volumes_fn = volumes_fn
+        # A single gate, initialised to zero, so the model starts out identical to one without the
+        # encoding and can only depart from it by learning to. Same reasoning as the volume rescaling
+        # head: a strict generalization cannot start worse.
+        self.position_gate = self.add_weight(
+            shape=(),
+            initializer=keras.initializers.Zeros(),
+            dtype='float32',
+            trainable=True,
+            name='position_gate',
+            )
+
         self.W_q = keras.layers.Dense(
             d_model,
             use_bias=False,
@@ -510,18 +532,67 @@ class IntraVolume_MultiHeadAttention(keras.layers.Layer):
             kernel_initializer=keras.initializers.HeUniform,
         )
         
+    def position_encoding(self):
+        """Sinusoidal encoding of log volume, shape (1, n_volumes, d_model).
+
+        Sinusoids rather than a linear function of log v because the attention score picks up the
+        term p(v_i) . p(v_j), and for sinusoids that is a function of log v_i - log v_j, a genuine
+        distance between branches. A linear encoding would give the product log v_i * log v_j, which
+        can say that two branches are both large but not that they are close to each other.
+
+        log rather than raw volume because the branches are spaced geometrically, so a fixed ratio
+        rather than a fixed difference is what 'nearby' means. The branch spacing is very uneven --
+        the sparse small volume tail is spread far coarser than the middle -- so encoding the volume
+        itself rather than the branch index is what makes neighbouring encodings reflect genuinely
+        neighbouring volumes.
+        """
+        volumes = self.volumes_fn()
+        n_volumes = volumes.shape[0]
+        log_volumes = keras.ops.log(
+            keras.ops.reshape(keras.ops.cast(volumes, dtype='float32'), (-1, 1))
+            )
+        # Spread the branches over a 0 to n_volumes axis, placed at their true log volume
+        # coordinates. The span matters: the highest frequency below is 1 radian per unit, so a
+        # range of n_volumes gives the same resolution a standard positional encoding has over that
+        # many positions. Normalising to unit variance instead would compress everything into a few
+        # radians, leaving every sinusoid in its slow regime and the branches indistinguishable.
+        # The placement within the span stays proportional to log volume, so the sparse small volume
+        # tail is correctly rendered as coarsely spaced.
+        lowest = keras.ops.min(log_volumes)
+        highest = keras.ops.max(log_volumes)
+        positions = n_volumes*(log_volumes - lowest)/(highest - lowest + 1e-9)
+
+        frequencies = keras.ops.exp(
+            keras.ops.arange(0, self.d_model//2, dtype='float32')
+            * (-np.log(10000.0)/(self.d_model//2))
+            )
+        angles = positions*keras.ops.reshape(frequencies, (1, -1))
+        encoding = keras.ops.concatenate(
+            [keras.ops.sin(angles), keras.ops.cos(angles)], axis=1
+            )
+        return keras.ops.expand_dims(encoding, axis=0)
+
     def call(self, x):
         # x shape: (batch_size, n_volumes, n_filters)
         batch_size = keras.ops.shape(x)[0]
-        n_volumes = keras.ops.shape(x)[1] 
+        n_volumes = keras.ops.shape(x)[1]
         n_filters = keras.ops.shape(x)[2]
-        
+
         # Generate Q, K, V - Dense automatically applies to each volume
         # (batch_size, n_volumes, d_model)
-        Q = self.W_q(x) 
+        Q = self.W_q(x)
         K = self.W_k(x)
         V = self.W_v(x)
-        
+
+        # Queries and keys only. They decide which branches attend to which, which is where knowing
+        # the ordering helps. V is left alone deliberately: it is the content that flows out of the
+        # attention and into the predicted unit cell shape, and the shape is supposed to be volume
+        # invariant -- the branch's own volume is reapplied analytically at the very end by
+        # MetricVolumeRescale.
+        encoding = self.position_gate*self.position_encoding()
+        Q = Q + encoding
+        K = K + encoding
+
         # Reshape for multi-head attention
         Q = keras.ops.reshape(Q, (batch_size, n_volumes, self.n_heads, self.d_k))
         K = keras.ops.reshape(K, (batch_size, n_volumes, self.n_heads, self.d_k))

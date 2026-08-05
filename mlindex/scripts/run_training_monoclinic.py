@@ -104,9 +104,7 @@ if __name__ == '__main__':
         'augment': True,
         'model_type': 'metric',
         # Weight on the auxiliary cross entropy that supervises which volume branch is correct.
-        # Override from the shell with BRANCH_LOSS_WEIGHT to sweep it. 0.0 disables it, which
-        # reproduces the previous model exactly.
-        'branch_loss_weight': float(os.environ.get('BRANCH_LOSS_WEIGHT', 0.2)),
+        'branch_loss_weight': 0.2,
         'calibration_params': {
             'layers': 3,
             'epsilon_pds': 0.1,
