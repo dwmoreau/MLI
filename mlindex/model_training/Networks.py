@@ -140,6 +140,25 @@ class ExtractionLayer(keras.layers.Layer):
                 keras.ops.expand_dims(keras.ops.cast(distribution_volumes, dtype='float32'), axis=1),
                 )
 
+            # Equal probability spacing gave every branch the same number of entries, so the
+            # auxiliary branch cross entropy was a balanced classification without anyone arranging
+            # it. Any other spacing breaks that -- a blended grid leaves branch frequency varying
+            # more than tenfold -- and cross entropy systematically under predicts rare classes,
+            # which here are the sparsely populated small volume branches that most need the help.
+            # Weighting by inverse frequency restores the balance the old grid provided implicitly.
+            branch_counts = np.bincount(
+                self.get_branch_labels(reciprocal_volume), minlength=self.model_params['n_volumes']
+                ).astype(float)
+            occupied = branch_counts > 0
+            branch_class_weights = np.zeros_like(branch_counts)
+            branch_class_weights[occupied] = 1.0/branch_counts[occupied]
+            # Normalised so the mean weight over the training data is 1, which keeps the loss on the
+            # same scale as the unweighted version and leaves branch_loss_weight meaning what it did.
+            branch_class_weights /= (
+                (branch_counts*branch_class_weights).sum()/branch_counts.sum()
+                )
+            self.branch_class_weights = branch_class_weights
+
             q2_obs_scaled = q2_obs / q2_obs_scale
             q2_obs_scaled_sorted = np.sort(
                 q2_obs_scaled[:, :self.model_params['extraction_peak_length']].ravel()
@@ -195,6 +214,8 @@ class ExtractionLayer(keras.layers.Layer):
             self.filters_init = self.filters.numpy()[0]
         else:
             self.filters_init = None
+            # No data to count branch occupancy from, and none needed: the load path never trains.
+            self.branch_class_weights = None
 
     def call(self, q2_obs_scaled, **kwargs):
         # filters:     1, 1, n_filters, 1
@@ -263,9 +284,13 @@ class ExtractionLayer(keras.layers.Layer):
         say it.
         """
         _, _, logits, branch_true = self.loss_function_common(y_true, y_pred)
-        return keras.losses.sparse_categorical_crossentropy(
-            keras.ops.cast(branch_true, dtype='int32'), logits, from_logits=True
-            )
+        labels = keras.ops.cast(branch_true, dtype='int32')
+        losses = keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
+        if self.branch_class_weights is not None:
+            losses = losses*keras.ops.take(
+                keras.ops.cast(self.branch_class_weights, dtype='float32'), labels, axis=0
+                )
+        return losses
 
     def branch_accuracy(self, y_true, y_pred):
         """Fraction of entries whose top ranked branch is the matching one."""

@@ -111,6 +111,9 @@ class IntegralFilter:
             'batch_size': 64,
             'l1_regularization': 0.0,
             'n_heads': 5,
+            # Epochs of no validation improvement before the miller index model stops. 'epochs' is
+            # now an upper bound rather than the number actually run.
+            'early_stopping_patience': 5,
             }
 
         for key in calibration_params_defaults.keys():
@@ -299,6 +302,7 @@ class IntegralFilter:
             'learning_rate',
             'batch_size',
             'n_heads',
+            'early_stopping_patience',
             ]
         self.model_params['calibration_params'] = dict.fromkeys(calibration_params_keys)
         self.model_params['calibration_params']['l1_regularization'] = 0.0
@@ -307,8 +311,13 @@ class IntegralFilter:
             value = element.replace("'", "").split(':')[1]
             if key in ['dropout_rate', 'epsilon_pds', 'learning_rate', 'l1_regularization']:
                 self.model_params['calibration_params'][key] = float(value)
-            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers', 'n_heads']:
+            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers', 'n_heads',
+                         'early_stopping_patience']:
                 self.model_params['calibration_params'][key] = int(value)
+        # Models saved before early stopping existed have no such column, so dict.fromkeys leaves
+        # it None, which would be passed straight to EarlyStopping.
+        if self.model_params['calibration_params']['early_stopping_patience'] is None:
+            self.model_params['calibration_params']['early_stopping_patience'] = 5
         if self.model_params['model_type'] != 'base_line':
             model_manager = NeuralNetworkManager(
                 model_name=f'{self.split_group}_calibration_weights_{self.model_params["tag"]}',
@@ -800,14 +809,25 @@ class IntegralFilter:
             )
         train_true_calibration = np.stack(train['hkl_labels'])
         val_true_calibration = np.stack(val['hkl_labels'])
+        # The validation loss flattens within about eight epochs while training keeps falling, so
+        # the back two thirds of a fixed forty epoch run buy nothing but overfitting. min_delta is
+        # set above the epoch to epoch noise in the validation loss so it stops on a real plateau
+        # rather than on a lucky dip, and the best weights are restored rather than the last ones.
+        calibration_callbacks = [keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=self.model_params['calibration_params']['early_stopping_patience'],
+            min_delta=0.001,
+            restore_best_weights=True,
+            verbose=1,
+            )]
         self.calibration_fit_history = self.calibration_model.fit(
             x=train_inputs_calibration,
             y=train_true_calibration,
             epochs=self.model_params['calibration_params']['epochs'],
             shuffle=True,
-            batch_size=self.model_params['calibration_params']['batch_size'], 
+            batch_size=self.model_params['calibration_params']['batch_size'],
             validation_data=(val_inputs_calibration, val_true_calibration),
-            callbacks=None,
+            callbacks=calibration_callbacks,
             )
         self.save_calibration(train_inputs_calibration)
 
