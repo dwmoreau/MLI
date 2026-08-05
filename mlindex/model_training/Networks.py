@@ -370,6 +370,57 @@ class ExtractionLayer(keras.layers.Layer):
         plt.close()
 
 
+class MetricVolumeRescale(keras.layers.Layer):
+    """Turn the regression head's output from an absolute xnn into a volume-normalized shape.
+
+    The head predicts a unit cell shape; the absolute scale comes from the branch's own trial volume.
+    Because q2 = h.G*.h^T, changing the unit cell volume multiplies every q2 by a common factor, so
+    the shape a branch sees is the true cell divided by that branch's volume v. Reconstructing the
+    absolute value and re-applying the model's own median/MAD normalization,
+
+        shape       = (xnn_mean + xnn_scale * D) / q2_obs_scale
+        xnn_raw     = shape * v * q2_obs_scale = (xnn_mean + xnn_scale * D) * v
+        xnn_scaled  = (xnn_raw - xnn_mean) / xnn_scale = D * v + (xnn_mean / xnn_scale) * (v - 1)
+
+    q2_obs_scale cancels. Two properties matter. At v = 1 this is exactly D, and ExtractionLayer
+    normalizes the volumes to a median of 1, so the median branch is unchanged at initialization and
+    this is a strict generalization of the previous head rather than a different model. And the
+    (v - 1) term encodes the prior that xnn scales with the trial volume, which is what the geometry
+    demands, so the head starts near the right magnitude at every branch instead of only the median
+    one.
+
+    Only the first unit_cell_length channels are rescaled. The last channel is the branch logit and
+    passes through untouched, so the output layout stays (batch, n_volumes, unit_cell_length + 1) as
+    loss_function_common expects.
+    """
+    def __init__(self, volumes_fn, xnn_mean, xnn_scale, unit_cell_length, **kwargs):
+        super().__init__(**kwargs)
+        # A plain callable, not the layer itself. Holding ExtractionLayer as an attribute would
+        # register it as a sublayer and change the weights.h5 layout; this keeps the checkpoint
+        # structure identical to the previous model. It also reads volumes live at call time, which
+        # is required: on the load_from_tag path build_model(data=None) builds the graph while that
+        # weight is still zeros, and it is only filled when the weights are loaded afterwards.
+        self._volumes_fn = volumes_fn
+        self.unit_cell_length = unit_cell_length
+        # Baked in as a constant rather than a weight so that no new entry appears in weights.h5.
+        self.xnn_offset = np.reshape(
+            np.asarray(xnn_mean, dtype='float32') / np.asarray(xnn_scale, dtype='float32'),
+            (1, 1, unit_cell_length)
+            )
+
+    def call(self, x):
+        # x:       batch_size, n_volumes, unit_cell_length + 1
+        # volumes: 1, n_volumes, 1
+        volumes = keras.ops.reshape(self._volumes_fn(), (1, -1, 1))
+        xnn_offset = keras.ops.cast(self.xnn_offset, dtype=x.dtype)
+        xnn_scaled = x[:, :, :self.unit_cell_length]*volumes + xnn_offset*(volumes - 1.0)
+        logits = x[:, :, self.unit_cell_length:]
+        return keras.ops.concatenate([xnn_scaled, logits], axis=2)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+
 class IntraVolume_MultiHeadAttention(keras.layers.Layer):
     def __init__(self, d_model, n_heads, **kwargs):
         super().__init__(**kwargs)

@@ -37,6 +37,20 @@ class IntegralFilter:
         self.lattice_system = self.data_params['lattice_system']
         self.hkl_ref = hkl_ref
 
+    def get_titles(self, kind):
+        """Labels for the active unit cell / xnn components of this lattice system.
+
+        Both lists are indexed by unit_cell_indices, not positionally. For monoclinic the active
+        components are indices [0, 1, 2, 4], so the fourth one is beta / Xhl, not alpha / Xkl --
+        Xkl and Xhk are identically zero. Labelling positionally mislabels every lattice system
+        whose indices are not a prefix of the full list.
+        """
+        all_titles = {
+            'unit_cell': ['a', 'b', 'c', 'alpha', 'beta', 'gamma'],
+            'xnn': ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk'],
+            }
+        return [all_titles[kind][index] for index in self.unit_cell_indices]
+
     def _setup_integral_filter(self, data):
         model_params_defaults = {
             'peak_length': 20,
@@ -299,7 +313,22 @@ class IntegralFilter:
                 self.model_params, q2_obs, xnn, reciprocal_volume, self.q2_obs_scale,
                 name='extraction_layer'
                 )
+
+            # The regression head bakes these into the graph, so they have to exist before the model
+            # is built rather than being computed in train(). Kept identical to what train() uses for
+            # the targets: the reindexed_xnn column, not the xnn derived from reindexed_unit_cell
+            # above, and the same rhombohedral filter.
+            train_xnn = np.stack(training_data['reindexed_xnn'])[:, self.unit_cell_indices]
+            if self.lattice_system == 'rhombohedral':
+                train_xnn = train_xnn[np.max(np.abs(train_xnn), axis=1) < 0.05]
+            self.xnn_mean = np.median(train_xnn, axis=0)[np.newaxis]
+            self.xnn_scale = np.median(np.abs(train_xnn - self.xnn_mean), axis=0)[np.newaxis]
         else:
+            # _load_from_tag_integral_filter loads the scalers from .npy before calling build_model.
+            assert hasattr(self, 'xnn_mean') and hasattr(self, 'xnn_scale'), (
+                'build_model(data=None) needs xnn_mean and xnn_scale to already be set, because the '
+                'regression head bakes them into the graph.'
+                )
             self.extraction_layer = ExtractionLayer(
                 self.model_params, None, None, None, self.q2_obs_scale,
                 name='extraction_layer'
@@ -379,6 +408,7 @@ class IntegralFilter:
     def model_builder_metric(self, inputs):
         import keras
         from mlindex.model_training.Networks import IntraVolume_MultiHeadAttention
+        from mlindex.model_training.Networks import MetricVolumeRescale
         # inputs: batch_size, n_peaks
         # metric: batch_size, n_volumes, n_filters
 
@@ -411,13 +441,25 @@ class IntegralFilter:
                 kernel_initializer=keras.initializers.HeUniform
                 )(x)
 
-        # output: batch_size, n_volumes, unit_cell_length + 1
-        output = keras.layers.Dense(
+        # raw: batch_size, n_volumes, unit_cell_length + 1
+        raw = keras.layers.Dense(
             self.unit_cell_length + 1,
             activation='linear',
-            name=f'{self.model_params["model_type"]}_xnn_scaled',
+            name=f'{self.model_params["model_type"]}_raw',
             kernel_initializer=keras.initializers.HeUniform
             )(x)
+
+        # The Dense weights are shared across all n_volumes branches, so it predicts a volume
+        # normalized shape and each branch reapplies its own trial volume. This layer must keep the
+        # xnn_scaled name because compile_model keys its loss and metric dicts on it.
+        # output: batch_size, n_volumes, unit_cell_length + 1
+        output = MetricVolumeRescale(
+            volumes_fn=lambda: self.extraction_layer.volumes,
+            xnn_mean=self.xnn_mean,
+            xnn_scale=self.xnn_scale,
+            unit_cell_length=self.unit_cell_length,
+            name=f'{self.model_params["model_type"]}_xnn_scaled',
+            )(raw)
         return output
 
     def transform_pairwise_differences(self, pairwise_differences_scaled, tensorflow):
@@ -545,15 +587,15 @@ class IntegralFilter:
         else:
             train_unaugmented = np.invert(train['augmented'])
 
-        self.xnn_mean = np.median(train_xnn, axis=0)[np.newaxis]
-        self.xnn_scale = np.median(np.abs(train_xnn - self.xnn_mean), axis=0)[np.newaxis]
+        # xnn_mean and xnn_scale are computed in build_model, which the regression head bakes into
+        # the graph. Recomputing them here would risk the constants in the graph drifting from the
+        # ones used to scale the targets.
         train_xnn_scaled = (train_xnn - self.xnn_mean) / self.xnn_scale
         val_xnn_scaled = (val_xnn - self.xnn_mean) / self.xnn_scale
 
         fig, axes = plt.subplots(1, self.unit_cell_length + 1, figsize=(8, 3))
         bins0 = np.linspace(0, 5, 301)
         bins1 = np.linspace(-5, 5, 301)
-        xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
         for index in range(self.unit_cell_length + 1):
             if index == 0:
                 axes[index].hist(
@@ -1015,9 +1057,9 @@ class IntegralFilter:
 
             train_size = train_xnn_pred.shape[0]
             val_size = val_xnn_pred.shape[0]
-            
-            unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
-            xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+
+            unit_cell_titles = self.get_titles('unit_cell')
+            xnn_titles = self.get_titles('xnn')
             output_dict = {}
             for uc_index in range(self.unit_cell_length):
                 output_dict[f'rmse_train_{unit_cell_titles[uc_index]}'] = \
@@ -1057,8 +1099,8 @@ class IntegralFilter:
         fig, axes = plt.subplots(2, self.unit_cell_length, figsize=figsize)
         if self.unit_cell_length == 1:
             axes = axes[:, np.newaxis]
-        unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
-        xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+        unit_cell_titles = self.get_titles('unit_cell')
+        xnn_titles = self.get_titles('xnn')
         alpha = 0.1
         markersize = 0.5
         for plot_index in range(2):
