@@ -119,18 +119,18 @@ if __name__ == '__main__':
         }
 
     integral_filter_params = {
-        'mC_0_02': integral_filter_params_group_load,
-        'mC_0_03': integral_filter_params_group_load,
-        'mC_1_02': integral_filter_params_group_load,
-        'mC_1_03': integral_filter_params_group_load,
-        'mC_4_02': integral_filter_params_group_load,
-        'mC_4_03': integral_filter_params_group_load,
-        'mP_0_00': integral_filter_params_group_load,
+        'mC_0_02': integral_filter_params_group,
+        'mC_0_03': integral_filter_params_group,
+        'mC_1_02': integral_filter_params_group,
+        'mC_1_03': integral_filter_params_group,
+        'mC_4_02': integral_filter_params_group,
+        'mC_4_03': integral_filter_params_group,
+        'mP_0_00': integral_filter_params_group,
         'mP_0_01': integral_filter_params_group,
-        'mP_1_00': integral_filter_params_group_load,
-        'mP_1_01': integral_filter_params_group_load,
-        'mP_4_00': integral_filter_params_group_load,
-        'mP_4_01': integral_filter_params_group_load,
+        'mP_1_00': integral_filter_params_group,
+        'mP_1_01': integral_filter_params_group,
+        'mP_4_00': integral_filter_params_group,
+        'mP_4_01': integral_filter_params_group,
         }
 
     random_params_bl = {
@@ -166,7 +166,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    # HACK: retrain mP_0_01 only -- the other groups' models were moved to
-    # integral_filter_fwhmbug/ and would fail to load. Remove to retrain everything.
-    wrapper.data_params['split_groups'] = ['mP_0_01']
     wrapper.setup_integral_filter('training')

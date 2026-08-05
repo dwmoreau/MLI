@@ -73,7 +73,7 @@ if __name__ == '__main__':
 
     integral_filter_group_params = {
         'tag': f'rhombohedral_{broadening_tag}',
-        'load_from_tag': True,
+        'load_from_tag': False,
         'peak_length': 20,
         'extraction_peak_length': 8,
         'n_volumes': 100,
@@ -107,8 +107,8 @@ if __name__ == '__main__':
         }
 
     integral_filter_params = {
-        'hR_00': integral_filter_group_params_load,
-        'hR_01': integral_filter_group_params_load,
+        'hR_00': integral_filter_group_params,
+        'hR_01': integral_filter_group_params,
         }
 
     random_params_bl = {
@@ -142,4 +142,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('inference')
+    wrapper.setup_integral_filter('training')
