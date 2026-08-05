@@ -57,19 +57,30 @@ def main():
     if unit_cell_indices is None:
         raise SystemExit(f'unit_cell_indices not known for split group {split_group}')
 
-    data = pq.read_table(
+    everything = pq.read_table(
         args.data,
         columns=['split_group', 'train', 'q2', 'reindexed_xnn', 'reindexed_volume'],
-        filters=[('split_group', '==', split_group), ('train', '==', False)],
+        filters=[('split_group', '==', split_group)],
         ).to_pandas()
+    training = everything[everything['train']]
+    data = everything[~everything['train']].reset_index(drop=True)
     xnn_true = np.stack(data['reindexed_xnn'].values).astype(float)[:, unit_cell_indices]
 
-    # Each entry's own volume scale, put on the same normalization as the branch volumes, then
-    # matched to the nearest branch in log space.
+    # Each entry's own volume scale, put on the same footing as the branch volumes, then matched to
+    # the nearest branch in log space.
+    #
+    # The normalization has to be recomputed from the training data, the way ExtractionLayer does
+    # it, and cannot be inferred from the branch volumes themselves. Dividing by the median branch
+    # instead only works when the branches are spaced by equal probability, because that is the one
+    # spacing whose median branch coincides with the median of the distribution. It is not saved
+    # anywhere: it is a plain attribute used while fitting, so post hoc it must be rebuilt.
+    normalization = np.median(
+        (1.0/training['reindexed_volume'].values.astype(float)/q2_obs_scale**2)**(2/3)
+        )
     reciprocal_volume = 1.0/data['reindexed_volume'].values.astype(float)
-    scales = (reciprocal_volume/q2_obs_scale**2)**(2/3)
-    scales /= np.median(scales)/np.median(volumes)
+    scales = (reciprocal_volume/q2_obs_scale**2)**(2/3)/normalization
     matched = np.abs(np.log(scales)[:, None] - np.log(volumes)[None, :]).argmin(axis=1)
+    outside = ((scales < volumes.min()) | (scales > volumes.max())).mean()
 
     session = onnxruntime.InferenceSession(f'{prefix}pitf_weights_{tag}_quantized.onnx')
     input_name = session.get_inputs()[0].name
@@ -80,15 +91,26 @@ def main():
     n_components = len(unit_cell_indices)
     loss_error = np.zeros(n_sample)
     relative_error = np.zeros(n_sample)
+    chosen = np.zeros(n_sample, dtype=int)
     for row_index, row in enumerate(q2_all):
         output = session.run(None, {input_name: row.astype(np.float32)[None]})[0][0]
         branch = output[:, n_components].argmax()
+        chosen[row_index] = branch
         predicted = output[branch, :n_components]*xnn_scale + xnn_mean
         true = xnn_true[indices[row_index]]
         loss_error[row_index] = np.median(np.abs((predicted - true)/xnn_scale))
         relative_error[row_index] = np.median(np.abs(predicted - true)/np.abs(true))
 
     matched_bin = matched[indices]
+    # Sanity check on the branch reconstruction above, not on the model. Everything binned by
+    # branch is meaningless if the reconstruction is wrong, and a wrong one still produces
+    # plausible looking bins. This number must agree with the val_branch_accuracy keras reported
+    # during training; if it is near 1/n_volumes the normalization is wrong, not the model.
+    print('\nbranch reconstruction check')
+    print('  top-1 branch accuracy %.1f%%   (chance is %.1f%%; compare against the'
+          % (100*(chosen == matched_bin).mean(), 100/len(volumes)))
+    print('   val_branch_accuracy keras printed while training -- they should agree)')
+    print('  entries outside the branch grid: %.2f%%' % (100*outside))
     print(f'\n{n_sample} validation entries\n')
     print('%-9s %6s %8s %12s %10s %12s' % (
         'branch', 'n', 'med v', '|true|/scale', 'rel err', 'loss-space'))

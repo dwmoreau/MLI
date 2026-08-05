@@ -80,14 +80,19 @@ class IntegralFilter:
             'd_model': 512,
             'n_heads': 8,
             # Weight on the auxiliary cross entropy that supervises which volume branch is correct.
-            # 0.0 reproduces the behaviour of models trained before it existed.
-            'branch_loss_weight': 0.0,
+            # Without it the branch ranking is only supervised indirectly, through a regression loss
+            # that weights each branch by its own confidence and never says which one is right.
+            'branch_loss_weight': 0.2,
             # Percentiles of the reciprocal volume distribution the branch grid spans, and how the
-            # branches are spaced within it. These defaults reproduce the behaviour of models
-            # trained before they existed: 0.5 to 99 percent, spaced by equal probability.
-            'volume_lower_percentile': 0.005,
-            'volume_upper_percentile': 0.990,
-            'volume_spacing_blend': 1.0,
+            # branches are spaced within it. 1.0 spaces them by equal probability, 0.0 by equal
+            # steps in 1/v and therefore equal misalignment; 0.5 trades a slightly worse median
+            # alignment for far fewer badly misaligned entries, and the wider span leaves fewer
+            # entries with no usable branch at all. Measured over the monoclinic split groups:
+            # entries outside the grid 1.75% -> 0.4%, entries misaligned by more than a peak width
+            # 5.3% -> 2.4%.
+            'volume_lower_percentile': 0.001,
+            'volume_upper_percentile': 0.999,
+            'volume_spacing_blend': 0.5,
             'epochs': 20,
             'batch_size': 64,
             'loss_type': 'log_cosh',
@@ -255,9 +260,12 @@ class IntegralFilter:
         self.model_params['model_type'] = params['model_type']
         # Defaulted rather than required: models trained before the auxiliary branch loss existed
         # have no such column, and 0.0 is what they were trained with.
-        self.model_params['branch_loss_weight'] = float(params.get('branch_loss_weight', 0.0))
         # Recorded for provenance rather than needed to rebuild: the branch grid is stored in the
-        # weights as ExtractionLayer.volumes, and build_model(data=None) never refits it.
+        # weights as ExtractionLayer.volumes, and build_model(data=None) never refits it. The
+        # fallbacks are deliberately the values these settings had before they were settable, not
+        # the current defaults, because they describe what a file written back then was trained
+        # with rather than what a new model should use.
+        self.model_params['branch_loss_weight'] = float(params.get('branch_loss_weight', 0.0))
         self.model_params['volume_lower_percentile'] = float(
             params.get('volume_lower_percentile', 0.005))
         self.model_params['volume_upper_percentile'] = float(
