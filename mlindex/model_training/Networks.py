@@ -46,6 +46,7 @@ class ExtractionLayer(keras.layers.Layer):
         super().__init__(**kwargs)
         self.model_params = model_params
         self.seed = 0
+        self.q2_obs_scale = q2_obs_scale
         self.volumes = self.add_weight(
             shape=(self.model_params['n_volumes'], 1),
             initializer=keras.initializers.Zeros(),
@@ -98,6 +99,10 @@ class ExtractionLayer(keras.layers.Layer):
             # large side and the q2_filter distribution is pushed to a much larger region than q2_obs.
             volume_normalization = np.median(distribution_volumes)
             distribution_volumes /= volume_normalization
+            # Kept so an entry's own volume can be put on the same scale as the branches, which is
+            # what the branch labels for the auxiliary loss need. Training only; on the load path
+            # there is no data to fit and no labels to build.
+            self.volume_normalization = volume_normalization
             self.volumes.assign(
                 keras.ops.expand_dims(keras.ops.cast(distribution_volumes, dtype='float32'), axis=1),
                 )
@@ -179,27 +184,78 @@ class ExtractionLayer(keras.layers.Layer):
         metric = keras.ops.sum(distances, axis=3)
         return metric
 
+    def get_branch_labels(self, reciprocal_volume):
+        """Index of the branch whose trial volume best matches each entry's true volume.
+
+        Built exactly the way the branch grid itself was built, so the label is the branch that
+        actually renders the entry in register. Matched in log space because the branches are
+        spaced geometrically, so a fixed ratio, not a fixed difference, is what 'close' means.
+        """
+        scales = (reciprocal_volume/self.q2_obs_scale**2)**(2/3)/self.volume_normalization
+        volumes = np.asarray(keras.ops.convert_to_numpy(self.volumes)).ravel()
+        differences = np.abs(np.log(scales)[:, np.newaxis] - np.log(volumes)[np.newaxis])
+        return differences.argmin(axis=1)
+
     def loss_function_common(self, y_true, y_pred):
-        # y_true: batch_size, unit_cell_length
+        # y_true: batch_size, unit_cell_length + 1
+        #         the xnn targets, then the index of the branch that matches the true volume
         # y_pred: batch_size, n_volumes, unit_cell_length + 1
-        xnn_scaled_pred = y_pred[:, :, :self.model_params['unit_cell_length']]
-        logits = y_pred[:, :, self.model_params['unit_cell_length']]
+        unit_cell_length = self.model_params['unit_cell_length']
+        xnn_true = y_true[:, :unit_cell_length]
+        xnn_scaled_pred = y_pred[:, :, :unit_cell_length]
+        logits = y_pred[:, :, unit_cell_length]
         probabilities = keras.ops.softmax(logits, axis=1)
-        errors = keras.ops.expand_dims(y_true, axis=1) - xnn_scaled_pred
+        errors = keras.ops.expand_dims(xnn_true, axis=1) - xnn_scaled_pred
         # This is to prevent an overflow error
         # keras.ops.cosh has a limit around +/- 80 for dtype=float32
         errors = keras.ops.clip(errors, -75.0, 75.0)
-        return errors, probabilities
+        return errors, probabilities, logits, y_true[:, unit_cell_length]
 
     def loss_function_log_cosh(self, y_true, y_pred):
-        errors, probabilities = self.loss_function_common(y_true, y_pred)
+        errors, probabilities, _, _ = self.loss_function_common(y_true, y_pred)
         losses = keras.ops.sum(keras.ops.log(keras.ops.cosh(errors)), axis=2)
         return keras.ops.sum(losses * probabilities, axis=1)
 
     def loss_function_mse(self, y_true, y_pred):
-        errors, probabilities = self.loss_function_common(y_true, y_pred)
+        errors, probabilities, _, _ = self.loss_function_common(y_true, y_pred)
         losses = 1/2 * keras.ops.mean(errors**2, axis=2)
         return keras.ops.sum(losses * probabilities, axis=1)
+
+    def loss_function_branch(self, y_true, y_pred):
+        """Cross entropy on the branch logits against the branch that matches the true volume.
+
+        The regression losses weight each branch by its own softmax probability, which rewards the
+        model for being confident where it happens to predict well. Nothing in them says which
+        branch is physically correct, so the ranking is only ever supervised indirectly. This does
+        say it.
+        """
+        _, _, logits, branch_true = self.loss_function_common(y_true, y_pred)
+        return keras.losses.sparse_categorical_crossentropy(
+            keras.ops.cast(branch_true, dtype='int32'), logits, from_logits=True
+            )
+
+    def branch_accuracy(self, y_true, y_pred):
+        """Fraction of entries whose top ranked branch is the matching one."""
+        _, _, logits, branch_true = self.loss_function_common(y_true, y_pred)
+        predicted = keras.ops.cast(keras.ops.argmax(logits, axis=1), dtype='int32')
+        return keras.ops.cast(
+            keras.ops.equal(predicted, keras.ops.cast(branch_true, dtype='int32')),
+            dtype='float32',
+            )
+
+    def training_loss_log_cosh(self, y_true, y_pred):
+        return (
+            self.loss_function_log_cosh(y_true, y_pred)
+            + self.model_params.get('branch_loss_weight', 0.0)
+            * self.loss_function_branch(y_true, y_pred)
+            )
+
+    def training_loss_mse(self, y_true, y_pred):
+        return (
+            self.loss_function_mse(y_true, y_pred)
+            + self.model_params.get('branch_loss_weight', 0.0)
+            * self.loss_function_branch(y_true, y_pred)
+            )
 
     def evaluate_weights(self, q2_obs_scaled, save_to, split_group, tag):
         metric_max = np.zeros(q2_obs_scaled.shape[0])

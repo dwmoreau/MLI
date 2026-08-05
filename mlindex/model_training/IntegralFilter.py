@@ -51,6 +51,21 @@ class IntegralFilter:
             }
         return [all_titles[kind][index] for index in self.unit_cell_indices]
 
+    def get_branch_labels(self, data):
+        """Index of the volume branch that matches each entry's true unit cell volume.
+
+        The reciprocal volume is derived the same way build_model derives it for the branch grid, so
+        the label lines up with the branches the model actually has.
+        """
+        unit_cell = np.stack(data['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        reciprocal_unit_cell = reciprocal_uc_conversion(
+            unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        reciprocal_volume = get_unit_cell_volume(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        return self.extraction_layer.get_branch_labels(reciprocal_volume)
+
     def _setup_integral_filter(self, data):
         model_params_defaults = {
             'peak_length': 20,
@@ -64,6 +79,9 @@ class IntegralFilter:
             'learning_rate': 0.00005,
             'd_model': 512,
             'n_heads': 8,
+            # Weight on the auxiliary cross entropy that supervises which volume branch is correct.
+            # 0.0 reproduces the behaviour of models trained before it existed.
+            'branch_loss_weight': 0.0,
             'epochs': 20,
             'batch_size': 64,
             'loss_type': 'log_cosh',
@@ -226,6 +244,9 @@ class IntegralFilter:
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['loss_type'] = params['loss_type']
         self.model_params['model_type'] = params['model_type']
+        # Defaulted rather than required: models trained before the auxiliary branch loss existed
+        # have no such column, and 0.0 is what they were trained with.
+        self.model_params['branch_loss_weight'] = float(params.get('branch_loss_weight', 0.0))
 
         self.q2_obs_scale = np.load(
             os.path.join(
@@ -523,18 +544,22 @@ class IntegralFilter:
         optimizer = keras.optimizers.Adam(
             learning_rate=self.model_params['learning_rate'],
             )
+        # The training loss carries the auxiliary branch term; the metrics keep the pure regression
+        # errors under their existing names so the loss curves stay comparable across runs.
         if self.model_params['loss_type'] == 'mse':
             loss_functions = {
-                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.loss_function_mse
+                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.training_loss_mse
                 }
         else:
             loss_functions = {
-                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.loss_function_log_cosh
+                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.training_loss_log_cosh
                 }
         loss_metrics = {
             f'{self.model_params["model_type"]}_xnn_scaled': [
                 self.extraction_layer.loss_function_log_cosh,
-                self.extraction_layer.loss_function_mse
+                self.extraction_layer.loss_function_mse,
+                self.extraction_layer.loss_function_branch,
+                self.extraction_layer.branch_accuracy,
                 ]
             }
         self.model.compile(
@@ -574,6 +599,9 @@ class IntegralFilter:
         train_xnn = np.stack(train['reindexed_xnn'])[:, self.unit_cell_indices]
         val_xnn = np.stack(val['reindexed_xnn'])[:, self.unit_cell_indices]
 
+        train_branch = self.get_branch_labels(train)
+        val_branch = self.get_branch_labels(val)
+
         if self.lattice_system == 'rhombohedral':
             # There are very large values of xnn being included for rhombohedral.
             # These need to be excluded or NaNs will occur in the model.
@@ -581,8 +609,10 @@ class IntegralFilter:
             val_indices = np.max(np.abs(val_xnn), axis=1) < 0.05
             train_xnn = train_xnn[train_indices]
             train_q2_obs_scaled = train_q2_obs_scaled[train_indices]
+            train_branch = train_branch[train_indices]
             val_xnn = val_xnn[val_indices]
             val_q2_obs_scaled = val_q2_obs_scaled[val_indices]
+            val_branch = val_branch[val_indices]
             train_unaugmented = np.invert(train['augmented'][train_indices])
         else:
             train_unaugmented = np.invert(train['augmented'])
@@ -620,8 +650,10 @@ class IntegralFilter:
             ))
         plt.close()
 
-        train_true = train_xnn_scaled
-        val_true = val_xnn_scaled
+        # The branch label rides along as the last column of the target so the loss can supervise
+        # the branch logits as well as the regression. Nothing downstream of the model changes.
+        train_true = np.concatenate([train_xnn_scaled, train_branch[:, np.newaxis]], axis=1)
+        val_true = np.concatenate([val_xnn_scaled, val_branch[:, np.newaxis]], axis=1)
         train_inputs = train_q2_obs_scaled
         val_inputs = val_q2_obs_scaled
 
@@ -654,9 +686,9 @@ class IntegralFilter:
         ##############################
         # Plot training loss vs time #
         ##############################
-        fig, axes = plt.subplots(3, 1, figsize=(6, 8), sharex=True)
+        fig, axes = plt.subplots(4, 1, figsize=(6, 10), sharex=True)
         axes[0].plot(
-            self.fit_history.history['loss'], 
+            self.fit_history.history['loss'],
             label='Training', marker='.'
             )
         axes[0].plot(
@@ -679,10 +711,19 @@ class IntegralFilter:
             self.fit_history.history['val_loss_function_mse'], 
             label='Validation', marker='v'
             )
+        axes[3].plot(
+            self.fit_history.history['branch_accuracy'],
+            label='Training', marker='.'
+            )
+        axes[3].plot(
+            self.fit_history.history['val_branch_accuracy'],
+            label='Validation', marker='v'
+            )
         axes[0].set_ylabel('Loss')
         axes[1].set_ylabel('Log-Cosh Error')
         axes[2].set_ylabel('MSE Error')
-        axes[2].set_xlabel('Epoch')
+        axes[3].set_ylabel('Branch Accuracy')
+        axes[3].set_xlabel('Epoch')
         axes[0].legend()
         fig.tight_layout()
         fig.savefig(os.path.join(
