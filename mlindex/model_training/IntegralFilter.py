@@ -82,6 +82,12 @@ class IntegralFilter:
             # Weight on the auxiliary cross entropy that supervises which volume branch is correct.
             # 0.0 reproduces the behaviour of models trained before it existed.
             'branch_loss_weight': 0.0,
+            # Percentiles of the reciprocal volume distribution the branch grid spans, and how the
+            # branches are spaced within it. These defaults reproduce the behaviour of models
+            # trained before they existed: 0.5 to 99 percent, spaced by equal probability.
+            'volume_lower_percentile': 0.005,
+            'volume_upper_percentile': 0.990,
+            'volume_spacing_blend': 1.0,
             'epochs': 20,
             'batch_size': 64,
             'loss_type': 'log_cosh',
@@ -247,6 +253,14 @@ class IntegralFilter:
         # Defaulted rather than required: models trained before the auxiliary branch loss existed
         # have no such column, and 0.0 is what they were trained with.
         self.model_params['branch_loss_weight'] = float(params.get('branch_loss_weight', 0.0))
+        # Recorded for provenance rather than needed to rebuild: the branch grid is stored in the
+        # weights as ExtractionLayer.volumes, and build_model(data=None) never refits it.
+        self.model_params['volume_lower_percentile'] = float(
+            params.get('volume_lower_percentile', 0.005))
+        self.model_params['volume_upper_percentile'] = float(
+            params.get('volume_upper_percentile', 0.990))
+        self.model_params['volume_spacing_blend'] = float(
+            params.get('volume_spacing_blend', 1.0))
 
         self.q2_obs_scale = np.load(
             os.path.join(

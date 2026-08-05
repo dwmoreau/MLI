@@ -78,8 +78,16 @@ class ExtractionLayer(keras.layers.Layer):
             import scipy.ndimage
             rng = np.random.default_rng(self.seed)
             reciprocal_volume_sorted = np.sort(reciprocal_volume)
-            upper_volume_limit = reciprocal_volume_sorted[int(0.990*reciprocal_volume_sorted.size)]
-            lower_volume_limit = reciprocal_volume_sorted[int(0.005*reciprocal_volume_sorted.size)]
+            # The branch grid only spans these percentiles, so entries outside them have no branch
+            # that renders them in register and are measurably the worst predicted group. Widening
+            # costs alignment, since the same number of branches covers more range, so the two are
+            # traded against each other rather than set independently.
+            upper_volume_limit = reciprocal_volume_sorted[int(
+                self.model_params['volume_upper_percentile']*reciprocal_volume_sorted.size
+                )]
+            lower_volume_limit = reciprocal_volume_sorted[int(
+                self.model_params['volume_lower_percentile']*reciprocal_volume_sorted.size
+                )]
             bins_vol = np.linspace(lower_volume_limit, upper_volume_limit, 401)
             centers_vol = (bins_vol[1:] + bins_vol[:-1]) / 2
             reciprocal_volume_hist, _ = np.histogram(reciprocal_volume, bins=bins_vol, density=True)
@@ -89,15 +97,40 @@ class ExtractionLayer(keras.layers.Layer):
             reciprocal_volume_rv = scipy.stats.rv_histogram(
                 (reciprocal_volume_hist_smoothed, bins_vol), density=True
                 )
-            reciprocal_volume_samples = reciprocal_volume_rv.ppf(np.linspace(
-                0.001, 0.999, self.model_params['n_volumes']
-                ))
-            distribution_volumes = (reciprocal_volume_samples / q2_obs_scale**2)**(2/3)
+            # Peak p of branch v is rendered at q2_p / v, so how far a peak moves between adjacent
+            # branches is set by the step in 1/v, not by the step in probability. Spacing the
+            # branches by equal probability gives every branch the same number of entries but lets
+            # the step in 1/v vary enormously across the grid, so entries in the sparse tails land
+            # far from any branch. blend interpolates between the two: 1.0 is equal probability,
+            # 0.0 is equal steps in 1/v and therefore equal misalignment everywhere.
+            blend = self.model_params['volume_spacing_blend']
+            if blend >= 1.0:
+                reciprocal_volume_samples = reciprocal_volume_rv.ppf(np.linspace(
+                    0.001, 0.999, self.model_params['n_volumes']
+                    ))
+                distribution_volumes = (reciprocal_volume_samples / q2_obs_scale**2)**(2/3)
+            else:
+                quantiles = np.linspace(0.001, 0.999, 20001)
+                reciprocal_v = 1.0/(
+                    reciprocal_volume_rv.ppf(quantiles) / q2_obs_scale**2
+                    )**(2/3)
+                weight = np.abs(np.gradient(reciprocal_v, quantiles))**(1 - blend)
+                cumulative = np.concatenate(
+                    [[0], np.cumsum((weight[1:] + weight[:-1])/2 * np.diff(quantiles))]
+                    )
+                cumulative /= cumulative[-1]
+                distribution_volumes = np.sort(1.0/np.interp(
+                    np.linspace(0, 1, self.model_params['n_volumes']), cumulative, reciprocal_v
+                    ))
 
             # Ideally this scaling of distribution_volumes should not be needed.
             # For primitive monoclinic and triclinic, the distribution of the volumes skews to the
             # large side and the q2_filter distribution is pushed to a much larger region than q2_obs.
-            volume_normalization = np.median(distribution_volumes)
+            # Taken from the data rather than from the branch samples so that it does not move when
+            # the branches are reallocated. With equal-probability spacing the two agree to 0.2%,
+            # but a blended grid's median branch is not the distribution's median, and letting the
+            # normalization follow it would silently rescale the grid and the fitted sigma with it.
+            volume_normalization = np.median((reciprocal_volume / q2_obs_scale**2)**(2/3))
             distribution_volumes /= volume_normalization
             # Kept so an entry's own volume can be put on the same scale as the branches, which is
             # what the branch labels for the auxiliary loss need. Training only; on the load path

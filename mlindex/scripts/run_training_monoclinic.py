@@ -105,6 +105,12 @@ if __name__ == '__main__':
         'model_type': 'metric',
         # Weight on the auxiliary cross entropy that supervises which volume branch is correct.
         'branch_loss_weight': 0.2,
+        # Span more of the volume distribution, and spread the branches part way towards equal
+        # steps in 1/v. Together these cut the entries with no usable branch by 4-5x and roughly
+        # halve the badly misaligned tail, at the cost of a slightly worse median alignment.
+        'volume_lower_percentile': 0.001,
+        'volume_upper_percentile': 0.999,
+        'volume_spacing_blend': 0.5,
         'calibration_params': {
             'layers': 3,
             'epsilon_pds': 0.1,
