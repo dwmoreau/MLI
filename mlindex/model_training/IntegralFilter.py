@@ -444,7 +444,6 @@ class IntegralFilter:
         attended = IntraVolume_MultiHeadAttention(
             d_model=self.model_params['d_model'],
             n_heads=self.model_params['n_heads'],
-            volumes_fn=lambda: self.extraction_layer.volumes,
         )(metric)
         x = keras.layers.UnitNormalization(axis=2)(attended)
         
