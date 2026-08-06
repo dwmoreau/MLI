@@ -617,7 +617,6 @@ class IntegralFilter:
 
     def train(self, data):
         import keras
-        from mlindex.model_training.Networks import SigmaDecayCallback
         train = data[data['train']]
         val = data[~data['train']]
 
@@ -696,21 +695,13 @@ class IntegralFilter:
                 self.model_params["tag"]
                 )
 
-            callbacks = [SigmaDecayCallback(
-                extraction_layer=self.extraction_layer,
-                decay_rate=0.8,
-                initial_multiplier=2
-                )]
-        else:
-            callbacks = None
         self.fit_history = self.model.fit(
             x=train_inputs,
             y=train_true,
             epochs=self.model_params['epochs'],
             shuffle=True,
-            batch_size=self.model_params['batch_size'], 
+            batch_size=self.model_params['batch_size'],
             validation_data=(val_inputs, val_true),
-            #callbacks=callbacks,
             )
         self.save(train_inputs)
 

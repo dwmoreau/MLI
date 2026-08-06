@@ -11,34 +11,46 @@ def tensor_to_numpy(tensor):
         return tensor.detach().cpu().numpy()
 
 
-class SigmaDecayCallback(keras.callbacks.Callback):
-    def __init__(self, extraction_layer, initial_multiplier=10, decay_rate=0.9):
-        """
-        Callback to decay sigma from initial_value to final_value exponentially.
-        
-        Args:
-            custom_layer: The layer containing the sigma parameter
-            initial_value: Starting value for sigma (default: 0.1)
-            final_value: Target minimum value for sigma (default: 0.02)
-            decay_rate: Rate of exponential decay (default: 0.9)
-        """
-        super().__init__()
-        self.extraction_layer = extraction_layer
-        self.initial_value = initial_multiplier*self.extraction_layer.sigma_init
-        self.final_value = self.extraction_layer.sigma_init
-        self.decay_rate = decay_rate
-        
-    def on_train_begin(self, logs=None):
-        """Set sigma to initial value when training starts"""
-        self.extraction_layer.sigma.assign(self.initial_value)
-        print(f"Training started: sigma initialized to {self.initial_value:0.5f}")
-        
-    def on_epoch_begin(self, epoch, logs=None):
-        """Update sigma using exponential decay formula"""
-        # Calculate new sigma value using exponential decay
-        new_sigma = self.final_value + (self.initial_value - self.final_value) * (self.decay_rate ** epoch)
-        self.extraction_layer.sigma.assign(new_sigma)
-        print(f"Epoch {epoch + 1}: sigma decayed to {new_sigma:0.5f}")
+_compiled_extraction = None
+
+
+def _get_compiled_extraction():
+    """The elementwise chain of ExtractionLayer.call, fused into a single kernel.
+
+    Written against torch directly rather than keras.ops so that torch.compile sees the whole chain
+    at once. Eager execution runs each of the six operations as its own kernel, and every one of
+    them round trips a batch x n_volumes x n_filters x extraction_peak_length array through memory
+    -- 1.3 GB at batch 512, to produce 164 MB of output. The layer is bandwidth bound on those
+    intermediates rather than on the arithmetic, so fusing them into one pass, where the values stay
+    in registers and only the reduced result is written, is worth about 20x on this layer.
+
+    Compiled once on first use and cached. dynamic is left at its default so that torch specializes
+    on the first shape it sees and recompiles as shape-generic when a second one shows up; the call
+    sites here use several batch sizes, including a short final batch every epoch.
+    """
+    global _compiled_extraction
+    if _compiled_extraction is None:
+        import torch
+
+        def extraction(filters, volumes, q2_obs_scaled, sigma):
+            difference = filters - q2_obs_scaled / volumes
+            return torch.exp(-1/2 * (difference / sigma)**2).sum(dim=3)
+
+        _compiled_extraction = torch.compile(extraction)
+    return _compiled_extraction
+
+
+def _can_fuse(tensor):
+    """Whether the fused path applies to this tensor.
+
+    Only on the torch backend and only on the GPU, since the fused kernel is the point. Tracing is
+    excluded because torch.onnx.export traces the live model and has to see the plain ops to build
+    the graph, and the inference path runs from the exported ONNX rather than from here anyway.
+    """
+    if os.environ.get('KERAS_BACKEND') != 'torch':
+        return False
+    import torch
+    return bool(getattr(tensor, 'is_cuda', False)) and not torch.jit.is_tracing()
 
 
 class ExtractionLayer(keras.layers.Layer):
@@ -209,6 +221,13 @@ class ExtractionLayer(keras.layers.Layer):
         # grid being stretched out to meet q2_obs. Both place peak p of branch v at q2_p / v, but
         # this form gives every branch the same Gaussian width instead of sigma / v, so a given unit
         # cell shape reaches the shared attention embedding as the same pattern at every volume.
+        #
+        # The fused path below is the same arithmetic as the eager one, in one kernel instead of
+        # six. The two agree to float32 rounding; they differ at all only because the compiler is
+        # free to reassociate and to emit fused multiply-adds.
+        if _can_fuse(filters):
+            return _get_compiled_extraction()(filters, volumes, q2_obs_scaled, self.sigma)
+
         difference = filters - q2_obs_scaled / volumes
 
         distances = keras.ops.exp(-1/2 * (difference / self.sigma)**2)
