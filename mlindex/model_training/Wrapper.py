@@ -989,11 +989,39 @@ class Wrapper:
         self.data['reindexed_unit_cell_pred'] = list(reindexed_uc_pred)
         self.data['reindexed_unit_cell_pred_var'] = list(reindexed_uc_pred_var)
 
-    def setup_integral_filter(self, mode):
+    def setup_integral_filter(self, mode, resume=False):
+        """Train or load the integral filter for every split group.
+
+        resume skips groups that already finished, which is what a script needs after a job is
+        killed part way down its list. Completion is judged by the last artifact the per group
+        pipeline writes, the quantized evaluation plot, so a group interrupted anywhere earlier is
+        redone rather than left half built. Within a group, an interrupted fit picks up from its
+        backup regardless of this flag.
+
+        It is off by default because the artifacts of a finished group look the same whether it
+        finished a minute ago or in March, so defaulting it on would silently skip everything on a
+        run that was meant to retrain from scratch.
+        """
         from mlindex.model_training.IntegralFilter import IntegralFilter
         self.integral_filter_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
+            if resume and not self.integral_filter_params[split_group]['load_from_tag']:
+                # The two quantized graphs are what inference loads, and the calibration one is
+                # written last, after the integral filter is already trained and saved. Both are
+                # checked rather than just the later one so that a group is only skipped when it is
+                # actually usable. The evaluation plots are deliberately not the test: they are
+                # diagnostics written after the models, and a group missing only its plots has
+                # nothing left worth recomputing.
+                tag = self.data_params['tag']
+                directory = os.path.join(self.save_to['integral_filter'], split_group)
+                finished = all(os.path.exists(os.path.join(directory, name)) for name in [
+                    f'{split_group}_pitf_weights_{tag}_quantized.onnx',
+                    f'{split_group}_calibration_weights_{tag}_quantized.onnx',
+                    ])
+                if finished:
+                    print(f'{split_group} already trained, skipping')
+                    continue
             self.integral_filter_generator[split_group] = IntegralFilter(
                 split_group,
                 self.data_params,

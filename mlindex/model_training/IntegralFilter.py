@@ -695,6 +695,20 @@ class IntegralFilter:
                 self.model_params["tag"]
                 )
 
+        # Nothing is written until fit() returns, so a job killed part way through loses every epoch
+        # it ran. That forces long walltime requests, which are the hardest thing for a scheduler to
+        # backfill, so the job waits longer still. BackupAndRestore writes the weights, the optimizer
+        # state and the epoch number after each epoch and restores all three on the next fit(), so an
+        # interrupted run resumes instead of restarting. It keeps one checkpoint, overwritten in
+        # place, and deletes the directory once fit() completes -- so the backup existing is itself
+        # the signal that the previous run was interrupted. There is no flag to remember to set, and
+        # a group that finished normally retrains from scratch exactly as before.
+        backup_directory = os.path.join(
+            self.save_to_split_group,
+            f'{self.split_group}_training_backup_{self.model_params["tag"]}'
+            )
+        if os.path.exists(os.path.join(backup_directory, 'latest.weights.h5')):
+            print(f'resuming {self.split_group} from the backup in {backup_directory}')
         self.fit_history = self.model.fit(
             x=train_inputs,
             y=train_true,
@@ -702,6 +716,7 @@ class IntegralFilter:
             shuffle=True,
             batch_size=self.model_params['batch_size'],
             validation_data=(val_inputs, val_true),
+            callbacks=[keras.callbacks.BackupAndRestore(backup_dir=backup_directory)],
             )
         self.save(train_inputs)
 
@@ -709,38 +724,22 @@ class IntegralFilter:
         # Plot training loss vs time #
         ##############################
         fig, axes = plt.subplots(4, 1, figsize=(6, 10), sharex=True)
-        axes[0].plot(
-            self.fit_history.history['loss'],
-            label='Training', marker='.'
-            )
-        axes[0].plot(
-            self.fit_history.history['val_loss'], 
-            label='Validation', marker='v'
-            )
-        axes[1].plot(
-            self.fit_history.history['loss_function_log_cosh'], 
-            label='Training', marker='.'
-            )
-        axes[1].plot(
-            self.fit_history.history['val_loss_function_log_cosh'], 
-            label='Validation', marker='v'
-            )
-        axes[2].plot(
-            self.fit_history.history['loss_function_mse'], 
-            label='Training', marker='.'
-            )
-        axes[2].plot(
-            self.fit_history.history['val_loss_function_mse'], 
-            label='Validation', marker='v'
-            )
-        axes[3].plot(
-            self.fit_history.history['branch_accuracy'],
-            label='Training', marker='.'
-            )
-        axes[3].plot(
-            self.fit_history.history['val_branch_accuracy'],
-            label='Validation', marker='v'
-            )
+        # A resumed run only records the epochs it actually ran, so plotting the history against an
+        # implicit index would relabel epoch 20 as epoch 0. fit_history.epoch carries the real
+        # numbers. The epochs before the interruption are genuinely lost from the curves.
+        epochs = self.fit_history.epoch
+        for index, (train_key, val_key) in enumerate([
+                ('loss', 'val_loss'),
+                ('loss_function_log_cosh', 'val_loss_function_log_cosh'),
+                ('loss_function_mse', 'val_loss_function_mse'),
+                ('branch_accuracy', 'val_branch_accuracy'),
+                ]):
+            axes[index].plot(
+                epochs, self.fit_history.history[train_key], label='Training', marker='.'
+                )
+            axes[index].plot(
+                epochs, self.fit_history.history[val_key], label='Validation', marker='v'
+                )
         axes[0].set_ylabel('Loss')
         axes[1].set_ylabel('Log-Cosh Error')
         axes[2].set_ylabel('MSE Error')
