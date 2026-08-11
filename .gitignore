@@ -5,3 +5,6 @@ __pycache__
 *_base_line*
 dist/
 *.egg-info/
+
+# Working notes for the ML-FOM project; not for GitHub.
+docs/
