@@ -169,7 +169,6 @@ for index in range(n):
         print(entry)
         entry_tag = entry.file_name
         peak_list = np.array(entry.peak_positions)[:20]**2
-        triplet_file_name = '/foo/bar/bam'
         if zero_error:
             wavelength = entry.primary_wavelength
         else:
@@ -177,7 +176,6 @@ for index in range(n):
     else:
         entry_tag = entry_tags[index]
         peak_list = np.load(base_dir + f'/{entry_tag}/{entry_tag}_peak_list.npy')[:20]
-        triplet_file_name = base_dir + f'/{entry_tag}/{entry_tag}_triplets.npy'
         #wavelength = None
         #zero_error = False
         wavelength = 1.5418
@@ -185,12 +183,6 @@ for index in range(n):
 
     logger.info(f'Starting entry {entry_tag}')
 
-    if os.path.exists(triplet_file_name):
-        triplet_obs = np.load(triplet_file_name)
-        logger.info(f'Entry {entry_tag} has triplet information')
-        triplet_obs = None
-    else:
-        triplet_obs = None
     # The next portion is the optimization of a single entry
     # rank 0 will be the rank that compares results from all bravais lattices. 
     if rank == 0:
@@ -199,9 +191,6 @@ for index in range(n):
         top_Minfo = dict.fromkeys(bravais_lattices)
         top_spacegroup = dict.fromkeys(bravais_lattices)
         top_n_indexed = dict.fromkeys(bravais_lattices)
-        if not triplet_obs is None:
-            top_M_triplets = dict.fromkeys(bravais_lattices)
-            top_n_indexed_triplets = dict.fromkeys(bravais_lattices)
 
     # This loop optimizes the entry given an assumed bravais lattice.
     for bravais_lattice in bravais_lattices:
@@ -214,7 +203,6 @@ for index in range(n):
             logger.info(f'Starting optimization of {bravais_lattice} {role}')
             optimizer[bravais_lattice].run(
                 q2=peak_list,
-                triplets=triplet_obs,
                 n_top_candidates=n_top_candidates,
                 zero_error=zero_error,
                 wavelength=wavelength
@@ -231,9 +219,6 @@ for index in range(n):
             top_Minfo[bravais_lattice] = optimizer[bravais_lattice].top_Minfo
             top_spacegroup[bravais_lattice] = optimizer[bravais_lattice].top_spacegroup
             top_n_indexed[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed
-            if not triplet_obs is None:
-                top_n_indexed_triplets[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed_triplets
-                top_M_triplets[bravais_lattice] = optimizer[bravais_lattice].top_M_triplets
         else:
             if rank == 0:
                 top_unit_cell[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
@@ -241,18 +226,12 @@ for index in range(n):
                 top_Minfo[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_spacegroup[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_n_indexed[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                if not triplet_obs is None:
-                    top_n_indexed_triplets[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                    top_M_triplets[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
             elif rank == mpi_organizers[bravais_lattice].manager:
                 comm.send(optimizer[bravais_lattice].top_unit_cell, dest=0)
                 comm.send(optimizer[bravais_lattice].top_M20, dest=0)
                 comm.send(optimizer[bravais_lattice].top_Minfo, dest=0)
                 comm.send(optimizer[bravais_lattice].top_spacegroup, dest=0)
                 comm.send(optimizer[bravais_lattice].top_n_indexed, dest=0)
-                if not triplet_obs is None:
-                    comm.send(optimizer[bravais_lattice].top_n_indexed_triplets, dest=0)
-                    comm.send(optimizer[bravais_lattice].top_M_triplets, dest=0)
     if rank == 0:
         output_data = []
         for bravais_lattice in bravais_lattices:
@@ -290,22 +269,10 @@ for index in range(n):
                         ])
                 elif bravais_lattice == 'aP':
                     unit_cell = partial_unit_cell
-                if triplet_obs is None:
-                    n_indexed_triplets = 0
-                else:
-                    n_indexed_triplets = top_n_indexed_triplets[bravais_lattice][result_index]
-                if triplet_obs is None:
-                    M_triplet_output = None
-                    n_indexed_triplets_output = None
-                else:
-                    M_triplet_output = list(top_M_triplets[bravais_lattice][result_index])
-                    n_indexed_triplets_output = n_indexed_triplets
                 output_data.append({
                     'M20': top_M20[bravais_lattice][result_index],
                     'Minfo': top_Minfo[bravais_lattice][result_index],
                     'n_indexed': top_n_indexed[bravais_lattice][result_index],
-                    'M_triplet': M_triplet_output,
-                    'n_indexed_triplet': n_indexed_triplets_output,
                     'bravais_lattice': bravais_lattice,
                     'spacegroup': top_spacegroup[bravais_lattice][result_index],
                     'a': unit_cell[0],

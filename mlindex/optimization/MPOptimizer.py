@@ -77,7 +77,6 @@ class MPOptimizerManager(OptimizerManager):
     def run_common(self, n_top_candidates):
         for r in range(1, self.n_ranks):
             self._data_queues[r].put(self.q2_obs.copy())
-            self._data_queues[r].put(self.triplets)
         self._run_loop(n_top_candidates)
 
     def generate_candidates_rank(self):
@@ -97,12 +96,6 @@ class MPOptimizerManager(OptimizerManager):
         best_xnn_all = [candidates.best_xnn]
         best_n_indexed_all = [candidates.n_indexed]
         best_spacegroup_all = list(candidates.best_spacegroup)
-        if self.triplets is not None:
-            best_n_indexed_triplets_all = [candidates.n_indexed_triplets]
-            best_M_triplets_all = [candidates.best_M_triplets]
-        else:
-            best_n_indexed_triplets_all = None
-            best_M_triplets_all = None
         for r in range(1, self.n_ranks):
             result = self._result_queues[r].get()
             if isinstance(result, Exception):
@@ -112,12 +105,8 @@ class MPOptimizerManager(OptimizerManager):
             best_xnn_all.append(result['xnn'])
             best_n_indexed_all.append(result['n_indexed'])
             best_spacegroup_all += result['spacegroup']
-            if self.triplets is not None:
-                best_n_indexed_triplets_all.append(result['n_indexed_triplets'])
-                best_M_triplets_all.append(result['M_triplets'])
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
-                                     best_n_indexed_triplets_all, best_M_triplets_all,
                                      n_top_candidates)
 
     def convergence_testing(self, candidates):
@@ -158,7 +147,6 @@ class MPOptimizerWorker(OptimizerWorker):
 
     def run_common(self, n_top_candidates):
         self.q2_obs[:] = self._data_q.get()
-        self.triplets = self._data_q.get()
         self._run_loop(n_top_candidates)
 
     def generate_candidates_rank(self):
@@ -172,9 +160,6 @@ class MPOptimizerWorker(OptimizerWorker):
             'n_indexed': candidates.n_indexed,
             'spacegroup': list(candidates.best_spacegroup),
         }
-        if self.triplets is not None:
-            result['n_indexed_triplets'] = candidates.n_indexed_triplets
-            result['M_triplets'] = candidates.best_M_triplets
         self._result_q.put(result)
 
     def convergence_testing(self, candidates):
@@ -251,11 +236,11 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
     return optimizers, processes, task_queues
 
 
-def run_mp_bl(optimizer, bl, task_queues, q2, triplets, zero_error, wavelength, n_top):
+def run_mp_bl(optimizer, bl, task_queues, q2, zero_error, wavelength, n_top):
     """Signal workers to start BL run, then run manager's share."""
     for r in range(1, len(task_queues)):
         task_queues[r].put((bl, n_top, zero_error, wavelength))
-    optimizer.run(q2=q2, triplets=triplets, zero_error=zero_error,
+    optimizer.run(q2=q2, zero_error=zero_error,
                   wavelength=wavelength, n_top_candidates=n_top)
 
 

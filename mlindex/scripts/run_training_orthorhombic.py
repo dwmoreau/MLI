@@ -6,10 +6,12 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import keras
+from mlindex.model_training.BackendSetup import enable_tf32
 from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
+    enable_tf32()
     broadening_tag = '1'
     data_params = {
         'tag': f'orthorhombic_{broadening_tag}',
@@ -97,7 +99,7 @@ if __name__ == '__main__':
 
     integral_filter_group_params = {
         'tag': f'orthorhombic_{broadening_tag}',
-        'load_from_tag': True,
+        'load_from_tag': False,
         'peak_length': 20,
         'extraction_peak_length': 10,
         'n_volumes': 100,
@@ -133,15 +135,14 @@ if __name__ == '__main__':
 
     integral_filter_params = {
         'oC_0_00': integral_filter_group_params_load,
-        'oC_1_00': integral_filter_group_params_load,
         'oC_2_00': integral_filter_group_params_load,
         'oF_0_00': integral_filter_group_params_load,
         'oF_0_01': integral_filter_group_params_load,
         'oI_0_00': integral_filter_group_params_load,
-        'oP_0_00': integral_filter_group_params_load,
-        'oP_0_01': integral_filter_group_params_load,
-        'oP_0_02': integral_filter_group_params_load,
-        'oP_0_03': integral_filter_group_params_load,
+        'oP_0_00': integral_filter_group_params,
+        'oP_0_01': integral_filter_group_params,
+        'oP_0_02': integral_filter_group_params,
+        'oP_0_03': integral_filter_group_params,
         }
 
     random_params_bl0 = {
@@ -192,4 +193,4 @@ if __name__ == '__main__':
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
     #wrapper.setup_miller_index_templates()
-    wrapper.setup_integral_filter('inference')
+    wrapper.setup_integral_filter('training')

@@ -55,12 +55,6 @@ def _parse_args():
         help="X-ray wavelength (Å); required for .pkslst files, --zero-error, and --peak-units 2theta"
     )
     parser.add_argument(
-        "--triplets-file",
-        type=str,
-        default=None,
-        help="file name of the triplets file (numpy array)"
-    )
-    parser.add_argument(
         "--zero-error",
         action='store_true',
         help="Apply a correction for zero point error in theta"
@@ -124,16 +118,12 @@ def _load_peaks(args):
     else:
         raise ValueError("Either --peaks or --peak-file must be provided")
 
-    if args.triplets_file:
-        triplet_obs = np.load(args.triplets_file)
-    else:
-        triplet_obs = None
     peak_list.sort()
-    return peak_list, triplet_obs
+    return peak_list
 
 
 def _collect_results(optimizer, bl, all_results,
-                     Minfos=None, spacegroups=None, M_triplets=None, n_indexed_triplets=None):
+                     Minfos=None, spacegroups=None):
     for i in range(optimizer.top_M20.size):
         partial = optimizer.top_unit_cell[i]
         if bl in ['cF', 'cI', 'cP']:
@@ -163,8 +153,6 @@ def _collect_results(optimizer, bl, all_results,
         }
         if Minfos is not None:             entry['Minfo']             = Minfos[i]
         if spacegroups is not None:        entry['spacegroup']        = spacegroups[i]
-        if M_triplets is not None:         entry['M_triplet']         = list(M_triplets[i])
-        if n_indexed_triplets is not None: entry['n_indexed_triplet'] = n_indexed_triplets[i]
         all_results.append(entry)
     return all_results
 
@@ -290,7 +278,7 @@ def _conventional_cell(output_data, delta=0.1):
 
 
 def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
-                  top_n_indexed, top_M_triplets, top_n_indexed_triplets, triplet_obs):
+                  top_n_indexed):
     output_data = []
     for bl in args.bravais_lattices:
         mock = types.SimpleNamespace(
@@ -302,14 +290,12 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
             mock, bl, output_data,
             Minfos=top_Minfo[bl],
             spacegroups=top_spacegroup[bl],
-            M_triplets=top_M_triplets[bl] if triplet_obs is not None else None,
-            n_indexed_triplets=top_n_indexed_triplets[bl] if triplet_obs is not None else None,
         )
     output_data = _conventional_cell(output_data)
     _write_results(output_data, output_file_base='indexing_results')
 
 
-def _run_mpi(args, peak_list, triplet_obs, seed=12345):
+def _run_mpi(args, peak_list, seed=12345):
     from mpi4py import MPI
 
     broadening_tag = '1'
@@ -346,9 +332,6 @@ def _run_mpi(args, peak_list, triplet_obs, seed=12345):
         top_Minfo = dict.fromkeys(bravais_lattices)
         top_spacegroup = dict.fromkeys(bravais_lattices)
         top_n_indexed = dict.fromkeys(bravais_lattices)
-        if triplet_obs is not None:
-            top_M_triplets = dict.fromkeys(bravais_lattices)
-            top_n_indexed_triplets = dict.fromkeys(bravais_lattices)
 
     for bravais_lattice in bravais_lattices:
         if rank in mpi_organizers[bravais_lattice].workers:
@@ -360,7 +343,6 @@ def _run_mpi(args, peak_list, triplet_obs, seed=12345):
             logger.info(f'Starting optimization of {bravais_lattice} {role}')
             optimizer[bravais_lattice].run(
                 q2=peak_list,
-                triplets=triplet_obs,
                 n_top_candidates=n_top_candidates,
                 zero_error=args.zero_error,
                 wavelength=args.wavelength,
@@ -376,9 +358,6 @@ def _run_mpi(args, peak_list, triplet_obs, seed=12345):
             top_Minfo[bravais_lattice] = optimizer[bravais_lattice].top_Minfo
             top_spacegroup[bravais_lattice] = optimizer[bravais_lattice].top_spacegroup
             top_n_indexed[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed
-            if triplet_obs is not None:
-                top_n_indexed_triplets[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed_triplets
-                top_M_triplets[bravais_lattice] = optimizer[bravais_lattice].top_M_triplets
         else:
             if rank == 0:
                 top_unit_cell[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
@@ -386,29 +365,20 @@ def _run_mpi(args, peak_list, triplet_obs, seed=12345):
                 top_Minfo[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_spacegroup[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_n_indexed[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                if triplet_obs is not None:
-                    top_n_indexed_triplets[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                    top_M_triplets[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
             elif rank == mpi_organizers[bravais_lattice].manager:
                 comm.send(optimizer[bravais_lattice].top_unit_cell, dest=0)
                 comm.send(optimizer[bravais_lattice].top_M20, dest=0)
                 comm.send(optimizer[bravais_lattice].top_Minfo, dest=0)
                 comm.send(optimizer[bravais_lattice].top_spacegroup, dest=0)
                 comm.send(optimizer[bravais_lattice].top_n_indexed, dest=0)
-                if triplet_obs is not None:
-                    comm.send(optimizer[bravais_lattice].top_n_indexed_triplets, dest=0)
-                    comm.send(optimizer[bravais_lattice].top_M_triplets, dest=0)
 
     if rank == 0:
-        top_M_triplets_out = top_M_triplets if triplet_obs is not None else None
-        top_n_indexed_triplets_out = top_n_indexed_triplets if triplet_obs is not None else None
         _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
-                      top_n_indexed, top_M_triplets_out, top_n_indexed_triplets_out,
-                      triplet_obs)
+                      top_n_indexed)
     logger.info('Finished gathering optimization results')
 
 
-def _run_mp(args, peak_list, triplet_obs, n_procs, seed=12345):
+def _run_mp(args, peak_list, n_procs, seed=12345):
     from mlindex.optimization.MPOptimizer import setup_mp_optimizers, run_mp_bl, shutdown_mp_workers
 
     broadening_tag = '1'
@@ -423,8 +393,6 @@ def _run_mp(args, peak_list, triplet_obs, n_procs, seed=12345):
     top_Minfo = {}
     top_spacegroup = {}
     top_n_indexed = {}
-    top_M_triplets = {}
-    top_n_indexed_triplets = {}
 
     for bravais_lattice in args.bravais_lattices:
         run_mp_bl(
@@ -432,7 +400,6 @@ def _run_mp(args, peak_list, triplet_obs, n_procs, seed=12345):
             bravais_lattice,
             task_queues,
             q2=peak_list,
-            triplets=triplet_obs,
             zero_error=args.zero_error,
             wavelength=args.wavelength,
             n_top=n_top_candidates,
@@ -443,17 +410,11 @@ def _run_mp(args, peak_list, triplet_obs, n_procs, seed=12345):
         top_Minfo[bravais_lattice] = opt.top_Minfo
         top_spacegroup[bravais_lattice] = opt.top_spacegroup
         top_n_indexed[bravais_lattice] = opt.top_n_indexed
-        if triplet_obs is not None:
-            top_M_triplets[bravais_lattice] = opt.top_M_triplets
-            top_n_indexed_triplets[bravais_lattice] = opt.top_n_indexed_triplets
 
     shutdown_mp_workers(processes, task_queues)
 
-    top_M_triplets_out = top_M_triplets if triplet_obs is not None else None
-    top_n_indexed_triplets_out = top_n_indexed_triplets if triplet_obs is not None else None
     _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
-                  top_n_indexed, top_M_triplets_out, top_n_indexed_triplets_out,
-                  triplet_obs)
+                  top_n_indexed)
 
 
 def main():
@@ -463,11 +424,11 @@ def main():
     if invalid:
         raise SystemExit(f"Unknown Bravais lattices: {', '.join(invalid)}")
     args.bravais_lattices = selected
-    peak_list, triplet_obs = _load_peaks(args)
+    peak_list = _load_peaks(args)
     if args.mpi:
-        _run_mpi(args, peak_list, triplet_obs, seed=args.seed)
+        _run_mpi(args, peak_list, seed=args.seed)
     else:
-        _run_mp(args, peak_list, triplet_obs, n_procs=args.nproc, seed=args.seed)
+        _run_mp(args, peak_list, n_procs=args.nproc, seed=args.seed)
 
 
 if __name__ == "__main__":

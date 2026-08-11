@@ -11,34 +11,46 @@ def tensor_to_numpy(tensor):
         return tensor.detach().cpu().numpy()
 
 
-class SigmaDecayCallback(keras.callbacks.Callback):
-    def __init__(self, extraction_layer, initial_multiplier=10, decay_rate=0.9):
-        """
-        Callback to decay sigma from initial_value to final_value exponentially.
-        
-        Args:
-            custom_layer: The layer containing the sigma parameter
-            initial_value: Starting value for sigma (default: 0.1)
-            final_value: Target minimum value for sigma (default: 0.02)
-            decay_rate: Rate of exponential decay (default: 0.9)
-        """
-        super().__init__()
-        self.extraction_layer = extraction_layer
-        self.initial_value = initial_multiplier*self.extraction_layer.sigma_init
-        self.final_value = self.extraction_layer.sigma_init
-        self.decay_rate = decay_rate
-        
-    def on_train_begin(self, logs=None):
-        """Set sigma to initial value when training starts"""
-        self.extraction_layer.sigma.assign(self.initial_value)
-        print(f"Training started: sigma initialized to {self.initial_value:0.5f}")
-        
-    def on_epoch_begin(self, epoch, logs=None):
-        """Update sigma using exponential decay formula"""
-        # Calculate new sigma value using exponential decay
-        new_sigma = self.final_value + (self.initial_value - self.final_value) * (self.decay_rate ** epoch)
-        self.extraction_layer.sigma.assign(new_sigma)
-        print(f"Epoch {epoch + 1}: sigma decayed to {new_sigma:0.5f}")
+_compiled_extraction = None
+
+
+def _get_compiled_extraction():
+    """The elementwise chain of ExtractionLayer.call, fused into a single kernel.
+
+    Written against torch directly rather than keras.ops so that torch.compile sees the whole chain
+    at once. Eager execution runs each of the six operations as its own kernel, and every one of
+    them round trips a batch x n_volumes x n_filters x extraction_peak_length array through memory
+    -- 1.3 GB at batch 512, to produce 164 MB of output. The layer is bandwidth bound on those
+    intermediates rather than on the arithmetic, so fusing them into one pass, where the values stay
+    in registers and only the reduced result is written, is worth about 20x on this layer.
+
+    Compiled once on first use and cached. dynamic is left at its default so that torch specializes
+    on the first shape it sees and recompiles as shape-generic when a second one shows up; the call
+    sites here use several batch sizes, including a short final batch every epoch.
+    """
+    global _compiled_extraction
+    if _compiled_extraction is None:
+        import torch
+
+        def extraction(filters, volumes, q2_obs_scaled, sigma):
+            difference = filters - q2_obs_scaled / volumes
+            return torch.exp(-1/2 * (difference / sigma)**2).sum(dim=3)
+
+        _compiled_extraction = torch.compile(extraction)
+    return _compiled_extraction
+
+
+def _can_fuse(tensor):
+    """Whether the fused path applies to this tensor.
+
+    Only on the torch backend and only on the GPU, since the fused kernel is the point. Tracing is
+    excluded because torch.onnx.export traces the live model and has to see the plain ops to build
+    the graph, and the inference path runs from the exported ONNX rather than from here anyway.
+    """
+    if os.environ.get('KERAS_BACKEND') != 'torch':
+        return False
+    import torch
+    return bool(getattr(tensor, 'is_cuda', False)) and not torch.jit.is_tracing()
 
 
 class ExtractionLayer(keras.layers.Layer):
@@ -46,6 +58,7 @@ class ExtractionLayer(keras.layers.Layer):
         super().__init__(**kwargs)
         self.model_params = model_params
         self.seed = 0
+        self.q2_obs_scale = q2_obs_scale
         self.volumes = self.add_weight(
             shape=(self.model_params['n_volumes'], 1),
             initializer=keras.initializers.Zeros(),
@@ -77,8 +90,16 @@ class ExtractionLayer(keras.layers.Layer):
             import scipy.ndimage
             rng = np.random.default_rng(self.seed)
             reciprocal_volume_sorted = np.sort(reciprocal_volume)
-            upper_volume_limit = reciprocal_volume_sorted[int(0.990*reciprocal_volume_sorted.size)]
-            lower_volume_limit = reciprocal_volume_sorted[int(0.005*reciprocal_volume_sorted.size)]
+            # The branch grid only spans these percentiles, so entries outside them have no branch
+            # that renders them in register and are measurably the worst predicted group. Widening
+            # costs alignment, since the same number of branches covers more range, so the two are
+            # traded against each other rather than set independently.
+            upper_volume_limit = reciprocal_volume_sorted[int(
+                self.model_params['volume_upper_percentile']*reciprocal_volume_sorted.size
+                )]
+            lower_volume_limit = reciprocal_volume_sorted[int(
+                self.model_params['volume_lower_percentile']*reciprocal_volume_sorted.size
+                )]
             bins_vol = np.linspace(lower_volume_limit, upper_volume_limit, 401)
             centers_vol = (bins_vol[1:] + bins_vol[:-1]) / 2
             reciprocal_volume_hist, _ = np.histogram(reciprocal_volume, bins=bins_vol, density=True)
@@ -88,19 +109,48 @@ class ExtractionLayer(keras.layers.Layer):
             reciprocal_volume_rv = scipy.stats.rv_histogram(
                 (reciprocal_volume_hist_smoothed, bins_vol), density=True
                 )
-            reciprocal_volume_samples = reciprocal_volume_rv.ppf(np.linspace(
-                0.001, 0.999, self.model_params['n_volumes']
-                ))
-            distribution_volumes = (reciprocal_volume_samples / q2_obs_scale**2)**(2/3)
+            # Peak p of branch v is rendered at q2_p / v, so how far a peak moves between adjacent
+            # branches is set by the step in 1/v, not by the step in probability. Spacing the
+            # branches by equal probability gives every branch the same number of entries but lets
+            # the step in 1/v vary enormously across the grid, so entries in the sparse tails land
+            # far from any branch. blend interpolates between the two: 1.0 is equal probability,
+            # 0.0 is equal steps in 1/v and therefore equal misalignment everywhere.
+            blend = self.model_params['volume_spacing_blend']
+            if blend >= 1.0:
+                reciprocal_volume_samples = reciprocal_volume_rv.ppf(np.linspace(
+                    0.001, 0.999, self.model_params['n_volumes']
+                    ))
+                distribution_volumes = (reciprocal_volume_samples / q2_obs_scale**2)**(2/3)
+            else:
+                quantiles = np.linspace(0.001, 0.999, 20001)
+                reciprocal_v = 1.0/(
+                    reciprocal_volume_rv.ppf(quantiles) / q2_obs_scale**2
+                    )**(2/3)
+                weight = np.abs(np.gradient(reciprocal_v, quantiles))**(1 - blend)
+                cumulative = np.concatenate(
+                    [[0], np.cumsum((weight[1:] + weight[:-1])/2 * np.diff(quantiles))]
+                    )
+                cumulative /= cumulative[-1]
+                distribution_volumes = np.sort(1.0/np.interp(
+                    np.linspace(0, 1, self.model_params['n_volumes']), cumulative, reciprocal_v
+                    ))
 
             # Ideally this scaling of distribution_volumes should not be needed.
             # For primitive monoclinic and triclinic, the distribution of the volumes skews to the
             # large side and the q2_filter distribution is pushed to a much larger region than q2_obs.
-            distribution_volumes /= np.median(distribution_volumes)
+            # Taken from the data rather than from the branch samples so that it does not move when
+            # the branches are reallocated. With equal-probability spacing the two agree to 0.2%,
+            # but a blended grid's median branch is not the distribution's median, and letting the
+            # normalization follow it would silently rescale the grid and the fitted sigma with it.
+            volume_normalization = np.median((reciprocal_volume / q2_obs_scale**2)**(2/3))
+            distribution_volumes /= volume_normalization
+            # Kept so an entry's own volume can be put on the same scale as the branches, which is
+            # what the branch labels for the auxiliary loss need. Training only; on the load path
+            # there is no data to fit and no labels to build.
+            self.volume_normalization = volume_normalization
             self.volumes.assign(
                 keras.ops.expand_dims(keras.ops.cast(distribution_volumes, dtype='float32'), axis=1),
                 )
-            volume_differences = distribution_volumes[1:] - distribution_volumes[:-1]
 
             q2_obs_scaled = q2_obs / q2_obs_scale
             q2_obs_scaled_sorted = np.sort(
@@ -114,9 +164,42 @@ class ExtractionLayer(keras.layers.Layer):
                 self.model_params['n_filters']
             )
 
-            sigma = min(max(2*np.median(volume_differences), 0.015), 0.04)
+            # sigma is the width of a peak on the fixed filter grid, so it is measured there. Each
+            # training entry is projected onto the grid by its own volume scale, exactly as its
+            # matched branch will project it, and sigma is set so that adjacent peaks of that
+            # volume-normalized pattern stay resolved: two Gaussians of width sigma separated by d
+            # only show a dip when d > 2*sigma. The 5% quantile rather than the minimum keeps a
+            # handful of pathological entries from setting the width for the whole split group.
+            entry_scales = (reciprocal_volume / q2_obs_scale**2)**(2/3) / volume_normalization
+            projected_q2 = np.sort(
+                q2_obs_scaled[:, :self.model_params['extraction_peak_length']]
+                / entry_scales[:, np.newaxis],
+                axis=1
+                )
+            peak_separations = np.diff(projected_q2, axis=1).ravel()
+            peak_separations = peak_separations[peak_separations > 0]
+            sigma_measured = np.quantile(peak_separations, 0.05) / 2
+            # Kept so evaluate_init can plot the distribution sigma was actually fitted to.
+            self.peak_separations_init = peak_separations
+
+            # Safeguard. Too wide merges the peaks into a featureless blob; too narrow falls between
+            # filters and will not train. Both bounds are multiples of the filter spacing so they
+            # track n_filters instead of silently inverting if it changes.
+            filter_spacing = q2_filters[1] - q2_filters[0]
+            sigma = min(max(sigma_measured, 2*filter_spacing), 6*filter_spacing)
             self.sigma_init = sigma
             self.sigma.assign(keras.ops.cast(sigma, dtype='float32'))
+
+            if sigma > sigma_measured:
+                clipped = f'CLIPPED UP from {sigma_measured:0.5f} (floor 2*spacing)'
+            elif sigma < sigma_measured:
+                clipped = f'CLIPPED DOWN from {sigma_measured:0.5f} (ceiling 6*spacing)'
+            else:
+                clipped = 'not clipped'
+            print(
+                f'sigma = {sigma:0.5f} = {sigma/filter_spacing:0.2f} x filter spacing '
+                f'({filter_spacing:0.5f}); {clipped}'
+                )
 
             self.filters.assign(
                 keras.ops.expand_dims(keras.ops.cast(q2_filters, dtype='float32'), axis=0)
@@ -126,17 +209,26 @@ class ExtractionLayer(keras.layers.Layer):
             self.filters_init = None
 
     def call(self, q2_obs_scaled, **kwargs):
-        # filters:     1, n_filters
-        # volumes:     n_volumes, 1
-        # q2_filters:  1, n_volumes, n_filters, 1
-        # q2_obs:      batch_size, extraction_peak_length
+        # filters:     1, 1, n_filters, 1
+        # volumes:     1, n_volumes, 1, 1
+        # q2_obs:      batch_size, 1, 1, extraction_peak_length
         # difference:  batch_size, n_volumes, n_filters, extraction_peak_length
-        q2_filters = keras.ops.expand_dims(
-            keras.ops.expand_dims(self.volumes * self.filters, axis=0),
-            axis=3
-            )
+        filters = keras.ops.reshape(self.filters, (1, 1, -1, 1))
+        volumes = keras.ops.reshape(self.volumes, (1, -1, 1, 1))
         q2_obs_scaled = keras.ops.expand_dims(keras.ops.expand_dims(q2_obs_scaled, axis=1), axis=2)
-        difference = q2_filters - q2_obs_scaled
+
+        # q2_obs is projected onto the fixed filter grid by the trial volume, rather than the filter
+        # grid being stretched out to meet q2_obs. Both place peak p of branch v at q2_p / v, but
+        # this form gives every branch the same Gaussian width instead of sigma / v, so a given unit
+        # cell shape reaches the shared attention embedding as the same pattern at every volume.
+        #
+        # The fused path below is the same arithmetic as the eager one, in one kernel instead of
+        # six. The two agree to float32 rounding; they differ at all only because the compiler is
+        # free to reassociate and to emit fused multiply-adds.
+        if _can_fuse(filters):
+            return _get_compiled_extraction()(filters, volumes, q2_obs_scaled, self.sigma)
+
+        difference = filters - q2_obs_scaled / volumes
 
         distances = keras.ops.exp(-1/2 * (difference / self.sigma)**2)
         # distances: batch_size, n_volumes, n_filters, extraction_peak_length
@@ -144,27 +236,78 @@ class ExtractionLayer(keras.layers.Layer):
         metric = keras.ops.sum(distances, axis=3)
         return metric
 
+    def get_branch_labels(self, reciprocal_volume):
+        """Index of the branch whose trial volume best matches each entry's true volume.
+
+        Built exactly the way the branch grid itself was built, so the label is the branch that
+        actually renders the entry in register. Matched in log space because the branches are
+        spaced geometrically, so a fixed ratio, not a fixed difference, is what 'close' means.
+        """
+        scales = (reciprocal_volume/self.q2_obs_scale**2)**(2/3)/self.volume_normalization
+        volumes = np.asarray(keras.ops.convert_to_numpy(self.volumes)).ravel()
+        differences = np.abs(np.log(scales)[:, np.newaxis] - np.log(volumes)[np.newaxis])
+        return differences.argmin(axis=1)
+
     def loss_function_common(self, y_true, y_pred):
-        # y_true: batch_size, unit_cell_length
+        # y_true: batch_size, unit_cell_length + 1
+        #         the xnn targets, then the index of the branch that matches the true volume
         # y_pred: batch_size, n_volumes, unit_cell_length + 1
-        xnn_scaled_pred = y_pred[:, :, :self.model_params['unit_cell_length']]
-        logits = y_pred[:, :, self.model_params['unit_cell_length']]
+        unit_cell_length = self.model_params['unit_cell_length']
+        xnn_true = y_true[:, :unit_cell_length]
+        xnn_scaled_pred = y_pred[:, :, :unit_cell_length]
+        logits = y_pred[:, :, unit_cell_length]
         probabilities = keras.ops.softmax(logits, axis=1)
-        errors = keras.ops.expand_dims(y_true, axis=1) - xnn_scaled_pred
+        errors = keras.ops.expand_dims(xnn_true, axis=1) - xnn_scaled_pred
         # This is to prevent an overflow error
         # keras.ops.cosh has a limit around +/- 80 for dtype=float32
         errors = keras.ops.clip(errors, -75.0, 75.0)
-        return errors, probabilities
+        return errors, probabilities, logits, y_true[:, unit_cell_length]
 
     def loss_function_log_cosh(self, y_true, y_pred):
-        errors, probabilities = self.loss_function_common(y_true, y_pred)
+        errors, probabilities, _, _ = self.loss_function_common(y_true, y_pred)
         losses = keras.ops.sum(keras.ops.log(keras.ops.cosh(errors)), axis=2)
         return keras.ops.sum(losses * probabilities, axis=1)
 
     def loss_function_mse(self, y_true, y_pred):
-        errors, probabilities = self.loss_function_common(y_true, y_pred)
+        errors, probabilities, _, _ = self.loss_function_common(y_true, y_pred)
         losses = 1/2 * keras.ops.mean(errors**2, axis=2)
         return keras.ops.sum(losses * probabilities, axis=1)
+
+    def loss_function_branch(self, y_true, y_pred):
+        """Cross entropy on the branch logits against the branch that matches the true volume.
+
+        The regression losses weight each branch by its own softmax probability, which rewards the
+        model for being confident where it happens to predict well. Nothing in them says which
+        branch is physically correct, so the ranking is only ever supervised indirectly. This does
+        say it.
+        """
+        _, _, logits, branch_true = self.loss_function_common(y_true, y_pred)
+        return keras.losses.sparse_categorical_crossentropy(
+            keras.ops.cast(branch_true, dtype='int32'), logits, from_logits=True
+            )
+
+    def branch_accuracy(self, y_true, y_pred):
+        """Fraction of entries whose top ranked branch is the matching one."""
+        _, _, logits, branch_true = self.loss_function_common(y_true, y_pred)
+        predicted = keras.ops.cast(keras.ops.argmax(logits, axis=1), dtype='int32')
+        return keras.ops.cast(
+            keras.ops.equal(predicted, keras.ops.cast(branch_true, dtype='int32')),
+            dtype='float32',
+            )
+
+    def training_loss_log_cosh(self, y_true, y_pred):
+        return (
+            self.loss_function_log_cosh(y_true, y_pred)
+            + self.model_params.get('branch_loss_weight', 0.0)
+            * self.loss_function_branch(y_true, y_pred)
+            )
+
+    def training_loss_mse(self, y_true, y_pred):
+        return (
+            self.loss_function_mse(y_true, y_pred)
+            + self.model_params.get('branch_loss_weight', 0.0)
+            * self.loss_function_branch(y_true, y_pred)
+            )
 
     def evaluate_weights(self, q2_obs_scaled, save_to, split_group, tag):
         metric_max = np.zeros(q2_obs_scaled.shape[0])
@@ -227,33 +370,63 @@ class ExtractionLayer(keras.layers.Layer):
             print(self.filters_init)
 
     def evaluate_init(self, q2_obs_scaled, save_to, split_group, tag):
-        q2_filters = tensor_to_numpy(self.volumes * self.filters)
         volumes = self.volumes.numpy()[:, 0]
-        volume_differences = volumes[1:] - volumes[:-1]
+        filters = self.filters.numpy()[0]
+        sigma = self.sigma.numpy()
+        filter_spacing = filters[1] - filters[0]
+
+        # Every peak is rendered with the same width now, so what matters is how that width compares
+        # to the grid it is sampled on and to how far a peak walks between adjacent volume branches.
+        # A shift below ~1 sigma means adjacent branches overlap for that peak.
         fig, axes = plt.subplots(1, 1, figsize=(5, 3))
-        axes.plot(volume_differences, marker='.')        
-        xlim = axes.get_xlim()
-        axes.plot(xlim, [self.sigma.numpy(), self.sigma.numpy()], linestyle='dashed')
-        axes.plot(xlim, [0.01, 0.01], linestyle='dotted', color=[0, 0, 0])
-        axes.plot(xlim, [0.04, 0.04], linestyle='dotted', color=[0, 0, 0])
-        axes.set_xlim(xlim)
-        axes.set_ylim([0, axes.get_ylim()[1]])
-        axes.set_ylabel('Volume\nDifference')
+        for q2_representative in (0.5, 4.0):
+            branch_shift = q2_representative * np.diff(volumes) / (volumes[1:] * volumes[:-1])
+            axes.plot(branch_shift / sigma, marker='.', label=f'q2 = {q2_representative}')
+        axes.axhline(1.0, linestyle='dashed', color=[0, 0, 0])
+        axes.set_yscale('log')
+        axes.set_ylabel('Branch-to-branch\nshift / sigma')
         axes.set_xlabel('Volume Index')
+        axes.set_title(
+            f'sigma {sigma:0.5f} = {sigma/filter_spacing:0.2f} x spacing {filter_spacing:0.5f}'
+            )
+        axes.legend()
         fig.tight_layout()
         fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_volume_diff_{tag}.png'))
         plt.close()
 
+        # The volume-normalized peak separations sigma was fitted to, against the 2*sigma resolution
+        # limit. Everything left of the dashed line is a peak pair that merges.
+        if hasattr(self, 'peak_separations_init'):
+            peak_separations = self.peak_separations_init
+            fig, axes = plt.subplots(1, 1, figsize=(4, 3))
+            axes.hist(peak_separations, bins=np.linspace(0, 0.5, 101), density=True)
+            axes.axvline(2*sigma, linestyle='dashed', color=[0, 0, 0])
+            merged = 100 * (peak_separations < 2*sigma).mean()
+            axes.set_title(f'{merged:0.1f}% of peak pairs merge')
+            axes.set_xlabel('Volume-normalized peak separation')
+            axes.set_ylabel('distribution')
+            fig.tight_layout()
+            fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_separations_{tag}.png'))
+            plt.close()
+
+        # Grid coverage. Post-fix the grid is fixed and what moves across it is q2_obs / v, so that
+        # projection is what has to land inside [filters.min(), filters.max()].
         bins = np.linspace(0, 5, 101)
         fig, axes = plt.subplots(1, 1, figsize=(4, 3))
         axes.hist(
             q2_obs_scaled[:, :self.model_params['extraction_peak_length']].ravel(),
             bins=bins, label='q2_obs_scaled', density=True
             )
+        # Subsampled: the full projection is n_entries x n_volumes x n_peaks.
+        projection_sample = q2_obs_scaled[
+            ::max(1, q2_obs_scaled.shape[0] // 2000), :self.model_params['extraction_peak_length']
+            ]
         axes.hist(
-            q2_filters.ravel(),
-            bins=bins, alpha=0.75, label='q2_filters', density=True
+            (projection_sample[:, np.newaxis, :] / volumes[np.newaxis, :, np.newaxis]).ravel(),
+            bins=bins, alpha=0.75, label='q2_obs_scaled / volumes', density=True
             )
+        axes.axvline(filters.min(), linestyle='dotted', color=[0, 0, 0])
+        axes.axvline(filters.max(), linestyle='dotted', color=[0, 0, 0])
         axes.set_xlabel('q2 scaled')
         axes.set_ylabel('distribution')
         axes.legend()
@@ -303,6 +476,57 @@ class ExtractionLayer(keras.layers.Layer):
         fig.tight_layout()
         fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_metric_init_{tag}.png'))
         plt.close()
+
+
+class MetricVolumeRescale(keras.layers.Layer):
+    """Turn the regression head's output from an absolute xnn into a volume-normalized shape.
+
+    The head predicts a unit cell shape; the absolute scale comes from the branch's own trial volume.
+    Because q2 = h.G*.h^T, changing the unit cell volume multiplies every q2 by a common factor, so
+    the shape a branch sees is the true cell divided by that branch's volume v. Reconstructing the
+    absolute value and re-applying the model's own median/MAD normalization,
+
+        shape       = (xnn_mean + xnn_scale * D) / q2_obs_scale
+        xnn_raw     = shape * v * q2_obs_scale = (xnn_mean + xnn_scale * D) * v
+        xnn_scaled  = (xnn_raw - xnn_mean) / xnn_scale = D * v + (xnn_mean / xnn_scale) * (v - 1)
+
+    q2_obs_scale cancels. Two properties matter. At v = 1 this is exactly D, and ExtractionLayer
+    normalizes the volumes to a median of 1, so the median branch is unchanged at initialization and
+    this is a strict generalization of the previous head rather than a different model. And the
+    (v - 1) term encodes the prior that xnn scales with the trial volume, which is what the geometry
+    demands, so the head starts near the right magnitude at every branch instead of only the median
+    one.
+
+    Only the first unit_cell_length channels are rescaled. The last channel is the branch logit and
+    passes through untouched, so the output layout stays (batch, n_volumes, unit_cell_length + 1) as
+    loss_function_common expects.
+    """
+    def __init__(self, volumes_fn, xnn_mean, xnn_scale, unit_cell_length, **kwargs):
+        super().__init__(**kwargs)
+        # A plain callable, not the layer itself. Holding ExtractionLayer as an attribute would
+        # register it as a sublayer and change the weights.h5 layout; this keeps the checkpoint
+        # structure identical to the previous model. It also reads volumes live at call time, which
+        # is required: on the load_from_tag path build_model(data=None) builds the graph while that
+        # weight is still zeros, and it is only filled when the weights are loaded afterwards.
+        self._volumes_fn = volumes_fn
+        self.unit_cell_length = unit_cell_length
+        # Baked in as a constant rather than a weight so that no new entry appears in weights.h5.
+        self.xnn_offset = np.reshape(
+            np.asarray(xnn_mean, dtype='float32') / np.asarray(xnn_scale, dtype='float32'),
+            (1, 1, unit_cell_length)
+            )
+
+    def call(self, x):
+        # x:       batch_size, n_volumes, unit_cell_length + 1
+        # volumes: 1, n_volumes, 1
+        volumes = keras.ops.reshape(self._volumes_fn(), (1, -1, 1))
+        xnn_offset = keras.ops.cast(self.xnn_offset, dtype=x.dtype)
+        xnn_scaled = x[:, :, :self.unit_cell_length]*volumes + xnn_offset*(volumes - 1.0)
+        logits = x[:, :, self.unit_cell_length:]
+        return keras.ops.concatenate([xnn_scaled, logits], axis=2)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
 
 
 class IntraVolume_MultiHeadAttention(keras.layers.Layer):

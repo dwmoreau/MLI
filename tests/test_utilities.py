@@ -292,9 +292,8 @@ def test_load_peaks_npy(test_metadata):
             peak_units="q2",
             wavelength=None,
             zero_error=False,
-            triplets_file=None,
         )
-        result, _ = _load_peaks(args)
+        result = _load_peaks(args)
         expected = np.sort(np.load(npy_path))[:20]
         assert len(result) <= 20, f"{bl}: more than 20 peaks loaded"
         assert result[0] <= result[-1], f"{bl}: peaks not sorted"

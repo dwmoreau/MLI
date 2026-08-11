@@ -89,14 +89,12 @@ class AnalyticOptimizer(OptimizerManager):
                 {
                     'worker': 'deterministic',
                     'n_iterations': 1,
-                    'triplet_opt': False,
                 },
                 {
                     'worker': 'random_subsampling',
                     'n_iterations': 5,
                     'n_peaks': n_peaks,
                     'n_drop': max(0, n_peaks - _N_PEAKS_KEPT[self.lattice_system]),
-                    'triplet_opt': True,
                     'uniform_sampling': False,
                 }
             ]
@@ -122,7 +120,6 @@ class AnalyticOptimizer(OptimizerManager):
         self.n_ranks = comm.Get_size()
         self.fom = 'M20'
         self.q2_obs = None
-        self.triplets = None
         self.n_peaks = n_peaks
 
         self.lattice_system = self.comm.bcast(self.lattice_system, root=self.root)
@@ -233,7 +230,6 @@ class MPAnalyticOptimizer(AnalyticOptimizer):
     def run_common(self, n_top_candidates):
         for r in range(1, self.n_ranks):
             self._data_queues[r].put(self.q2_obs.copy())
-            self._data_queues[r].put(self.triplets)
         self._run_loop(n_top_candidates)
 
     def generate_candidates_rank(self):
@@ -254,12 +250,6 @@ class MPAnalyticOptimizer(AnalyticOptimizer):
         best_xnn_all = [candidates.best_xnn]
         best_n_indexed_all = [candidates.n_indexed]
         best_spacegroup_all = list(candidates.best_spacegroup)
-        if self.triplets is not None:
-            best_n_indexed_triplets_all = [candidates.n_indexed_triplets]
-            best_M_triplets_all = [candidates.best_M_triplets]
-        else:
-            best_n_indexed_triplets_all = None
-            best_M_triplets_all = None
         for r in range(1, self.n_ranks):
             result = self._result_queues[r].get()
             if isinstance(result, Exception):
@@ -269,12 +259,8 @@ class MPAnalyticOptimizer(AnalyticOptimizer):
             best_xnn_all.append(result['xnn'])
             best_n_indexed_all.append(result['n_indexed'])
             best_spacegroup_all += result['spacegroup']
-            if self.triplets is not None:
-                best_n_indexed_triplets_all.append(result['n_indexed_triplets'])
-                best_M_triplets_all.append(result['M_triplets'])
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
-                                     best_n_indexed_triplets_all, best_M_triplets_all,
                                      n_top_candidates)
 
     def convergence_testing(self, candidates):

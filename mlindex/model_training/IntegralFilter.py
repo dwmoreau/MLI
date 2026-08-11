@@ -37,6 +37,35 @@ class IntegralFilter:
         self.lattice_system = self.data_params['lattice_system']
         self.hkl_ref = hkl_ref
 
+    def get_titles(self, kind):
+        """Labels for the active unit cell / xnn components of this lattice system.
+
+        Both lists are indexed by unit_cell_indices, not positionally. For monoclinic the active
+        components are indices [0, 1, 2, 4], so the fourth one is beta / Xhl, not alpha / Xkl --
+        Xkl and Xhk are identically zero. Labelling positionally mislabels every lattice system
+        whose indices are not a prefix of the full list.
+        """
+        all_titles = {
+            'unit_cell': ['a', 'b', 'c', 'alpha', 'beta', 'gamma'],
+            'xnn': ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk'],
+            }
+        return [all_titles[kind][index] for index in self.unit_cell_indices]
+
+    def get_branch_labels(self, data):
+        """Index of the volume branch that matches each entry's true unit cell volume.
+
+        The reciprocal volume is derived the same way build_model derives it for the branch grid, so
+        the label lines up with the branches the model actually has.
+        """
+        unit_cell = np.stack(data['reindexed_unit_cell'])[:, self.unit_cell_indices]
+        reciprocal_unit_cell = reciprocal_uc_conversion(
+            unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        reciprocal_volume = get_unit_cell_volume(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        return self.extraction_layer.get_branch_labels(reciprocal_volume)
+
     def _setup_integral_filter(self, data):
         model_params_defaults = {
             'peak_length': 20,
@@ -50,6 +79,20 @@ class IntegralFilter:
             'learning_rate': 0.00005,
             'd_model': 512,
             'n_heads': 8,
+            # Weight on the auxiliary cross entropy that supervises which volume branch is correct.
+            # Without it the branch ranking is only supervised indirectly, through a regression loss
+            # that weights each branch by its own confidence and never says which one is right.
+            'branch_loss_weight': 0.2,
+            # Percentiles of the reciprocal volume distribution the branch grid spans, and how the
+            # branches are spaced within it. 1.0 spaces them by equal probability, 0.0 by equal
+            # steps in 1/v and therefore equal misalignment; 0.5 trades a slightly worse median
+            # alignment for far fewer badly misaligned entries, and the wider span leaves fewer
+            # entries with no usable branch at all. Measured over the monoclinic split groups:
+            # entries outside the grid 1.75% -> 0.4%, entries misaligned by more than a peak width
+            # 5.3% -> 2.4%.
+            'volume_lower_percentile': 0.001,
+            'volume_upper_percentile': 0.999,
+            'volume_spacing_blend': 0.5,
             'epochs': 20,
             'batch_size': 64,
             'loss_type': 'log_cosh',
@@ -73,6 +116,9 @@ class IntegralFilter:
             'batch_size': 64,
             'l1_regularization': 0.0,
             'n_heads': 5,
+            # Epochs of no validation improvement before the miller index model stops. 'epochs' is
+            # now an upper bound rather than the number actually run.
+            'early_stopping_patience': 5,
             }
 
         for key in calibration_params_defaults.keys():
@@ -212,6 +258,20 @@ class IntegralFilter:
         self.model_params['batch_size'] = int(params['batch_size'])
         self.model_params['loss_type'] = params['loss_type']
         self.model_params['model_type'] = params['model_type']
+        # Defaulted rather than required: models trained before the auxiliary branch loss existed
+        # have no such column, and 0.0 is what they were trained with.
+        # Recorded for provenance rather than needed to rebuild: the branch grid is stored in the
+        # weights as ExtractionLayer.volumes, and build_model(data=None) never refits it. The
+        # fallbacks are deliberately the values these settings had before they were settable, not
+        # the current defaults, because they describe what a file written back then was trained
+        # with rather than what a new model should use.
+        self.model_params['branch_loss_weight'] = float(params.get('branch_loss_weight', 0.0))
+        self.model_params['volume_lower_percentile'] = float(
+            params.get('volume_lower_percentile', 0.005))
+        self.model_params['volume_upper_percentile'] = float(
+            params.get('volume_upper_percentile', 0.990))
+        self.model_params['volume_spacing_blend'] = float(
+            params.get('volume_spacing_blend', 1.0))
 
         self.q2_obs_scale = np.load(
             os.path.join(
@@ -250,6 +310,7 @@ class IntegralFilter:
             'learning_rate',
             'batch_size',
             'n_heads',
+            'early_stopping_patience',
             ]
         self.model_params['calibration_params'] = dict.fromkeys(calibration_params_keys)
         self.model_params['calibration_params']['l1_regularization'] = 0.0
@@ -258,8 +319,13 @@ class IntegralFilter:
             value = element.replace("'", "").split(':')[1]
             if key in ['dropout_rate', 'epsilon_pds', 'learning_rate', 'l1_regularization']:
                 self.model_params['calibration_params'][key] = float(value)
-            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers', 'n_heads']:
+            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers', 'n_heads',
+                         'early_stopping_patience']:
                 self.model_params['calibration_params'][key] = int(value)
+        # Models saved before early stopping existed have no such column, so dict.fromkeys leaves
+        # it None, which would be passed straight to EarlyStopping.
+        if self.model_params['calibration_params']['early_stopping_patience'] is None:
+            self.model_params['calibration_params']['early_stopping_patience'] = 5
         if self.model_params['model_type'] != 'base_line':
             model_manager = NeuralNetworkManager(
                 model_name=f'{self.split_group}_calibration_weights_{self.model_params["tag"]}',
@@ -299,7 +365,22 @@ class IntegralFilter:
                 self.model_params, q2_obs, xnn, reciprocal_volume, self.q2_obs_scale,
                 name='extraction_layer'
                 )
+
+            # The regression head bakes these into the graph, so they have to exist before the model
+            # is built rather than being computed in train(). Kept identical to what train() uses for
+            # the targets: the reindexed_xnn column, not the xnn derived from reindexed_unit_cell
+            # above, and the same rhombohedral filter.
+            train_xnn = np.stack(training_data['reindexed_xnn'])[:, self.unit_cell_indices]
+            if self.lattice_system == 'rhombohedral':
+                train_xnn = train_xnn[np.max(np.abs(train_xnn), axis=1) < 0.05]
+            self.xnn_mean = np.median(train_xnn, axis=0)[np.newaxis]
+            self.xnn_scale = np.median(np.abs(train_xnn - self.xnn_mean), axis=0)[np.newaxis]
         else:
+            # _load_from_tag_integral_filter loads the scalers from .npy before calling build_model.
+            assert hasattr(self, 'xnn_mean') and hasattr(self, 'xnn_scale'), (
+                'build_model(data=None) needs xnn_mean and xnn_scale to already be set, because the '
+                'regression head bakes them into the graph.'
+                )
             self.extraction_layer = ExtractionLayer(
                 self.model_params, None, None, None, self.q2_obs_scale,
                 name='extraction_layer'
@@ -379,6 +460,7 @@ class IntegralFilter:
     def model_builder_metric(self, inputs):
         import keras
         from mlindex.model_training.Networks import IntraVolume_MultiHeadAttention
+        from mlindex.model_training.Networks import MetricVolumeRescale
         # inputs: batch_size, n_peaks
         # metric: batch_size, n_volumes, n_filters
 
@@ -411,13 +493,25 @@ class IntegralFilter:
                 kernel_initializer=keras.initializers.HeUniform
                 )(x)
 
-        # output: batch_size, n_volumes, unit_cell_length + 1
-        output = keras.layers.Dense(
+        # raw: batch_size, n_volumes, unit_cell_length + 1
+        raw = keras.layers.Dense(
             self.unit_cell_length + 1,
             activation='linear',
-            name=f'{self.model_params["model_type"]}_xnn_scaled',
+            name=f'{self.model_params["model_type"]}_raw',
             kernel_initializer=keras.initializers.HeUniform
             )(x)
+
+        # The Dense weights are shared across all n_volumes branches, so it predicts a volume
+        # normalized shape and each branch reapplies its own trial volume. This layer must keep the
+        # xnn_scaled name because compile_model keys its loss and metric dicts on it.
+        # output: batch_size, n_volumes, unit_cell_length + 1
+        output = MetricVolumeRescale(
+            volumes_fn=lambda: self.extraction_layer.volumes,
+            xnn_mean=self.xnn_mean,
+            xnn_scale=self.xnn_scale,
+            unit_cell_length=self.unit_cell_length,
+            name=f'{self.model_params["model_type"]}_xnn_scaled',
+            )(raw)
         return output
 
     def transform_pairwise_differences(self, pairwise_differences_scaled, tensorflow):
@@ -481,18 +575,22 @@ class IntegralFilter:
         optimizer = keras.optimizers.Adam(
             learning_rate=self.model_params['learning_rate'],
             )
+        # The training loss carries the auxiliary branch term; the metrics keep the pure regression
+        # errors under their existing names so the loss curves stay comparable across runs.
         if self.model_params['loss_type'] == 'mse':
             loss_functions = {
-                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.loss_function_mse
+                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.training_loss_mse
                 }
         else:
             loss_functions = {
-                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.loss_function_log_cosh
+                f'{self.model_params["model_type"]}_xnn_scaled': self.extraction_layer.training_loss_log_cosh
                 }
         loss_metrics = {
             f'{self.model_params["model_type"]}_xnn_scaled': [
                 self.extraction_layer.loss_function_log_cosh,
-                self.extraction_layer.loss_function_mse
+                self.extraction_layer.loss_function_mse,
+                self.extraction_layer.loss_function_branch,
+                self.extraction_layer.branch_accuracy,
                 ]
             }
         self.model.compile(
@@ -519,7 +617,6 @@ class IntegralFilter:
 
     def train(self, data):
         import keras
-        from mlindex.model_training.Networks import SigmaDecayCallback
         train = data[data['train']]
         val = data[~data['train']]
 
@@ -532,6 +629,9 @@ class IntegralFilter:
         train_xnn = np.stack(train['reindexed_xnn'])[:, self.unit_cell_indices]
         val_xnn = np.stack(val['reindexed_xnn'])[:, self.unit_cell_indices]
 
+        train_branch = self.get_branch_labels(train)
+        val_branch = self.get_branch_labels(val)
+
         if self.lattice_system == 'rhombohedral':
             # There are very large values of xnn being included for rhombohedral.
             # These need to be excluded or NaNs will occur in the model.
@@ -539,21 +639,23 @@ class IntegralFilter:
             val_indices = np.max(np.abs(val_xnn), axis=1) < 0.05
             train_xnn = train_xnn[train_indices]
             train_q2_obs_scaled = train_q2_obs_scaled[train_indices]
+            train_branch = train_branch[train_indices]
             val_xnn = val_xnn[val_indices]
             val_q2_obs_scaled = val_q2_obs_scaled[val_indices]
+            val_branch = val_branch[val_indices]
             train_unaugmented = np.invert(train['augmented'][train_indices])
         else:
             train_unaugmented = np.invert(train['augmented'])
 
-        self.xnn_mean = np.median(train_xnn, axis=0)[np.newaxis]
-        self.xnn_scale = np.median(np.abs(train_xnn - self.xnn_mean), axis=0)[np.newaxis]
+        # xnn_mean and xnn_scale are computed in build_model, which the regression head bakes into
+        # the graph. Recomputing them here would risk the constants in the graph drifting from the
+        # ones used to scale the targets.
         train_xnn_scaled = (train_xnn - self.xnn_mean) / self.xnn_scale
         val_xnn_scaled = (val_xnn - self.xnn_mean) / self.xnn_scale
 
         fig, axes = plt.subplots(1, self.unit_cell_length + 1, figsize=(8, 3))
         bins0 = np.linspace(0, 5, 301)
         bins1 = np.linspace(-5, 5, 301)
-        xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
         for index in range(self.unit_cell_length + 1):
             if index == 0:
                 axes[index].hist(
@@ -578,8 +680,10 @@ class IntegralFilter:
             ))
         plt.close()
 
-        train_true = train_xnn_scaled
-        val_true = val_xnn_scaled
+        # The branch label rides along as the last column of the target so the loss can supervise
+        # the branch logits as well as the regression. Nothing downstream of the model changes.
+        train_true = np.concatenate([train_xnn_scaled, train_branch[:, np.newaxis]], axis=1)
+        val_true = np.concatenate([val_xnn_scaled, val_branch[:, np.newaxis]], axis=1)
         train_inputs = train_q2_obs_scaled
         val_inputs = val_q2_obs_scaled
 
@@ -591,56 +695,56 @@ class IntegralFilter:
                 self.model_params["tag"]
                 )
 
-            callbacks = [SigmaDecayCallback(
-                extraction_layer=self.extraction_layer,
-                decay_rate=0.8,
-                initial_multiplier=2
-                )]
-        else:
-            callbacks = None
+        # Nothing is written until fit() returns, so a job killed part way through loses every epoch
+        # it ran. That forces long walltime requests, which are the hardest thing for a scheduler to
+        # backfill, so the job waits longer still. BackupAndRestore writes the weights, the optimizer
+        # state and the epoch number after each epoch and restores all three on the next fit(), so an
+        # interrupted run resumes instead of restarting. It keeps one checkpoint, overwritten in
+        # place, and deletes the directory once fit() completes -- so the backup existing is itself
+        # the signal that the previous run was interrupted. There is no flag to remember to set, and
+        # a group that finished normally retrains from scratch exactly as before.
+        backup_directory = os.path.join(
+            self.save_to_split_group,
+            f'{self.split_group}_training_backup_{self.model_params["tag"]}'
+            )
+        if os.path.exists(os.path.join(backup_directory, 'latest.weights.h5')):
+            print(f'resuming {self.split_group} from the backup in {backup_directory}')
         self.fit_history = self.model.fit(
             x=train_inputs,
             y=train_true,
             epochs=self.model_params['epochs'],
             shuffle=True,
-            batch_size=self.model_params['batch_size'], 
+            batch_size=self.model_params['batch_size'],
             validation_data=(val_inputs, val_true),
-            #callbacks=callbacks,
+            callbacks=[keras.callbacks.BackupAndRestore(backup_dir=backup_directory)],
             )
         self.save(train_inputs)
 
         ##############################
         # Plot training loss vs time #
         ##############################
-        fig, axes = plt.subplots(3, 1, figsize=(6, 8), sharex=True)
-        axes[0].plot(
-            self.fit_history.history['loss'], 
-            label='Training', marker='.'
-            )
-        axes[0].plot(
-            self.fit_history.history['val_loss'], 
-            label='Validation', marker='v'
-            )
-        axes[1].plot(
-            self.fit_history.history['loss_function_log_cosh'], 
-            label='Training', marker='.'
-            )
-        axes[1].plot(
-            self.fit_history.history['val_loss_function_log_cosh'], 
-            label='Validation', marker='v'
-            )
-        axes[2].plot(
-            self.fit_history.history['loss_function_mse'], 
-            label='Training', marker='.'
-            )
-        axes[2].plot(
-            self.fit_history.history['val_loss_function_mse'], 
-            label='Validation', marker='v'
-            )
+        fig, axes = plt.subplots(4, 1, figsize=(6, 10), sharex=True)
+        # A resumed run only records the epochs it actually ran, so plotting the history against an
+        # implicit index would relabel epoch 20 as epoch 0. fit_history.epoch carries the real
+        # numbers. The epochs before the interruption are genuinely lost from the curves.
+        epochs = self.fit_history.epoch
+        for index, (train_key, val_key) in enumerate([
+                ('loss', 'val_loss'),
+                ('loss_function_log_cosh', 'val_loss_function_log_cosh'),
+                ('loss_function_mse', 'val_loss_function_mse'),
+                ('branch_accuracy', 'val_branch_accuracy'),
+                ]):
+            axes[index].plot(
+                epochs, self.fit_history.history[train_key], label='Training', marker='.'
+                )
+            axes[index].plot(
+                epochs, self.fit_history.history[val_key], label='Validation', marker='v'
+                )
         axes[0].set_ylabel('Loss')
         axes[1].set_ylabel('Log-Cosh Error')
         axes[2].set_ylabel('MSE Error')
-        axes[2].set_xlabel('Epoch')
+        axes[3].set_ylabel('Branch Accuracy')
+        axes[3].set_xlabel('Epoch')
         axes[0].legend()
         fig.tight_layout()
         fig.savefig(os.path.join(
@@ -703,14 +807,25 @@ class IntegralFilter:
             )
         train_true_calibration = np.stack(train['hkl_labels'])
         val_true_calibration = np.stack(val['hkl_labels'])
+        # The validation loss flattens within about eight epochs while training keeps falling, so
+        # the back two thirds of a fixed forty epoch run buy nothing but overfitting. min_delta is
+        # set above the epoch to epoch noise in the validation loss so it stops on a real plateau
+        # rather than on a lucky dip, and the best weights are restored rather than the last ones.
+        calibration_callbacks = [keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=self.model_params['calibration_params']['early_stopping_patience'],
+            min_delta=0.001,
+            restore_best_weights=True,
+            verbose=1,
+            )]
         self.calibration_fit_history = self.calibration_model.fit(
             x=train_inputs_calibration,
             y=train_true_calibration,
             epochs=self.model_params['calibration_params']['epochs'],
             shuffle=True,
-            batch_size=self.model_params['calibration_params']['batch_size'], 
+            batch_size=self.model_params['calibration_params']['batch_size'],
             validation_data=(val_inputs_calibration, val_true_calibration),
-            callbacks=None,
+            callbacks=calibration_callbacks,
             )
         self.save_calibration(train_inputs_calibration)
 
@@ -1015,9 +1130,9 @@ class IntegralFilter:
 
             train_size = train_xnn_pred.shape[0]
             val_size = val_xnn_pred.shape[0]
-            
-            unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
-            xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+
+            unit_cell_titles = self.get_titles('unit_cell')
+            xnn_titles = self.get_titles('xnn')
             output_dict = {}
             for uc_index in range(self.unit_cell_length):
                 output_dict[f'rmse_train_{unit_cell_titles[uc_index]}'] = \
@@ -1057,8 +1172,8 @@ class IntegralFilter:
         fig, axes = plt.subplots(2, self.unit_cell_length, figsize=figsize)
         if self.unit_cell_length == 1:
             axes = axes[:, np.newaxis]
-        unit_cell_titles = ['a', 'b', 'c', 'alpha', 'beta', 'gamma']
-        xnn_titles = ['Xhh', 'Xkk', 'Xll', 'Xkl', 'Xhl', 'Xhk']
+        unit_cell_titles = self.get_titles('unit_cell')
+        xnn_titles = self.get_titles('xnn')
         alpha = 0.1
         markersize = 0.5
         for plot_index in range(2):
@@ -1191,16 +1306,28 @@ class IntegralFilter:
             axes[1, 0].set_ylabel('Predicted')
             fig.tight_layout()
             if quantitized_model:
-                fig.savefig(os.path.join(
+                base_name = os.path.join(
                     f'{self.save_to_split_group}',
-                    f'{self.split_group}_pitf_reg_eval_optimized_{self.model_params["tag"]}_{save_label}.png'
-                    ))
+                    f'{self.split_group}_pitf_reg_eval_optimized_{self.model_params["tag"]}_{save_label}'
+                    )
             else:
-                fig.savefig(os.path.join(
+                base_name = os.path.join(
                     f'{self.save_to_split_group}',
-                    f'{self.split_group}_pitf_reg_eval_{self.model_params["tag"]}_{save_label}.png'
-                    ))
+                    f'{self.split_group}_pitf_reg_eval_{self.model_params["tag"]}_{save_label}'
+                    )
+            fig.savefig(f'{base_name}.png')
             plt.close()
+
+            # The plot above bakes the numbers into pixels, so the validation points behind it are
+            # also written out for figures that pool split groups. Validation only: the train points
+            # are in the plot for diagnosis, but a pooled accuracy figure should not be reporting
+            # error on entries the model fit. Shape is (2, n_val, unit_cell_length) with [0] true and
+            # [1] predicted, so groups of one lattice system concatenate along axis 1. Angles stay in
+            # radians, matching reindexed_unit_cell.
+            np.save(
+                f'{base_name}.npy',
+                np.stack([val_unit_cell, val_unit_cell_pred], axis=0)
+                )
 
         ##########################
         # Plot branch importance #
@@ -1314,34 +1441,54 @@ class IntegralFilter:
             val_xnn,
             )
 
+        # Everything downstream needs only the winning hkl and how confident the model was in it,
+        # so each entry's distribution over hkl_ref is reduced to those two numbers as it is
+        # produced and never all held at once. Keeping the full softmax costs
+        # n_entries * n_peaks * len(hkl_ref) floats, which is 10 GB for triclinic and gets the
+        # process killed; this is a few MB and gives identical results.
+        def reduce_softmax(hkl_softmax):
+            hkl_softmax = np.reshape(
+                hkl_softmax, (-1, self.data_params['n_peaks'], self.hkl_ref.shape[0])
+                )
+            return hkl_softmax.argmax(axis=2), hkl_softmax.max(axis=2)
+
+        def predict_onnx(inputs_calibration):
+            n_entries = inputs_calibration[0].shape[0]
+            hkl_labels_pred = np.zeros((n_entries, self.data_params['n_peaks']), dtype=int)
+            hkl_confidence = np.zeros((n_entries, self.data_params['n_peaks']))
+            for pred_index in range(n_entries):
+                inputs = {
+                    'input_0': inputs_calibration[0][pred_index].astype(np.float32)[np.newaxis],
+                    'input_1': inputs_calibration[1][pred_index].astype(np.float32)[np.newaxis]
+                    }
+                labels, confidence = reduce_softmax(
+                    self.calibration_onnx_model.run(None, inputs)[0]
+                    )
+                hkl_labels_pred[pred_index] = labels[0]
+                hkl_confidence[pred_index] = confidence[0]
+            return hkl_labels_pred, hkl_confidence
+
+        def predict_keras(inputs_calibration, batch_size=4096):
+            # Batched for the same reason, since predict on the whole set would build the array
+            # this function exists to avoid.
+            n_entries = inputs_calibration[0].shape[0]
+            hkl_labels_pred = np.zeros((n_entries, self.data_params['n_peaks']), dtype=int)
+            hkl_confidence = np.zeros((n_entries, self.data_params['n_peaks']))
+            for start in range(0, n_entries, batch_size):
+                stop = min(start + batch_size, n_entries)
+                labels, confidence = reduce_softmax(self.calibration_model.predict(
+                    (inputs_calibration[0][start:stop], inputs_calibration[1][start:stop])
+                    ))
+                hkl_labels_pred[start:stop] = labels
+                hkl_confidence[start:stop] = confidence
+            return hkl_labels_pred, hkl_confidence
+
         if quantitized_model:
-            hkl_softmax_train = np.zeros((
-                train_q2_obs_scaled.shape[0],
-                self.data_params['n_peaks'],
-                self.hkl_ref.shape[0]
-                ))
-            hkl_softmax_val = np.zeros((
-                val_q2_obs_scaled.shape[0],
-                self.data_params['n_peaks'],
-                self.hkl_ref.shape[0]
-                ))
-            for pred_index in range(train_q2_obs_scaled.shape[0]):
-                inputs = {
-                    'input_0': train_inputs_calibration[0][pred_index].astype(np.float32)[np.newaxis],
-                    'input_1': train_inputs_calibration[1][pred_index].astype(np.float32)[np.newaxis]
-                    }
-                hkl_softmax_train[pred_index] = self.calibration_onnx_model.run(None, inputs)[0]
-            for pred_index in range(val_q2_obs_scaled.shape[0]):
-                inputs = {
-                    'input_0': val_inputs_calibration[0][pred_index].astype(np.float32)[np.newaxis],
-                    'input_1': val_inputs_calibration[1][pred_index].astype(np.float32)[np.newaxis]
-                    }
-                hkl_softmax_val[pred_index] = self.calibration_onnx_model.run(None, inputs)[0]
+            hkl_labels_pred_train, hkl_confidence_train = predict_onnx(train_inputs_calibration)
+            hkl_labels_pred_val, hkl_confidence_val = predict_onnx(val_inputs_calibration)
         else:
-            hkl_softmax_train = self.calibration_model.predict(train_inputs_calibration)
-            hkl_softmax_val = self.calibration_model.predict(val_inputs_calibration)
-        hkl_labels_pred_train = np.argmax(hkl_softmax_train, axis=2)
-        hkl_labels_pred_val = np.argmax(hkl_softmax_val, axis=2)
+            hkl_labels_pred_train, hkl_confidence_train = predict_keras(train_inputs_calibration)
+            hkl_labels_pred_val, hkl_confidence_val = predict_keras(val_inputs_calibration)
 
         # correct shape: n_entries, n_peaks
         correct_pred_train = hkl_labels_true_train == hkl_labels_pred_train
@@ -1393,19 +1540,11 @@ class IntegralFilter:
                 ))
         plt.close()    
 
-        def calibration_plots(hkl_labels_true, hkl_softmax, n_peaks, n_bins=25):
-            N = hkl_softmax.shape[0]
-            hkl_labels_pred = hkl_softmax.argmax(axis=2)
-            p_pred = np.zeros((N, n_peaks))
+        def calibration_plots(hkl_labels_true, hkl_labels_pred, p_pred, n_bins=25):
+            # p_pred is the probability the model gave the hkl it picked, which is what the
+            # entry by point loop this replaced was reading out of the full softmax.
             metrics = np.zeros((n_bins, 4))
             ece = 0
-            for entry_index in range(N):
-                for point_index in range(n_peaks):
-                    p_pred[entry_index, point_index] = hkl_softmax[
-                        entry_index,
-                        point_index,
-                        hkl_labels_pred[entry_index, point_index]
-                        ]
 
             bins = np.linspace(p_pred.min(), p_pred.max(), n_bins + 1)
             centers = (bins[1:] + bins[:-1]) / 2
@@ -1426,8 +1565,12 @@ class IntegralFilter:
                     ece += prefactor * np.abs(metrics[bin_index, 2] - metrics[bin_index, 1])
             return metrics, ece
 
-        metrics_train, ece_train = calibration_plots(hkl_labels_true_train, hkl_softmax_train, self.n_peaks)
-        metrics_val, ece_val = calibration_plots(hkl_labels_true_val, hkl_softmax_val, self.n_peaks)
+        metrics_train, ece_train = calibration_plots(
+            hkl_labels_true_train, hkl_labels_pred_train, hkl_confidence_train
+            )
+        metrics_val, ece_val = calibration_plots(
+            hkl_labels_true_val, hkl_labels_pred_val, hkl_confidence_val
+            )
         fig, axes = plt.subplots(1, 2, figsize=(6, 3))
         for i in range(2):
             axes[i].plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])

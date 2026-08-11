@@ -6,11 +6,13 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import keras
+from mlindex.model_training.BackendSetup import enable_tf32
 from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = '1'
+    enable_tf32()
+    broadening_tag = 'sa'
     data_params = {
         'tag': f'tetragonal_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
@@ -115,14 +117,14 @@ if __name__ == '__main__':
         }
 
     integral_filter_params = {
-        'tP_0_00': integral_filter_group_params_load,
-        'tP_1_00': integral_filter_group_params_load,
-        'tP_0_01': integral_filter_group_params_load,
-        'tP_1_01': integral_filter_group_params_load,
-        'tI_0_00': integral_filter_group_params_load,
-        'tI_1_00': integral_filter_group_params_load,
-        'tI_0_01': integral_filter_group_params_load,
-        'tI_1_01': integral_filter_group_params_load,
+        'tP_0_00': integral_filter_group_params,
+        'tP_1_00': integral_filter_group_params,
+        'tP_0_01': integral_filter_group_params,
+        'tP_1_01': integral_filter_group_params,
+        'tI_0_00': integral_filter_group_params,
+        'tI_1_00': integral_filter_group_params,
+        'tI_0_01': integral_filter_group_params,
+        'tI_1_01': integral_filter_group_params,
         }
     random_params_bl = {
         'tag': f'tetragonal_{broadening_tag}',
@@ -156,4 +158,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('inference')
+    wrapper.setup_integral_filter('training')

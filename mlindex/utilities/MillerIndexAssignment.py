@@ -101,33 +101,3 @@ def best_assign_nocommon(softmaxes):
         )[:, 0]
         np.put(softmaxes, hkl_assign[:, np.newaxis, :], 0)
     return hkl_assign, softmax_assign
-
-
-def assign_hkl_triplets(triplets_obs, hkl_assign, triplet_hkl_ref, q2_ref_calc):
-    top_n = hkl_assign.shape[2]
-    n_candidates = hkl_assign.shape[0]
-    n_triplets = triplets_obs.shape[0]
-    hkl_assign_triplets = np.zeros((n_candidates, n_triplets), dtype=np.uint16)
-    for candidate_index in range(n_candidates):
-        hkl_assign_candidate = hkl_assign[candidate_index]
-        q2_ref_calc_candidate = q2_ref_calc[candidate_index]
-        for triplet_index in range(n_triplets):
-            triplet_loop = triplets_obs[triplet_index]
-            hkl_assign_0_top_n = hkl_assign_candidate[int(triplet_loop[0])]
-            hkl_assign_1_top_n = hkl_assign_candidate[int(triplet_loop[1])]
-            hkl_assign_pair = []
-            for top_n_index_0 in range(top_n):
-                hkl_assign_0 = hkl_assign_0_top_n[top_n_index_0]
-                for top_n_index_1 in range(top_n):
-                    hkl_assign_1 = hkl_assign_1_top_n[top_n_index_1]
-                    if hkl_assign_0 < hkl_assign_1:
-                        hkl_assign_pair += triplet_hkl_ref[hkl_assign_0][hkl_assign_1]
-                    elif hkl_assign_0 > hkl_assign_1:
-                        hkl_assign_pair += triplet_hkl_ref[hkl_assign_1][hkl_assign_0]
-            if len(hkl_assign_pair) > 0:
-                diff = np.abs(triplet_loop[2] - q2_ref_calc_candidate[hkl_assign_pair])
-                min_index = np.argmin(diff)
-                hkl_assign_triplets[candidate_index, triplet_index] = hkl_assign_pair[
-                    min_index
-                ]
-    return hkl_assign_triplets
