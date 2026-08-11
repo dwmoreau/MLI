@@ -8,7 +8,6 @@ from sklearn.model_selection import GridSearchCV
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
-from mlindex.utilities.FigureOfMerits import get_M20_sym_reversed
 from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
 from mlindex.utilities.IOManagers import SKLearnManager
@@ -354,7 +353,7 @@ class MITemplates:
                                     mi_sets.append(make_sets(
                                         templates_per_dominant_zone_bin,
                                         self.template_params['n_peaks'],
-                                        hkl_labels_bin,
+                                        hkl_labels_ratio_bin,
                                         self.hkl_ref_length,
                                         self.rng
                                         ))
@@ -436,7 +435,6 @@ class MITemplates:
 
         # q2_calc should increase monotonically. Sort hkl2 then re-solve for xnn iteratively.
         q2_obs_template = q2_obs[:self.template_params['n_peaks_template']]
-        q2_obs_calibration = q2_obs[:self.template_params['n_peaks_calibration']]
         xnn = np.zeros((n_templates, self.unit_cell_length))
         sigma = q2_obs_template[np.newaxis]
         hessian_prefactor = (1 / sigma**2)[:, :, np.newaxis, np.newaxis]

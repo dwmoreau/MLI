@@ -1306,16 +1306,28 @@ class IntegralFilter:
             axes[1, 0].set_ylabel('Predicted')
             fig.tight_layout()
             if quantitized_model:
-                fig.savefig(os.path.join(
+                base_name = os.path.join(
                     f'{self.save_to_split_group}',
-                    f'{self.split_group}_pitf_reg_eval_optimized_{self.model_params["tag"]}_{save_label}.png'
-                    ))
+                    f'{self.split_group}_pitf_reg_eval_optimized_{self.model_params["tag"]}_{save_label}'
+                    )
             else:
-                fig.savefig(os.path.join(
+                base_name = os.path.join(
                     f'{self.save_to_split_group}',
-                    f'{self.split_group}_pitf_reg_eval_{self.model_params["tag"]}_{save_label}.png'
-                    ))
+                    f'{self.split_group}_pitf_reg_eval_{self.model_params["tag"]}_{save_label}'
+                    )
+            fig.savefig(f'{base_name}.png')
             plt.close()
+
+            # The plot above bakes the numbers into pixels, so the validation points behind it are
+            # also written out for figures that pool split groups. Validation only: the train points
+            # are in the plot for diagnosis, but a pooled accuracy figure should not be reporting
+            # error on entries the model fit. Shape is (2, n_val, unit_cell_length) with [0] true and
+            # [1] predicted, so groups of one lattice system concatenate along axis 1. Angles stay in
+            # radians, matching reindexed_unit_cell.
+            np.save(
+                f'{base_name}.npy',
+                np.stack([val_unit_cell, val_unit_cell_pred], axis=0)
+                )
 
         ##########################
         # Plot branch importance #
@@ -1429,34 +1441,54 @@ class IntegralFilter:
             val_xnn,
             )
 
+        # Everything downstream needs only the winning hkl and how confident the model was in it,
+        # so each entry's distribution over hkl_ref is reduced to those two numbers as it is
+        # produced and never all held at once. Keeping the full softmax costs
+        # n_entries * n_peaks * len(hkl_ref) floats, which is 10 GB for triclinic and gets the
+        # process killed; this is a few MB and gives identical results.
+        def reduce_softmax(hkl_softmax):
+            hkl_softmax = np.reshape(
+                hkl_softmax, (-1, self.data_params['n_peaks'], self.hkl_ref.shape[0])
+                )
+            return hkl_softmax.argmax(axis=2), hkl_softmax.max(axis=2)
+
+        def predict_onnx(inputs_calibration):
+            n_entries = inputs_calibration[0].shape[0]
+            hkl_labels_pred = np.zeros((n_entries, self.data_params['n_peaks']), dtype=int)
+            hkl_confidence = np.zeros((n_entries, self.data_params['n_peaks']))
+            for pred_index in range(n_entries):
+                inputs = {
+                    'input_0': inputs_calibration[0][pred_index].astype(np.float32)[np.newaxis],
+                    'input_1': inputs_calibration[1][pred_index].astype(np.float32)[np.newaxis]
+                    }
+                labels, confidence = reduce_softmax(
+                    self.calibration_onnx_model.run(None, inputs)[0]
+                    )
+                hkl_labels_pred[pred_index] = labels[0]
+                hkl_confidence[pred_index] = confidence[0]
+            return hkl_labels_pred, hkl_confidence
+
+        def predict_keras(inputs_calibration, batch_size=4096):
+            # Batched for the same reason, since predict on the whole set would build the array
+            # this function exists to avoid.
+            n_entries = inputs_calibration[0].shape[0]
+            hkl_labels_pred = np.zeros((n_entries, self.data_params['n_peaks']), dtype=int)
+            hkl_confidence = np.zeros((n_entries, self.data_params['n_peaks']))
+            for start in range(0, n_entries, batch_size):
+                stop = min(start + batch_size, n_entries)
+                labels, confidence = reduce_softmax(self.calibration_model.predict(
+                    (inputs_calibration[0][start:stop], inputs_calibration[1][start:stop])
+                    ))
+                hkl_labels_pred[start:stop] = labels
+                hkl_confidence[start:stop] = confidence
+            return hkl_labels_pred, hkl_confidence
+
         if quantitized_model:
-            hkl_softmax_train = np.zeros((
-                train_q2_obs_scaled.shape[0],
-                self.data_params['n_peaks'],
-                self.hkl_ref.shape[0]
-                ))
-            hkl_softmax_val = np.zeros((
-                val_q2_obs_scaled.shape[0],
-                self.data_params['n_peaks'],
-                self.hkl_ref.shape[0]
-                ))
-            for pred_index in range(train_q2_obs_scaled.shape[0]):
-                inputs = {
-                    'input_0': train_inputs_calibration[0][pred_index].astype(np.float32)[np.newaxis],
-                    'input_1': train_inputs_calibration[1][pred_index].astype(np.float32)[np.newaxis]
-                    }
-                hkl_softmax_train[pred_index] = self.calibration_onnx_model.run(None, inputs)[0]
-            for pred_index in range(val_q2_obs_scaled.shape[0]):
-                inputs = {
-                    'input_0': val_inputs_calibration[0][pred_index].astype(np.float32)[np.newaxis],
-                    'input_1': val_inputs_calibration[1][pred_index].astype(np.float32)[np.newaxis]
-                    }
-                hkl_softmax_val[pred_index] = self.calibration_onnx_model.run(None, inputs)[0]
+            hkl_labels_pred_train, hkl_confidence_train = predict_onnx(train_inputs_calibration)
+            hkl_labels_pred_val, hkl_confidence_val = predict_onnx(val_inputs_calibration)
         else:
-            hkl_softmax_train = self.calibration_model.predict(train_inputs_calibration)
-            hkl_softmax_val = self.calibration_model.predict(val_inputs_calibration)
-        hkl_labels_pred_train = np.argmax(hkl_softmax_train, axis=2)
-        hkl_labels_pred_val = np.argmax(hkl_softmax_val, axis=2)
+            hkl_labels_pred_train, hkl_confidence_train = predict_keras(train_inputs_calibration)
+            hkl_labels_pred_val, hkl_confidence_val = predict_keras(val_inputs_calibration)
 
         # correct shape: n_entries, n_peaks
         correct_pred_train = hkl_labels_true_train == hkl_labels_pred_train
@@ -1508,19 +1540,11 @@ class IntegralFilter:
                 ))
         plt.close()    
 
-        def calibration_plots(hkl_labels_true, hkl_softmax, n_peaks, n_bins=25):
-            N = hkl_softmax.shape[0]
-            hkl_labels_pred = hkl_softmax.argmax(axis=2)
-            p_pred = np.zeros((N, n_peaks))
+        def calibration_plots(hkl_labels_true, hkl_labels_pred, p_pred, n_bins=25):
+            # p_pred is the probability the model gave the hkl it picked, which is what the
+            # entry by point loop this replaced was reading out of the full softmax.
             metrics = np.zeros((n_bins, 4))
             ece = 0
-            for entry_index in range(N):
-                for point_index in range(n_peaks):
-                    p_pred[entry_index, point_index] = hkl_softmax[
-                        entry_index,
-                        point_index,
-                        hkl_labels_pred[entry_index, point_index]
-                        ]
 
             bins = np.linspace(p_pred.min(), p_pred.max(), n_bins + 1)
             centers = (bins[1:] + bins[:-1]) / 2
@@ -1541,8 +1565,12 @@ class IntegralFilter:
                     ece += prefactor * np.abs(metrics[bin_index, 2] - metrics[bin_index, 1])
             return metrics, ece
 
-        metrics_train, ece_train = calibration_plots(hkl_labels_true_train, hkl_softmax_train, self.n_peaks)
-        metrics_val, ece_val = calibration_plots(hkl_labels_true_val, hkl_softmax_val, self.n_peaks)
+        metrics_train, ece_train = calibration_plots(
+            hkl_labels_true_train, hkl_labels_pred_train, hkl_confidence_train
+            )
+        metrics_val, ece_val = calibration_plots(
+            hkl_labels_true_val, hkl_labels_pred_val, hkl_confidence_val
+            )
         fig, axes = plt.subplots(1, 2, figsize=(6, 3))
         for i in range(2):
             axes[i].plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])

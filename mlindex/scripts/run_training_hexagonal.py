@@ -6,11 +6,13 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import keras
+from mlindex.model_training.BackendSetup import enable_tf32
 from mlindex.model_training.Wrapper import Wrapper
 
 
 if __name__ == '__main__':
-    broadening_tag = '1'
+    enable_tf32()
+    broadening_tag = 'sa'
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
         'base_directory': '/global/cfs/cdirs/m4064/dwmoreau/MLI/',
@@ -79,7 +81,7 @@ if __name__ == '__main__':
 
     integral_filter_group_params = {
         'tag': f'hexagonal_{broadening_tag}',
-        'load_from_tag': True,
+        'load_from_tag': False,
         'peak_length': 20,
         'extraction_peak_length': 8,
         'n_volumes': 100,
@@ -113,14 +115,14 @@ if __name__ == '__main__':
         }
 
     integral_filter_params = {
-        'hP_0_00': integral_filter_group_params_load,
-        'hP_0_01': integral_filter_group_params_load,
-        'hP_0_02': integral_filter_group_params_load,
-        'hP_0_03': integral_filter_group_params_load,
-        'hP_1_00': integral_filter_group_params_load,
-        'hP_1_01': integral_filter_group_params_load,
-        'hP_1_02': integral_filter_group_params_load,
-        'hP_1_03': integral_filter_group_params_load,
+        'hP_0_00': integral_filter_group_params,
+        'hP_0_01': integral_filter_group_params,
+        'hP_0_02': integral_filter_group_params,
+        'hP_0_03': integral_filter_group_params,
+        'hP_1_00': integral_filter_group_params,
+        'hP_1_01': integral_filter_group_params,
+        'hP_1_02': integral_filter_group_params,
+        'hP_1_03': integral_filter_group_params,
         }
 
     random_params_bl = {
@@ -154,4 +156,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('inference')
+    wrapper.setup_integral_filter('training')

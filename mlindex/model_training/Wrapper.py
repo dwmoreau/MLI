@@ -394,7 +394,22 @@ class Wrapper:
         self.save()
 
     def load_data_from_tag(self, load_augmented, load_train, load_bravais_lattice='all'):
-        self.data = pd.read_parquet(os.path.join(f'{self.save_to["data"]}', 'data.parquet'))
+        # The rows being dropped are filtered out by the reader rather than after the fact, so they
+        # never occupy memory. It matters because augmented rows outnumber the rest by roughly an
+        # order of magnitude, and the columns are per peak arrays that cost far more in memory than
+        # they do on disk: the largest lattice systems otherwise load tens of GB to keep a tenth of
+        # it. The hkl restacking below is the peak, since it holds a second copy.
+        filters = []
+        if not load_augmented:
+            filters.append(('augmented', '==', False))
+        if not load_train:
+            filters.append(('train', '==', False))
+        if load_bravais_lattice != 'all':
+            filters.append(('bravais_lattice', '==', load_bravais_lattice))
+        self.data = pd.read_parquet(
+            os.path.join(f'{self.save_to["data"]}', 'data.parquet'),
+            filters=filters if filters else None,
+            )
         if 'reindexed_h' in self.data.keys():
             reindexed_hkl = np.stack([
                 np.stack(self.data['reindexed_h'], axis=0),
@@ -1045,6 +1060,41 @@ class Wrapper:
                 self.integral_filter_generator[split_group].evaluate(split_group_data)
                 self.integral_filter_generator[split_group].load_from_tag(mode='inference')
                 self.integral_filter_generator[split_group].evaluate(split_group_data, quantitized_model=True)
+
+    def evaluate_integral_filter(self, quantitized_model=True, split_groups=None):
+        """Re-run the integral filter evaluation against models that are already trained.
+
+        setup_integral_filter only evaluates the groups it just trained, so a group loaded from tag
+        never writes evaluation artifacts. This runs that last step on its own, which is what is
+        needed when the evaluation itself changed -- a new output, a corrected metric -- and the
+        models behind it did not. Nothing here fits or overwrites a model.
+
+        quantitized_model picks which of the two models is evaluated: True is the quantized graph
+        that inference actually loads, and is the one to report, False is the Keras model and needs
+        that training stack installed. The artifacts are named apart, so neither clobbers the other.
+        """
+        from mlindex.model_training.IntegralFilter import IntegralFilter
+        if split_groups is None:
+            split_groups = self.data_params['split_groups']
+        if not hasattr(self, 'integral_filter_generator') or self.integral_filter_generator is None:
+            self.integral_filter_generator = dict.fromkeys(self.data_params['split_groups'])
+        for split_group in split_groups:
+            print(f'Evaluating {split_group}')
+            bravais_lattice = split_group[:2]
+            generator = IntegralFilter(
+                split_group,
+                self.data_params,
+                self.integral_filter_params[split_group],
+                self.save_to['integral_filter'],
+                self.random_seed,
+                self.hkl_ref[bravais_lattice]
+                )
+            generator.load_from_tag(mode='inference' if quantitized_model else 'training')
+            generator.evaluate(
+                self.data[self.data['split_group'] == split_group],
+                quantitized_model=quantitized_model
+                )
+            self.integral_filter_generator[split_group] = generator
 
     def evaluate_random_forest(self):
         from mlindex.model_training.Evaluations import evaluate_regression
