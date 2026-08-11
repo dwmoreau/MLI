@@ -14,7 +14,7 @@ from mlindex.optimization.UtilitiesOptimizer import get_monoclinic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_tetragonal_optimizer
 from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_M20_from_xnn
-from mlindex.utilities.FigureOfMerits import get_q2_calc_triplets
+# get_q2_calc_triplets was removed with the triplet code (F-033).
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
 
 from mlindex.model_training.IntegralFilter import IntegralFilter

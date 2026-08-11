@@ -75,7 +75,6 @@ def main() -> None:
         help="Random seed for reproducibility (default: 12345)",
     )
     args = parser.parse_args()
-    args.triplets_file = None   # _load_peaks requires this attribute; analytical mode has no triplets
 
     bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
     invalid = [bl for bl in bravais_lattices if bl not in _ALL_ANALYTIC_BL]
@@ -128,7 +127,7 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=123
         for bl in bravais_lattices:
             run_mp_bl(
                 optimizers[bl], bl, task_queues,
-                q2=q2_obs, triplets=None,
+                q2=q2_obs,
                 zero_error=args.zero_error, wavelength=args.wavelength,
                 n_top=20,
             )

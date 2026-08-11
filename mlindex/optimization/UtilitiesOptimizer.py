@@ -113,14 +113,12 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
         {
         'worker': 'deterministic',
         'n_iterations': 1,
-        'triplet_opt': True,
         },
         {
         'worker': 'random_subsampling',
         'n_iterations': 5,
         'n_peaks': 10,
         'n_drop': 8,
-        'triplet_opt': True,
         'uniform_sampling': False,
         }
         ]
@@ -194,7 +192,6 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         {
         'worker': 'deterministic',
         'n_iterations': 1,
-        'triplet_opt': True,
         },
         {
         'worker': 'random_subsampling',
@@ -202,7 +199,6 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         'n_peaks': 20,
         'n_drop': 17,
         'uniform_sampling': False,
-        'triplet_opt': True,
         }
         ]
     opt_params = {
@@ -291,7 +287,6 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         {
         'worker': 'deterministic',
         'n_iterations': 1,
-        'triplet_opt': True,
         },
         {
         'worker': 'random_subsampling',
@@ -299,7 +294,6 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         'n_peaks': 20,
         'n_drop': 17,
         'uniform_sampling': False,
-        'triplet_opt': True,
         }
         ]
     opt_params = {
@@ -364,7 +358,6 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         {
         'worker': 'deterministic',
         'n_iterations': 1,
-        'triplet_opt': True,
         },
         {
         'worker': 'random_subsampling',
@@ -372,7 +365,6 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         'n_peaks': 20,
         'n_drop': 17,
         'uniform_sampling': False,
-        'triplet_opt': True,
         }
         ]
     opt_params = {
@@ -492,7 +484,6 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         {
         'worker': 'deterministic',
         'n_iterations': 1,
-        'triplet_opt': True,
         },
         {
         'worker': 'random_subsampling',
@@ -500,7 +491,6 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         'n_peaks': 20,
         'n_drop': 14,
         'uniform_sampling': False,
-        'triplet_opt': True,
         }
         ]
     opt_params = {
@@ -617,7 +607,6 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         'worker': 'deterministic',
         'n_iterations': 1,
         'n_peaks': 20,
-        'triplet_opt': True,
         },
         {
         'worker': 'random_subsampling',
@@ -625,7 +614,6 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         'n_peaks': 20,
         'n_drop': 14,
         'uniform_sampling': False,
-        'triplet_opt': True,
         }
         ]
     opt_params = {
@@ -686,7 +674,6 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         {
         'worker': 'deterministic',
         'n_iterations': 1,
-        'triplet_opt': True,
         },
         {
         'worker': 'random_subsampling',
@@ -694,7 +681,6 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         'n_peaks': 20,
         'n_drop': 12,
         'uniform_sampling': False,
-        'triplet_opt': True,
         }
         ]
     opt_params = {
