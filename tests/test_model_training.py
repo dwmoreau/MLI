@@ -59,8 +59,14 @@ def test_random_generator_generate(unique_test_metadata, all_optimizers):
             N_GENERATE, rng, q2_obs, model='random',
         )
         expected = np.load(EXPECTED_DIR / f'random_gen_{bl}.npy')
-        np.testing.assert_array_equal(result, expected,
-                                      err_msg=f'random_generator mismatch for {bl}')
+        # allclose rather than array_equal: the unit cells come out of a chain of floating point
+        # reductions whose accumulation order depends on the BLAS the machine happens to link
+        # against, so the last couple of ulps move between environments while the code and the
+        # model files are untouched. Observed drift is ~3e-14 on values of order 10, so a
+        # tolerance well below anything crystallographically meaningful still catches a real
+        # regression.
+        np.testing.assert_allclose(result, expected, rtol=1e-9, atol=1e-9,
+                                   err_msg=f'random_generator mismatch for {bl}')
 
 
 def test_random_forest_generate(unique_test_metadata, all_optimizers):
