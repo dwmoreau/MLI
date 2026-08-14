@@ -95,12 +95,6 @@ def build_base_parser(description="Start the display application"):
 
 def _parse_args():
     parser = build_base_parser()
-    parser.add_argument(
-        "--triplets-file",
-        type=str,
-        default=None,
-        help="file name of the triplets file (numpy array)"
-    )
     return parser.parse_args()
 
 
