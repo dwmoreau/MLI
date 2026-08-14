@@ -25,7 +25,7 @@ from mlindex.command_line.run import (
 
 
 def main() -> None:
-    parser = build_base_parser(description="Analytical high‑symmetry indexing")
+    parser = build_base_parser(description="Analytical high-symmetry indexing")
     parser.set_defaults(output_file="analytic_results.json")
     args = parser.parse_args()
 

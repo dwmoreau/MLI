@@ -36,25 +36,25 @@ def build_base_parser(description="Start the display application"):
     parser.add_argument(
         "--peaks",
         type=str,
-        help="Comma- or space-separated list of peak positions; units set by --peak-units (default: d-spacing in Å)"
+        help="Comma- or space-separated list of peak positions; units set by --peak-units (default: d-spacing in Angstrom)"
     )
     parser.add_argument(
         "--peak-file",
         type=str,
-        help="Path to peak list file (.npy array or GSAS-II .pkslst). For .npy, units set by --peak-units. For .pkslst, peaks are in 2θ and --wavelength is required."
+        help="Path to peak list file (.npy array or GSAS-II .pkslst). For .npy, units set by --peak-units. For .pkslst, peaks are in 2-theta and --wavelength is required."
     )
     parser.add_argument(
         "--peak-units",
         type=str,
         choices=['d', 'q', 'q2', '2theta'],
         default="d",
-        help="Units for peaks from --peaks or .npy files: 'd' = d-spacing (Å, default), 'q' = 1/d (Å⁻¹), 'q2' = 1/d² (Å⁻²), '2theta' = degrees (requires --wavelength). Not applied to .pkslst files.",
+        help="Units for peaks from --peaks or .npy files: 'd' = d-spacing (Angstrom, default), 'q' = 1/d (1/Angstrom), 'q2' = 1/d^2 (1/Angstrom^2), '2theta' = degrees (requires --wavelength). Not applied to .pkslst files.",
     )
     parser.add_argument(
         "--wavelength",
         type=float,
         default=None,
-        help="X-ray wavelength (Å); required for .pkslst files, --zero-error, and --peak-units 2theta"
+        help="X-ray wavelength (Angstrom); required for .pkslst files, --zero-error, and --peak-units 2theta"
     )
     parser.add_argument(
         "--zero-error",
@@ -184,8 +184,12 @@ def _write_results(output_data, output_file_base='indexing_results'):
         'alpha': 'Alpha (°)', 'beta': 'Beta (°)', 'gamma': 'Gamma (°)',
         'volume': 'Volume (Å^3)', 'spacegroup': 'Space Group',
     }
+    # encoding is explicit because the headers carry non-ASCII units: Windows would
+    # otherwise use the locale codepage and fail to write this file outright
+    # (cp1251/cp932 cannot encode 'Å').
     output_df.to_string(
         output_file_base + '.txt',
+        encoding='utf-8',
         index=False,
         columns=txt_cols,
         header=[txt_headers[c] for c in txt_cols],

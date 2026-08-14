@@ -110,6 +110,47 @@ All trained models are saved under `mlindex/models/{tag}/` (e.g., `mlindex/model
 - `SpaceGroups.py`: Systematic absence rules and hkl reference sets per spacegroup.
 - `Reindexing.py`: Selling reduction, monoclinic standardization, and axis permutation for canonical unit-cell orientation.
 
+## Cross-platform compatibility (required for all edits)
+
+Users run this on Windows, macOS, and Linux. Development happens on macOS, so Windows
+breakage is not caught by simply running the code. **All edits must be cross-platform.**
+The end-user path — `pip install mlindex` → `mlindex.download_models` → `mlindex.run` —
+is the one that matters most; it must never regress on Windows.
+
+Rules, each of which corresponds to a bug this project has actually shipped or narrowly avoided:
+
+- **Never build paths by string concatenation or with `/` separators.** Use `os.path.join`,
+  `pathlib`, or `importlib.resources.files(...).joinpath(...)`. Never `'/'.join(parts)`.
+- **Never assume a path shape.** Do not reconstruct a directory by appending known
+  components to a path a user supplied, and never walk up with `.parent.parent` to undo
+  that. `MLINDEX_MODELS_DIR` was broken this way for every path not ending in
+  `mlindex/models`, and was 100% broken on Windows, where `D:\models` resolved to `D:\`.
+  Pass the real directory through instead — see `mlindex/paths.py`.
+- **Always pass `encoding=` when opening or writing text.** Windows defaults to the locale
+  codepage, not UTF-8. Anything non-ASCII (`Å`, `°`, `θ`, `²`) fails to write on cp1251 and
+  cp932, and superscripts fail even on cp1252. `_write_results` in `run.py` passes
+  `encoding='utf-8'` for exactly this reason.
+- **Keep everything argparse prints pure ASCII** — help strings, descriptions, metavars.
+  Redirecting or piping `--help` on Windows encodes through the locale codepage and raises
+  `UnicodeEncodeError`. Write `Angstrom`, `2-theta`, `1/Angstrom^2`; not `Å`, `2θ`, `Å⁻²`.
+  Non-ASCII is fine in file output as long as the encoding is explicit.
+- **Pass `newline=''` to `open()` when using the `csv` module** (`IOManagers.write_params`),
+  or Windows produces `\r\r\n` and blank rows.
+- **Keep multiprocessing spawn-safe.** Windows and macOS both use the `spawn` start method:
+  worker targets must be module-level functions and every argument must be picklable. See
+  `_mp_worker_fn` in `MPOptimizer.py`. Never rely on `fork` semantics or inherited state.
+- **Do not use Unix-only modules** (`fcntl`, `pwd`, `grp`, `resource`, `os.fork`) or shell
+  out to Unix tools in shipped code.
+- **Avoid symlinks.** `snapshot_download` is called with `local_dir=`, which copies files;
+  the cache mode would create symlinks and require Developer Mode or admin rights on Windows.
+- **`shutil.rmtree` over a git clone fails on Windows** — git marks `.git/objects` read-only,
+  so cleanup raises `PermissionError`. This affects the legacy `--source github` path in
+  `download_models.py`, which is still unfixed and slated for removal in 0.2.0.
+
+Not currently supported on Windows: MPI mode (`--mpi`), model training, and dataset
+generation. `cctbx-base` ships a `win_amd64` wheel but no `win_arm64`, so Windows-on-ARM
+cannot install at all.
+
 ## Optional dependencies
 
 Dataset generation requires: `pyarrow`, `openpyxl`, `cctbx`, `tqdm`
