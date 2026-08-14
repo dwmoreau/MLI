@@ -6,14 +6,17 @@ from conftest import load_test_case, _TEST_DATA_DIR
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.UnitCellTools import (
-    get_xnn_from_unit_cell, get_hkl_matrix, get_partial_unit_cell,
+    get_xnn_from_unit_cell,
+    get_hkl_matrix,
+    get_partial_unit_cell,
 )
 
 
 def _xnn(unit_cell, lattice_system):
     uc_p = get_partial_unit_cell(unit_cell, lattice_system=lattice_system)
-    return get_xnn_from_unit_cell(uc_p[np.newaxis], partial_unit_cell=True,
-                                   lattice_system=lattice_system)
+    return get_xnn_from_unit_cell(
+        uc_p[np.newaxis], partial_unit_cell=True, lattice_system=lattice_system
+    )
 
 
 def _cases(test_metadata):
@@ -23,7 +26,7 @@ def _cases(test_metadata):
 def test_candidate_opt_loss(test_metadata):
     rng = np.random.default_rng(42)
     for q2_obs, unit_cell, wavelength, bl, lattice_system in _cases(test_metadata):
-        hkl_ref = np.load(_TEST_DATA_DIR.parent / f'hkl_ref_{bl}.npy')
+        hkl_ref = np.load(_TEST_DATA_DIR.parent / f"hkl_ref_{bl}.npy")
         xnn_true = _xnn(unit_cell, lattice_system)
         hkl2 = get_hkl_matrix(hkl_ref, lattice_system)
         q2_calc = np.sum(hkl2 * xnn_true, axis=1)
@@ -47,6 +50,9 @@ def test_candidate_opt_loss(test_metadata):
         xnn_refined = xnn_pert + delta
 
         np.testing.assert_allclose(
-            xnn_refined, xnn_true, rtol=1e-6, atol=1e-10,
-            err_msg=f'GN step failed to recover xnn for {bl}',
+            xnn_refined,
+            xnn_true,
+            rtol=1e-6,
+            atol=1e-10,
+            err_msg=f"GN step failed to recover xnn for {bl}",
         )

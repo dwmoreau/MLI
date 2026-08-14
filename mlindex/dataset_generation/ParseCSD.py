@@ -36,12 +36,11 @@ for index in range(rank, n_total, n_ranks):
         print(f'{100 * index / n_total: 2.2f}  {index} {len(dicts)}')
 
 entries_rank = pd.DataFrame(dicts)
-entries_rank.to_parquet(os.path.join('data', f'csd_{rank:02d}.parquet'))
+entries_rank.to_parquet(f'csd_{rank:02d}.parquet')
 
 failed_read = pd.DataFrame(failed_dicts)
-failed_read.to_parquet(os.path.join('data', f'failed_read_csd_{rank:02d}.parquet'))
+failed_read.to_parquet(f'failed_read_csd_{rank:02d}.parquet')
 
+COMM.Barrier()
 if rank == 0:
     remove_duplicates('csd', n_ranks)
-else:
-    MPI.Finalize()

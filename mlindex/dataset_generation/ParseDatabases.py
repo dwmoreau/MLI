@@ -2,6 +2,7 @@ from ccdc.io import CrystalWriter
 import gemmi
 import numpy as np
 import os
+from pathlib import Path
 
 from EntryHelpers import ChemicalFormulaHandler
 from EntryHelpers import get_unit_cell_volume
@@ -554,17 +555,9 @@ class ProcessCSDEntry(ProcessEntry):
             return None
 
         # I write cif files so I can load them with cctbx to generate powder patterns
-        cif_directory = os.path.join(os.path.join(
-            'Users',
-            'DWMoreau',
-            'csd_cifs',
-            str(self.spacegroup_number)
-            ))
-        self.cif_file_name = os.path.join(
-            cif_directory, f'{self.identifier}.cif'
-            )
-        if not os.path.exists(cif_directory):
-            os.mkdir(cif_directory)
+        cif_directory = Path.home() / 'csd_cifs' / str(self.spacegroup_number)
+        cif_directory.mkdir(parents=True, exist_ok=True)
+        self.cif_file_name = str(cif_directory / f'{self.identifier}.cif')
         if not os.path.exists(self.cif_file_name):
             with CrystalWriter(self.cif_file_name, append=False) as crystal_writer:
                 crystal_writer.write(csd_entry.crystal)
