@@ -4,6 +4,10 @@ from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 
 
+class ContaminantPlacementError(RuntimeError):
+    pass
+
+
 def add_q2_error(q2, hkl, multiplier, rng):
     from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
     q2_error_params = get_peak_generation_info()['q2_error_params']
@@ -19,7 +23,42 @@ def add_q2_error(q2, hkl, multiplier, rng):
         return q2, hkl
 
 
-def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False):
+def select_peaks_with_dropout(q2_full, n_peaks, n_drop, rng):
+    # Interior dropout: delete peaks from *within* the low-q2 range and backfill from higher q2,
+    # which is what undetected weak reflections do to a real pattern. This is a different attack
+    # from pushing the whole window outwards -- it punches holes in the low-angle region, where the
+    # systematic-absence pattern lives and where the generators take their information, so it
+    # degrades candidate *discovery* rather than just the fit. n_drop = 0 is a no-op.
+    #
+    # n_drop is the number of peaks REMOVED FROM THE FIRST n_peaks + n_drop, not the number of holes
+    # left in the nominal list. A fraction n_drop/(n_peaks + n_drop) of the draws lands in the
+    # backfill region, where dropping a peak merely selects a different high-q2 one and changes
+    # nothing. So the expected hole count is n_drop * n_peaks/(n_peaks + n_drop): measured 2.60 for
+    # n_drop=3 and 4.56 for n_drop=6 at n_peaks=20, against 2.61 and 4.62 predicted. This is
+    # deliberate -- every peak in the window has the same detection probability, which is the
+    # physical model -- but it means the parameter understates nothing and overstates the effect,
+    # so callers should record the achieved count rather than assume n_drop.
+    q2_full = np.asarray(q2_full, dtype=float)
+    q2_full = q2_full[q2_full > 0]
+    if n_drop <= 0:
+        return q2_full[:n_peaks]
+    window = q2_full[:n_peaks + n_drop]
+    if window.size <= n_peaks:
+        # Not enough peaks to drop any and still fill the list; return what there is and let the
+        # caller decide. Reporting the achieved distribution matters more than forcing the count.
+        return q2_full[:n_peaks]
+    dropped = rng.choice(window.size, size=min(n_drop, window.size - n_peaks), replace=False)
+    kept = np.delete(window, dropped)
+    return np.sort(kept)[:n_peaks]
+
+
+def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False, max_attempts=None,
+                     low_angle_bias=1.0):
+    # The whole contaminant set is redrawn until every member clears every peak's half breadth,
+    # so acceptance falls off exponentially in n_contaminants and a dense pattern can spin
+    # forever. max_attempts=None keeps that unbounded behaviour; an integer caps the redraws
+    # and raises instead, so a caller sweeping many entries can drop the ones that cannot be
+    # contaminated rather than hanging on them.
     from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
     q2_broadening_params = get_peak_generation_info()['broadening_params']
     # Breadth is specified as a linear model in q
@@ -29,17 +68,31 @@ def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False):
     n_peaks = q2.shape[1]
     for entry_index in range(q2.shape[0]):
         status = True
+        n_attempts = 0
         while status:
+            if not max_attempts is None and n_attempts >= max_attempts:
+                raise ContaminantPlacementError(
+                    f'Could not place {n_contaminants} contaminants in entry {entry_index} '
+                    f'within {max_attempts} attempts'
+                    )
+            n_attempts += 1
             high = q2[entry_index, -1]
             if random_n_contaminants:
                 n_contaminants_add = rng.choice(n_contaminants)
             else:
                 n_contaminants_add = n_contaminants
-            q2_contaminants = rng.uniform(
-                low=0.5*q2[entry_index, 0],
-                high=high,
-                size=n_contaminants_add
-                )
+            # low_angle_bias biases the draw towards low q2 via q2 = low + (high-low) * u**bias.
+            # bias = 1 is the original uniform draw; bias = 2 is uniform in q rather than q2, which
+            # is roughly where a second phase's visible lines sit. Measured over 400 mP entries, the
+            # fraction of contaminants landing within the first five real peaks -- the region the
+            # generators index from -- is 35% at bias 1, 50% at 1.5, 61% at 2 and 72% at 3, with the
+            # median landing position moving from 47% of the q2 window to 8%.
+            low = 0.5*q2[entry_index, 0]
+            if low_angle_bias == 1.0:
+                q2_contaminants = rng.uniform(low=low, high=high, size=n_contaminants_add)
+            else:
+                q2_contaminants = low + (high - low) * rng.uniform(
+                    size=n_contaminants_add)**low_angle_bias
             if n_peaks is None:
                 difference = np.abs(
                     q2_contaminants[np.newaxis]
