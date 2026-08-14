@@ -248,21 +248,21 @@ class PeakListCreator:
                             )
                         s1_lattice.append(s1_panel)
                         s1_lab_lattice.append(s1_lab_panel)
-                s1_lab_lattice = np.row_stack(s1_lab_lattice)
+                s1_lab_lattice = np.vstack(s1_lab_lattice)
                 refl_counts.append(s1_lab_lattice.shape[0])
                 # s0 and s1_lab are retained for constructing secondary peaks and beam center optimization
-                s1_lab.append(np.row_stack(s1_lab_lattice))
+                s1_lab.append(np.vstack(s1_lab_lattice))
                 s0.append(s0_lattice)
                 expt_indices.append(expt_index*np.ones(s1_lab_lattice.shape[0], dtype=int))
                 # q2_lattice is the magnitude**2 of the scattering vector
                 q2.append(self._get_q2_spacing(
-                    np.row_stack(s1_lattice), s0_lattice)
+                    np.vstack(s1_lattice), s0_lattice)
                     )
         self.q2_obs = np.concatenate(q2)
         self.refl_counts = np.array(refl_counts)
         self.expt_indices = np.concatenate(expt_indices)
-        self.s0 = np.row_stack(s0)
-        self.s1_lab = np.row_stack(s1_lab)
+        self.s0 = np.vstack(s0)
+        self.s1_lab = np.vstack(s1_lab)
         np.save(
             os.path.join(self.save_to_directory, f'{self.tag}_q2_obs.npy'),
             self.q2_obs
@@ -345,7 +345,7 @@ class PeakListCreator:
                     if 0 <= pad_x < n_bins:
                         if 0 <= pad_y < n_bins:
                             mask_indices.append([pad_y, pad_x])
-        mask_indices = np.row_stack((mask_indices))
+        mask_indices = np.vstack((mask_indices))
         mask[mask_indices[:, 0], mask_indices[:, 1]] = True
 
 

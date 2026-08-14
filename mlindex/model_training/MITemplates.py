@@ -254,7 +254,7 @@ class MITemplates:
                             self.hkl_ref_length,
                             self.rng
                             ))
-            miller_index_templates = np.row_stack(mi_sets)
+            miller_index_templates = np.vstack(mi_sets)
             sampling_probability = np.concatenate(sampling_probability)
         else:
             reindexed_xnn = np.stack(training_data['reindexed_xnn'])
@@ -382,7 +382,7 @@ class MITemplates:
                             self.hkl_ref_length,
                             self.rng
                             ))
-            miller_index_templates = np.row_stack(mi_sets)
+            miller_index_templates = np.vstack(mi_sets)
             sampling_probability = np.concatenate(sampling_probability)
 
         # Miller index templates are generated using all available peaks
@@ -619,11 +619,11 @@ class MITemplates:
                     xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
                     q2_calc_best_neighbor = q2_calc_chunk[neighbor_indices][best_neighbor]
                     error_best_neighbor = error_chunk[neighbor_indices][best_neighbor]
-                    xnn_chunk = np.row_stack((
+                    xnn_chunk = np.vstack((
                         np.delete(xnn_chunk, neighbor_indices, axis=0), 
                         xnn_best_neighbor
                         ))
-                    q2_calc_chunk = np.row_stack((
+                    q2_calc_chunk = np.vstack((
                         np.delete(q2_calc_chunk, neighbor_indices, axis=0), 
                         q2_calc_best_neighbor
                         ))
@@ -635,8 +635,8 @@ class MITemplates:
                     status = False
             xnn_downsampled.append(xnn_chunk)
             q2_calc_downsampled.append(q2_calc_chunk)
-        xnn_downsampled = np.row_stack(xnn_downsampled)
-        q2_calc_downsampled = np.row_stack(q2_calc_downsampled)
+        xnn_downsampled = np.vstack(xnn_downsampled)
+        q2_calc_downsampled = np.vstack(q2_calc_downsampled)
         return xnn_downsampled, q2_calc_downsampled
 
     def _get_inputs_worker(self, inputs):
@@ -722,9 +722,9 @@ class MITemplates:
                 N_pred.append(outputs[i][3])
                 q2_calc_max.append(outputs[i][4])
 
-        probability = np.row_stack(probability)
+        probability = np.vstack(probability)
         distance = np.concatenate(distance)
-        xnn = np.row_stack(xnn)
+        xnn = np.vstack(xnn)
         N_pred = np.concatenate(N_pred)
         q2_calc_max = np.concatenate(q2_calc_max)
         return probability, distance, xnn, xnn_true[indices], N_pred, q2_calc_max

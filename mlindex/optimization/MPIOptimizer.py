@@ -31,7 +31,7 @@ def _downsample_chunk(args):
         Minfo_best_neighbor = Minfo_chunk[neighbor_indices][best_neighbor]
         n_indexed_best_neighbor = n_indexed_chunk[neighbor_indices][best_neighbor]
         spacegroup_best_neighbor = [spacegroup_chunk[i] for i in neighbor_indices][best_neighbor]
-        xnn_chunk = np.row_stack((np.delete(xnn_chunk, neighbor_indices, axis=0), xnn_best_neighbor))
+        xnn_chunk = np.vstack((np.delete(xnn_chunk, neighbor_indices, axis=0), xnn_best_neighbor))
         M20_chunk = np.concatenate((np.delete(M20_chunk, neighbor_indices), [M20_best_neighbor]))
         Minfo_chunk = np.concatenate((np.delete(Minfo_chunk, neighbor_indices), [Minfo_best_neighbor]))
         n_indexed_chunk = np.concatenate((np.delete(n_indexed_chunk, neighbor_indices), [n_indexed_best_neighbor]))
@@ -536,7 +536,7 @@ class OptimizerManager(OptimizerBase):
             Minfo_downsampled.append(Minfo_chunk)
             n_indexed_downsampled.append(n_indexed_chunk)
             spacegroup_downsampled += spacegroup_chunk
-        xnn_downsampled = np.row_stack(xnn_downsampled)
+        xnn_downsampled = np.vstack(xnn_downsampled)
         M20_downsampled = np.concatenate(M20_downsampled)
         Minfo_downsampled = np.concatenate(Minfo_downsampled)
         n_indexed_downsampled = np.concatenate(n_indexed_downsampled)
