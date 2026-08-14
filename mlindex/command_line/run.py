@@ -246,27 +246,46 @@ def _conventional_cell(output_data, delta=0.1):
     for entry in output_data:
         uc_params = (entry['a'], entry['b'], entry['c'],
                      entry['alpha'], entry['beta'], entry['gamma'])
-        sym = cctbx_crystal.symmetry(unit_cell=uc_params, space_group_symbol='P 1')
-        groups = metric_subgroups(sym, delta, enforce_max_delta_for_generated_two_folds=True)
 
         best_bl = entry['bravais_lattice']
         best_uc = uc_params
         best_volume = entry['volume']
         best_sg = entry.get('spacegroup')
 
-        for group in groups.result_groups:
-            best_subsym = group['best_subsym']
-            sg = best_subsym.space_group()
-            cs = sg.crystal_system()
-            centring = sg.conventional_centring_type_symbol()
-            candidate_bl = _CS_CENTRING_TO_BL.get((cs, centring))
-            if candidate_bl is None:
+        # Promotion is an optional improvement to one candidate, so a candidate cctbx cannot
+        # analyse must not take the run down. metric_subgroups raises on cells it cannot reduce
+        # ("Unsuitable value for rational rotation matrix"), which happens readily once triclinic
+        # and monoclinic candidates from real data are in the pool -- 10 of 16 workers died this
+        # way before the guard. Keep the un-promoted candidate; it is still a valid result.
+        try:
+            sym = cctbx_crystal.symmetry(unit_cell=uc_params, space_group_symbol='P 1')
+            groups = metric_subgroups(sym, delta,
+                                      enforce_max_delta_for_generated_two_folds=True)
+            result_groups = groups.result_groups
+        except (RuntimeError, ValueError):
+            result_groups = []
+
+        for group in result_groups:
+            # Per group as well as per candidate, and the four fields are read before any is
+            # committed, so a group that raises part way through cannot leave a cell whose
+            # lattice, parameters and spacegroup disagree with each other.
+            try:
+                best_subsym = group['best_subsym']
+                sg = best_subsym.space_group()
+                candidate_bl = _CS_CENTRING_TO_BL.get(
+                    (sg.crystal_system(), sg.conventional_centring_type_symbol())
+                    )
+                if candidate_bl is None:
+                    continue
+                if _BL_RANK.get(candidate_bl, 0) <= _BL_RANK.get(best_bl, 0):
+                    continue
+                promoted = (candidate_bl,
+                            best_subsym.unit_cell().parameters(),
+                            best_subsym.unit_cell().volume(),
+                            best_subsym.space_group_info().type().lookup_symbol())
+            except (RuntimeError, ValueError):
                 continue
-            if _BL_RANK.get(candidate_bl, 0) > _BL_RANK.get(best_bl, 0):
-                best_bl = candidate_bl
-                best_uc = best_subsym.unit_cell().parameters()
-                best_volume = best_subsym.unit_cell().volume()
-                best_sg = best_subsym.space_group_info().type().lookup_symbol()
+            best_bl, best_uc, best_volume, best_sg = promoted
 
         new_entry = dict(entry)
         new_entry['bravais_lattice'] = best_bl

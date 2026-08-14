@@ -351,6 +351,9 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
             sg = sgtbx.space_group_info(f"{spacegroups[index]} :R").group()
         else:
             sg = sgtbx.space_group_info(spacegroups[index]).group()
+        # int() per component is required, not cosmetic: Boost.Python accepts numpy int32 but
+        # rejects int64 and float64, and the reference lists are float64 under mlindex/models and
+        # int64 under mlindex/data.
         systematically_absent = np.array([
             sg.is_sys_absent(tuple((int(i) for i in hkl))) for hkl in hkl_ref
         ])

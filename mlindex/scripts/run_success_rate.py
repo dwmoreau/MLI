@@ -138,14 +138,14 @@ if __name__ == '__main__':
         off_by_two = False
         found_explainer = False
         for candidate_index in range(optimizer.top_unit_cell.shape[0]):
-            correct, off_by_two = validate_candidate_known_bl(
+            correct, candidate_off_by_two = validate_candidate_known_bl(
                 unit_cell_true=unit_cell_true,
                 unit_cell_pred=optimizer.top_unit_cell[candidate_index],
                 bravais_lattice_pred=bravais_lattice,
                 )
             if correct:
                 found = True
-            if off_by_two:
+            if candidate_off_by_two:
                 off_by_two = True
             if np.any(optimizer.top_M20 > 1000):
                 found_explainer = True

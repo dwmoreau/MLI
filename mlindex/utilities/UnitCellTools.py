@@ -24,7 +24,7 @@ def get_partial_unit_cell(unit_cell, lattice_system=None, bravais_lattice=None):
             return unit_cell[[0, 3]]
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
             return unit_cell[[0, 1, 2]]
-        elif bravais_lattice == ['mP', 'mC']:
+        elif bravais_lattice in ['mP', 'mC']:
             return unit_cell[[0, 1, 2, 4]]
         else:
             return unit_cell
