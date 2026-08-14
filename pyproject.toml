@@ -11,7 +11,7 @@ mlindex = ["model_metadata.json", "models/*/data/hkl_ref_*.npy"]
 
 [project]
 name = "mlindex"
-version = "0.1.0"
+version = "0.1.1"
 authors = [{name = "David Mittan-Moreau", email = "dwmoreau@lbl.gov"}]
 description = "A data driven approach to powder diffraction indexing"
 keywords = ["powder diffraction", "diffraction", "crystallography", "indexing", "machine learning"]
