@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-MLINDEX is a powder diffraction indexing program. Given a list of observed diffraction peaks, it returns candidate unit cells ranked by the de Wolff M20 figure of merit. ML models initialize candidate unit cells for each Bravais lattice; candidates are then refined by least-squares optimization. The paper describing the methods was submitted to the Journal of Applied Crystallography.
+MLINDEX is a powder diffraction indexing program. Given a list of observed diffraction peaks, it returns candidate unit cells ranked by the de Wolff M20 figure of merit. ML models initialize candidate unit cells for each Bravais lattice; candidates are then refined by least-squares optimization.
 
 ## Installation
 
@@ -12,10 +12,24 @@ MLINDEX is a powder diffraction indexing program. Given a list of observed diffr
 pip install .
 ```
 
-ML model files (~1 GB) are stored in `mlindex/models/` via git-lfs. After cloning, retrieve them with:
+ML model files (~545 MB) are published on the Hugging Face Hub at
+[`dwmoreau/mlindex-models`](https://huggingface.co/dwmoreau/mlindex-models), and `mlindex.download_models`
+fetches them from there with `huggingface_hub` (no git or git-lfs needed). Each release pins a model
+revision via `model_revision` in `mlindex/model_metadata.json`.
+
+The same files are also still tracked in `mlindex/models/` via git-lfs for development. After cloning:
 ```bash
-git lfs fetch --all && git lfs checkout
+git lfs pull
 ```
+
+Models are located at runtime by `_resolve_models_dir()` in `mlindex/optimization/UtilitiesOptimizer.py`,
+which searches, in order: `MLINDEX_MODELS_DIR` (used as-is), `$XDG_DATA_HOME/mlindex/models`, then the
+package's own `mlindex/models/`. A models directory is the one that *directly* contains `cubic_1/`,
+`hexagonal_1/`, ... — the helpers live in `mlindex/paths.py` and are shared with the downloader.
+
+Note that the wheel always ships a *partial* `mlindex/models/` tree: the `models/*/data/hkl_ref_*.npy`
+package-data glob, which `AnalyticOptimizer` and `CreatePeakList` read via `importlib.resources`. That is
+why the "do we have models?" probe checks for `cubic_1/integral_filter/` rather than for `models/`.
 
 ## Running the indexer
 

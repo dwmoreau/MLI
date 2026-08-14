@@ -2,7 +2,7 @@
 
 A powder diffraction indexing program that uses machine learning models to initialize the SVD-Index algorithm. It takes an input peak list and returns a list of unit cells ranked by Figure of Merit.
 
-> **Note:** The paper describing the methods is currently in submission to the Journal of Applied Crystallography. This application is in beta stage. Usage and feedback would be greatly appreciated to improve user experience.
+> **Note:** This application is in beta stage. Usage and feedback would be greatly appreciated to improve user experience.
 
 ## Installation
 
@@ -13,14 +13,31 @@ pip install mlindex
 mlindex.download_models
 ```
 
-`mlindex.download_models` fetches the ML model files (~1 GB) from GitHub using git and git-lfs and installs them to `~/.local/share/mlindex/models/`. [git-lfs](https://www.git-lfs.com) must be installed before running this step.
+`mlindex.download_models` fetches the ML model files (~545 MB) from the [Hugging Face Hub](https://huggingface.co/dwmoreau/mlindex-models) and installs them to `~/.local/share/mlindex/models/`. No git or git-lfs is required. Each mlindex release pins a specific model revision, so you always get the models that version was tested against.
 
-The model directory can be customized with `--models-dir` or the `MLINDEX_MODELS_DIR` environment variable:
+Re-running the command is cheap: files that are already present and up to date are not downloaded again, so an interrupted download can be resumed by simply running it again.
+
+### Installing models somewhere else
+
+The model directory can be customized with `--models-dir` or the `MLINDEX_MODELS_DIR` environment variable. Both must name **the same directory**, and it must be the directory that *directly contains* the model subdirectories `cubic_1/`, `hexagonal_1/`, ...:
 
 ```bash
 mlindex.download_models --models-dir /path/to/models
 export MLINDEX_MODELS_DIR=/path/to/models
 ```
+
+On Windows:
+
+```
+mlindex.download_models --models-dir D:\mlindex-models
+set MLINDEX_MODELS_DIR=D:\mlindex-models
+```
+
+### Troubleshooting
+
+- **`MLINDEX_MODELS_DIR=... does not look like a models directory`** — the variable is pointing one level too high. It must name the directory holding `cubic_1/`, not its parent. The error message suggests the right path when it can find it.
+- **Network blocks huggingface.co** — set `HF_ENDPOINT` to a mirror, or fall back to the legacy git-lfs download with `mlindex.download_models --source github` (this one does require git and git-lfs).
+- **Re-download everything from scratch** — `mlindex.download_models --redownload`.
 
 ### Developer installation (git clone)
 
@@ -33,8 +50,7 @@ Required for model training, dataset generation, or contributing to the codebase
 
 2. **Retrieve the model files:**
    ```bash
-   git lfs fetch --all
-   git lfs checkout
+   git lfs pull
    ```
 
 3. **Install the project:**

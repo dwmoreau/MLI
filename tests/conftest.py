@@ -85,9 +85,9 @@ def aP_data(test_metadata):
 @pytest.fixture(scope="session")
 def models_available():
     try:
-        from mlindex.optimization.UtilitiesOptimizer import _resolve_project_path
+        from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 
-        _resolve_project_path()
+        _resolve_models_dir()
         return True
     except (FileNotFoundError, ImportError):
         return False

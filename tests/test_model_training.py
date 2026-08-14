@@ -32,7 +32,7 @@ def all_optimizers(models_available):
     from mlindex.optimization.MPOptimizer import LocalComm
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     from mlindex.optimization.UtilitiesOptimizer import (
-        _resolve_project_path,
+        _resolve_models_dir,
         get_cubic_optimizer,
         get_hexagonal_optimizer,
         get_rhombohedral_optimizer,
@@ -43,7 +43,7 @@ def all_optimizers(models_available):
     )
 
     comm = LocalComm(1)
-    project_path = _resolve_project_path()
+    models_dir = _resolve_models_dir()
     bl_to_factory = {
         "cF": get_cubic_optimizer,
         "cI": get_cubic_optimizer,
@@ -63,7 +63,8 @@ def all_optimizers(models_available):
     optimizers = {}
     for bl, factory in bl_to_factory.items():
         opt = factory(
-            bl, "1", 1, comm, project_path, optimizer_class=OptimizerManager, seed=12345
+            bl, "1", 1, comm, optimizer_class=OptimizerManager, seed=12345,
+            models_directory=models_dir,
         )
         opt.wrapper.setup_random()
         optimizers[bl] = opt

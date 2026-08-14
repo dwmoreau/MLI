@@ -208,7 +208,7 @@ def generate_model_training_expected(test_metadata):
     from mlindex.optimization.MPOptimizer import LocalComm
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     from mlindex.optimization.UtilitiesOptimizer import (
-        _resolve_project_path,
+        _resolve_models_dir,
         get_cubic_optimizer,
         get_hexagonal_optimizer,
         get_rhombohedral_optimizer,
@@ -220,7 +220,7 @@ def generate_model_training_expected(test_metadata):
 
     print("Loading ML models ...")
     comm = LocalComm(1)
-    project_path = _resolve_project_path()
+    models_dir = _resolve_models_dir()
     bl_to_factory = {
         "cF": get_cubic_optimizer,
         "cI": get_cubic_optimizer,
@@ -242,7 +242,8 @@ def generate_model_training_expected(test_metadata):
     for q2_obs, unit_cell, wavelength, bl, lattice_system in all_cases(test_metadata):
         factory = bl_to_factory[bl]
         opt = factory(
-            bl, "1", 1, comm, project_path, optimizer_class=OptimizerManager, seed=12345
+            bl, "1", 1, comm, optimizer_class=OptimizerManager, seed=12345,
+            models_directory=models_dir,
         )
         opt.wrapper.setup_random()
         sg = opt.wrapper.data_params["split_groups"][0]

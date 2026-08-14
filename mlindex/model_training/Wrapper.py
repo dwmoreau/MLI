@@ -16,9 +16,17 @@ class Wrapper:
         self.template_params = template_params
         self.integral_filter_params = integral_filter_params
 
-        results_directory = os.path.normpath(os.path.join(
-            self.data_params['base_directory'], 'mlindex', 'models', self.data_params['tag']
-            ))
+        # Popped, not read: Wrapper.save() persists data_params to data_params.csv, and a
+        # machine-specific absolute path must not be baked into the distributed models.
+        self.models_directory = self.data_params.pop('models_directory', None)
+        if self.models_directory is not None:
+            results_directory = os.path.normpath(os.path.join(
+                str(self.models_directory), self.data_params['tag']
+                ))
+        else:
+            results_directory = os.path.normpath(os.path.join(
+                str(self.data_params['base_directory']), 'mlindex', 'models', self.data_params['tag']
+                ))
         self.save_to = {
             'results': results_directory,
             'augmentor': os.path.join(results_directory, 'augmentor'),
@@ -29,23 +37,20 @@ class Wrapper:
             'integral_filter': os.path.join(results_directory, 'integral_filter'),
             }
 
-        if not os.path.exists(self.save_to['results']):
-            os.mkdir(self.save_to['results'])
-        if not os.path.exists(self.save_to['augmentor']):
-            os.mkdir(self.save_to['augmentor'])
-        if not os.path.exists(self.save_to['data']):
-            os.mkdir(self.save_to['data'])
-        if not os.path.exists(self.save_to['random']):
-            os.mkdir(self.save_to['random'])
-        if not os.path.exists(self.save_to['random_forest']):
-            os.mkdir(self.save_to['random_forest'])
-        if not os.path.exists(self.save_to['template']):
-            os.mkdir(self.save_to['template'])
-        if not os.path.exists(self.save_to['integral_filter']):
-            os.mkdir(self.save_to['integral_filter'])
-        if self.data_params['load_from_tag']:
+        if self.data_params.get('load_from_tag'):
+            # Loading trained models: the directory must already exist. Creating it here
+            # would hide the real problem and surface later as a missing .npy file.
+            if not os.path.isdir(self.save_to['results']):
+                raise FileNotFoundError(
+                    f"Model directory not found: {self.save_to['results']}\n"
+                    f"Expected trained models for tag '{self.data_params['tag']}'.\n"
+                    "Run 'mlindex.download_models', or set MLINDEX_MODELS_DIR to the "
+                    "directory that directly contains cubic_1/, hexagonal_1/, ..."
+                    )
             self.setup_from_tag(load_bravais_lattice)
         else:
+            for directory in self.save_to.values():
+                os.makedirs(directory, exist_ok=True)
             self.setup()
 
     def setup(self):
