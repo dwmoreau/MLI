@@ -260,6 +260,26 @@ _SPACEGROUP_HKL_REF_TEST_HKL = np.array(
 )
 
 
+@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.float64])
+def test_spacegroup_hkl_ref_dtypes(dtype):
+    # The production reference lists are float64 under mlindex/models and int64 under
+    # mlindex/data, and Boost.Python accepts numpy int32 but rejects both of those. An int32-only
+    # fixture therefore passes while every real run raises, which is how a broken systematic
+    # absence check survived in assign_extinction_group. Pin all three dtypes.
+    from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
+
+    hkl = _SPACEGROUP_HKL_REF_TEST_HKL.astype(dtype)
+    for bl in BL_TO_LATTICE_SYSTEM:
+        result = get_spacegroup_hkl_ref(hkl, bl)
+        reference = get_spacegroup_hkl_ref(_SPACEGROUP_HKL_REF_TEST_HKL, bl)
+        assert list(result.keys()) == list(reference.keys()), f"{bl}: key mismatch"
+        for key in reference:
+            np.testing.assert_array_equal(
+                np.asarray(result[key], dtype=np.int64), reference[key].astype(np.int64),
+                err_msg=f"{bl} [{key}]: {dtype} disagrees with int32",
+            )
+
+
 def test_spacegroup_hkl_ref():
     from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 
