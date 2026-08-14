@@ -1,31 +1,48 @@
 import numpy as np
 
 
-def validate_candidate(entry, top_unit_cell, top_M20):
+def label_candidates(entry, top_unit_cell, rtol=1e-2):
+    # top_unit_cell is the Bravais-lattice-keyed dict of partial unit cells that the
+    # optimizers produce. Returns two dicts of boolean arrays with the same keys,
+    # aligned with each lattice's candidates, so callers can rank on the labels
+    # rather than only reducing them to per-entry flags.
+    unit_cell_true = np.array(entry['reindexed_unit_cell'])
+    correct = {}
+    off_by_two = {}
+    for bravais_lattice_pred in top_unit_cell.keys():
+        n_candidates = top_unit_cell[bravais_lattice_pred].shape[0]
+        correct[bravais_lattice_pred] = np.zeros(n_candidates, dtype=bool)
+        off_by_two[bravais_lattice_pred] = np.zeros(n_candidates, dtype=bool)
+        for candidate_index in range(n_candidates):
+            candidate_correct, candidate_off_by_two = validate_candidate_known_bl(
+                unit_cell_true=unit_cell_true,
+                unit_cell_pred=top_unit_cell[bravais_lattice_pred][candidate_index],
+                bravais_lattice_pred=bravais_lattice_pred,
+                rtol=rtol,
+                )
+            correct[bravais_lattice_pred][candidate_index] = candidate_correct
+            off_by_two[bravais_lattice_pred][candidate_index] = candidate_off_by_two
+    return correct, off_by_two
+
+
+def validate_candidate(entry, top_unit_cell, top_M20, rtol=1e-2):
+    correct, off_by_two_all = label_candidates(entry, top_unit_cell, rtol=rtol)
+    bravais_lattice_true = entry['bravais_lattice']
+
     found = False
     off_by_two = False
     incorrect_bl = False
     found_explainer = False
-
-    unit_cell_true = np.array(entry['reindexed_unit_cell'])
-    bravais_lattice_true = entry['bravais_lattice']
-
     for bravais_lattice_pred in top_unit_cell.keys():
-        for candidate_index in range(top_unit_cell[bravais_lattice_pred].shape[0]):
-            correct, off_by_two = validate_candidate_known_bl(
-                unit_cell_true=unit_cell_true,
-                unit_cell_pred=top_unit_cell[bravais_lattice_pred][candidate_index],
-                bravais_lattice_pred=bravais_lattice_pred,
-                )
-            if correct:
-                if bravais_lattice_pred == bravais_lattice_true:
-                    found = True
-                else:
-                    incorrect_bl = True
-            if off_by_two:
-                off_by_two = True
-            if np.any(top_M20[bravais_lattice_pred] > 1000):
-                found_explainer = True
+        if np.any(correct[bravais_lattice_pred]):
+            if bravais_lattice_pred == bravais_lattice_true:
+                found = True
+            else:
+                incorrect_bl = True
+        if np.any(off_by_two_all[bravais_lattice_pred]):
+            off_by_two = True
+        if np.any(top_M20[bravais_lattice_pred] > 1000):
+            found_explainer = True
     return found, off_by_two, incorrect_bl, found_explainer
 
 
