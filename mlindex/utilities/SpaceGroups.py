@@ -351,7 +351,6 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
             sg = sgtbx.space_group_info(f"{spacegroups[index]} :R").group()
         else:
             sg = sgtbx.space_group_info(spacegroups[index]).group()
-        systematically_absent = np.array([sg.is_sys_absent(tuple(hkl)) for hkl in hkl_ref])
         systematically_absent = np.array([
             sg.is_sys_absent(tuple((int(i) for i in hkl))) for hkl in hkl_ref
         ])

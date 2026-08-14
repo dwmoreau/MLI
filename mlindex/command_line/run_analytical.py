@@ -34,7 +34,7 @@ def main() -> None:
     if invalid:
         parser.error(f"Unknown Bravais lattices: {', '.join(invalid)}")
 
-    q2_obs, _ = _load_peaks(args)
+    q2_obs = _load_peaks(args)
 
     n_ref_hkl_guess = {bl: 10 for bl in bravais_lattices}
 
