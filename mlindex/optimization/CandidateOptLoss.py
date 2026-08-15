@@ -1,5 +1,7 @@
 import numpy as np
 
+from mlindex.utilities.numba_functions import gauss_newton_solve
+
 
 class CandidateOptLoss:
     def __init__(self, q2_obs, lattice_system):
@@ -88,107 +90,57 @@ class CandidateOptLoss:
         else:
             return q2_pred
 
+    # A Cholesky pivot at or below this fraction of the Hessian's largest
+    # diagonal marks a candidate unrefinable. It replaces the eigenvalue
+    # tolerance the old np.linalg.matrix_rank test used; on captured runs the two
+    # classifications disagreed on 1 candidate in 39,753, and on that one both
+    # produced a step below 1e-8 of the cell, so the value is not delicate.
+    pivot_tolerance = 1e-12
+
     def gauss_newton_step(self, xnn):
-        # q2_pred:       n_entries, n_peaks
-        # dq2_pred_dxnn: n_entries, n_peaks, xnn_length
-        # self.q2_obs:   n_peaks
-        #
-        # The arithmetic here is unchanged and the results are bit-identical to
-        # what this produced before; only the failure handling is different. Two
-        # ways this used to break, both reachable with ill-conditioned candidates:
-        #
-        #   * np.linalg.matrix_rank was called *outside* the try below, and it
-        #     raises on a non-finite Hessian, so a single bad sigma anywhere in
-        #     the batch took the whole run down.
-        #   * numpy's batched inv raises for the *entire* batch when any one
-        #     member is singular. The except clause caught it, but delta_gn was
-        #     then all zeros, so one degenerate candidate out of tens of thousands
-        #     cost every candidate in the batch its refinement step.
-        #
-        # Both are now isolated to the individual candidate. A candidate that
-        # cannot be refined gets a zero step, which is what this code always
-        # intended for a non-invertible candidate.
-        #
-        # tools/repro_hessian.py holds a faster, far leaner alternative
-        # (gauss_newton_solve in numba_functions: 9.3-9.6x, peak working memory
-        # 224 MB -> 1.3 MB). It is not wired in here because it perturbs the
-        # Gauss-Newton step by ~1e-8 relative to the cell, which this optimizer
-        # amplifies into a reordering of the lower half of the candidate list.
-        q2_pred, dq2_pred_dxnn = self.get_q2_pred(xnn, jac=True)
-        residuals = (q2_pred - self.q2_obs) / self.sigma
-        dlikelihood_dq2_pred = residuals / self.sigma
-        dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
-        term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
-        H = np.sum(self.hessian_prefactor * term0, axis=1)
+        """One Gauss-Newton step per candidate, solved independently.
 
-        # Need to ensure H is invertible before inverting.
-        # isfinite rather than the old ~isnan: an infinite unit cell leaves H
-        # finite, so it passed the rank test and the inversion and then emerged
-        # as a non-finite step that was added straight into xnn. NaN and Inf
-        # cells are both unusable, so both are screened here.
-        invertible = np.isfinite(xnn).all(axis=1)
-        # A non-finite Hessian is what makes matrix_rank raise, so screen for it
-        # rather than letting the exception escape. On healthy input every H is
-        # finite and this changes nothing.
-        invertible &= np.isfinite(H).all(axis=(1, 2))
-        # The gradient can go non-finite while H stays finite, by the same route.
-        invertible &= np.isfinite(dloss_dxnn).all(axis=1)
-        if np.any(invertible):
-            try:
-                invertible[invertible] = np.linalg.matrix_rank(
-                    H[invertible], hermitian=True) == self.uc_length
-            except np.linalg.LinAlgError:
-                invertible = self._rank_test_one_at_a_time(H, invertible)
+        gauss_newton_solve builds each candidate's k x k Hessian in a reused
+        buffer, factorises it with a tolerance-guarded Cholesky and solves in
+        place. It replaces a four-step numpy pipeline that built an
+        (n_entries, n_peaks, k, k) intermediate, tested invertibility with a full
+        eigendecomposition, then inverted.
 
-        delta_gn = np.zeros((self.n_entries, self.uc_length))
-        if np.any(invertible):
-            try:
-                delta_gn[invertible] = -np.matmul(
-                    np.linalg.inv(H[invertible]),
-                    dloss_dxnn[invertible, :, np.newaxis]
-                    )[:, :, 0]
-            except np.linalg.LinAlgError:
-                self._invert_one_at_a_time(H, dloss_dxnn, invertible, delta_gn)
-        # Last line of defence. A step is added straight into xnn, so letting a
-        # non-finite one through poisons that candidate for the rest of the run
-        # and shows up much later as a NaN unit cell. Zeroing it leaves the
-        # candidate where it was, which is the same outcome as failing the
-        # invertibility test above.
-        unusable = ~np.isfinite(delta_gn).all(axis=1)
-        if np.any(unusable):
-            delta_gn[unusable] = 0.0
-        return delta_gn
+        Robustness was the reason for writing it, not speed. The numpy version
+        called np.linalg.matrix_rank outside its try block and matrix_rank raises
+        on a non-finite Hessian, so one bad sigma ended the run; and numpy's
+        batched inv raises for the *entire* batch when any single member is
+        singular, which left every candidate with a zero step. There is no
+        batched LAPACK call here to fail: a candidate that cannot be refined gets
+        a zero step and its neighbours are untouched.
 
-    def _rank_test_one_at_a_time(self, H, invertible):
-        """Fallback when a batched matrix_rank refuses the whole batch."""
-        candidates = np.flatnonzero(invertible)
-        keep = np.zeros(candidates.size, dtype=bool)
-        for position, candidate in enumerate(candidates):
-            try:
-                keep[position] = np.linalg.matrix_rank(
-                    H[candidate], hermitian=True) == self.uc_length
-            except np.linalg.LinAlgError:
-                keep[position] = False
-        invertible[candidates] = keep
-        return invertible
+        Measured against captured inputs (tools/repro_hessian.py): 9.3-9.6x on
+        this function, 8.6% end to end, and peak working memory 224 MB -> 1.3 MB
+        on a 39,753-candidate chunk. The intermediate it removes would be ~549 MB
+        at 100,000 triclinic candidates.
 
-    def _invert_one_at_a_time(self, H, dloss_dxnn, invertible, delta_gn):
-        """Fallback when a batched inv refuses the whole batch.
+        This is not bit-identical to the numpy version. A different summation
+        order perturbs each step by ~1e-8 relative to the cell, and roughly sixty
+        iterations of a randomised optimizer amplify that into a reordered
+        candidate list. Validated across the seventeen known-answer cases in
+        mlindex/data/test_data (tools/validate_true_cell.py): the true cell is
+        found in 16/17 under both implementations with identical rank-1, top-5,
+        top-20 and median-rank counts. Its M20 does move in 7 of those 16 cases,
+        by 1e-13 to 4e-3 relative; the two largest movements are improvements and
+        the largest degradation is 4e-5.
 
-        Solving candidate by candidate costs more than the batched call, but it
-        only runs when the batched call has already failed, and it means a single
-        singular Hessian no longer discards every other candidate's step.
+        ``ok`` is discarded here because a skipped candidate already has the zero
+        step this function has always given a non-invertible one, but the kernel
+        returns it so callers can count skips if that is ever wanted.
         """
-        n_failed = 0
-        for candidate in np.flatnonzero(invertible):
-            try:
-                delta_gn[candidate] = -np.matmul(
-                    np.linalg.inv(H[candidate]), dloss_dxnn[candidate])
-            except np.linalg.LinAlgError:
-                n_failed += 1
-        if n_failed:
-            print(f'GAUSS-NEWTON: {n_failed} of {int(invertible.sum())} candidates '
-                  f'could not be inverted; their steps are zero')
+        delta_gn, _ok = gauss_newton_solve(
+            np.ascontiguousarray(self.hkl2),
+            np.ascontiguousarray(self.q2_obs),
+            np.ascontiguousarray(self.sigma),
+            np.ascontiguousarray(xnn),
+            self.pivot_tolerance,
+            )
+        return delta_gn
 
     def correct_zeropoint(self, xnn, wavelength):
         # q2_pred:       n_entries, n_peaks
