@@ -383,11 +383,19 @@ class Candidates:
                             mult_factors[mf_index, 5] = np.sqrt(mf0 * mf1)
                         mf_index += 1
 
-        M20 = np.zeros([self.n, mult_factors.shape[0]])
-        hkl = np.zeros([self.n, mult_factors.shape[0], self.n_peaks, 3])
-        xnn_all = np.zeros([self.n, mult_factors.shape[0], self.best_xnn.shape[1]])
+        # Only the winning factor per candidate is ever read, so a running best
+        # replaces the per-factor arrays. Those were [n, n_mult, n_peaks, 3] and
+        # [n, n_mult, xnn_length]: 103 MB and 7 MB for a 3519-candidate
+        # monoclinic run, of which at most 1/64 was used. np.argmax takes the
+        # *first* maximum, so the update below is guarded by a strict '>' and
+        # selects the same factor. Measured 1.41x with bit-identical output
+        # (tools/repro_offbytwo.py).
+        best_mf_M20 = np.full(self.n, -np.inf)
+        best_mf_index = np.zeros(self.n, dtype=int)
+        best_mf_hkl = np.zeros([self.n, self.n_peaks, 3])
+        best_mf_xnn = np.zeros([self.n, self.best_xnn.shape[1]])
         if self.zero_error:
-            zeropoint = np.zeros([self.n, mult_factors.shape[0]])
+            best_mf_zeropoint = np.zeros(self.n)
         for mf_index in range(mult_factors.shape[0]):
             xnn_mult = mult_factors[mf_index, :][np.newaxis]**2 * self.best_xnn
             xnn_mult = fix_unphysical(
@@ -399,44 +407,48 @@ class Candidates:
                 )
             q2_ref_calc_mult = self.q2_calculator.get_q2(xnn_mult)
             hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
-            hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
+            hkl_mult = np.take(self.hkl_ref, hkl_assign, axis=0)
             q2_calc_mult = np.take_along_axis(q2_ref_calc_mult, hkl_assign, axis=1)
             if self.zero_error:
                 target_function_zp = CandidateOptLoss(
                     np.repeat(self.q2_obs[np.newaxis], self.n, axis=0),
                     lattice_system=self.lattice_system,
                     )
-                target_function_zp.update(hkl[:, mf_index], xnn_mult)
+                target_function_zp.update(hkl_mult, xnn_mult)
                 # Get a per-peak correction for zero and add these to q_calc
                 delta_gn = target_function_zp.gauss_newton_step_zero_error(xnn_mult, self.wavelength)
                 xnn_mult += delta_gn[:, :-1]
-                zeropoint[:, mf_index] = delta_gn[:, -1]
+                zeropoint_mult = delta_gn[:, -1]
 
                 q2_ref_calc_mult = target_function_zp.apply_zeropoint(
-                    zeropoint[:, mf_index], self.wavelength, q2_ref_calc_mult
+                    zeropoint_mult, self.wavelength, q2_ref_calc_mult
                 )
                 hkl_assign = fast_assign(self.q2_obs, q2_ref_calc_mult)
-                hkl[:, mf_index] = np.take(self.hkl_ref, hkl_assign, axis=0)
+                hkl_mult = np.take(self.hkl_ref, hkl_assign, axis=0)
                 q2_calc_mult = np.take_along_axis(q2_ref_calc_mult, hkl_assign, axis=1)
-            xnn_all[:, mf_index] = xnn_mult
-            M20[:, mf_index] = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
+            M20_mult = get_M20(self.q2_obs, q2_calc_mult, q2_ref_calc_mult)
+
+            # Strict '>' so an equal M20 never displaces an earlier factor,
+            # matching np.argmax's first-maximum rule.
+            better = M20_mult > best_mf_M20
+            best_mf_M20[better] = M20_mult[better]
+            best_mf_index[better] = mf_index
+            best_mf_hkl[better] = hkl_mult[better]
+            best_mf_xnn[better] = xnn_mult[better]
+            if self.zero_error:
+                best_mf_zeropoint[better] = zeropoint_mult[better]
 
         # Index 0 of mult_factors is always the identity transformation (mult_factor[0]=1).
         # When a non-identity factor gives a better M20, keep the original candidate and
         # append the off-by-two corrected version rather than replacing the original.
-        best_index = np.argmax(M20, axis=1)
-        improved = best_index != 0
+        improved = best_mf_index != 0
         if np.any(improved):
-            imp_idx = best_index[improved]
-            new_xnn = xnn_all[improved, imp_idx, :]
-            new_M20 = M20[improved, imp_idx]
-            new_hkl = hkl[improved, imp_idx, :, :]
-            self.best_xnn = np.concatenate([self.best_xnn, new_xnn], axis=0)
-            self.best_M20 = np.concatenate([self.best_M20, new_M20])
-            self.best_hkl = np.concatenate([self.best_hkl, new_hkl], axis=0)
+            self.best_xnn = np.concatenate([self.best_xnn, best_mf_xnn[improved]], axis=0)
+            self.best_M20 = np.concatenate([self.best_M20, best_mf_M20[improved]])
+            self.best_hkl = np.concatenate([self.best_hkl, best_mf_hkl[improved]], axis=0)
             if self.zero_error:
-                new_zeropoint = zeropoint[improved, imp_idx]
-                self.best_zeropoint = np.concatenate([self.best_zeropoint, new_zeropoint])
+                self.best_zeropoint = np.concatenate(
+                    [self.best_zeropoint, best_mf_zeropoint[improved]])
             self.n = self.best_xnn.shape[0]
 
         # do quick reindexing to enforce constraints
