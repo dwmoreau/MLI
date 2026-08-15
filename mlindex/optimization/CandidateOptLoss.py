@@ -157,14 +157,32 @@ class CandidateOptLoss:
         return q2 + 4*np.sin(theta2)/wavelength**2 * zeropoint[:, np.newaxis]
 
     def gauss_newton_step_zero_error(self, xnn, wavelength, zeropoint=None):
-        # q2_pred:       n_entries, n_peaks
-        # dq2_pred_dxnn: n_entries, n_peaks, xnn_length
-        # self.q2_obs:   n_peaks
-        # xnn:           n_entries, xnn_length
-        # hkl2:          n_entries, n_peaks, xnn_length
+        """Gauss-Newton step refining the zero-point offset alongside the cell.
 
-        sigma = self.sigma
-        
+        Same normal equations as gauss_newton_step, on a system augmented by one
+        column: the zero-point enters q2 linearly through
+        4 sin(2 theta) / lambda^2, so appending that to hkl2 and the current
+        zero-point to xnn makes it just another parameter. That is why this can
+        reuse the same kernel -- the returned step is (n_entries, uc_length + 1),
+        with the zero-point correction in the final column.
+
+        What this replaces mattered more than the arithmetic. The invertibility
+        test was wrapped in a bare ``except:`` that printed the offending
+        candidate and then hit ``assert False``, so a single non-finite Hessian
+        ended the run by construction -- and a bare except also swallows
+        KeyboardInterrupt. np.linalg.matrix_rank raises on exactly that input,
+        which is reachable here: when wavelength/2 * sqrt(q2_obs) exceeds 1 the
+        arcsin below is NaN and every entry of that candidate's Hessian follows.
+        The kernel skips such a candidate and leaves its step at zero, the same
+        outcome the code intended for a non-invertible one, without touching its
+        neighbours.
+
+        Note that apply_zeropoint clips the arcsin argument to [-1, 1] and this
+        does not. Adding a clip here would change results for peaks beyond the
+        wavelength's reachable range rather than dropping those candidates, so it
+        is left as it was; the kernel means the difference is now a skipped
+        candidate rather than a dead process.
+        """
         theta2 = 2 * np.arcsin(wavelength/2 * np.sqrt(self.q2_obs))
         prefactor = 4 * np.sin(theta2) / wavelength**2
         hkl2 = np.concatenate([self.hkl2, prefactor[:, :, np.newaxis]], axis=2)
@@ -173,36 +191,13 @@ class CandidateOptLoss:
         else:
             xnn = np.concatenate([xnn, zeropoint[:, np.newaxis]], axis=1)
 
-        arg = hkl2 * xnn[:, np.newaxis, :]
-        q2_pred = np.sum(arg, axis=2)
-        dq2_pred_dxnn = hkl2
-            
-        residuals = (q2_pred - self.q2_obs) / sigma
-        dlikelihood_dq2_pred = residuals / sigma
-        dloss_dxnn = np.sum(dlikelihood_dq2_pred[:, :, np.newaxis] * dq2_pred_dxnn, axis=1)
-        term0 = np.matmul(dq2_pred_dxnn[:, :, :, np.newaxis], dq2_pred_dxnn[:, :, np.newaxis, :])
-        H = np.sum(self.hessian_prefactor * term0, axis=1)
-        # Need to ensure H is invertible before inverting.
-        #invertible = np.linalg.det(H) != 0 # This is the fastest, but leaves non-invertible matrices.
-        try:
-            invertible = np.linalg.matrix_rank(H, hermitian=True) == (self.uc_length + 1)
-        except:
-            for index in range(H.shape[0]):
-                try:
-                    np.linalg.matrix_rank(H[index], hermitian=True)
-                except:
-                    print(xnn[index])
-                    print(H[index])
-            assert False
-        #invertible = np.isfinite(np.linalg.cond(H)) # This is slow
-        delta_gn = np.zeros((self.n_entries, self.uc_length + 1))
-        try:
-            delta_gn[invertible] = -np.matmul(
-                np.linalg.inv(H[invertible]),
-                dloss_dxnn[invertible, :, np.newaxis]
-                )[:, :, 0]
-        except np.linalg.LinAlgError as e:
-            print(f'GAUSS-NEWTON INVERSION FAILED: {e}')
+        delta_gn, _ok = gauss_newton_solve(
+            np.ascontiguousarray(hkl2),
+            np.ascontiguousarray(self.q2_obs),
+            np.ascontiguousarray(self.sigma),
+            np.ascontiguousarray(xnn),
+            self.pivot_tolerance,
+            )
         return delta_gn
 
     def linear_least_squares(self):

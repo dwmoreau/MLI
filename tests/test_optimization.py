@@ -132,3 +132,62 @@ def test_one_singular_candidate_does_not_zero_the_whole_batch():
         f"only {moved} of 40 candidates got a step; one degenerate candidate "
         f"appears to have zeroed the whole batch"
     )
+
+
+# ---------------------------------------------------------------------------
+# gauss_newton_step_zero_error robustness
+# ---------------------------------------------------------------------------
+#
+# This path used to wrap its invertibility test in a bare `except:` that printed
+# the offending candidate and then hit `assert False`, so one non-finite Hessian
+# ended the run by construction. It is reachable: when wavelength/2 * sqrt(q2)
+# exceeds 1 the arcsin is NaN and the whole Hessian follows.
+
+
+def test_zero_error_step_shape_and_finiteness():
+    loss, xnn = _loss_for(30)
+    delta = loss.gauss_newton_step_zero_error(xnn, wavelength=1.5405)
+    # one extra column for the zero-point parameter
+    assert delta.shape == (30, loss.uc_length + 1)
+    assert np.isfinite(delta).all()
+
+
+def test_zero_error_step_accepts_a_starting_zeropoint():
+    loss, xnn = _loss_for(30)
+    zeropoint = np.full(30, 1e-4)
+    delta = loss.gauss_newton_step_zero_error(xnn, wavelength=1.5405, zeropoint=zeropoint)
+    assert delta.shape == (30, loss.uc_length + 1)
+    assert np.isfinite(delta).all()
+
+
+@pytest.mark.parametrize(
+    "description, corrupt",
+    [
+        ("NaN unit cell", lambda loss, xnn: xnn.__setitem__(3, np.nan)),
+        ("Inf unit cell", lambda loss, xnn: xnn.__setitem__(3, np.inf)),
+        ("zero sigma", lambda loss, xnn: loss.sigma.__setitem__((5, 2), 0.0)),
+        ("rank-deficient hkl", lambda loss, xnn: loss.hkl2.__setitem__((7, slice(None), slice(None)), 0.0)),
+    ],
+)
+def test_zero_error_step_never_raises_on_degenerate_candidates(description, corrupt):
+    loss, xnn = _loss_for(30)
+    corrupt(loss, xnn)
+    with np.errstate(all="ignore"):
+        delta = loss.gauss_newton_step_zero_error(xnn, wavelength=1.5405)
+    assert delta.shape == (30, loss.uc_length + 1), description
+    assert np.isfinite(delta).all(), f"{description} produced a non-finite step"
+
+
+def test_zero_error_step_survives_an_unreachable_wavelength():
+    """wavelength/2 * sqrt(q2) > 1 makes arcsin NaN for the affected peaks.
+
+    That used to poison the Hessian and trip the `assert False`. It must now
+    simply skip the candidates it cannot refine.
+    """
+    loss, xnn = _loss_for(30)
+    with np.errstate(all="ignore"):
+        delta = loss.gauss_newton_step_zero_error(xnn, wavelength=50.0)
+    assert delta.shape == (30, loss.uc_length + 1)
+    assert np.isfinite(delta).all()
+    # Nothing is refinable here, so every step should be zero rather than junk.
+    assert not delta.any()
