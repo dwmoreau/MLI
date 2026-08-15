@@ -9,3 +9,6 @@ dist/
 # Working notes for the ML-FOM project; not for GitHub.
 docs/
 .DS_Store
+
+# profiler output (tools/profile_run.py)
+indexing_profile/
