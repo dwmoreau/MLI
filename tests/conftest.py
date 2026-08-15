@@ -83,14 +83,37 @@ def aP_data(test_metadata):
 
 
 @pytest.fixture(scope="session")
-def models_available():
+def models_available(models_dir):
+    return models_dir is not None
+
+
+@pytest.fixture(scope="session")
+def models_dir():
+    """The model tree the expected/ fixtures were generated against.
+
+    Prefer the repository's own mlindex/models over whatever
+    _resolve_models_dir picks. That helper searches MLINDEX_MODELS_DIR, then
+    $XDG_DATA_HOME/mlindex/models, then the package tree -- correct for a user,
+    wrong here, because a developer who has ever run mlindex.download_models has
+    a copy under $XDG_DATA_HOME that can be an older release than the checkout.
+
+    That is not hypothetical. With the downloaded tree the generator fixtures
+    disagreed by 1e0 to 2.7e1 across every Bravais lattice; against the
+    repository tree 24 of the same 28 comparisons agree to ~1e-14. The fixtures
+    are versioned alongside the models they were built from, so the test must
+    pin to the checkout rather than to machine state.
+    """
+    from mlindex.paths import looks_like_models_dir
+
+    repository_models = Path(__file__).parent.parent / "mlindex" / "models"
+    if looks_like_models_dir(repository_models):
+        return repository_models
     try:
         from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 
-        _resolve_models_dir()
-        return True
+        return _resolve_models_dir()
     except (FileNotFoundError, ImportError):
-        return False
+        return None
 
 
 def pytest_addoption(parser):
