@@ -124,3 +124,133 @@ def fast_assign_top_n(q2_obs, q2_ref, top_n):
                     current_min_index.pop()
             hkl_assign[candidate_index, obs_index, :] = current_min_index
     return hkl_assign
+
+
+# fastmath is deliberately restricted rather than True. Bare fastmath=True implies
+# LLVM's 'nnan' and 'ninf', which license the compiler to assume NaN and Inf never
+# occur -- and it duly folds the np.isnan guards below to False, so a NaN unit cell
+# sails through and produces a non-finite step. This set keeps the arithmetic
+# relaxations and drops only the two flags that would break the guards this kernel
+# exists to provide.
+_SAFE_FASTMATH = {'nsz', 'arcp', 'contract', 'afn', 'reassoc'}
+
+
+@jit(fastmath=_SAFE_FASTMATH)
+def gauss_newton_solve(hkl2, q2_obs, sigma, xnn, pivot_tolerance):
+    """Per-candidate Gauss-Newton step: build, factorise and solve independently.
+
+    Replaces a four-step numpy pipeline that built a (n, n_peaks, k, k)
+    intermediate, tested invertibility with a full eigendecomposition, and then
+    inverted. Measured 9.3-9.6x with peak working memory falling from 224 MB to
+    1.3 MB on a 39,753-candidate chunk (tools/repro_hessian.py).
+
+    Robustness is the main reason this exists, not speed. numpy's batched inv,
+    solve and cholesky all raise for the *entire batch* if any single member is
+    singular, and the caller's except clause then leaves every candidate with a
+    zero step -- one degenerate candidate out of tens of thousands costing all of
+    them their refinement. Worse, np.linalg.matrix_rank was called outside that
+    try, and it raises on a non-finite Hessian, so a single bad sigma took the
+    process down. Here every candidate is independent: a failure writes zeros for
+    that one row, which is exactly what the old code intended for a
+    non-invertible candidate, and its neighbours are untouched.
+
+    H = J^T W J is symmetric positive semi-definite by construction, so a Cholesky
+    is valid and much cheaper than an eigendecomposition. A pivot at or below
+    pivot_tolerance * max_diagonal marks the candidate failed rather than
+    producing a huge step -- the scale-relative test that matrix_rank was standing
+    in for. Unlike matrix_rank it also rejects the near-singular matrices that
+    used to pass the rank check and then blow up inside inv.
+
+    Returns (delta_gn, ok) so callers can see how many candidates were skipped
+    rather than learning about it from a printed message.
+    """
+    n = hkl2.shape[0]
+    n_peaks = hkl2.shape[1]
+    k = hkl2.shape[2]
+    delta_gn = np.zeros((n, k))
+    ok = np.zeros(n, dtype=np.bool_)
+
+    H = np.zeros((k, k))
+    L = np.zeros((k, k))
+    gradient = np.zeros(k)
+    y = np.zeros(k)
+
+    for candidate in range(n):
+        bad_input = False
+        for component in range(k):
+            if not np.isfinite(xnn[candidate, component]):
+                bad_input = True
+        if bad_input:
+            continue
+
+        for i in range(k):
+            gradient[i] = 0.0
+            for j in range(k):
+                H[i, j] = 0.0
+
+        for peak in range(n_peaks):
+            s = sigma[candidate, peak]
+            if s == 0.0 or not np.isfinite(s):
+                bad_input = True
+                break
+            weight = 1.0 / (s * s)
+            prediction = 0.0
+            for component in range(k):
+                prediction += hkl2[candidate, peak, component] * xnn[candidate, component]
+            scaled_residual = (prediction - q2_obs[candidate, peak]) * weight
+            for i in range(k):
+                hi = hkl2[candidate, peak, i]
+                gradient[i] += scaled_residual * hi
+                for j in range(i + 1):
+                    H[i, j] += weight * hi * hkl2[candidate, peak, j]
+        if bad_input:
+            continue
+
+        largest_diagonal = 0.0
+        for i in range(k):
+            if H[i, i] > largest_diagonal:
+                largest_diagonal = H[i, i]
+        if not (largest_diagonal > 0.0):
+            continue
+        floor = pivot_tolerance * largest_diagonal
+
+        singular = False
+        for i in range(k):
+            for j in range(i + 1):
+                total = H[i, j]
+                for m in range(j):
+                    total -= L[i, m] * L[j, m]
+                if i == j:
+                    if not (total > floor):
+                        singular = True
+                        break
+                    L[i, i] = np.sqrt(total)
+                else:
+                    L[i, j] = total / L[j, j]
+            if singular:
+                break
+        if singular:
+            continue
+
+        for i in range(k):
+            total = -gradient[i]
+            for m in range(i):
+                total -= L[i, m] * y[m]
+            y[i] = total / L[i, i]
+        for i in range(k - 1, -1, -1):
+            total = y[i]
+            for m in range(i + 1, k):
+                total -= L[m, i] * delta_gn[candidate, m]
+            delta_gn[candidate, i] = total / L[i, i]
+
+        finite = True
+        for i in range(k):
+            if not np.isfinite(delta_gn[candidate, i]):
+                finite = False
+        if not finite:
+            for i in range(k):
+                delta_gn[candidate, i] = 0.0
+            continue
+        ok[candidate] = True
+
+    return delta_gn, ok
