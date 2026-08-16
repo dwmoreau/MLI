@@ -156,3 +156,33 @@ cannot install at all.
 Dataset generation requires: `pyarrow`, `openpyxl`, `cctbx`, `tqdm`
 
 Model training additionally requires: `skl2onnx`, `keras`, `torch`, `torchvision`
+
+## The ML-FOM project — its record is untracked, and this is the only pointer to it
+
+There is a long-running research project on top of this codebase — **ML-FOM**, replacing the de
+Wolff M20 figure of merit with a learned one. Its entire working record lives under `docs/`, which
+`.gitignore` excludes on purpose: those are working notes and they are not for GitHub.
+
+**So `docs/` is not in this repository.** A fresh clone has none of it, `git pull` on another
+machine does not deliver it, and `git clean -xdf` deletes it. This section exists because it is
+the only trace of the project that a clone does carry. If `docs/fom/` is missing, the record has
+to be restored from a backup or from NERSC before doing any FOM work:
+
+```bash
+rsync -a ~/mli-record-backup/<YYYY-MM-DD>/docs/ docs/       # local dated snapshot
+docs/sync_record.sh snapshot                                # take a new one
+```
+
+When `docs/` is present, read `docs/fom/PROTOCOL.md` first — it defines how a session is
+conducted and its standing rules override any other instruction in that project — then
+`docs/fom/README.md`, `docs/fom/STATUS.md`, and the relevant handoff under `docs/fom/handoffs/`.
+
+Three things about that work that affect ordinary edits here:
+
+- **FOM work goes on branch `fom`; general correctness fixes go on `main`** and are merged in. The
+  test is whether the change would matter to someone who never touches figures of merit.
+- **Perlmutter cannot push to `origin`** (`Permission denied (publickey)`), so a fix recorded as
+  done may exist on one machine only. Check with `git log origin/main --oneline -- <path>`.
+- **Never `git add -A`.** `mlindex/models/` is git-lfs and often mid-retrain, and
+  `mlindex/characterization/` and `mlindex/data/generated_datasets/` are regenerable run output.
+  Stage named paths.
