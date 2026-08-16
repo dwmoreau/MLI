@@ -24,32 +24,47 @@ def add_q2_error(q2, hkl, multiplier, rng):
 
 
 def select_peaks_with_dropout(q2_full, n_peaks, n_drop, rng):
-    # Interior dropout: delete peaks from *within* the low-q2 range and backfill from higher q2,
-    # which is what undetected weak reflections do to a real pattern. This is a different attack
-    # from pushing the whole window outwards -- it punches holes in the low-angle region, where the
-    # systematic-absence pattern lives and where the generators take their information, so it
-    # degrades candidate *discovery* rather than just the fit. n_drop = 0 is a no-op.
+    # Interior dropout: delete peaks from *within* the nominal low-q2 window and backfill from
+    # higher q2, which is what undetected weak reflections do to a real pattern. This is a different
+    # attack from pushing the whole window outwards -- it punches holes in the low-angle region,
+    # where the systematic-absence pattern lives and where the generators take their information, so
+    # it degrades candidate *discovery* rather than just the fit. n_drop = 0 is a no-op.
     #
-    # n_drop is the number of peaks REMOVED FROM THE FIRST n_peaks + n_drop, not the number of holes
-    # left in the nominal list. A fraction n_drop/(n_peaks + n_drop) of the draws lands in the
-    # backfill region, where dropping a peak merely selects a different high-q2 one and changes
-    # nothing. So the expected hole count is n_drop * n_peaks/(n_peaks + n_drop): measured 2.60 for
-    # n_drop=3 and 4.56 for n_drop=6 at n_peaks=20, against 2.61 and 4.62 predicted. This is
-    # deliberate -- every peak in the window has the same detection probability, which is the
-    # physical model -- but it means the parameter understates nothing and overstates the effect,
-    # so callers should record the achieved count rather than assume n_drop.
+    # n_drop is the number of holes left in the NOMINAL first n_peaks, capped by how many surplus
+    # peaks the entry has to backfill with: a 22-peak entry can give up 2 and no more, a 26-peak
+    # entry can give up 6, and a 20-peak entry cannot give up any. The returned list is always as
+    # long as the input allows, so the fixed-length ONNX generator input is never violated (F-044).
+    #
+    # This changed on 2026-08-16. It used to draw the deletions from a window of n_peaks + n_drop,
+    # so a fraction n_drop/(n_peaks + n_drop) of them landed in the backfill region and did nothing,
+    # leaving n_drop * n_peaks/(n_peaks + n_drop) holes rather than n_drop. The rationale was that
+    # every peak in the window then has the same detection probability. The cost was that a hole
+    # count could not be requested: at n_peaks=20 a 26-peak entry saturated at 4.62 holes on average
+    # and no value of n_drop reached 6, because raising it widened the window as fast as it added
+    # draws. S04's C5 needs "as aggressive as the entry allows", so the parameter now means what it
+    # says. Callers still record the achieved count, since the cap binds on thin entries.
+    #
+    # NOTE: S02's 18 `_drop` mechanism bundles were generated under the old semantics and their
+    # n_dropout is not comparable with S04's C4/C5. They are exploratory bundles, not the frozen C1
+    # nominal the split manifest is pinned to, so nothing downstream depends on the difference.
     q2_full = np.asarray(q2_full, dtype=float)
     q2_full = q2_full[q2_full > 0]
     if n_drop <= 0:
         return q2_full[:n_peaks]
-    window = q2_full[:n_peaks + n_drop]
-    if window.size <= n_peaks:
-        # Not enough peaks to drop any and still fill the list; return what there is and let the
-        # caller decide. Reporting the achieved distribution matters more than forcing the count.
+    n_surplus = q2_full.size - n_peaks
+    if n_surplus <= 0:
+        # Nothing to backfill from, so dropping a peak would shorten the list. Return what there is
+        # and let the caller record that the requested dropout was not achieved.
         return q2_full[:n_peaks]
-    dropped = rng.choice(window.size, size=min(n_drop, window.size - n_peaks), replace=False)
-    kept = np.delete(window, dropped)
-    return np.sort(kept)[:n_peaks]
+    # Two caps, and both bind in practice. The surplus is what the entry can backfill with; n_peaks
+    # is the obvious one -- a peak-rich entry sweeping n_drop past 20 would otherwise be asked to
+    # punch more holes than the nominal window has peaks. At the n_peaks cap the window has moved
+    # off the nominal range entirely, which is the limit of what this mechanism can do.
+    n_holes = min(n_drop, n_surplus, n_peaks)
+    dropped = rng.choice(n_peaks, size=n_holes, replace=False)
+    kept = np.delete(q2_full[:n_peaks], dropped)
+    backfill = q2_full[n_peaks:n_peaks + n_holes]
+    return np.sort(np.concatenate((kept, backfill)))
 
 
 def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False, max_attempts=None,

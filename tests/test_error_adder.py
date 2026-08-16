@@ -148,6 +148,36 @@ def test_dropout_drops_as_many_as_the_available_peaks_allow(n_available, n_drop,
     assert int(np.sum(~np.isin(nominal, out))) == expected_dropped
 
 
+@pytest.mark.parametrize('n_available,n_drop,expected_dropped', [
+    (26, 6, 6),      # the case the old semantics could not reach at any n_drop
+    (22, 1, 1),
+    (22, 2, 2),
+    (22, 6, 2),      # capped by the two surplus peaks
+    (30, 10, 10),
+    (30, 20, 10),
+    (60, 20, 20),    # the nominal window is emptied and entirely replaced
+    (60, 30, 20),    # n_drop above n_peaks: capped, not an error
+])
+def test_dropout_hole_count_is_exact_at_every_seed(n_available, n_drop, expected_dropped):
+    """n_drop means holes in the nominal window, not draws from a widened one.
+
+    Until 2026-08-16 the deletions were drawn from a window of n_peaks + n_drop, so a fraction of
+    them landed in the backfill region and did nothing. The hole count was then a binomial mean
+    rather than a guarantee -- 26 available peaks saturated at 4.62 of a requested 6, and no value
+    of n_drop reached 6 because raising it widened the window as fast as it added draws. The
+    existing cases above happened to pass on their seeds; these fail on most of them.
+    """
+    n_peaks = 20
+    q2_full = np.linspace(0.05, 3.0, n_available)
+    nominal = q2_full[:n_peaks]
+    for seed in range(25):
+        out = select_peaks_with_dropout(q2_full, n_peaks, n_drop,
+                                        np.random.default_rng(seed))
+        assert out.size == n_peaks, f'seed {seed} returned {out.size} peaks'
+        assert int(np.sum(~np.isin(nominal, out))) == expected_dropped, f'seed {seed}'
+        assert np.all(np.diff(out) > 0), f'seed {seed} returned an unsorted list'
+
+
 def test_zero_contaminants_terminates_without_a_redraw():
     # An empty draw has no rejectable member, so even the uncontaminatable pattern exits on the
     # first attempt. This is the guard that a cap of 1 is enough for the n_contaminants=0 bundle.
