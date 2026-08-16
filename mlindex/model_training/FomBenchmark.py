@@ -41,7 +41,7 @@ from mlindex.utilities.Q2Calculator import Q2Calculator
 from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 
 
-SCHEMA_VERSION = '1'
+SCHEMA_VERSION = '2'
 
 # Written by the dump hook, one row per surviving candidate.
 CANDIDATE_COLUMNS = (
@@ -81,6 +81,9 @@ ENTRY_COLUMNS = (
     'contaminant_bias',
     'n_dropout',
     'n_dropout_achieved',
+    'second_phase_lines',
+    'second_phase_bias',
+    'second_phase_partner',
     'xnn_true',
     'unit_cell_true',
     'volume_true',

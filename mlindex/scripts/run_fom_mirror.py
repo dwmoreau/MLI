@@ -68,6 +68,7 @@ from mlindex.optimization.CandidateValidation import label_candidates
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.ErrorAdder import add_contaminants
 from mlindex.utilities.ErrorAdder import add_q2_error
+from mlindex.utilities.ErrorAdder import add_second_phase
 from mlindex.utilities.ErrorAdder import select_peaks_with_dropout
 
 
@@ -128,6 +129,15 @@ def _parse_args():
                         help='Interior peak dropout: delete this many peaks from within the '
                              'low-q2 window and backfill from higher q2, as undetected weak '
                              'reflections do. Attacks candidate discovery, not just the fit')
+    parser.add_argument('--second-phase-lines', type=int, default=0,
+                        help='Lines injected from a second crystalline phase drawn at random '
+                             'from the database. Unlike --n-contaminants, which places each line '
+                             'independently, these are correlated -- they are consistent with a '
+                             'real lattice, which is what makes them hard to reject')
+    parser.add_argument('--second-phase-bias', type=float, default=2.0,
+                        help='Weight the choice of the partner\'s lines towards low q2, where a '
+                             'second phase\'s strong reflections sit: index = floor(n * u**bias). '
+                             '1 picks uniformly among its lines in range')
     parser.add_argument('--n-entries-per-bl', type=int, default=500,
                         help='Entries sampled per Bravais lattice, capped by availability')
     parser.add_argument('--bravais-lattices', type=str, default=','.join(BRAVAIS_LATTICES),
@@ -157,6 +167,10 @@ def bundle_tag(args):
         tag += f'_bias{args.contaminant_bias:g}'
     if args.n_dropout:
         tag += f'_drop{args.n_dropout:d}'
+    if getattr(args, 'second_phase_lines', 0):
+        tag += f'_phase{args.second_phase_lines:d}'
+        if args.second_phase_bias != 2.0:
+            tag += f'_pbias{args.second_phase_bias:g}'
     return tag
 
 
@@ -188,7 +202,35 @@ def sample_entries(bravais_lattice, n_entries, base_seed, columns=None):
     return data
 
 
-def prepare_peak_list(entry, args, base_seed, hkl=None):
+def build_second_phase_pool(entries):
+    """Candidate contaminating phases for C6: the same entries, across every Bravais lattice.
+
+    Real contamination is not lattice-matched to the phase of interest, so the partner is drawn
+    from the whole sampled set rather than from within the entry's own lattice. Reusing the frame
+    already in hand costs no extra I/O and keeps the pool identical across pools and shards, which
+    it must be for the partner choice to be reproducible.
+    """
+    return (entries['identifier'].tolist(),
+            [np.asarray(q2, dtype=float) for q2 in entries[f'q2_{BROADENING_TAG}']])
+
+
+def choose_second_phase(entry, second_phase_pool, base_seed):
+    """Pick this entry's contaminating phase, deterministically and excluding itself.
+
+    Its own dedicated RNG stream, not the noise one: the partner must not shift when an unrelated
+    condition parameter changes how many noise draws precede it, or the same entry would see a
+    different second phase in every bundle and the paired comparison would be lost.
+    """
+    rng = np.random.default_rng(derived_seed(f'phase2:{entry["identifier"]}', base_seed))
+    identifiers, line_lists = second_phase_pool
+    for _ in range(10):
+        index = int(rng.integers(len(line_lists)))
+        if identifiers[index] != entry['identifier']:
+            return identifiers[index], line_lists[index]
+    raise ValueError(f'could not draw a partner phase for {entry["identifier"]}')
+
+
+def prepare_peak_list(entry, args, base_seed, hkl=None, second_phase_pool=None):
     # Applied in the order a real pattern acquires them: some reflections are never detected, the
     # instrument has a calibration offset and a random error, and the contaminant lines are then
     # placed relative to the peaks as observed.
@@ -234,9 +276,24 @@ def prepare_peak_list(entry, args, base_seed, hkl=None):
             q2, hkl = add_contaminants(q2, hkl, args.n_contaminants, rng,
                                        max_attempts=CONTAMINANT_MAX_ATTEMPTS,
                                        low_angle_bias=args.contaminant_bias)
+    # Last, because a second phase is present in the sample rather than added by the measurement:
+    # its lines are placed relative to the peaks as observed, the same way contaminants are.
+    partner_id = None
+    if getattr(args, 'second_phase_lines', 0) > 0:
+        if second_phase_pool is None:
+            raise ValueError('--second-phase-lines needs a partner pool; none was passed')
+        partner_id, partner_q2 = choose_second_phase(entry, second_phase_pool, base_seed)
+        if hkl is None:
+            q2 = add_second_phase(q2, None, partner_q2, args.second_phase_lines, rng,
+                                  max_attempts=CONTAMINANT_MAX_ATTEMPTS,
+                                  low_angle_bias=args.second_phase_bias)
+        else:
+            q2, hkl = add_second_phase(q2, hkl, partner_q2, args.second_phase_lines, rng,
+                                       max_attempts=CONTAMINANT_MAX_ATTEMPTS,
+                                       low_angle_bias=args.second_phase_bias)
     if hkl is None:
-        return q2[0], n_dropout_achieved
-    return q2[0], n_dropout_achieved, hkl[0]
+        return q2[0], n_dropout_achieved, partner_id
+    return q2[0], n_dropout_achieved, hkl[0], partner_id
 
 
 def pool_candidates(top_unit_cell, top_M20, top_Minfo, top_spacegroup, top_n_indexed,
@@ -327,7 +384,7 @@ def summarize_entry(entry, pool, q2_obs):
     return summary
 
 
-def run_pool(pool_index, args, entries, out_dir, shard_tag):
+def run_pool(pool_index, args, entries, out_dir, shard_tag, second_phase_pool=None):
     # Runs in its own process. Builds a manager plus pool_size-1 workers, works through this pool's
     # stripe of entries, and writes its own shard files. The queue injection in
     # setup_mp_optimizers is class-level and documented as non-reentrant, which is exactly why each
@@ -355,7 +412,8 @@ def run_pool(pool_index, args, entries, out_dir, shard_tag):
             entry = entries.iloc[entry_index]
             entry_started = time.time()
             try:
-                q2_obs, n_dropout_achieved = prepare_peak_list(entry, args, args.seed)
+                q2_obs, n_dropout_achieved, _ = prepare_peak_list(
+                    entry, args, args.seed, second_phase_pool=second_phase_pool)
             except ContaminantPlacementError as error:
                 failures.append({'identifier': entry['identifier'],
                                  'reason': 'contaminant_placement', 'detail': str(error)})
@@ -501,6 +559,10 @@ def main():
           f'{args.n_pools} pools x {args.pool_size} processes = '
           f'{args.n_pools * args.pool_size} total', flush=True)
 
+    # Built before striping, so every pool and every shard draws partners from the same set.
+    second_phase_pool = (build_second_phase_pool(entries)
+                         if args.second_phase_lines > 0 else None)
+
     # Stripe rather than block: entries are concatenated in lattice order, so striping gives every
     # pool the same lattice mix and therefore roughly the same total cost. Blocking would hand one
     # pool all the triclinic entries, which are the most expensive by a wide margin.
@@ -509,14 +571,15 @@ def main():
 
     if args.n_pools == 1:
         # Run inline, so a single-pool debugging run has no extra process layer to obscure errors.
-        run_pool(0, args, pool_entries[0], out_dir, shard_tag)
+        run_pool(0, args, pool_entries[0], out_dir, shard_tag, second_phase_pool)
         return
 
     started = time.time()
     processes = []
     for pool_index in range(args.n_pools):
         process = Process(target=run_pool,
-                          args=(pool_index, args, pool_entries[pool_index], out_dir, shard_tag))
+                          args=(pool_index, args, pool_entries[pool_index], out_dir, shard_tag,
+                                second_phase_pool))
         process.start()
         processes.append(process)
     for process in processes:

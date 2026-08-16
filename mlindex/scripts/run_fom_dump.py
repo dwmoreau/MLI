@@ -78,6 +78,13 @@ def _parse_args():
     parser.add_argument('--n-dropout', type=int, default=0,
                         help='Interior peak dropout: peaks deleted from the low-q2 window '
                              'and backfilled from higher q2')
+    parser.add_argument('--second-phase-lines', type=int, default=0,
+                        help='Lines injected from a second crystalline phase drawn at random '
+                             'from the database. Correlated, unlike --n-contaminants, which is '
+                             'what makes them hard to reject (bundle C6)')
+    parser.add_argument('--second-phase-bias', type=float, default=2.0,
+                        help='Weight the choice of the partner\'s lines towards low q2, where a '
+                             'second phase\'s strong reflections sit. 1 picks uniformly')
     parser.add_argument('--n-entries-per-bl', type=int, default=500,
                         help='Entries sampled per Bravais lattice, capped by availability')
     parser.add_argument('--bravais-lattices', type=str, default=','.join(BRAVAIS_LATTICES),
@@ -95,6 +102,11 @@ def _parse_args():
     parser.add_argument('--split-manifest', type=str, default=str(MANIFEST_PATH),
                         help='Frozen S02 manifest supplying the fom-train/dev/test split. '
                              'The split is by source entry and must never be re-derived here')
+    parser.add_argument('--allow-unassigned-split', action='store_true',
+                        help='Proceed when sampled entries are absent from the frozen manifest. '
+                             'Only for deliberately reduced runs: at the production settings the '
+                             'sampling reproduces the manifest exactly, so a shortfall otherwise '
+                             'means a parameter has drifted')
     parser.add_argument('--out-dir', type=str, required=True)
     return parser.parse_args()
 
@@ -123,7 +135,7 @@ def load_split(manifest_path):
     return dict(zip(manifest[id_column], manifest[split_column]))
 
 
-def entry_record(entry, args, q2_obs, hkl_true, n_dropout_achieved, split):
+def entry_record(entry, args, q2_obs, hkl_true, n_dropout_achieved, split, partner_id):
     return {
         'entry_id': entry['identifier'],
         'q2_digest': FomBenchmark.q2_digest(q2_obs),
@@ -138,6 +150,11 @@ def entry_record(entry, args, q2_obs, hkl_true, n_dropout_achieved, split):
         'contaminant_bias': float(args.contaminant_bias),
         'n_dropout': int(args.n_dropout),
         'n_dropout_achieved': int(n_dropout_achieved),
+        'second_phase_lines': int(args.second_phase_lines),
+        'second_phase_bias': float(args.second_phase_bias),
+        # Which entry contaminated this one. Null off C6, and needed there to reproduce the
+        # pattern and to ask whether a particular partner lattice is what defeats the FOM.
+        'second_phase_partner': partner_id,
         'xnn_true': np.asarray(entry['reindexed_xnn'], dtype=np.float64),
         'unit_cell_true': np.asarray(entry['reindexed_unit_cell'], dtype=np.float64),
         'volume_true': float(entry['reindexed_volume']),
@@ -149,7 +166,23 @@ def entry_record(entry, args, q2_obs, hkl_true, n_dropout_achieved, split):
         }
 
 
-def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag):
+def _pool_output_is_complete(out_dir, pool_tag):
+    """Both of a pool's tables present and readable, so a resumed task can skip it."""
+    paths = [Path(out_dir) / f'entries_{pool_tag}.parquet',
+             Path(out_dir) / f'candidates_{pool_tag}.parquet']
+    if not all(path.exists() for path in paths):
+        return False
+    try:
+        for path in paths:
+            pd.read_parquet(path, columns=['entry_id'])
+    except Exception:
+        # Truncated by a kill mid-write. Regenerate rather than resume onto a corrupt shard.
+        return False
+    return True
+
+
+def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
+             second_phase_pool=None):
     """One manager plus pool_size-1 workers, working through this pool's stripe of entries.
 
     Runs in its own process: the queue injection in setup_mp_optimizers is class-level and
@@ -160,6 +193,13 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag):
     from mlindex.optimization.MPOptimizer import shutdown_mp_workers
 
     pool_tag = f'{shard_tag}_pool{pool_index:02d}'
+    # Resume: a requeued array task must not redo pools that already finished. Both tables have to
+    # be present and readable -- a pool killed mid-write can leave the entry table complete and the
+    # candidate shard truncated, and silently skipping that would lose its candidates for good.
+    if _pool_output_is_complete(out_dir, pool_tag):
+        print(f'[pool {pool_index:02d}] already written, skipping', flush=True)
+        return
+
     optimizers, processes, task_queues = setup_mp_optimizers(
         args.pool_size, mirror.BROADENING_TAG, n_candidates_scale=1,
         seed=args.seed + pool_index,
@@ -180,8 +220,9 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag):
                 for axis in ('h', 'k', 'l')
                 ], axis=1)
             try:
-                q2_obs, n_dropout_achieved, hkl_true = mirror.prepare_peak_list(
-                    entry, args, args.seed, hkl=hkl_full)
+                q2_obs, n_dropout_achieved, hkl_true, partner_id = mirror.prepare_peak_list(
+                    entry, args, args.seed, hkl=hkl_full,
+                    second_phase_pool=second_phase_pool)
             except ContaminantPlacementError as error:
                 failures.append({'identifier': entry['identifier'],
                                  'reason': 'contaminant_placement', 'detail': str(error)})
@@ -213,13 +254,21 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag):
             candidate_frames.append(FomBenchmark.records_to_frame(records))
             entry_rows.append(entry_record(
                 entry, args, q2_obs, hkl_true, n_dropout_achieved,
-                split_by_id.get(entry['identifier'], 'unassigned'),
+                split_by_id.get(entry['identifier'], 'unassigned'), partner_id,
                 ))
 
             if (entry_index + 1) % 25 == 0:
                 elapsed = time.time() - started
                 print(f'[pool {pool_index:02d}] {entry_index + 1}/{entries.shape[0]} entries, '
                       f'{elapsed / (entry_index + 1):.1f} s/entry', flush=True)
+    except Exception as error:
+        # Write what this pool has rather than losing hours of it. The mirror already does this
+        # (run_fom_mirror.run_pool); the dump did not, so an abort near the end of a 2.5 h bundle
+        # discarded every row the pool had accumulated. Re-raised after the tables are on disk so
+        # the process still exits non-zero and main() reports the failure.
+        aborted = error
+    else:
+        aborted = None
     finally:
         shutdown_mp_workers(processes, task_queues)
 
@@ -231,9 +280,12 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag):
         FomBenchmark.write_candidate_shard(
             pd.concat(candidate_frames, ignore_index=True), out_dir, pool_tag)
     elapsed = time.time() - started
-    print(f'[pool {pool_index:02d}] done: {len(entry_rows)}/{entries.shape[0]} entries, '
+    print(f'[pool {pool_index:02d}] {"ABORTED" if aborted else "done"}: '
+          f'{len(entry_rows)}/{entries.shape[0]} entries, '
           f'{elapsed / max(1, len(entry_rows)):.1f} s/entry, {len(failures)} failures',
           flush=True)
+    if aborted is not None:
+        raise aborted
 
 
 def _commit_hash():
@@ -266,19 +318,44 @@ def main():
         print(f'{bravais_lattice}: sampled {sampled.shape[0]} of '
               f'{args.n_entries_per_bl} requested', flush=True)
     entries = pd.concat(entries, ignore_index=True)
+
+    # Pre-flight, because the alternative is discovering it after the bundle has run: an entry with
+    # no split is unusable downstream, and the usual cause is a sampling parameter that no longer
+    # reproduces the frozen set. Verified for the production settings -- at --n-entries-per-bl 500
+    # and --seed 12345 the sampling reproduces all 5 955 manifest entries exactly, per lattice --
+    # so any shortfall here means a parameter has drifted, not that the manifest is incomplete.
+    # A reduced-size smoke run legitimately samples outside it and passes --allow-unassigned-split.
+    unassigned = [identifier for identifier in entries['identifier']
+                  if identifier not in split_by_id]
+    if unassigned:
+        message = (f'{len(unassigned)} of {entries.shape[0]} sampled entries are absent from '
+                   f'{args.split_manifest}, e.g. {sorted(unassigned)[:3]}. The split is frozen by '
+                   'S02 and must not be re-derived, so these entries would carry no split.')
+        if not args.allow_unassigned_split:
+            raise SystemExit(
+                f'{message}\nCheck --n-entries-per-bl and --seed match the manifest, or pass '
+                '--allow-unassigned-split for a deliberately reduced run.'
+                )
+        print(f'WARNING: {message}', flush=True)
+
     entries = entries.iloc[args.shard::args.n_shards].reset_index(drop=True)
     print(f'shard {args.shard}/{args.n_shards}: {entries.shape[0]} entries, bundle {tag}; '
           f'{args.n_pools} pools x {args.pool_size} processes', flush=True)
 
+    # Built before striping, so every pool and every shard draws partners from the same set.
+    second_phase_pool = (mirror.build_second_phase_pool(entries)
+                         if args.second_phase_lines > 0 else None)
+
     started = time.time()
     if args.n_pools == 1:
-        run_pool(0, args, entries, split_by_id, out_dir, shard_tag)
+        run_pool(0, args, entries, split_by_id, out_dir, shard_tag, second_phase_pool)
     else:
         processes = []
         for pool_index in range(args.n_pools):
             stripe = entries.iloc[pool_index::args.n_pools].reset_index(drop=True)
             process = Process(target=run_pool,
-                              args=(pool_index, args, stripe, split_by_id, out_dir, shard_tag))
+                              args=(pool_index, args, stripe, split_by_id, out_dir, shard_tag,
+                                    second_phase_pool))
             process.start()
             processes.append(process)
         for process in processes:
@@ -303,6 +380,8 @@ def main():
         n_contaminants=args.n_contaminants,
         contaminant_bias=args.contaminant_bias,
         n_dropout=args.n_dropout,
+        second_phase_lines=args.second_phase_lines,
+        second_phase_bias=args.second_phase_bias,
         prune_threshold=5.0,
         split_manifest=str(args.split_manifest),
         commit=_commit_hash(),

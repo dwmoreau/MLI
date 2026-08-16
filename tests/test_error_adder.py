@@ -13,6 +13,7 @@ from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.ErrorAdder import add_contaminants
 from mlindex.utilities.ErrorAdder import add_q2_error
+from mlindex.utilities.ErrorAdder import add_second_phase
 from mlindex.utilities.ErrorAdder import MAX_INTERIOR_DROPOUT
 from mlindex.utilities.ErrorAdder import select_peaks_with_dropout
 
@@ -202,3 +203,87 @@ def test_zero_contaminants_terminates_without_a_redraw():
     q2 = _uncontaminatable_q2()
     q2_out = add_contaminants(q2.copy(), None, 0, np.random.default_rng(0), max_attempts=1)
     np.testing.assert_array_equal(q2_out, q2)
+
+
+def _partner_lines(n_lines=200, low=0.02, high=2.5):
+    # A second phase's line list: ascending, positive, and denser than the host pattern so the
+    # eligibility window has plenty to choose from.
+    return np.linspace(low, high, n_lines)
+
+
+def test_second_phase_conserves_the_peak_count_and_marks_lines_as_contaminants():
+    q2 = _sparse_q2()
+    hkl = np.tile(np.arange(1, 21)[:, np.newaxis], (1, 3))[np.newaxis].astype(float)
+    q2_out, hkl_out = add_second_phase(
+        q2.copy(), hkl.copy(), _partner_lines(), 3, np.random.default_rng(0), max_attempts=500)
+
+    assert q2_out.shape == q2.shape
+    assert hkl_out.shape == hkl.shape
+    assert np.all(np.diff(q2_out, axis=1) > 0)
+    # Injected lines displace real peaks from the high-q2 end, exactly as add_contaminants does.
+    n_injected = np.count_nonzero(np.all(hkl_out[0] == 0, axis=1))
+    assert 1 <= n_injected <= 3
+    retained_real = hkl_out[0, :, 0][hkl_out[0, :, 0] != 0]
+    np.testing.assert_array_equal(retained_real, np.arange(1, retained_real.size + 1))
+
+
+def test_second_phase_lines_come_from_the_partner_and_lie_in_the_observed_window():
+    q2 = _sparse_q2()
+    partner = _partner_lines()
+    before = set(np.round(q2[0], 12))
+    out = add_second_phase(q2.copy(), None, partner, 4, np.random.default_rng(1), max_attempts=500)
+
+    injected = [value for value in out[0] if round(value, 12) not in before]
+    assert injected, 'nothing was injected'
+    for value in injected:
+        assert np.isclose(partner, value).any(), 'an injected line is not one of the partner\'s'
+        assert 0.5*q2[0, 0] <= value <= q2[0, -1], 'an injected line is outside the window'
+
+
+def test_second_phase_draws_without_replacement():
+    # A rank draw with collisions redrawn; a repeated line would be a silently weaker condition.
+    q2 = _sparse_q2()
+    partner = _partner_lines()
+    for seed in range(20):
+        before = set(np.round(q2[0], 12))
+        out = add_second_phase(q2.copy(), None, partner, 5, np.random.default_rng(seed),
+                               max_attempts=500)
+        injected = [round(value, 12) for value in out[0] if round(value, 12) not in before]
+        assert len(injected) == len(set(injected)), f'seed {seed} injected a duplicate line'
+
+
+def test_second_phase_bias_pulls_the_selection_towards_low_q2():
+    # The whole point of the weighting: a real second phase shows its low-angle lines. Measured
+    # over many entries, since one fixed RNG would make the draw constant.
+    q2 = _sparse_q2()
+    partner = _partner_lines()
+    positions = {}
+    for bias in (1.0, 3.0):
+        fractions = []
+        for trial in range(200):
+            row = q2.copy()
+            low, high = 0.5*row[0, 0], row[0, -1]
+            before = set(np.round(row[0], 12))
+            out = add_second_phase(row, None, partner, 1, np.random.default_rng(trial),
+                                   max_attempts=500, low_angle_bias=bias)
+            injected = [v for v in out[0] if round(v, 12) not in before]
+            if injected:
+                fractions.append((injected[0] - low) / (high - low))
+        positions[bias] = np.median(fractions)
+    assert positions[3.0] < positions[1.0] - 0.1, (
+        f'bias should pull the selection to low q2: {positions}')
+
+
+def test_second_phase_raises_when_the_partner_has_no_line_in_range():
+    q2 = _sparse_q2()
+    # Every partner line sits above the host's last peak, so none is observable.
+    partner = np.linspace(10.0, 20.0, 50)
+    with pytest.raises(ContaminantPlacementError):
+        add_second_phase(q2.copy(), None, partner, 2, np.random.default_rng(0), max_attempts=50)
+
+
+def test_second_phase_raises_rather_than_hanging_on_an_uncontaminatable_pattern():
+    q2 = _uncontaminatable_q2()
+    with pytest.raises(ContaminantPlacementError):
+        add_second_phase(q2.copy(), None, _partner_lines(high=1.0), 2,
+                         np.random.default_rng(0), max_attempts=200)
