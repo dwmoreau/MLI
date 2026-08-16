@@ -32,9 +32,11 @@
 #
 #        sbatch submit_fom_dump_calibration.sh
 #
-#      It compares 32x4 against 16x8 on a small entry count in the debug queue. If s/entry/pool
-#      lands far from the ~48 s the mirror measured, adjust NPOOLS/POOLSIZE or the walltime here
-#      before submitting.
+#      It compares 32x4, 16x8 and 64x2 in the debug queue, ~19 min. Subtract the ~111 s per-pool
+#      startup from each reported s/entry before projecting -- see that script's closing notes.
+#      Then set NPOOLS/POOLSIZE and the walltime here from the winner. THIS STEP IS OPTIONAL: the
+#      walltime below carries enough slack to run without it, at the cost of holding a longer
+#      reservation than the job needs.
 #
 #   4. Run the grid:
 #
@@ -63,11 +65,25 @@
 #      Then, on the laptop: docs/sync_record.sh pull-inbox
 # ================================================================================================
 #
-# SIZING. A bundle is 5 955 entries. At the 48.3 s/entry/pool the S02 calibration measured for
-# 32x4, that is 5955/32 * 48.3 s ~ 2.5 h, against a 5 h walltime -- 2x headroom, which the dump
-# needs more of than the mirror did because it writes ~566 rows per entry rather than one. Seven
-# tasks run concurrently, so the grid finishes in one bundle's wall-time and a failure costs one
-# bundle. Storage is ~3.5 GB for the whole grid (F-049: ~148 B/row).
+# SIZING, AND WHY THE WALLTIME IS 8 H RATHER THAN A MEASURED 5. A bundle is 5 955 entries. The
+# only anchor is S02's mirror at 48.3 s/entry/pool for 32x4, which gives 5955/32 * 48.3 ~ 2.5 h.
+# The dump should be SLOWER than that -- it writes ~566 rows per entry where the mirror wrote one --
+# so 2.5 h is a floor, not an estimate.
+#
+# The dump's own calibration has not yet produced a usable rate. Job 57098114 ran with too few
+# entries per pool (one, at 32 pools), so it measured model loading rather than throughput and the
+# two topologies it compared came out within 1% of each other. submit_fom_dump_calibration.sh has
+# been fixed to measure the marginal rate; if it has been re-run, size from its numbers and reduce
+# this. Until then 8 h is deliberate slack over an unmeasured quantity, not a measurement.
+#
+# Being killed is recoverable but not free: run_fom_dump.py skips pools whose output is already
+# written, so a requeued task resumes rather than restarts, but it costs another queue cycle and
+# someone has to notice. Slack is cheaper.
+#
+# Seven tasks run concurrently, so the grid finishes in one bundle's wall-time and a failure costs
+# one bundle. Storage is ~3.5 GB for the whole grid (F-049: ~148 B/row). Memory is not a
+# constraint: seff on the calibration measured 62.4 GB for 32 pools, ~2 GB per manager, against
+# the node's 476 GB.
 #
 # NOT passing --conventional-cell, matching the S02 grid. It changed nothing measurable there
 # (ceiling identical, operating point inside noise) and it crashed 10 of 16 pools on a cctbx
@@ -81,7 +97,7 @@
 #SBATCH --mail-user=dwmoreau@lbl.gov
 #SBATCH --mail-type=ALL
 #SBATCH -A lcls
-#SBATCH -t 5:00:00
+#SBATCH -t 8:00:00
 #SBATCH --array=0-6
 
 # Absolute interpreter rather than `module load conda; conda activate`, per PROTOCOL section 6.
@@ -91,8 +107,10 @@ PYTHON=/global/cfs/cdirs/m4064/dwmoreau/envs/onnx/bin/python
 REPO=/global/cfs/cdirs/m4064/dwmoreau/MLI
 cd "$REPO/mlindex/scripts" || exit 1
 
-NPOOLS=32         # independent managers, run concurrently. 32x4 measured 1.45x faster than 16x8
-POOLSIZE=4        # processes per pool: 1 manager + 3 workers. NPOOLS * POOLSIZE = 128 = core count
+NPOOLS=32         # independent managers, run concurrently. 32x4 was S02's measured best of the
+POOLSIZE=4        # two it compared; the dump's own comparison is not yet conclusive.
+                  # 1 manager + 3 workers each. NPOOLS * POOLSIZE = 128 = the node's PHYSICAL core
+                  # count; SLURM_CPUS_ON_NODE reports 256, which counts both threads per core.
 NPERBL=500
 SEED=12345
 MANIFEST="$REPO/docs/fom/artifacts/S02_mirror_manifest.parquet"
