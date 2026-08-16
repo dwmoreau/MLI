@@ -255,7 +255,37 @@ def recompute_frame(candidates, entries, models_directory=None):
     return result
 
 
-def label_frame(candidates, entries, rtol=1e-2):
+# label_frame's cost is almost entirely validate_candidate_known_bl: profiled at 600 candidates it
+# is 95% of the time, calling np.isclose ~252 times per candidate as it searches the off-by-two
+# multiplier and permutation space. That is ~9 ms/candidate, which over a full S04 grid of ~20M
+# candidates is ~50 h and makes consolidation impossible in one job.
+#
+# The work is per-candidate and independent, so it parallelises exactly rather than being rewritten.
+# That is the right trade here: validate_candidate_known_bl is production comparison logic that S02's
+# labelling also depends on, and a node has 128 cores idle while this runs.
+def _label_chunk(payload):
+    """Module-level and picklable, so this survives the spawn start method."""
+    candidates, truth, rtol = payload
+    return label_frame(candidates, truth, rtol=rtol, n_processes=1)
+
+
+def label_frame_parallel(candidates, entries, rtol=1e-2, n_processes=1, chunk_size=20000):
+    """label_frame over a process pool. Identical output; only the wall-clock differs."""
+    if n_processes <= 1 or candidates.shape[0] <= chunk_size:
+        return label_frame(candidates, entries, rtol=rtol)
+    from multiprocessing import Pool
+
+    # Only the columns label_frame reads, so each chunk pickles a few hundred kB of ground truth
+    # rather than the entry table's q2_obs and hkl_true arrays.
+    truth = entries[['entry_id', 'unit_cell_true', 'volume_true', 'bravais_lattice_true']]
+    chunks = [candidates.iloc[start:start + chunk_size].reset_index(drop=True)
+              for start in range(0, candidates.shape[0], chunk_size)]
+    with Pool(processes=n_processes) as pool:
+        labelled = pool.map(_label_chunk, [(chunk, truth, rtol) for chunk in chunks])
+    return pd.concat(labelled, ignore_index=True)
+
+
+def label_frame(candidates, entries, rtol=1e-2, n_processes=1):
     """Attach correctness labels, which need ground truth the dump hook cannot see.
 
     `is_correct` and `is_off_by_two` come from `validate_candidate_known_bl`, which takes
@@ -271,6 +301,9 @@ def label_frame(candidates, entries, rtol=1e-2):
     before the distance is taken. Comparing them directly would leave the distance null for
     every lattice except triclinic, silently.
     """
+    if n_processes > 1:
+        return label_frame_parallel(candidates, entries, rtol=rtol, n_processes=n_processes)
+
     from mlindex.optimization.CandidateValidation import validate_candidate_known_bl
     from mlindex.utilities.UnitCellTools import get_partial_unit_cell
     from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
@@ -365,6 +398,15 @@ def load_entries(root):
     # entries_<tag>.parquet, but the consolidated pool is a single entries.parquet, and both must
     # load through the same function.
     return _read_glob(root, 'entries*.parquet')
+
+
+def load_entries_ids(root):
+    """Just the entry_id column, for callers that only need the entry set.
+
+    Reading the whole entry table pulls q2_obs, hkl_true and the ground-truth cell for every
+    pattern; the intersection pre-pass in consolidation needs none of it.
+    """
+    return _read_glob(root, 'entries*.parquet', columns=['entry_id'])['entry_id']
 
 
 def load_candidates(root, split=None, bravais_lattices=None, columns=None):

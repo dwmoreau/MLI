@@ -268,3 +268,24 @@ def test_loaders_read_the_consolidated_single_file_layout(pool, tmp_path):
     joined = fb.load_benchmark(tmp_path, label=False)
     assert joined.shape[0] == candidates.shape[0]
     assert 'volume_true' in joined.columns
+
+
+def test_parallel_labelling_matches_serial(pool):
+    """Labelling is ~95% of consolidation's cost and is parallelised, so the two must agree exactly.
+
+    validate_candidate_known_bl searches an off-by-two multiplier and permutation space with ~252
+    np.isclose calls per candidate, about 9 ms each. Serial over a full S04 grid of ~20M candidates
+    is ~50 h, which is why consolidation fans it out. The rewrite that would have been the
+    alternative touches production comparison logic S02's labelling also depends on; splitting the
+    work does not, provided it gives the same answer.
+    """
+    candidates, entries = pool
+    serial = fb.label_frame(candidates, entries)
+    parallel = fb.label_frame_parallel(candidates, entries, n_processes=2, chunk_size=8)
+    assert parallel.shape == serial.shape
+    for column in ('is_correct', 'is_off_by_two'):
+        np.testing.assert_array_equal(parallel[column].to_numpy(), serial[column].to_numpy())
+    for column in ('volume_ratio_to_truth', 'xnn_distance_to_truth'):
+        np.testing.assert_allclose(parallel[column].to_numpy(dtype=float),
+                                   serial[column].to_numpy(dtype=float),
+                                   rtol=0, atol=0, equal_nan=True)

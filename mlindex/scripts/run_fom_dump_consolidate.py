@@ -52,6 +52,14 @@ def _parse_args():
     parser.add_argument('--tag', type=str, default='S04_row_counts')
     parser.add_argument('--rtol', type=float, default=1e-2,
                         help='Correctness tolerance for validate_candidate_known_bl')
+    parser.add_argument('--n-processes', type=int, default=1,
+                        help='Processes for candidate labelling, which is ~95%% of this script\'s '
+                             'cost at ~9 ms/candidate. Serial over a full grid is ~50 h; use the '
+                             'node (e.g. 128) and it is minutes')
+    parser.add_argument('--no-align-entries', action='store_true',
+                        help='Keep every bundle\'s own entry set instead of intersecting them. '
+                             'Leaves conditions describing different crystals, so any paired '
+                             'comparison must intersect by entry_id itself')
     return parser.parse_args()
 
 
@@ -64,14 +72,43 @@ def bundle_directories(dump_root):
     return found
 
 
-def consolidate_bundle(bundle_dir, out_dir, rtol):
+def common_entry_ids(bundle_dirs):
+    """The entries every bundle has, so all bundles describe the same crystals.
+
+    A condition can lose an entry: add_second_phase raises when a pattern is dense enough that no
+    line of its assigned partner clears every peak's half breadth, and the first grid lost 33 of
+    5 955 in C6 that way. Nothing else lost any. Left alone, that leaves C6 with a different entry
+    set from the other six, and every downstream paired comparison has to remember to intersect --
+    which is the kind of thing that is remembered until it is not, and then silently compares
+    different crystals across conditions.
+
+    Aligning here costs those 33 entries in the six bundles that did have them, and buys the
+    invariant that a bundle is a condition applied to one fixed set of entries.
+
+    Reads only the entry_id column, so this pre-pass is cheap against a 20M-row grid.
+    """
+    common = None
+    per_bundle = {}
+    for bundle_dir in bundle_dirs:
+        ids = set(FomBenchmark.load_entries_ids(bundle_dir))
+        per_bundle[bundle_dir.name] = ids
+        common = ids if common is None else (common & ids)
+    return common, per_bundle
+
+
+def consolidate_bundle(bundle_dir, out_dir, rtol, keep_entry_ids=None, n_processes=1):
     """Label one bundle, write it partitioned by Bravais lattice, and return what the gate needs."""
     entries = FomBenchmark.load_entries(bundle_dir)
     candidates = FomBenchmark.load_candidates(bundle_dir)
+    if keep_entry_ids is not None:
+        entries = entries.loc[entries['entry_id'].isin(keep_entry_ids)].reset_index(drop=True)
+        candidates = candidates.loc[
+            candidates['entry_id'].isin(keep_entry_ids)].reset_index(drop=True)
     # Raises if any candidate's q2_digest disagrees with its entry: shards from different runs
     # would otherwise join silently, every column parsing and every number on the wrong pattern.
     FomBenchmark._check_join(candidates, entries)
-    labelled = FomBenchmark.label_frame(candidates, entries, rtol=rtol)
+    labelled = FomBenchmark.label_frame(candidates, entries, rtol=rtol,
+                                        n_processes=n_processes)
 
     bundle = entries['condition_bundle'].iloc[0]
     if entries['condition_bundle'].nunique() != 1:
@@ -121,6 +158,15 @@ def check_gate(counts, reach, entries):
         })
 
     overlap = entries.groupby('entry_id')['split'].nunique()
+    per_bundle_counts = entries.groupby('condition_bundle')['entry_id'].nunique()
+    findings.append({
+        'check': 'every bundle covers the same entries',
+        'passed': bool(per_bundle_counts.nunique() == 1),
+        'detail': f'{int(per_bundle_counts.iloc[0])} entries in each of '
+                  f'{per_bundle_counts.shape[0]} bundles' if per_bundle_counts.nunique() == 1
+                  else f'counts differ: {per_bundle_counts.to_dict()}',
+        })
+
     findings.append({
         'check': 'splits disjoint by entry_id',
         'passed': bool((overlap <= 1).all()),
@@ -165,9 +211,28 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
+    bundle_dirs = bundle_directories(args.dump_root)
+    keep_entry_ids, dropped_per_bundle = None, {}
+    if not args.no_align_entries:
+        keep_entry_ids, per_bundle = common_entry_ids(bundle_dirs)
+        dropped_per_bundle = {name: len(ids) - len(keep_entry_ids)
+                              for name, ids in per_bundle.items()}
+        total_dropped = sum(dropped_per_bundle.values())
+        print(f'aligning entry sets: {len(keep_entry_ids)} entries common to all '
+              f'{len(bundle_dirs)} bundles', flush=True)
+        if total_dropped:
+            for name, dropped in sorted(dropped_per_bundle.items()):
+                if dropped:
+                    print(f'  {name}: dropping {dropped} entries absent from another bundle',
+                          flush=True)
+            print(f'  {total_dropped} entry-rows dropped in total, so every condition now '
+                  'describes the same crystals', flush=True)
+
     all_entries, all_counts, all_reach, manifests = [], [], [], {}
-    for bundle_dir in bundle_directories(args.dump_root):
-        bundle, entries, counts, reach = consolidate_bundle(bundle_dir, out_dir, args.rtol)
+    for bundle_dir in bundle_dirs:
+        bundle, entries, counts, reach = consolidate_bundle(
+            bundle_dir, out_dir, args.rtol, keep_entry_ids=keep_entry_ids,
+            n_processes=args.n_processes)
         all_entries.append(entries)
         all_counts.append(counts)
         all_reach.append(reach)
@@ -193,6 +258,9 @@ def main():
         n_entry_rows_per_bundle=entries.groupby('condition_bundle').size().to_dict(),
         n_candidates=int(counts['n_candidates'].sum()),
         rtol=args.rtol,
+        entries_aligned=not args.no_align_entries,
+        n_entries_common=None if keep_entry_ids is None else len(keep_entry_ids),
+        n_entries_dropped_to_align=dropped_per_bundle,
         gate_passed=bool(gate['passed'].all()),
         )
 
