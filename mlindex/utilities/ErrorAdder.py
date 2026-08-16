@@ -8,6 +8,15 @@ class ContaminantPlacementError(RuntimeError):
     pass
 
 
+# Interior dropout is capped here, not left to the caller. Measured over the 5 955 S04 entries, the
+# median entry carries ~60 peaks, so the entry's own surplus almost never binds below 20 -- and at
+# n_drop = 20 the mechanism removes 18.9 of the nominal 20 and refills from peaks 21-40. That is no
+# longer punching holes in the low-angle window; it is translating the window wholesale to high
+# angle, which is the distinct attack this function's docstring contrasts itself against. Ten keeps
+# half the nominal window, so what the mechanism does still matches what it claims to do.
+MAX_INTERIOR_DROPOUT = 10
+
+
 def add_q2_error(q2, hkl, multiplier, rng):
     from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
     q2_error_params = get_peak_generation_info()['q2_error_params']
@@ -31,9 +40,10 @@ def select_peaks_with_dropout(q2_full, n_peaks, n_drop, rng):
     # it degrades candidate *discovery* rather than just the fit. n_drop = 0 is a no-op.
     #
     # n_drop is the number of holes left in the NOMINAL first n_peaks, capped by how many surplus
-    # peaks the entry has to backfill with: a 22-peak entry can give up 2 and no more, a 26-peak
-    # entry can give up 6, and a 20-peak entry cannot give up any. The returned list is always as
-    # long as the input allows, so the fixed-length ONNX generator input is never violated (F-044).
+    # peaks the entry has to backfill with and by MAX_INTERIOR_DROPOUT: a 22-peak entry can give up
+    # 2 and no more, a 26-peak entry can give up 6, and a 20-peak entry cannot give up any. The
+    # returned list is always as long as the input allows, so the fixed-length ONNX generator input
+    # is never violated (F-044).
     #
     # This changed on 2026-08-16. It used to draw the deletions from a window of n_peaks + n_drop,
     # so a fraction n_drop/(n_peaks + n_drop) of them landed in the backfill region and did nothing,
@@ -56,11 +66,10 @@ def select_peaks_with_dropout(q2_full, n_peaks, n_drop, rng):
         # Nothing to backfill from, so dropping a peak would shorten the list. Return what there is
         # and let the caller record that the requested dropout was not achieved.
         return q2_full[:n_peaks]
-    # Two caps, and both bind in practice. The surplus is what the entry can backfill with; n_peaks
-    # is the obvious one -- a peak-rich entry sweeping n_drop past 20 would otherwise be asked to
-    # punch more holes than the nominal window has peaks. At the n_peaks cap the window has moved
-    # off the nominal range entirely, which is the limit of what this mechanism can do.
-    n_holes = min(n_drop, n_surplus, n_peaks)
+    # Three caps. The surplus is what the entry can backfill with; MAX_INTERIOR_DROPOUT is the
+    # mechanism's own ceiling, above which it stops being interior dropout at all; n_peaks is the
+    # arithmetic floor under both, and binds only if a caller shortens the nominal window.
+    n_holes = min(n_drop, n_surplus, MAX_INTERIOR_DROPOUT, n_peaks)
     dropped = rng.choice(n_peaks, size=n_holes, replace=False)
     kept = np.delete(q2_full[:n_peaks], dropped)
     backfill = q2_full[n_peaks:n_peaks + n_holes]

@@ -13,6 +13,7 @@ from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.ErrorAdder import add_contaminants
 from mlindex.utilities.ErrorAdder import add_q2_error
+from mlindex.utilities.ErrorAdder import MAX_INTERIOR_DROPOUT
 from mlindex.utilities.ErrorAdder import select_peaks_with_dropout
 
 
@@ -154,9 +155,9 @@ def test_dropout_drops_as_many_as_the_available_peaks_allow(n_available, n_drop,
     (22, 2, 2),
     (22, 6, 2),      # capped by the two surplus peaks
     (30, 10, 10),
-    (30, 20, 10),
-    (60, 20, 20),    # the nominal window is emptied and entirely replaced
-    (60, 30, 20),    # n_drop above n_peaks: capped, not an error
+    (30, 20, 10),    # MAX_INTERIOR_DROPOUT binds before the entry's surplus does
+    (60, 20, 10),    # a peak-rich entry is still held to the mechanism's ceiling
+    (60, 30, 10),    # n_drop above n_peaks: capped, not an error from rng.choice
 ])
 def test_dropout_hole_count_is_exact_at_every_seed(n_available, n_drop, expected_dropped):
     """n_drop means holes in the nominal window, not draws from a widened one.
@@ -176,6 +177,23 @@ def test_dropout_hole_count_is_exact_at_every_seed(n_available, n_drop, expected
         assert out.size == n_peaks, f'seed {seed} returned {out.size} peaks'
         assert int(np.sum(~np.isin(nominal, out))) == expected_dropped, f'seed {seed}'
         assert np.all(np.diff(out) > 0), f'seed {seed} returned an unsorted list'
+
+
+def test_dropout_never_exceeds_the_mechanism_ceiling():
+    """Past ~10 holes of 20 this stops being interior dropout and becomes a window translation.
+
+    The nominal low-angle window is where the systematic-absence pattern lives and where the
+    generators take their information; emptying it entirely is a different condition, not a more
+    aggressive version of this one. The ceiling is enforced here rather than left to each caller,
+    so no bundle can reach it by accident.
+    """
+    q2_full = np.linspace(0.05, 3.0, 80)
+    n_peaks = 20
+    nominal = q2_full[:n_peaks]
+    for n_drop in (MAX_INTERIOR_DROPOUT, 15, 20, 40):
+        out = select_peaks_with_dropout(q2_full, n_peaks, n_drop, np.random.default_rng(3))
+        assert int(np.sum(~np.isin(nominal, out))) == MAX_INTERIOR_DROPOUT
+        assert out.size == n_peaks
 
 
 def test_zero_contaminants_terminates_without_a_redraw():

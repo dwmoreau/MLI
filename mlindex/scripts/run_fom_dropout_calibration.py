@@ -33,8 +33,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_fom_mirror as mirror
 
 
-# The handoff's C4 target: the median q2_20 should sit about 1.5x the nominal q2_20.
+# The handoff's target for C4: the median q2_20 should sit about 1.5x the nominal q2_20.
 C4_TARGET_STRETCH = 1.5
+
+# The values S04 actually runs (DWMM, 2026-08-16). The first sweep of this script is what settled
+# them: the 1.5x target lands at n_drop = 10, but 10 is also the ceiling the mechanism now enforces
+# (ErrorAdder.MAX_INTERIOR_DROPOUT), so pinning C4 there would have made C4 and C5 the same bundle.
+# C4 steps back to 6 and C5 takes the ceiling, which puts the 1.5x target on C5 rather than C4.
+C4_N_DROPOUT = 6
+C5_N_DROPOUT = 10
 
 # Only what the selection needs. The full READ_COLUMNS set pulls the ground-truth cell and the
 # spacegroup as well, and dataset_aP.parquet is 1.2 GB.
@@ -118,29 +125,10 @@ def pooled(per_entry):
         ).reset_index()
 
 
-def recommend(pooled_summary):
-    """C4 is the n_drop landing nearest the target stretch; C5 is where availability takes over.
-
-    Nearest rather than "smallest that reaches", because the grid is coarse: a run measuring 1.48
-    at n_drop=8 and 1.72 at 12 should choose 8, not overshoot to 12 on a 0.02 shortfall.
-    """
-    distance = (pooled_summary['median_stretch'] - C4_TARGET_STRETCH).abs()
-    c4 = int(pooled_summary['n_drop'].iloc[int(distance.idxmin())])
-
-    # C5 is "as aggressive as the entry allows": the point past which raising the parameter stops
-    # buying holes because availability caps most entries. If the sweep never flattens, the grid
-    # did not reach that point and the caller is told so rather than handed its last value as if
-    # it were a measurement.
-    c5, c5_converged = int(pooled_summary['n_drop'].iloc[-1]), False
-    for index in range(1, pooled_summary.shape[0]):
-        gain = (pooled_summary['mean_holes'].iloc[index]
-                - pooled_summary['mean_holes'].iloc[index - 1])
-        if gain < 0.25:
-            # The plateau starts at the previous value; this one is the first that buys
-            # nothing further, so reporting it would overstate the parameter needed.
-            c5, c5_converged = int(pooled_summary['n_drop'].iloc[index - 1]), True
-            break
-    return c4, c5, c5_converged
+def measured_at(pooled_summary, n_drop):
+    """The measured properties of a decided bundle value, or None if it is off the sweep."""
+    row = pooled_summary.loc[pooled_summary['n_drop'] == n_drop]
+    return None if row.empty else row.iloc[0]
 
 
 # Light-mode categorical slots 1 and 8 from the data-viz reference palette, plus its text inks.
@@ -240,7 +228,8 @@ def main():
 
     summary = summarize(per_entry)
     pooled_summary = pooled(per_entry)
-    c4, c5, c5_converged = recommend(pooled_summary)
+    c4_row = measured_at(pooled_summary, C4_N_DROPOUT)
+    c5_row = measured_at(pooled_summary, C5_N_DROPOUT)
 
     summary.to_csv(artifact_dir / f'{args.tag}.csv', index=False)
     pooled_summary.to_csv(artifact_dir / f'{args.tag}_pooled.csv', index=False)
@@ -258,14 +247,20 @@ def main():
         'Peak selection only; no indexing. Same entries, seed and per-entry RNG as the generation',
         'run, so these are the bundles that will be generated, not a proxy.',
         '',
-        f'- **C4 (sparse): `--n-dropout {c4}`** -- the value landing nearest the handoff\'s '
-        f'{C4_TARGET_STRETCH}x median q2_20 target.',
-        (f'- **C5 (aggressive): `--n-dropout {c5}`** -- past this, availability caps most entries '
-         'and raising the parameter buys less than 0.25 further holes per entry.'
-         if c5_converged else
-         f'- **C5 (aggressive): `--n-dropout {c5}` is the top of the sweep, NOT a measured '
-         'plateau** -- mean holes were still climbing at the last value, so extend '
-         '`--n-drop-values` before trusting this one.'),
+        f'- **C4 (sparse): `--n-dropout {C4_N_DROPOUT}`** -- median q2_20 '
+        f'{c4_row["median_stretch"]:.2f}x nominal, {c4_row["mean_holes"]:.1f} holes of 20.',
+        f'- **C5 (aggressive): `--n-dropout {C5_N_DROPOUT}`** -- median q2_20 '
+        f'{c5_row["median_stretch"]:.2f}x nominal, {c5_row["mean_holes"]:.1f} holes of 20. This is '
+        f'`ErrorAdder.MAX_INTERIOR_DROPOUT`, the ceiling the mechanism enforces.',
+        '',
+        f'The handoff put a {C4_TARGET_STRETCH}x median-stretch target on C4. That target lands at '
+        f'n_dropout 10, which is also the ceiling, so pinning C4 there would have made C4 and C5 '
+        'the same bundle. C4 steps back to 6 and the target moves to C5 (DWMM, 2026-08-16).',
+        '',
+        'Why the ceiling exists: the median entry carries ~60 peaks, so the entry\'s own surplus '
+        'almost never binds. Swept to 20, the mechanism removes 18.9 of the nominal 20 and refills '
+        'from peaks 21-40 -- a wholesale translation of the window to high angle, not holes punched '
+        'in it. Ten keeps half the nominal window.',
         '',
         '## Pooled over all lattices',
         '',
@@ -285,8 +280,10 @@ def main():
     print()
     print(pooled_summary.round(3).to_string(index=False))
     print()
-    print(f'C4: --n-dropout {c4}')
-    print(f'C5: --n-dropout {c5}')
+    print(f'C4: --n-dropout {C4_N_DROPOUT}  '
+          f'({c4_row["median_stretch"]:.2f}x, {c4_row["mean_holes"]:.1f} holes)')
+    print(f'C5: --n-dropout {C5_N_DROPOUT}  '
+          f'({c5_row["median_stretch"]:.2f}x, {c5_row["mean_holes"]:.1f} holes)')
     print(f'wrote {artifact_dir / (args.tag + ".md")}')
 
 
