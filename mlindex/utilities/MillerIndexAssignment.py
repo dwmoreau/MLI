@@ -44,27 +44,43 @@ def vectorized_resampling(softmaxes, rng):
 
 
 def vectorized_subsampling(p, n_picks, rng):
-    n_entries = p.shape[0]
-    n_choices = p.shape[1]
-    choices = np.repeat(np.arange(n_choices)[np.newaxis], repeats=n_entries, axis=0)
+    """Draw n_picks peaks per entry without replacement, weighted by p.
+
+    A chosen entry is zeroed rather than deleted, which removes the two
+    np.delete-and-reshape calls this loop used to make per pick. Because
+    positions no longer shift, the position index is the original index and the
+    separate ``choices`` bookkeeping array is unnecessary too. Measured 1.13x
+    with bit-identical output (tools/repro_subsampling.py).
+
+    Two behaviours here are load-bearing and easy to lose. The cumulative
+    distribution is deliberately *not* renormalised after a pick, and the draw is
+    compared as ``cumsum >= random_value`` with random_value in [0, 1). Once
+    enough mass has been taken that the remaining total falls below the draw,
+    nothing satisfies the comparison and the pick falls through -- in the old
+    compacted array np.argmax returned 0, which meant the first *surviving*
+    entry. A zeroed array must therefore repair that case explicitly, or it
+    re-picks an already-chosen index; a randomised cross-check against the old
+    implementation caught exactly that on 203 of 300 cases.
+    """
+    n_entries, n_choices = p.shape
+    p = p.copy()
+    rows = np.arange(n_entries)
+    alive = np.ones((n_entries, n_choices), dtype=bool)
     chosen = np.zeros((n_entries, n_picks), dtype=int)
     for index in range(n_picks):
-        # cumsum: n_entries, n_peaks
-        # random_value: n_entries
-        # q: n_entries, n_peaks
-        n_peaks = p.shape[1]
         cumsum = p.cumsum(axis=1)
         random_value = rng.random(n_entries)
         q = cumsum >= random_value[:, np.newaxis]
         chosen_indices = q.argmax(axis=1)
-        chosen[:, index] = choices[np.arange(n_entries), chosen_indices]
-        p_flat = p.ravel()
-        choices_flat = choices.ravel()
-        delete_indices = np.arange(n_entries) * n_peaks + chosen_indices
-        p = np.delete(p_flat, delete_indices).reshape((n_entries, n_peaks - 1))
-        choices = np.delete(choices_flat, delete_indices).reshape(
-            (n_entries, n_peaks - 1)
-        )
+        # Fall-through repair: no entry satisfied the draw, or argmax landed on
+        # an already-taken position (possible only for an exact-zero draw).
+        needs_repair = ~q.any(axis=1) | ~alive[rows, chosen_indices]
+        if needs_repair.any():
+            chosen_indices = chosen_indices.copy()
+            chosen_indices[needs_repair] = alive[needs_repair].argmax(axis=1)
+        chosen[:, index] = chosen_indices
+        p[rows, chosen_indices] = 0.0
+        alive[rows, chosen_indices] = False
     chosen = np.sort(chosen, axis=1)
     return chosen
 

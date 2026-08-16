@@ -169,6 +169,100 @@ def test_fast_assign(unique_test_metadata):
         )
 
 
+def _fast_assign_reference(q2_obs, q2_ref):
+    """Straightforward nearest-reference scan, as fast_assign was first written.
+
+    fast_assign is now unrolled into four interleaved accumulators for speed, so
+    the two behaviours its callers depend on are no longer obvious from reading
+    it. This spells them out: the lowest reference index wins a tie, and a peak
+    with nothing within 100.0 is assigned index 0.
+    """
+    hkl_assign = np.zeros((q2_ref.shape[0], q2_obs.size), dtype=np.uint16)
+    for candidate_index in range(q2_ref.shape[0]):
+        for obs_index in range(q2_obs.size):
+            current_min = 100.0
+            for ref_index in range(q2_ref.shape[1]):
+                diff = abs(q2_obs[obs_index] - q2_ref[candidate_index, ref_index])
+                if diff < current_min:
+                    current_min = diff
+                    hkl_assign[candidate_index, obs_index] = ref_index
+    return hkl_assign
+
+
+def test_fast_assign_breaks_ties_on_lowest_index():
+    # 1.0 sits exactly between 0.5 and 1.5, and is equidistant from the pair at
+    # indices 0 and 3, so only the lowest-index rule fixes the answer.
+    q2_obs = np.array([1.0])
+    q2_ref = np.array([[0.5, 2.0, 2.0, 1.5]])
+    result = fast_assign(q2_obs, q2_ref)
+    assert result[0, 0] == 0
+    np.testing.assert_array_equal(result, _fast_assign_reference(q2_obs, q2_ref))
+
+
+def test_fast_assign_returns_zero_when_nothing_is_within_the_bound():
+    q2_obs = np.array([0.0])
+    q2_ref = np.array([[500.0, 300.0, 400.0]])
+    result = fast_assign(q2_obs, q2_ref)
+    assert result[0, 0] == 0
+    np.testing.assert_array_equal(result, _fast_assign_reference(q2_obs, q2_ref))
+
+
+@pytest.mark.parametrize(
+    "description, mutate",
+    [
+        ("all-NaN row", lambda a: a.__setitem__((1, slice(None)), np.nan)),
+        ("single NaN", lambda a: a.__setitem__((1, 3), np.nan)),
+        ("partial NaN row", lambda a: a.__setitem__((1, slice(0, 5)), np.nan)),
+        ("all-Inf row", lambda a: a.__setitem__((1, slice(None)), np.inf)),
+        ("single -Inf", lambda a: a.__setitem__((1, 2), -np.inf)),
+        ("everything beyond the 100.0 bound", lambda a: a.__setitem__((1, slice(None)), 1e9)),
+    ],
+)
+def test_fast_assign_is_well_defined_on_degenerate_input(description, mutate):
+    """Degenerate q2_ref must give a defined, in-range answer -- never a crash.
+
+    q2_ref is xnn @ hkl2.T and NaN xnn genuinely occurs (the Selling reduction
+    produces it, which is why _downsample_computation filters for it), so this
+    is a reachable input rather than a hypothetical. fast_assign deliberately
+    carries no fastmath for this reason: under fastmath the compiler may assume
+    NaN never appears and the result on these rows becomes whatever it happens
+    to emit.
+    """
+    rng = np.random.default_rng(4)
+    q2_obs = np.sort(rng.uniform(0.05, 3.0, size=6))
+    q2_ref = rng.uniform(0.05, 3.0, size=(3, 12))
+    mutate(q2_ref)
+
+    result = fast_assign(q2_obs, q2_ref)
+
+    assert result.shape == (3, 6)
+    # Every entry must be usable as an index into hkl_ref, or the caller's
+    # np.take would read out of bounds.
+    assert np.all(result < q2_ref.shape[1]), description
+    # Rows that were left alone must be unaffected by a neighbour's degeneracy.
+    np.testing.assert_array_equal(
+        result[[0, 2]], _fast_assign_reference(q2_obs, q2_ref)[[0, 2]]
+    )
+    # And the degenerate row itself must match the plain-Python semantics.
+    np.testing.assert_array_equal(
+        result, _fast_assign_reference(q2_obs, q2_ref), err_msg=description
+    )
+
+
+@pytest.mark.parametrize("n_ref", [1, 2, 3, 4, 5, 7, 8, 9, 17, 63, 64, 65])
+def test_fast_assign_matches_reference_for_any_row_length(n_ref):
+    # The unrolled loop handles four indices per step and finishes the remainder
+    # separately, so lengths either side of a multiple of four are the ones that
+    # would expose an off-by-one in the tail.
+    rng = np.random.default_rng(20240814 + n_ref)
+    q2_obs = np.sort(rng.uniform(0.05, 3.0, size=8))
+    # Coarse rounding makes exact ties common, which is what pins tie-breaking.
+    q2_ref = np.round(rng.uniform(0.0, 3.0, size=(11, n_ref)), 2)
+    np.testing.assert_array_equal(
+        fast_assign(q2_obs, q2_ref), _fast_assign_reference(q2_obs, q2_ref)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Figure of merits
 # ---------------------------------------------------------------------------

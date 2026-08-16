@@ -15,32 +15,56 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 
 
 def _downsample_chunk(args):
+    """Collapse each dense neighbourhood in a chunk to its highest-M20 member.
+
+    The distance matrix is computed once and then maintained, rather than
+    rebuilt after every collapse. Collapsing removes points and re-appends one
+    of the removed points, so the pairwise distances among the survivors are
+    unchanged -- recomputing them produced the same numbers ~110 times per
+    chunk. Measured 9-22x on captured chunks with bit-identical output
+    (tools/repro_downsample.py). redistribute_xnn below already avoided the
+    same rebuild for the same reason.
+
+    ``order`` holds original row indices in their current positions. That is
+    what keeps this bit-identical rather than merely equivalent: np.argmax
+    returns the *first* maximum, so both the densest-point choice and the
+    best-neighbour choice depend on the current ordering, and the collapse
+    permutes it in a specific way (survivors keep their relative order, the
+    kept point moves to the end).
+    """
     (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk,
      downsample_radius) = args
-    while True:
-        distance = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk)
-        neighbor_array = distance < downsample_radius
-        neighbor_count = np.sum(neighbor_array, axis=1)
-        if neighbor_count.size == 0 or neighbor_count.max() <= 1:
+    n = xnn_chunk.shape[0]
+    if n == 0:
+        return (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk)
+
+    neighbor_array = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk) < downsample_radius
+    order = np.arange(n)
+    # neighbor_count[o]: how many still-live points lie within the radius of o.
+    # Maintained by subtracting removed columns instead of being recounted.
+    neighbor_count = neighbor_array.sum(axis=1)
+
+    while order.size:
+        counts_in_position_order = neighbor_count[order]
+        if counts_in_position_order.max() <= 1:
             break
-        highest_density_index = np.argmax(neighbor_count)
-        neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
-        best_neighbor = np.argmax(M20_chunk[neighbor_indices])
-        xnn_best_neighbor = xnn_chunk[neighbor_indices][best_neighbor]
-        M20_best_neighbor = M20_chunk[neighbor_indices][best_neighbor]
-        Minfo_best_neighbor = Minfo_chunk[neighbor_indices][best_neighbor]
-        n_indexed_best_neighbor = n_indexed_chunk[neighbor_indices][best_neighbor]
-        spacegroup_best_neighbor = [spacegroup_chunk[i] for i in neighbor_indices][best_neighbor]
-        xnn_chunk = np.vstack((np.delete(xnn_chunk, neighbor_indices, axis=0), xnn_best_neighbor))
-        M20_chunk = np.concatenate((np.delete(M20_chunk, neighbor_indices), [M20_best_neighbor]))
-        Minfo_chunk = np.concatenate((np.delete(Minfo_chunk, neighbor_indices), [Minfo_best_neighbor]))
-        n_indexed_chunk = np.concatenate((np.delete(n_indexed_chunk, neighbor_indices), [n_indexed_best_neighbor]))
-        # neighbor indices are sorted in increasing order and must be reversed
-        # for this pop to remove them correctly.
-        for i in neighbor_indices[::-1]:
-            spacegroup_chunk.pop(i)
-        spacegroup_chunk += [spacegroup_best_neighbor]
-    return (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk)
+        highest_density_position = int(np.argmax(counts_in_position_order))
+        highest_density_index = order[highest_density_position]
+        neighbor_positions = np.flatnonzero(neighbor_array[highest_density_index, order])
+        neighbor_indices = order[neighbor_positions]
+        best_neighbor = int(np.argmax(M20_chunk[neighbor_indices]))
+        keep_index = neighbor_indices[best_neighbor]
+
+        removed = neighbor_indices[neighbor_indices != keep_index]
+        if removed.size:
+            neighbor_count -= neighbor_array[:, removed].sum(axis=1)
+
+        survivors = np.ones(order.size, dtype=bool)
+        survivors[neighbor_positions] = False
+        order = np.concatenate((order[survivors], [keep_index]))
+
+    return (xnn_chunk[order], M20_chunk[order], Minfo_chunk[order],
+            n_indexed_chunk[order], [spacegroup_chunk[i] for i in order])
 
 
 class OptimizerBase:
