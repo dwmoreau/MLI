@@ -34,6 +34,7 @@ os.environ['GOTO_NUM_THREADS'] = '1'
 os.environ['ATLAS_NUM_THREADS'] = '1'
 os.environ['SKLEARN_N_JOBS'] = '1'
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -271,6 +272,18 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
         aborted = None
     finally:
         shutdown_mp_workers(processes, task_queues)
+
+    # Failures were counted and then thrown away, so an unattended run left no way to tell a
+    # handful of unplaceable contaminants from a systematic problem. On the first gate run that
+    # hid four entries lost to one degenerate branch of add_second_phase.
+    if failures:
+        with open(Path(out_dir) / f'failures_{pool_tag}.json', 'w',
+                  encoding='utf-8') as failure_file:
+            json.dump(failures, failure_file, indent=2, sort_keys=True)
+        reasons = {}
+        for failure in failures:
+            reasons[failure['reason']] = reasons.get(failure['reason'], 0) + 1
+        print(f'[pool {pool_index:02d}] failures by reason: {reasons}', flush=True)
 
     if entry_rows:
         FomBenchmark.write_entry_table(

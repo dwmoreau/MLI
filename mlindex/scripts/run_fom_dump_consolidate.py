@@ -91,11 +91,13 @@ def consolidate_bundle(bundle_dir, out_dir, rtol):
     # Per-entry reachability, on the entry's own true lattice. "No correct candidate in the pool"
     # is a generation failure, not a ranking failure, and PROTOCOL section 8 wants them separate.
     own = labelled.merge(truth, left_on='entry_id', right_index=True, how='left')
-    own = own.loc[own['bravais_lattice'] == own['bravais_lattice_true']]
+    own = own.loc[own['bravais_lattice'] == own['bravais_lattice_true']].copy()
+    # Combine before grouping rather than reaching back into the frame from inside an agg lambda,
+    # which only works while the group's index still aligns with the parent's.
+    own['correct_and_kept'] = own['is_correct'].fillna(False) & own['in_top_n']
     reach = own.groupby('entry_id').agg(
         in_pool=('is_correct', 'any'),
-        in_top_n=('is_correct', lambda column: bool(
-            (column & own.loc[column.index, 'in_top_n']).any())),
+        in_top_n=('correct_and_kept', 'any'),
         ).reset_index().merge(truth, left_on='entry_id', right_index=True, how='left')
     reach.insert(0, 'condition_bundle', bundle)
 

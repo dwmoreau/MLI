@@ -215,7 +215,7 @@ def test_second_phase_conserves_the_peak_count_and_marks_lines_as_contaminants()
     q2 = _sparse_q2()
     hkl = np.tile(np.arange(1, 21)[:, np.newaxis], (1, 3))[np.newaxis].astype(float)
     q2_out, hkl_out = add_second_phase(
-        q2.copy(), hkl.copy(), _partner_lines(), 3, np.random.default_rng(0), max_attempts=500)
+        q2.copy(), hkl.copy(), _partner_lines(), 3, np.random.default_rng(0))
 
     assert q2_out.shape == q2.shape
     assert hkl_out.shape == hkl.shape
@@ -231,7 +231,7 @@ def test_second_phase_lines_come_from_the_partner_and_lie_in_the_observed_window
     q2 = _sparse_q2()
     partner = _partner_lines()
     before = set(np.round(q2[0], 12))
-    out = add_second_phase(q2.copy(), None, partner, 4, np.random.default_rng(1), max_attempts=500)
+    out = add_second_phase(q2.copy(), None, partner, 4, np.random.default_rng(1))
 
     injected = [value for value in out[0] if round(value, 12) not in before]
     assert injected, 'nothing was injected'
@@ -246,8 +246,7 @@ def test_second_phase_draws_without_replacement():
     partner = _partner_lines()
     for seed in range(20):
         before = set(np.round(q2[0], 12))
-        out = add_second_phase(q2.copy(), None, partner, 5, np.random.default_rng(seed),
-                               max_attempts=500)
+        out = add_second_phase(q2.copy(), None, partner, 5, np.random.default_rng(seed))
         injected = [round(value, 12) for value in out[0] if round(value, 12) not in before]
         assert len(injected) == len(set(injected)), f'seed {seed} injected a duplicate line'
 
@@ -265,7 +264,7 @@ def test_second_phase_bias_pulls_the_selection_towards_low_q2():
             low, high = 0.5*row[0, 0], row[0, -1]
             before = set(np.round(row[0], 12))
             out = add_second_phase(row, None, partner, 1, np.random.default_rng(trial),
-                                   max_attempts=500, low_angle_bias=bias)
+                                   low_angle_bias=bias)
             injected = [v for v in out[0] if round(v, 12) not in before]
             if injected:
                 fractions.append((injected[0] - low) / (high - low))
@@ -279,11 +278,31 @@ def test_second_phase_raises_when_the_partner_has_no_line_in_range():
     # Every partner line sits above the host's last peak, so none is observable.
     partner = np.linspace(10.0, 20.0, 50)
     with pytest.raises(ContaminantPlacementError):
-        add_second_phase(q2.copy(), None, partner, 2, np.random.default_rng(0), max_attempts=50)
+        add_second_phase(q2.copy(), None, partner, 2, np.random.default_rng(0))
 
 
-def test_second_phase_raises_rather_than_hanging_on_an_uncontaminatable_pattern():
+def test_second_phase_raises_when_every_eligible_line_overlaps_a_peak():
+    # No redraw loop to hang in: the colliding lines are filtered out up front, so this is a
+    # direct "nothing is placeable" answer rather than an attempt budget running out.
     q2 = _uncontaminatable_q2()
     with pytest.raises(ContaminantPlacementError):
-        add_second_phase(q2.copy(), None, _partner_lines(high=1.0), 2,
-                         np.random.default_rng(0), max_attempts=200)
+        add_second_phase(q2.copy(), None, _partner_lines(high=1.0), 2, np.random.default_rng(0))
+
+
+def test_second_phase_places_what_it_can_when_few_lines_are_eligible():
+    """The failure that cost four of fifty-six entries on the first gate run.
+
+    A partner with two eligible lines and two to place admits exactly one possible set, so the
+    old rejection loop redrew that same set 2000 times and then gave up. Filtering collisions up
+    front makes the sparse case succeed whenever any line is placeable, and only ever injects
+    fewer than asked because fewer are available -- not because a draw was unlucky.
+    """
+    q2 = _sparse_q2()
+    # Two lines in range, both clear of every peak: exactly the degenerate case.
+    partner = np.array([0.6123, 1.457])
+    before = set(np.round(q2[0], 12))
+    out = add_second_phase(q2.copy(), None, partner, 3, np.random.default_rng(0))
+    injected = [value for value in out[0] if round(value, 12) not in before]
+    assert len(injected) == 2, f'both placeable lines should be used, got {injected}'
+    for value in injected:
+        assert np.isclose(partner, value).any()

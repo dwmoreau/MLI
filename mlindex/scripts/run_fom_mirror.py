@@ -285,11 +285,9 @@ def prepare_peak_list(entry, args, base_seed, hkl=None, second_phase_pool=None):
         partner_id, partner_q2 = choose_second_phase(entry, second_phase_pool, base_seed)
         if hkl is None:
             q2 = add_second_phase(q2, None, partner_q2, args.second_phase_lines, rng,
-                                  max_attempts=CONTAMINANT_MAX_ATTEMPTS,
                                   low_angle_bias=args.second_phase_bias)
         else:
             q2, hkl = add_second_phase(q2, hkl, partner_q2, args.second_phase_lines, rng,
-                                       max_attempts=CONTAMINANT_MAX_ATTEMPTS,
                                        low_angle_bias=args.second_phase_bias)
     if hkl is None:
         return q2[0], n_dropout_achieved, partner_id

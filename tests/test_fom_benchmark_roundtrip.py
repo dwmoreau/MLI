@@ -245,3 +245,26 @@ def test_dumping_is_off_by_default():
 
     source = inspect.getsource(OptimizerManager.__init__)
     assert "'dump_candidates': None" in source
+
+
+def test_loaders_read_the_consolidated_single_file_layout(pool, tmp_path):
+    """A generation run writes entries_<tag>.parquet; consolidation writes one entries.parquet.
+
+    Both have to load through the same function. They did not: the glob was `entries_*.parquet`,
+    so the consolidated pool -- the artefact every downstream step actually reads -- raised
+    FileNotFoundError while each unconsolidated shard loaded fine. Caught by round-tripping
+    run_fom_dump_consolidate.py's output, not by any test, which is why this one exists.
+    """
+    pytest.importorskip('pyarrow')
+    candidates, entries = pool
+    # Consolidation's layout: one entry table for the whole pool, candidates split per lattice.
+    fb._to_parquet(entries, tmp_path / 'entries.parquet')
+    for bravais_lattice, group in candidates.groupby('bravais_lattice'):
+        fb.write_candidate_shard(group.reset_index(drop=True), tmp_path,
+                                 f'error1_cont0_{bravais_lattice}')
+
+    assert fb.load_entries(tmp_path).shape[0] == entries.shape[0]
+    assert fb.load_candidates(tmp_path).shape[0] == candidates.shape[0]
+    joined = fb.load_benchmark(tmp_path, label=False)
+    assert joined.shape[0] == candidates.shape[0]
+    assert 'volume_true' in joined.columns

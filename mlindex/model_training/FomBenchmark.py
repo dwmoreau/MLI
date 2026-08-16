@@ -361,11 +361,14 @@ def write_manifest(out_dir, **run_metadata):
 
 
 def load_entries(root):
-    return _read_glob(root, 'entries_*.parquet')
+    # `entries*` rather than `entries_*`: the per-pool shards a generation run writes are
+    # entries_<tag>.parquet, but the consolidated pool is a single entries.parquet, and both must
+    # load through the same function.
+    return _read_glob(root, 'entries*.parquet')
 
 
 def load_candidates(root, split=None, bravais_lattices=None, columns=None):
-    frame = _read_glob(root, 'candidates_*.parquet', columns=columns)
+    frame = _read_glob(root, 'candidates*.parquet', columns=columns)
     if bravais_lattices is not None:
         frame = frame.loc[frame['bravais_lattice'].isin(bravais_lattices)]
     if split is not None:

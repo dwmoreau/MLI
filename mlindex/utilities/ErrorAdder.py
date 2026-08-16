@@ -147,7 +147,7 @@ def add_contaminants(q2, hkl, n_contaminants, rng, random_n_contaminants=False, 
         return q2, hkl
 
 
-def add_second_phase(q2, hkl, partner_q2, n_lines, rng, max_attempts=None, low_angle_bias=1.0):
+def add_second_phase(q2, hkl, partner_q2, n_lines, rng, low_angle_bias=1.0):
     # add_contaminants draws each contaminant at an independent random position. Real contamination
     # is a second crystalline phase, so its lines are *correlated* -- they are consistent with some
     # other lattice, and a handful of them arrive together. Uniform contaminants are therefore
@@ -161,10 +161,17 @@ def add_second_phase(q2, hkl, partner_q2, n_lines, rng, max_attempts=None, low_a
     # lines -- index = floor(n_eligible * u**bias), bias 1 being a uniform pick -- so the parameter
     # means the same thing in both mechanisms.
     #
-    # Structure otherwise follows add_contaminants exactly: the whole set is redrawn until every
-    # member clears every real peak's half breadth, max_attempts turns an unplaceable pattern into
-    # a recorded skip rather than a hang, and the injected lines enter hkl as (0, 0, 0) before the
-    # list is re-sorted and truncated back to n_peaks.
+    # Placement is NOT add_contaminants' rejection loop, and deliberately so. That function draws
+    # from a continuum, so redrawing until nothing collides is the only option. Here the partner
+    # offers a finite, known set of lines, so the ones that collide with a real peak are filtered
+    # out up front and the draw is made from what remains. Rejection sampling on a discrete set
+    # degenerates: with two eligible lines and two to place there is exactly one possible set, and
+    # redrawing it 2000 times cannot change the answer. That cost four of fifty-six entries on the
+    # first gate run before this was rewritten -- a 7% loss that would have biased C6 towards
+    # entries whose partner happened to fit.
+    #
+    # Injected lines enter hkl as (0, 0, 0) before the list is re-sorted and truncated back to
+    # n_peaks, exactly as contaminants do.
     from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
     q2_broadening_params = get_peak_generation_info()['broadening_params']
     breadth_q = q2_broadening_params[0] + q2_broadening_params[1] * np.sqrt(q2)
@@ -185,34 +192,37 @@ def add_second_phase(q2, hkl, partner_q2, n_lines, rng, max_attempts=None, low_a
                 f'The second phase has no lines inside entry {entry_index}\'s observed range '
                 f'[{low:.4f}, {high:.4f}]'
                 )
-        n_add = min(n_lines, eligible.size)
+        # A line too close to a real peak would not be resolved as its own reflection, so it is
+        # not an observable contaminant. This is add_contaminants' criterion exactly -- the
+        # distance to the *nearest* peak against *every* peak's half breadth, so in effect the
+        # largest half breadth in the pattern -- rather than the line's own neighbour's breadth,
+        # which would be the more physical test. Matching matters more than improving it here:
+        # C3 and C6 differ only in how their lines are chosen, and a different rejection rule
+        # would confound that comparison.
+        separation = np.abs(
+            eligible[np.newaxis] - q2[entry_index, :n_peaks][:, np.newaxis]
+            ).min(axis=0)
+        placeable = eligible[
+            ~np.any(separation[np.newaxis] < 0.5*breadth[entry_index][:, np.newaxis], axis=0)
+            ]
+        if placeable.size == 0:
+            raise ContaminantPlacementError(
+                f'Every one of the second phase\'s {eligible.size} lines in entry '
+                f'{entry_index}\'s range overlaps one of its peaks'
+                )
+        n_add = min(n_lines, placeable.size)
 
-        status = True
-        n_attempts = 0
-        while status:
-            if not max_attempts is None and n_attempts >= max_attempts:
-                raise ContaminantPlacementError(
-                    f'Could not place {n_add} second-phase lines in entry {entry_index} '
-                    f'within {max_attempts} attempts'
-                    )
-            n_attempts += 1
-            # Rank draw rather than a position draw: the second phase offers a discrete set of
-            # real lines, not a continuum. Sampled without replacement by redrawing collisions,
-            # which is cheap because n_add is small and eligible is not.
-            chosen = set()
-            while len(chosen) < n_add:
-                if low_angle_bias == 1.0:
-                    index = rng.integers(eligible.size)
-                else:
-                    index = int(eligible.size * rng.uniform()**low_angle_bias)
-                chosen.add(min(index, eligible.size - 1))
-            q2_second_phase = eligible[sorted(chosen)]
-
-            difference = np.abs(
-                q2_second_phase[np.newaxis]
-                - q2[entry_index, :n_peaks][:, np.newaxis]
-                ).min(axis=0)
-            status = np.any(difference[np.newaxis] < 0.5*breadth[entry_index][:, np.newaxis])
+        # Rank draw rather than a position draw: the partner offers a discrete set of real lines,
+        # not a continuum. Without replacement, by redrawing index collisions -- which terminates
+        # because n_add <= placeable.size and every index remains reachable.
+        chosen = set()
+        while len(chosen) < n_add:
+            if low_angle_bias == 1.0:
+                index = int(rng.integers(placeable.size))
+            else:
+                index = int(placeable.size * rng.uniform()**low_angle_bias)
+            chosen.add(min(index, placeable.size - 1))
+        q2_second_phase = placeable[sorted(chosen)]
 
         q2_new = np.concatenate((q2[entry_index], q2_second_phase))
         if not hkl is None:
