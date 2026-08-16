@@ -44,12 +44,25 @@ fi
 NCORES=${SLURM_CPUS_ON_NODE:-128}
 echo "node reports $NCORES cores"
 
-# Two entries per lattice is ~28 entries: enough for a stable s/entry, small enough for the debug
-# queue. C5 is the timing worst case of the seven -- dropout pushes the window to higher q2, where
-# the reference line lists are denser, so it is the bundle to size against.
-NPERBL=2
+# ENOUGH ENTRIES THAT EACH POOL GETS SEVERAL. The first version used NPERBL=2, which is 28 entries
+# over 32 pools: one entry per pool, four pools idle, and every measurement equal to
+# startup + one entry. Startup is ~111 s per pool (model loading, and only managers load models),
+# so that measured almost nothing but model loading -- seff reported 2.8% CPU efficiency, and the
+# two topologies came out within 1% of each other because both were reporting the same constant.
+#
+# The number that sizes the walltime is the MARGINAL cost per entry, and separating it from startup
+# needs several entries per pool. NPERBL=20 is 280 entries: ~9 per pool at 32 pools, ~18 at 16, ~4
+# at 64. Each run then reports s/entry close to the marginal rate rather than to the startup.
+#
+# C5 is the timing worst case of the seven -- dropout pushes the window to higher q2, where the
+# reference line lists are denser, so it is the bundle to size against.
+NPERBL=20
 
-for TOPOLOGY in "32 4" "16 8"; do
+# 128 = the node's PHYSICAL core count. SLURM_CPUS_ON_NODE reports 256 on Perlmutter CPU nodes,
+# which counts the two hardware threads per core; the S02 calibration used 128 and that is what
+# these topologies keep. Memory is not the axis that binds: 32 pools measured 62.4 GB of the node's
+# 476 GB, i.e. ~2 GB per manager, so even 64 pools is ~125 GB.
+for TOPOLOGY in "32 4" "16 8" "64 2"; do
     read -r NPOOLS POOLSIZE <<< "$TOPOLOGY"
     TAG="cal_${NPOOLS}x${POOLSIZE}"
     echo
@@ -67,10 +80,19 @@ for TOPOLOGY in "32 4" "16 8"; do
 done
 
 echo
-echo "Per-pool s/entry is printed by each run above. Project a full bundle as:"
-echo "    5955 entries / NPOOLS * (s/entry/pool) / 3600 = hours"
-echo "and confirm it fits inside submit_fom_dump.sh's 5 h with headroom before submitting."
+echo "Each pool above ran $((NPERBL * 14 / 32)) or so entries, so its s/entry still carries a share"
+echo "of the ~111 s startup. Subtract it before projecting:"
 echo
-echo "Also check the pool's peak RSS: only managers load models, so NPOOLS is the memory-limited"
-echo "axis. 32 managers at ~3 GB is ~96 GB of the node's 512 GB; the dump adds its accumulated"
-echo "rows on top, ~85 MB per pool over a full bundle, which is not the constraint."
+echo "    marginal  = (s_per_entry * n_entries_in_pool - 111) / n_entries_in_pool"
+echo "    hours     = (111 + 5955 / NPOOLS * marginal) / 3600"
+echo
+echo "Confirm the winner fits inside submit_fom_dump.sh's 5 h with real headroom. The marginal rate"
+echo "depends on POOLSIZE -- only the optimisation iterations distribute to workers, candidate"
+echo "generation runs on the manager -- so a rate measured at one topology does NOT transfer to"
+echo "another. That is why all three are run here rather than two."
+echo
+echo "This script does not measure memory. Get it from the scheduler afterwards:"
+echo "    seff \$SLURM_JOB_ID"
+echo "Only managers load models, so NPOOLS is the memory-limited axis: 32 pools measured 62.4 GB"
+echo "of the node's 476 GB (~2 GB per manager), and the dump's accumulated rows add ~85 MB per pool"
+echo "over a full bundle, which is not the constraint."
