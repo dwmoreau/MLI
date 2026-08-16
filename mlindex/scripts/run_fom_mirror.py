@@ -167,12 +167,16 @@ def derived_seed(key, base_seed):
     return int.from_bytes(digest[:8], 'big')
 
 
-def sample_entries(bravais_lattice, n_entries, base_seed):
+def sample_entries(bravais_lattice, n_entries, base_seed, columns=None):
     # Uniform within the lattice, so the per-lattice success rate keeps the natural volume
     # distribution and stays comparable with draft Table 1. Volume stratification belongs to the
     # train/dev/test split and to reporting, not to the sampling.
+    #
+    # columns widens the read for callers needing ground truth the mirror does not use (the FOM
+    # benchmark dump wants reindexed_xnn and the per-peak Miller indices). The sampling itself
+    # depends only on the seed and the entry count, so a widened read selects the same entries.
     data = pd.read_parquet(DATASET_DIRECTORY / f'dataset_{bravais_lattice}.parquet',
-                           columns=READ_COLUMNS)
+                           columns=list(columns) if columns is not None else READ_COLUMNS)
     data = data.loc[~data['train']]
     peaks = data[f'q2_{BROADENING_TAG}']
     data = data.loc[peaks.apply(lambda q2: np.count_nonzero(q2) >= N_PEAKS)]
@@ -184,10 +188,16 @@ def sample_entries(bravais_lattice, n_entries, base_seed):
     return data
 
 
-def prepare_peak_list(entry, args, base_seed):
+def prepare_peak_list(entry, args, base_seed, hkl=None):
     # Applied in the order a real pattern acquires them: some reflections are never detected, the
     # instrument has a calibration offset and a random error, and the contaminant lines are then
     # placed relative to the peaks as observed.
+    #
+    # hkl is the ground-truth assignment for q2_full, supplied only by callers that need to know
+    # which observed peak came from which reflection -- the FOM benchmark dump does, the mirror
+    # does not. Passing it costs one extra return value and nothing else: add_q2_error and
+    # add_contaminants already carry an hkl argument through their sort and insertion, and
+    # contaminants arrive as (0, 0, 0) rows, which is the convention the benchmark schema wants.
     q2_full = np.asarray(entry[f'q2_{BROADENING_TAG}'], dtype=float)
     rng = np.random.default_rng(derived_seed(f'noise:{entry["identifier"]}', base_seed))
 
@@ -197,15 +207,36 @@ def prepare_peak_list(entry, args, base_seed):
     # applied, so the values are still exact.
     nominal = q2_full[q2_full > 0][:N_PEAKS]
     n_dropout_achieved = int(np.sum(~np.isin(nominal, q2)))
+
+    if hkl is not None:
+        # select_peaks_with_dropout drops the zero padding and then selects by value, so the
+        # surviving rows are recovered by looking the values up in the same filtered list. Peak
+        # lists are stored in ascending q2, which searchsorted requires.
+        positive = q2_full > 0
+        q2_positive = q2_full[positive]
+        hkl_positive = np.asarray(hkl, dtype=float)[positive]
+        kept = np.searchsorted(q2_positive, q2)
+        hkl = hkl_positive[kept][np.newaxis].copy()
+
     # add_q2_error perturbs in place, so hand it a copy and keep the unperturbed list intact.
     q2 = q2[np.newaxis].copy()
     if args.error_multiplier > 0:
-        q2 = add_q2_error(q2, None, args.error_multiplier, rng)
+        if hkl is None:
+            q2 = add_q2_error(q2, None, args.error_multiplier, rng)
+        else:
+            q2, hkl = add_q2_error(q2, hkl, args.error_multiplier, rng)
     if args.n_contaminants > 0:
-        q2 = add_contaminants(q2, None, args.n_contaminants, rng,
-                              max_attempts=CONTAMINANT_MAX_ATTEMPTS,
-                              low_angle_bias=args.contaminant_bias)
-    return q2[0], n_dropout_achieved
+        if hkl is None:
+            q2 = add_contaminants(q2, None, args.n_contaminants, rng,
+                                  max_attempts=CONTAMINANT_MAX_ATTEMPTS,
+                                  low_angle_bias=args.contaminant_bias)
+        else:
+            q2, hkl = add_contaminants(q2, hkl, args.n_contaminants, rng,
+                                       max_attempts=CONTAMINANT_MAX_ATTEMPTS,
+                                       low_angle_bias=args.contaminant_bias)
+    if hkl is None:
+        return q2[0], n_dropout_achieved
+    return q2[0], n_dropout_achieved, hkl[0]
 
 
 def pool_candidates(top_unit_cell, top_M20, top_Minfo, top_spacegroup, top_n_indexed,

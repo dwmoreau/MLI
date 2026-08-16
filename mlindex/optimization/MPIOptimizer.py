@@ -191,9 +191,18 @@ class OptimizerManager(OptimizerBase):
         self.bravais_lattice = bravais_lattice
         self.rng = np.random.default_rng(seed)
 
+        # Candidate dumping for the FOM benchmark (docs/fom/SCHEMA.md). Off unless the
+        # driver sets opt_params['dump_candidates'] and dump_context; production is
+        # untouched. The records are buffered rather than written because
+        # _downsample_computation runs once per Bravais lattice per entry, and a shard per
+        # call would mean hundreds of thousands of small files over a full grid.
+        self.dump_context = None
+        self._dump_records = []
+
         opt_params_defaults = {
             'minimum_uc': 2,
             'maximum_uc': 500,
+            'dump_candidates': None,
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
@@ -498,6 +507,71 @@ class OptimizerManager(OptimizerBase):
             )
         return xnn
 
+    def _record_candidate_dump(self, xnn, M20, Minfo, n_indexed, spacegroup,
+                               n_entering, n_top_candidates):
+        """Buffer every deduplicated candidate, not just the top N that ranking keeps.
+
+        Called from _downsample_computation *before* the truncation, so `final_rank`
+        covers the whole survivor set and the rows that ranking is about to discard are
+        still present. Read-only with respect to the optimizer: nothing here feeds back
+        into the arrays the caller goes on to sort.
+
+        The M20 recorded here is the post-`assign_extinction_group` value, which is the
+        one ranking uses -- `Candidates.assign_extinction_group` rebinds `best_M20` to the
+        maximum over extinction groups, and that is what arrives in this method.
+        """
+        if self.zero_error:
+            raise NotImplementedError(
+                'Candidate dumping does not support zero-error refinement: the per-'
+                'candidate zeropoint stays in the worker and never reaches the manager, '
+                'so the dumped columns would not reproduce the pipeline M20.'
+                )
+        from mlindex.model_training.FomBenchmark import q2_digest
+
+        context = self.dump_context or {}
+        # Descending M20 over every survivor, so rank 0 is the candidate ranking would
+        # pick and the truncation is expressible as a boolean rather than a missing row.
+        order = np.argsort(M20)[::-1]
+        final_rank = np.empty(M20.shape[0], dtype=int)
+        final_rank[order] = np.arange(M20.shape[0])
+
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        unit_cell = get_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            )
+        self._dump_records.append({
+            'bravais_lattice': self.bravais_lattice,
+            'lattice_system': self.lattice_system,
+            'q2_digest': context.get('q2_digest') or q2_digest(self.q2_obs),
+            'context': context,
+            'n_peaks': int(self.n_peaks),
+            'hkl_ref_length': int(self.hkl_ref_length),
+            'n_entering': n_entering,
+            'assignment_threshold': float(self.opt_params['assignment_threshold']),
+            'downsample_radius': float(self.opt_params['downsample_radius']),
+            'xnn': np.array(xnn, dtype=np.float64, copy=True),
+            'unit_cell': np.array(unit_cell, dtype=np.float64, copy=True),
+            'volume': get_unit_cell_volume(
+                unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system),
+            'reciprocal_volume': get_unit_cell_volume(
+                reciprocal_unit_cell, partial_unit_cell=True,
+                lattice_system=self.lattice_system),
+            'M20': np.array(M20, dtype=np.float64, copy=True),
+            'Minfo': np.array(Minfo, dtype=np.float64, copy=True),
+            'n_indexed': np.array(n_indexed, dtype=int, copy=True),
+            'spacegroup': list(spacegroup),
+            'final_rank': final_rank,
+            'in_top_n': final_rank < n_top_candidates,
+            })
+
+    def drain_candidate_dump(self):
+        """Hand the buffered records to the driver and reset, so memory stays bounded."""
+        records = self._dump_records
+        self._dump_records = []
+        return records
+
     def _downsample_computation(self, best_M20_all, best_Minfo_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
                                 n_top_candidates):
@@ -505,6 +579,10 @@ class OptimizerManager(OptimizerBase):
         best_Minfo_all = np.concatenate(best_Minfo_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
+        # How many candidates survived prune_below_m20 across all ranks. Recorded rather
+        # than inferred because the dump keeps only the deduplicated survivors, and the
+        # ratio is the only trace left of how hard the M20 >= 5 cut bit for this entry.
+        n_entering = int(best_xnn_all.shape[0])
 
         # Remove any candidates with np.nan as a unit cell.
         # I believe these are caused by numerical issues with triclinic unit cells during the
@@ -564,6 +642,13 @@ class OptimizerManager(OptimizerBase):
         M20_downsampled = np.concatenate(M20_downsampled)
         Minfo_downsampled = np.concatenate(Minfo_downsampled)
         n_indexed_downsampled = np.concatenate(n_indexed_downsampled)
+
+        if self.opt_params.get('dump_candidates'):
+            self._record_candidate_dump(
+                xnn_downsampled, M20_downsampled, Minfo_downsampled,
+                n_indexed_downsampled, spacegroup_downsampled,
+                n_entering, n_top_candidates,
+                )
 
         sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]

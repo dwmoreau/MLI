@@ -40,6 +40,8 @@ dependencies = [
 mpi = ["mpi4py"]
 dataset_generation = ["gemmi", "pyarrow", "openpyxl", "tqdm"]
 training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]
+# Figure-of-merit benchmark: reading and writing the candidate dump.
+fom = ["pyarrow"]
 dev = ["pytest"]
 
 [tool.pytest.ini_options]
