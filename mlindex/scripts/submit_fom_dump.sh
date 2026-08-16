@@ -45,19 +45,20 @@
 #      Tasks are independent. A task that dies can be requeued on its own -- run_fom_dump.py skips
 #      pools whose output is already written and readable, so a requeue resumes rather than redoes.
 #
-#   5. Check completeness, then consolidate. The gate recomputes M20, Minfo and n_indexed from the
-#      dumped columns alone and fails if any column needed to reconstruct a score is missing:
+#   5. Verify the whole grid with one command. It checks SLURM state, then that every bundle is
+#      structurally complete, then that every entry carries its frozen split, then runs the round
+#      trip per bundle and the consolidation -- cheapest layer first, stopping at the first that
+#      fails, because a round trip over a bundle missing half its pools proves nothing:
 #
-#        PY=/global/cfs/cdirs/m4064/dwmoreau/envs/onnx/bin/python
-#        for d in ../characterization/fom/benchmark/*/; do
-#            $PY run_fom_dump_gate.py --dump-dir "$d" --artifact-dir ../../docs/fom/artifacts \
-#                --tag "S04_roundtrip_$(basename "$d")" || echo "GATE FAILED: $d"
-#        done
-#        $PY run_fom_dump_consolidate.py --dump-root ../characterization/fom/benchmark \
-#            --out-dir ../data/fom_benchmark --artifact-dir ../../docs/fom/artifacts
+#        /global/cfs/cdirs/m4064/dwmoreau/envs/onnx/bin/python run_fom_dump_verify.py \
+#            --dump-root ../characterization/fom/benchmark \
+#            --artifact-dir ../../docs/fom/artifacts \
+#            --out-dir ../data/fom_benchmark \
+#            --slurm-job $SLURM_ARRAY_JOB_ID
 #
-#      Consolidation exits non-zero if the acceptance gate fails, and writes the row-count table,
-#      the reachability ceiling and the gate verdict to docs/fom/artifacts/S04_row_counts.md.
+#      Exits non-zero if anything failed. --skip-gate for the fast layers only, --keep-going to run
+#      every layer regardless. It writes the row-count table, the reachability ceiling and the gate
+#      verdict to docs/fom/artifacts/S04_row_counts.md.
 #
 #   6. Record findings in docs/fom/STATUS_nersc_inbox.md and NOTHING in STATUS.md. The laptop copy
 #      is authoritative and `sync_record.sh push` overwrites this one; the inbox is excluded from
