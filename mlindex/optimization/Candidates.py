@@ -345,9 +345,14 @@ class Candidates:
                 lattice_system=self.lattice_system
                 )
             failed = np.any(np.isnan(best_standardized_xnn), axis=1)
-            if np.sum(failed) > 0:
-                #print('Failure in Standardization - Final check\n    numpy warning has been caught and corrected')
-                self.best_xnn[~failed] = best_standardized_xnn[~failed]
+            #if np.sum(failed) > 0:
+            #    print('Failure in Standardization - Final check\n    numpy warning has been caught and corrected')
+            # The write-back is unconditional. It used to sit inside `if np.sum(failed) > 0`, so on
+            # any run where nothing NaN'd out -- the common case -- the monoclinic standardization
+            # and the triclinic Selling reduction above were computed and then thrown away, and
+            # best_xnn kept its unstandardized value. The two branches above are not affected:
+            # they write into a local. This one is the only one that has to reach self.
+            self.best_xnn[~failed] = best_standardized_xnn[~failed]
 
     def correct_off_by_two(self):
         #mult_factor = np.array([1, 1/2, np.sqrt(2), 2, 3, 4])

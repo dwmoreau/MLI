@@ -191,3 +191,71 @@ def test_zero_error_step_survives_an_unreachable_wavelength():
     assert np.isfinite(delta).all()
     # Nothing is refinable here, so every step should be zero rather than junk.
     assert not delta.any()
+
+
+def _standardization_fixture(lattice_system, unit_cells):
+    """A Candidates carrying only what standardize_cell touches.
+
+    The full constructor wants an hkl_ref, a Q2Calculator and a peak list, none of which the
+    standardization reads. Building one would test the constructor, not the method.
+    """
+    from mlindex.optimization.Candidates import Candidates
+    from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
+
+    candidates = object.__new__(Candidates)
+    candidates.lattice_system = lattice_system
+    candidates.rng = np.random.default_rng(0)
+    candidates.minimum_unit_cell = 2.0
+    candidates.maximum_unit_cell = 100.0
+    # Angles are radians throughout this codebase -- get_unit_cell_volume takes np.cos of them
+    # directly -- so the degrees the cases are written in are converted here.
+    partial = np.stack([
+        get_partial_unit_cell(
+            np.concatenate([np.asarray(unit_cell[:3], dtype=float),
+                            np.deg2rad(np.asarray(unit_cell[3:], dtype=float))]),
+            lattice_system=lattice_system,
+            )
+        for unit_cell in unit_cells
+        ])
+    candidates.best_xnn = get_xnn_from_unit_cell(
+        partial, partial_unit_cell=True, lattice_system=lattice_system
+        )
+    return candidates
+
+
+@pytest.mark.parametrize(
+    "lattice_system, unit_cells",
+    [
+        # A long, very oblique c axis, which the Selling reduction inside
+        # monoclinic_standardization shortens: c 20 -> 10.09 and beta 150 -> 97.5 deg.
+        ("monoclinic", [[8.0, 5.0, 20.0, 90.0, 150.0, 90.0]]),
+        # An unreduced triclinic cell, so the Selling reduction has something to do.
+        ("triclinic", [[9.0, 8.0, 7.0, 95.0, 100.0, 115.0],
+                       [11.0, 6.0, 10.0, 85.0, 78.0, 98.0]]),
+        ],
+    )
+def test_standardize_cell_writes_back_when_nothing_fails(lattice_system, unit_cells):
+    """The write-back used to sit inside `if np.sum(failed) > 0`.
+
+    So on any run where no candidate NaN'd out of the final xnn conversion -- the common case --
+    the standardization was computed and then discarded, and best_xnn kept its unstandardized
+    value. That silently disabled monoclinic standardization and the triclinic Selling reduction
+    for {mP, mC, aP}, which is the hard stratum, on essentially every production run.
+    """
+    candidates = _standardization_fixture(lattice_system, unit_cells)
+    before = candidates.best_xnn.copy()
+
+    candidates.standardize_cell()
+
+    assert np.isfinite(candidates.best_xnn).all()
+    assert not np.allclose(candidates.best_xnn, before), (
+        'standardize_cell left best_xnn untouched; the write-back is conditional again'
+        )
+
+
+def test_standardize_cell_is_a_no_op_off_monoclinic_and_triclinic():
+    candidates = _standardization_fixture(
+        'orthorhombic', [[8.0, 9.0, 10.0, 90.0, 90.0, 90.0]])
+    before = candidates.best_xnn.copy()
+    candidates.standardize_cell()
+    assert np.array_equal(candidates.best_xnn, before)
