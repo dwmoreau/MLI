@@ -8,10 +8,15 @@ it were never written. This module is the other half of the dump hook in
 them back, and recomputes the scores offline so a variant FOM can re-rank a frozen pool
 instead of re-running the indexer.
 
-Two tables, joined on ``entry_id``:
+Two tables, joined on ``(entry_id, condition_bundle)``:
 
     candidates_*.parquet   one row per surviving candidate
-    entries.parquet        one row per indexed pattern, with the ground truth
+    entries.parquet        one row per indexed pattern *per condition*, with the ground truth
+
+The bundle is not a candidate column -- the dump hook knows only the entry and the lattice --
+so it is read back off the filename by `bundle_from_candidate_path` and attached by
+`load_candidates`. Joining on ``entry_id`` alone was correct while a root held one bundle and
+is wrong for a consolidated pool, where the same entry appears under every condition.
 
 What is deliberately *not* stored, because it regenerates exactly and is large:
 
@@ -29,6 +34,7 @@ See docs/fom/SCHEMA.md.
 """
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +98,18 @@ ENTRY_COLUMNS = (
     'spacegroup_true',
     'extinction_group_true',
     'hkl_true',
+)
+
+
+# Attached by label_frame, and -- since the S04 consolidation -- written into the candidate shards
+# themselves. Labelling costs ~9 ms/candidate, so a pool that already carries them must not be
+# relabelled just because a loader defaults to label=True.
+LABEL_COLUMNS = (
+    'is_correct',
+    'is_off_by_two',
+    'xnn_distance_to_truth',
+    'volume_ratio_to_truth',
+    'is_degenerate',
 )
 
 
@@ -409,8 +427,67 @@ def load_entries_ids(root):
     return _read_glob(root, 'entries*.parquet', columns=['entry_id'])['entry_id']
 
 
-def load_candidates(root, split=None, bravais_lattices=None, columns=None):
-    frame = _read_glob(root, 'candidates*.parquet', columns=columns)
+def bundle_from_candidate_path(path):
+    """Which condition bundle a candidate shard belongs to, from its filename.
+
+    The bundle is *not* a candidate column -- the dump hook runs per (entry, Bravais lattice)
+    and knows nothing about the condition the driver applied -- so the filename is the only
+    record of it on the candidate side. Both layouts have to be read: a generation run writes
+    `candidates_<bundle>_shard<NN>ofNN_pool<NN>.parquet` and consolidation rewrites those as
+    `candidates_<bundle>_<BL>.parquet`.
+
+    This matters more than a convenience: after consolidation `entries.parquet` holds one row
+    per (entry, bundle), so `entry_id` alone is no longer a key and a join on it silently
+    fans out 7x. Nor is (entry_id, q2_digest) a key -- C4 and C5 leave 157 of 5 922 entries
+    with an identical peak list, because both dropout counts cap on the same surplus.
+    """
+    from mlindex.command_line.run import BRAVAIS_LATTICES
+
+    stem = Path(path).stem
+    if not stem.startswith('candidates_'):
+        raise ValueError(f'Not a candidate shard: {path}')
+    tag = stem[len('candidates_'):]
+    match = re.fullmatch(r'(?P<bundle>.+)_shard\d+of\d+_pool\d+', tag)
+    if match:
+        return match.group('bundle')
+    bundle, _, last = tag.rpartition('_')
+    if bundle and last in BRAVAIS_LATTICES:
+        return bundle
+    return tag
+
+
+def available_bundles(root):
+    """The condition bundles present under `root`, in sorted order."""
+    paths = sorted(Path(root).glob('candidates_*.parquet'))
+    if not paths:
+        raise FileNotFoundError(f'No candidates_*.parquet under {root}')
+    return sorted({bundle_from_candidate_path(path) for path in paths})
+
+
+def load_candidates(root, split=None, bravais_lattices=None, columns=None, bundles=None):
+    """Candidate shards under `root`, tagged with the bundle their filename names.
+
+    `columns` is the only real memory knob -- the filters below run after the read, because
+    parquet here carries no row-group statistics worth pushing a predicate into. Projecting
+    to the nine columns the metrics need takes one bundle of ~3M candidates from ~2 GB to
+    ~220 MB. `xnn` and `unit_cell` are what cost; ask for them deliberately.
+    """
+    paths = sorted(Path(root).glob('candidates*.parquet'))
+    if not paths:
+        raise FileNotFoundError(f'No candidates*.parquet under {root}')
+    wanted = None if bundles is None else set(bundles)
+    projection = None if columns is None else _with_required(columns)
+    frames = []
+    for path in paths:
+        bundle = bundle_from_candidate_path(path)
+        if wanted is not None and bundle not in wanted:
+            continue
+        frame = _read_parquet(path, columns=projection)
+        frame['condition_bundle'] = bundle
+        frames.append(frame)
+    if not frames:
+        raise FileNotFoundError(f'No candidate shard under {root} for bundles {sorted(wanted)}')
+    frame = pd.concat(frames, ignore_index=True)
     if bravais_lattices is not None:
         frame = frame.loc[frame['bravais_lattice'].isin(bravais_lattices)]
     if split is not None:
@@ -420,29 +497,82 @@ def load_candidates(root, split=None, bravais_lattices=None, columns=None):
     return frame.reset_index(drop=True)
 
 
-def load_benchmark(root, split=None, bravais_lattices=None, rtol=1e-2, label=True):
-    """Candidates joined to their entries and labelled -- the frame S05 onwards consumes."""
+def load_benchmark(root, split=None, bravais_lattices=None, rtol=1e-2, label=True,
+                   columns=None, bundles=None):
+    """Candidates joined to their entries and labelled -- the frame S05 onwards consumes.
+
+    Labelling is skipped when the shards already carry the label columns, which the S04
+    consolidation writes. Relabelling a pool that has them would cost ~9 ms/candidate to
+    reproduce what is already on disk.
+    """
     entries = load_entries(root)
-    candidates = load_candidates(root, split=split, bravais_lattices=bravais_lattices)
+    candidates = load_candidates(
+        root, split=split, bravais_lattices=bravais_lattices, columns=columns, bundles=bundles,
+        )
     _check_join(candidates, entries)
-    if label:
+    if label and not has_labels(candidates):
         candidates = label_frame(candidates, entries, rtol=rtol)
     return candidates.merge(
-        entries.drop(columns=['q2_digest']), on='entry_id', how='left', validate='m:1',
+        entries.drop(columns=['q2_digest']), on=_join_keys(candidates, entries), how='left',
+        validate='m:1',
         )
 
 
+def has_labels(frame):
+    """Does this frame already carry usable correctness labels?
+
+    `is_degenerate` is deliberately excluded: it ships null (SCHEMA.md, Q28), so requiring it
+    to be populated would call every pool unlabelled.
+    """
+    required = [column for column in LABEL_COLUMNS if column != 'is_degenerate']
+    if any(column not in frame.columns for column in required):
+        return False
+    return not frame['is_correct'].isna().any()
+
+
+def _with_required(columns):
+    """Column projections must keep the join and filter keys, whatever else they ask for."""
+    projection = list(columns)
+    for required in ('entry_id', 'q2_digest', 'bravais_lattice'):
+        if required not in projection:
+            projection.append(required)
+    return projection
+
+
+def _join_keys(candidates, entries):
+    """(entry_id, condition_bundle) for a consolidated pool, entry_id for a single-bundle one.
+
+    A consolidated entry table holds the same entry under every condition, so `entry_id` alone
+    is not a key there and joining on it fans every candidate out once per bundle. A generation
+    run's shard directory holds one bundle, and its entry table predates the column, so the
+    single key is still correct there.
+    """
+    if 'condition_bundle' in candidates.columns and 'condition_bundle' in entries.columns:
+        return ['entry_id', 'condition_bundle']
+    return ['entry_id']
+
+
 def _check_join(candidates, entries):
-    digests = entries.set_index('entry_id')['q2_digest']
-    missing = set(candidates['entry_id']) - set(digests.index)
-    if missing:
+    """Every candidate must find exactly one entry row, and agree with its peak list."""
+    keys = _join_keys(candidates, entries)
+    digests = entries.set_index(keys)['q2_digest']
+    if digests.index.has_duplicates:
+        n_duplicated = int(digests.index.duplicated().sum())
         raise ValueError(
-            f'{len(missing)} entry_id present in the candidate shards but absent from the '
-            f'entry table, e.g. {sorted(missing)[:3]}'
+            f'{n_duplicated} entry rows share {tuple(keys)}, so the entry table is not a key. '
+            'A consolidated pool needs condition_bundle on both sides; load the candidates '
+            'with load_candidates, which reads it from the filename.'
+            )
+    candidate_keys = (pd.MultiIndex.from_frame(candidates[keys]) if len(keys) > 1
+                      else pd.Index(candidates['entry_id']))
+    missing = candidate_keys.difference(digests.index)
+    if len(missing):
+        raise ValueError(
+            f'{len(missing)} {tuple(keys)} present in the candidate shards but absent from the '
+            f'entry table, e.g. {missing[:3].tolist()}'
             )
     mismatched = candidates.loc[
-        candidates['q2_digest'].to_numpy()
-        != digests.loc[candidates['entry_id']].to_numpy()
+        candidates['q2_digest'].to_numpy() != digests.loc[candidate_keys].to_numpy()
         ]
     if mismatched.shape[0]:
         raise ValueError(
@@ -452,6 +582,14 @@ def _check_join(candidates, entries):
 
 
 def _read_glob(root, pattern, columns=None):
+    paths = sorted(Path(root).glob(pattern))
+    if not paths:
+        raise FileNotFoundError(f'No {pattern} under {root}')
+    frames = [_read_parquet(path, columns=columns) for path in paths]
+    return pd.concat(frames, ignore_index=True)
+
+
+def _read_parquet(path, columns=None):
     try:
         import pyarrow  # noqa: F401
     except ImportError as error:
@@ -459,8 +597,4 @@ def _read_glob(root, pattern, columns=None):
             "Reading the FOM benchmark needs pyarrow. Install it with "
             "'pip install mlindex[fom]' or 'pip install pyarrow'."
             ) from error
-    paths = sorted(Path(root).glob(pattern))
-    if not paths:
-        raise FileNotFoundError(f'No {pattern} under {root}')
-    frames = [pd.read_parquet(path, columns=columns) for path in paths]
-    return pd.concat(frames, ignore_index=True)
+    return pd.read_parquet(path, columns=columns)

@@ -116,7 +116,11 @@ def consolidate_bundle(bundle_dir, out_dir, rtol, keep_entry_ids=None, n_process
             f'{bundle_dir} mixes condition bundles: '
             f'{sorted(entries["condition_bundle"].unique())}. One directory per bundle.')
 
-    for bravais_lattice, group in labelled.groupby('bravais_lattice'):
+    # `load_candidates` tags each row with the bundle its filename names, in memory. Drop it
+    # again before writing so the stored candidate schema stays as SCHEMA.md describes it --
+    # the bundle lives in the filename, and `bundle_from_candidate_path` reads it back.
+    stored = labelled.drop(columns=['condition_bundle'], errors='ignore')
+    for bravais_lattice, group in stored.groupby('bravais_lattice'):
         FomBenchmark.write_candidate_shard(
             group.reset_index(drop=True), out_dir, f'{bundle}_{bravais_lattice}')
 
