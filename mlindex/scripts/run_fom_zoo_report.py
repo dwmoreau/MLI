@@ -84,9 +84,15 @@ def _explanation(main_table, hard_table, over, bands, union):
         '### The one-sentence version',
         '',
         f'**`M_sym` beats M20 by {gain:.4f} — {gain/headroom:.0%} of M20\'s headroom — because the '
-        'dominant failure on this benchmark is a candidate whose symmetry is too *low*, not whose '
-        'volume is too *large*, and `M^Rev` is the only construction in the zoo that measures '
-        'that directly.**',
+        'dominant failure is a candidate from a different, *lower-symmetry* lattice rather than a '
+        '*larger* one; because line over-prediction is the signature of that; and, above all, '
+        'because `M^Rev` expresses it on a scale that survives being pooled across fourteen '
+        'Bravais lattices, which is the thing almost nothing else in the zoo does.**',
+        '',
+        '*The last clause is the load-bearing one and it is easy to miss. Within a single lattice '
+        '`M_sym` beats M20 by only 1.1 points and the whole zoo lands in a narrow band; across '
+        'lattices the spread is enormous (section 10b, F-074). The leaderboard is mostly a '
+        'ranking of scale transfer.*',
         '',
         '### The mechanism, in three measured steps',
         '',
@@ -119,6 +125,17 @@ def _explanation(main_table, hard_table, over, bands, union):
         '',
         'On both scales the merits carrying an explicit volume term are the bottom of the zoo, '
         'and on the hard stratum two of the three score exactly zero.',
+        '',
+        '**4. But the win is delivered through the units, not through the fit.** Within a lattice '
+        '`M^Rev` and M20 are indistinguishable (0.6777 vs 0.6745) — as they must be, since every '
+        'candidate there shares the true Bravais lattice and "lower symmetry" cannot discriminate. '
+        'The over-prediction signal is *inherently cross-lattice*, which is consistent with step 1: '
+        'only 8.9% of wrong winners share the true lattice, so the failure **is** a cross-lattice '
+        'comparison. The precise claim is therefore not that `M^Rev` detects over-prediction better '
+        'than M20 does, but that over-prediction is the signature of the dominant failure that can '
+        'be written on a scale which transfers between lattices. Section 10b is the measurement, '
+        'and it says the same thing from the other direction: the merits that lose are the ones '
+        'whose units do not travel.',
         '',
         '### The design axes, scored',
         '',
@@ -213,6 +230,7 @@ def main():
     union = read(art, f'{args.explain_tag}_union_oracle.csv')
     singular = read(art, f'{args.explain_tag}_c0_singularity.csv')
     prefilter = read(art, f'{args.explain_tag}_prefilter_summary.csv')
+    transfer = read(art, f'{args.explain_tag}_scale_transfer.csv')
 
     n_candidates = int(features['n_candidates'].sum()) if features is not None else 0
     lines = [
@@ -453,6 +471,34 @@ def main():
         '`M_werner_frac` is timed as its Werner part alone; it also needs M20, so add that row.',
         '',
         table(cost, ['merit', 'seconds_per_candidate', 'cost_vs_M20', 'n_candidates_timed'], 6),
+        '',
+        '## 10b. Scale transfer -- how much of section 2 is fit, and how much is units',
+        '',
+        '**Read this before quoting the leaderboard.** `run.py` pools fourteen Bravais lattices '
+        'and sorts on one raw scale, so a merit whose value means different things in different '
+        'lattices is destroyed by the pooling however well it discriminates within one. Ranking '
+        'each merit both ways -- `pool=\'cross_bl\'` (what the program does) and `pool=\'per_bl\'` '
+        '(within each entry-and-lattice, deliberately an easier problem and never a headline) -- '
+        'separates the two.',
+        '',
+        table(transfer, ['merit', 'top10_cross_bl', 'top10_per_bl', 'scale_transfer_ratio',
+                         'lost_to_pooling'], 4),
+        '',
+        '**Within a lattice the whole zoo lands between 0.44 and 0.685; across lattices it spreads '
+        'from 0.000 to 0.618.** So section 2 is ranking scale transfer at least as much as fit '
+        'quality (F-074). Specifically: `M_sym`\'s advantage over M20 is **+10.6 pp** cross-lattice '
+        'and **+1.1 pp** within one, so roughly 90% of the headline gain is transfer. Those numbers '
+        'are still the ones that matter operationally, because cross-lattice pooling is what the '
+        'program does -- but the mechanism is not the one a reader would infer from section 2 '
+        'alone.',
+        '',
+        'The three information-type merits are the extreme case: `Minfo`, `M_info_clipped` and '
+        '`null_tail_nll` sit at ~0.60 within a lattice and ~0.04 across them, a **14x** gap. They '
+        'are sums of per-line log terms whose scale runs with the expected discrepancy and the '
+        'line count, so pooling them raw is meaningless arithmetic rather than a fair test. '
+        '`null_tail_nll` is the merit S01 designated as S07\'s analytic backbone; it ranks 18th of '
+        '21 in section 2 and that is a statement about units, not about the statistic. **This is '
+        'the largest single opportunity the session measured, and it is S07\'s.**',
         '',
         '## 11. Why one merit beats another -- the explanation',
         '',

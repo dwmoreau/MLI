@@ -309,6 +309,38 @@ def prefilter_sensitivity(benchmark_dir, feature_dir, bundles, keep_entry_ids, e
     return frame, wide.reset_index()
 
 
+def scale_transfer(benchmark_dir, feature_dir, bundles, keep_entry_ids, entries, merits,
+                   seed, split_label):
+    """How much of each merit's cross-lattice weakness is a scale problem rather than a fit problem.
+
+    `run.py` pools fourteen Bravais lattices and sorts on one raw scale, so a merit whose value
+    means different things in different lattices is destroyed by the pooling however well it
+    discriminates *within* a lattice. `pool='per_bl'` measures the within-lattice problem
+    deliberately (METRICS.md section 1) and is never a headline -- but the **ratio** of the two is
+    exactly the quantity S07 exists to close, and it has never been measured.
+
+    Returns one row per merit with both top-10 rates and their ratio.
+    """
+    rows = []
+    for name, higher in merits:
+        result = {}
+        for pool in ('cross_bl', 'per_bl'):
+            shards = bundle_frames(benchmark_dir, feature_dir, bundles, keep_entry_ids, [name])
+            evaluated = FomMetrics.evaluate(
+                shards, score=name, higher_is_better=higher, threshold=None, entries=entries,
+                pool=pool, strata=(), split=split_label, n_bootstrap=0, seed=seed,
+                )
+            result[pool] = float(evaluated.metric('top10'))
+        rows.append({
+            'merit': name,
+            'top10_cross_bl': result['cross_bl'],
+            'top10_per_bl': result['per_bl'],
+            'scale_transfer_ratio': result['per_bl']/max(result['cross_bl'], 1e-12),
+            'lost_to_pooling': result['per_bl'] - result['cross_bl'],
+            })
+    return pd.DataFrame(rows).sort_values('scale_transfer_ratio', ascending=False)
+
+
 def complementarity(per_entry_path, metric='top10'):
     """Pairwise 'A finds it, B does not', and the union oracle over the whole zoo.
 
@@ -520,6 +552,7 @@ def main():
     parser.add_argument('--seed', type=int, default=12345)
     parser.add_argument('--skip-bands', action='store_true')
     parser.add_argument('--skip-prefilter', action='store_true')
+    parser.add_argument('--skip-scale', action='store_true')
     parser.add_argument('--reuse-geometry', action='store_true',
                         help='Load the geometry table from a previous run instead of walking '
                              'the pool again. It depends only on the pool and M20, so it is '
@@ -591,6 +624,17 @@ def main():
     else:
         print('  skipped: no C0 feature matrix. Build one with '
               '--bundles error0_cont0 --limit-entries 300')
+
+    if not args.skip_scale:
+        print('\nscale transfer: cross-BL against per-BL top-10 (the quantity S07 closes)')
+        from mlindex.scripts.run_fom_zoo_eval import MERITS
+        transfer = scale_transfer(
+            args.benchmark_dir, args.feature_dir, args.bundles, dev_ids, entries,
+            [(name, higher) for name, higher, _, _ in MERITS], args.seed, args.report_split,
+            )
+        print(transfer.round(4).to_string(index=False))
+        transfer.to_csv(artifact_dir/f'{args.tag}_scale_transfer.csv', index=False,
+                        encoding='utf-8')
 
     if not args.skip_prefilter:
         print('\npre-filter sensitivity (Q5: measured once, not adopted)')
