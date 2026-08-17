@@ -435,6 +435,39 @@ def test_threshold_selection_needs_something_to_trade_against():
     assert np.isfinite(youden.threshold)
 
 
+def test_a_lower_is_better_threshold_has_to_be_turned_back_round():
+    """The orientation trap S06 walks into once per lower-is-better merit.
+
+    `evaluate` flips a lower-is-better score once, on the way in, so everything downstream can
+    assume higher-is-better -- which means `per_entry` stores the *negated* score and the
+    threshold `select_threshold` picks off it is negated too. Feeding that number straight back
+    into `evaluate(threshold=..., higher_is_better=False)` negates it a second time and silently
+    selects on the wrong side of the distribution. The caller has to pass `-choice.threshold`.
+
+    Here the correct candidates score 2 and 3 and the wrong one 30, so any useful threshold keeps
+    scores below about 10.
+    """
+    rows = [('E1', 'oP', 2.0, True), ('E2', 'oP', 30.0, False), ('E3', 'oP', 3.0, True)]
+    result = _evaluate(rows, higher_is_better=False)
+    choice = FomMetrics.select_threshold(result, weighted=False)
+    # Internal orientation: the stored scores are -2, -30, -3, so the chosen threshold is negative.
+    assert choice.threshold < 0
+
+    correct = _evaluate(rows, higher_is_better=False, threshold=-choice.threshold, weights=None)
+    wrong = _evaluate(rows, higher_is_better=False, threshold=choice.threshold, weights=None)
+
+    # Turned back round, both correct candidates clear the threshold and the wrong one does not.
+    assert correct.metric('operating_point') == pytest.approx(2/3)
+    assert correct.metric('false_positive') == pytest.approx(0.0)
+
+    # Left negated, the threshold lands past the far tail and the program abstains on everything.
+    # Note the failure mode: not a flood of wrong answers but a silent refusal to answer at all,
+    # which is why this is worth a test -- a merit broken this way looks merely unimpressive.
+    assert wrong.metric('operating_point') == pytest.approx(0.0)
+    assert wrong.metric('reported') == pytest.approx(0.0)
+    assert correct.metric('reported') > wrong.metric('reported')
+
+
 def test_threshold_transfer_refuses_the_selection_entries():
     rows = [('E1', 'oP', 20.0, True), ('E2', 'oP', 4.0, True)]
     result = _evaluate(rows, threshold=10)

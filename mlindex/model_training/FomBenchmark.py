@@ -209,12 +209,17 @@ def reference_lines(xnn, lattice_system, bravais_lattice, spacegroup,
         ).get_q2(np.atleast_2d(xnn))
 
 
-def recompute_scores(q2_obs, xnn, lattice_system, bravais_lattice, spacegroup,
-                     assignment_threshold, models_directory=None):
-    """Recompute (M20, Minfo, n_indexed) for candidates sharing one extinction group.
+def assign_lines(q2_obs, xnn, lattice_system, bravais_lattice, spacegroup,
+                 models_directory=None):
+    """Rebuild the calculated lines and the Miller-index assignment for one extinction group.
 
-    This is the round trip the acceptance gate measures: it must reproduce the values the
-    pipeline stored, from the dumped columns alone.
+    Everything a figure of merit needs beyond the dumped columns, and the step both
+    `recompute_scores` and `zoo_features` start from: the full reference list `q2_ref_calc`,
+    the assignment `fast_assign` chooses, the assigned Miller indices, and the calculated
+    position of the line assigned to each observed peak.
+
+    Returns (q2_ref_calc, hkl_assign, hkl, q2_calc). `q2_ref_calc` is fresh, not cached --
+    `get_M20` writes into it (FigureOfMerits.py, np.putmask), so it must not be shared.
     """
     xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
     q2_obs = np.asarray(q2_obs, dtype=np.float64)
@@ -226,6 +231,21 @@ def recompute_scores(q2_obs, xnn, lattice_system, bravais_lattice, spacegroup,
     hkl_assign = fast_assign(q2_obs, q2_ref_calc)
     hkl = np.take(hkl_ref, hkl_assign, axis=0)
     q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+    return q2_ref_calc, hkl_assign, hkl, q2_calc
+
+
+def recompute_scores(q2_obs, xnn, lattice_system, bravais_lattice, spacegroup,
+                     assignment_threshold, models_directory=None):
+    """Recompute (M20, Minfo, n_indexed) for candidates sharing one extinction group.
+
+    This is the round trip the acceptance gate measures: it must reproduce the values the
+    pipeline stored, from the dumped columns alone.
+    """
+    xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
+    q2_obs = np.asarray(q2_obs, dtype=np.float64)
+    q2_ref_calc, hkl_assign, hkl, q2_calc = assign_lines(
+        q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory
+        )
 
     # get_M20 mutates q2_ref_calc in place (FigureOfMerits.py, np.putmask), so it gets the
     # array last and Minfo is computed from xnn before it is touched.
@@ -271,6 +291,98 @@ def recompute_frame(candidates, entries, models_directory=None):
     result[columns] = out
     result['n_indexed_recomputed'] = result['n_indexed_recomputed'].astype(int)
     return result
+
+
+# The keys a feature row is identified by. candidate_id is only meaningful within its own
+# (entry, lattice), so all four are needed to join a feature matrix back to the pool.
+ZOO_KEY_COLUMNS = ('entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id')
+
+# Columns zoo_features reads. Anything else is dead weight in a 10M-row projection.
+ZOO_CANDIDATE_COLUMNS = (
+    'entry_id',
+    'bravais_lattice',
+    'lattice_system',
+    'candidate_id',
+    'xnn',
+    'spacegroup',
+    'n_peaks',
+    'M20',
+    )
+
+
+def zoo_features(candidates, entries, g_min=1.0, min_discrepancy=0.0,
+                 sigma_entrywise=True, models_directory=None):
+    """Every figure of merit in the zoo, for a whole candidate frame.
+
+    `FigureOfMerits.compute_all` costs ~268 get_M20-equivalents (S01_fom_cost.csv), so it is
+    evaluated **once** here and each merit is then ranked as a plain column. Computing it inside
+    a `FomMetrics.evaluate(score=callable)` would pay that cost once per merit instead.
+
+    Returns (features, sigma_treatment): a frame carrying ZOO_KEY_COLUMNS and one float column
+    per feature, aligned to `candidates`' own index, and the map from feature name to
+    'free' / 'in-sample' / 'assumed'. A column labelled anything but 'free' is not
+    sigma-free and PROTOCOL section 3 rule 4 applies to it.
+
+    Grouped by (entry, n_peaks) on the outside and (lattice, extinction group) inside, for two
+    reasons. The reference list is cctbx-backed and is built once per extinction group rather
+    than once per row; and `sigma_entrywise` is a property of the *entry's whole pool*, so the
+    inner groups are collected before any merit is evaluated. n_peaks joins the outer key
+    because the cubic models are scored on ten peaks and everything else on twenty, and the
+    two cannot share a residual-scale estimate.
+
+    `g_min` enters only the two Werner quantities and enters both multiplicatively:
+    V_crit is proportional to 1/g_min, so `V_over_Vcrit` scales linearly in it and
+    `M_werner_frac` scales linearly in it *uniformly across candidates*. So the stored
+    columns are at the caller's `g_min` and any other floor is a rescale of them --
+    `M_werner_frac`'s ranking within an entry does not depend on g_min at all, and only the
+    V/V_crit = 1 boundary moves (Q14).
+    """
+    from mlindex.utilities.FigureOfMerits import compute_all
+    from mlindex.utilities.FigureOfMerits import estimate_sigma_entrywise
+
+    join_keys = _join_keys(candidates, entries)
+    peaks = entries.set_index(join_keys)['q2_obs']
+
+    collected = {}
+    treatments = {}
+    for outer_key, entry_group in candidates.groupby(list(join_keys) + ['n_peaks'], sort=False):
+        n_peaks = int(outer_key[-1])
+        peak_key = outer_key[0] if len(join_keys) == 1 else outer_key[:len(join_keys)]
+        # The optimizer truncates the peak list with a plain prefix slice; cut it the same way.
+        q2_obs = np.asarray(peaks.loc[peak_key], dtype=np.float64)[:n_peaks]
+
+        inner_keys = ['lattice_system', 'bravais_lattice', 'spacegroup']
+        prepared = []
+        for (lattice_system, bravais_lattice, spacegroup), group in \
+                entry_group.groupby(inner_keys, sort=False):
+            xnn = np.vstack([np.asarray(v, dtype=np.float64) for v in group['xnn']])
+            q2_ref_calc, _, _, q2_calc = assign_lines(
+                q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory
+                )
+            prepared.append(
+                (group.index, lattice_system, bravais_lattice, xnn, q2_calc, q2_ref_calc)
+                )
+
+        sigma = None
+        if sigma_entrywise:
+            sigma = estimate_sigma_entrywise(
+                q2_obs, np.vstack([item[4] for item in prepared])
+                )
+
+        for index, lattice_system, bravais_lattice, xnn, q2_calc, q2_ref_calc in prepared:
+            output = compute_all(
+                q2_obs, q2_calc, q2_ref_calc, xnn, lattice_system, bravais_lattice,
+                sigma_entrywise=sigma, g_min=g_min, min_discrepancy=min_discrepancy,
+                )
+            treatments.update(output['sigma_treatment'])
+            for name, values in output['features'].items():
+                collected.setdefault(name, {}).update(zip(index, np.asarray(values, dtype=float)))
+
+    features = pd.DataFrame(
+        {name: pd.Series(values) for name, values in collected.items()}
+        ).reindex(candidates.index)
+    keys = [column for column in ZOO_KEY_COLUMNS if column in candidates.columns]
+    return pd.concat([candidates[keys], features], axis=1), treatments
 
 
 # label_frame's cost is almost entirely validate_candidate_known_bl: profiled at 600 candidates it

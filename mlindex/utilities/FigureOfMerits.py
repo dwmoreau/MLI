@@ -670,6 +670,8 @@ SIGMA_TREATMENT.update(
     {
         "M_wu": "free",
         "M_star": "free",
+        "M_star_corrected": "free",
+        "M_werner_max": "free",
         "M_info_clipped": "free",
         "M_1": "free",
         "n_over": "free",
