@@ -39,7 +39,10 @@ dependencies = [
 [project.optional-dependencies]
 mpi = ["mpi4py"]
 dataset_generation = ["gemmi", "pyarrow", "openpyxl", "tqdm"]
-training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]
+# `lightgbm` is used only to test whether a per-entry ranking objective beats pointwise
+# classification in the figure-of-merit combiner (PLAN A11). It is imported inside the fit path,
+# never at module scope, so nothing on the inference path depends on it.
+training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision", "lightgbm"]
 # Figure-of-merit benchmark: reading and writing the candidate dump.
 fom = ["pyarrow"]
 dev = ["pytest"]

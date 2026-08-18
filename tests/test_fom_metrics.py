@@ -442,6 +442,36 @@ def test_mcnemar_refuses_different_entry_sets():
         FomMetrics.mcnemar(both, one)
 
 
+def test_mcnemar_accepts_a_boolean_mask_subset():
+    """The documented mask path, which raised "truth value of an array is ambiguous" until S08.
+
+    `subset == 'hard'` was evaluated before the type was known, so comparing an ndarray with a
+    string produced an array and the `elif` on it raised. That made every per-stratum paired test
+    unreachable -- including the per-Bravais-lattice one, which is the only way to check whether a
+    learned score has made one lattice worse while improving the aggregate (S08, F-080).
+    """
+    rows = [(f'E{position}', 'oP', 20.0, True) for position in range(12)]
+    candidates, entries = _tiny(rows)
+    candidates['other'] = candidates['score'] - 15.0
+    first = FomMetrics.evaluate(candidates, entries=entries, score='score', threshold=10,
+                                weights=None, n_bootstrap=0)
+    second = FomMetrics.evaluate(candidates, entries=entries, score='other', threshold=10,
+                                 weights=None, n_bootstrap=0)
+
+    everything = np.ones(first.per_entry.shape[0], dtype=bool)
+    assert (int(FomMetrics.mcnemar(first, second, subset=everything)['n_a_only'])
+            == int(FomMetrics.mcnemar(first, second)['n_a_only']))
+
+    half = np.zeros(first.per_entry.shape[0], dtype=bool)
+    half[:6] = True
+    assert int(FomMetrics.mcnemar(first, second, subset=half)['n_entries']) == 6
+
+    with pytest.raises(ValueError, match='boolean mask'):
+        FomMetrics.mcnemar(first, second, subset='soft')
+    with pytest.raises(ValueError, match='shape'):
+        FomMetrics.mcnemar(first, second, subset=np.ones(3, dtype=bool))
+
+
 def test_threshold_selection_needs_something_to_trade_against():
     # The operating point is monotone non-increasing in the threshold, so maximising it alone
     # drives the threshold to minus infinity. Selecting on it must therefore be constrained.

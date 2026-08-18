@@ -155,7 +155,11 @@ cannot install at all.
 
 Dataset generation requires: `pyarrow`, `openpyxl`, `cctbx`, `tqdm`
 
-Model training additionally requires: `skl2onnx`, `keras`, `torch`, `torchvision`
+Model training additionally requires: `skl2onnx`, `keras`, `torch`, `torchvision`, `lightgbm`
+
+`lightgbm` is only needed to fit the ranking-objective variant of the FOM combiner
+(`mlindex/model_training/FomCombiner.py`). It is imported inside the fit path, so inference and
+model loading work without it.
 
 ## The ML-FOM project — its record is untracked, and this is the only pointer to it
 

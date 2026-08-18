@@ -1078,12 +1078,21 @@ def mcnemar(result_a, result_b, metric='operating_point', subset=None):
             f'{len(only_right)} only in B (e.g. {only_right[:3].tolist()})'
             )
     right = right.reindex(left.index)
+    # The string check is guarded by `isinstance` rather than written as `subset == 'hard'`:
+    # comparing an ndarray to a string returns an array, and `elif` on it raises "truth value of
+    # an array is ambiguous" -- which made the documented boolean-mask path unusable.
     if subset is None:
         mask = np.ones(left.shape[0], dtype=bool)
-    elif subset == 'hard':
+    elif isinstance(subset, str):
+        if subset != 'hard':
+            raise ValueError(f"subset must be None, 'hard', or a boolean mask; got {subset!r}")
         mask = left['is_hard'].to_numpy(dtype=bool)
     else:
         mask = np.asarray(subset, dtype=bool)
+        if mask.shape != (left.shape[0],):
+            raise ValueError(
+                f'subset mask has shape {mask.shape}, expected ({left.shape[0]},). It must be '
+                'aligned to the result sorted by (entry_id, condition_bundle).')
     flags_a = left.loc[mask, metric].to_numpy(dtype=bool)
     flags_b = right.loc[mask, metric].to_numpy(dtype=bool)
     n_a_only = int(np.sum(flags_a & ~flags_b))
