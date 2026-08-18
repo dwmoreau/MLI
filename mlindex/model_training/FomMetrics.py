@@ -248,8 +248,14 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
     per_entry = context.merge(_combine_reductions(reductions),
                              on=['entry_id', 'condition_bundle'], how='inner', validate='1:1')
     # The threshold is quoted in the score's own orientation -- "accept below t" for a
-    # lower-is-better merit -- so it is mirrored with the scores rather than by the caller.
-    internal_threshold = (threshold if threshold is None or higher_is_better else -threshold)
+    # lower-is-better merit -- so it is mirrored with the scores rather than by the caller. A
+    # per-lattice mapping is mirrored value by value.
+    if threshold is None or higher_is_better:
+        internal_threshold = threshold
+    elif isinstance(threshold, dict):
+        internal_threshold = {lattice: -cut for lattice, cut in threshold.items()}
+    else:
+        internal_threshold = -threshold
     per_entry = derive_flags(per_entry, threshold=internal_threshold, top_n=top_n,
                              pool_subset=pool_subset, degenerates=degenerates)
 
@@ -271,7 +277,9 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
     meta = dict(
         score=score if isinstance(score, str) else getattr(score, '__name__', 'callable'),
         higher_is_better=bool(higher_is_better),
-        threshold=None if threshold is None else float(threshold),
+        threshold=(None if threshold is None else
+                   ({str(k): float(v) for k, v in threshold.items()}
+                    if isinstance(threshold, dict) else float(threshold))),
         pool=pool,
         top_n=int(top_n),
         pool_subset=pool_subset,
@@ -683,6 +691,20 @@ def _weight_series(lattices, weights):
 # ---------------------------------------------------------------------------------------
 # Flags
 # ---------------------------------------------------------------------------------------
+def _resolve_threshold(threshold, frame, lattice_column):
+    """A scalar cut, or one cut per row taken from `lattice_column`.
+
+    A lattice absent from the mapping, and a row with no candidate to attribute (an entry with no
+    correct candidate, or none at all), get `+inf` -- so the comparison is False rather than
+    silently borrowing another lattice's cut.
+    """
+    if not isinstance(threshold, dict):
+        return float(threshold)
+    lattices = frame[lattice_column].to_numpy()
+    return np.array([threshold.get(lattice, np.inf) if lattice is not None else np.inf
+                     for lattice in lattices], dtype=np.float64)
+
+
 def derive_flags(per_entry, threshold=None, top_n=DEFAULT_TOP_N, pool_subset='all',
                  degenerates='exclude'):
     """Attach the per-entry outcome flags for one (threshold, top_n) operating point.
@@ -690,6 +712,14 @@ def derive_flags(per_entry, threshold=None, top_n=DEFAULT_TOP_N, pool_subset='al
     Split out from the reduction because these are the only quantities that depend on the
     threshold, so S06 can sweep it without re-reading the pool and `mcnemar` can pair two
     scores on exactly these columns.
+
+    `threshold` is a scalar, or a **mapping from Bravais lattice to a cut**. The mapping exists
+    because a per-lattice accept rule cannot be expressed as a transform of the score: subtracting
+    a per-lattice offset changes the *cross-lattice ranking* as well as the accept test, and S08
+    measured that conflation costing 3.9 pp of top-10 (F-089). Applied here the ranking is
+    untouched and only the two comparisons move -- each against the lattice of the candidate it is
+    testing, which is why the reduction records `bravais_lattice_best_correct` and
+    `bravais_lattice_top` separately.
     """
     frame = per_entry.copy()
     suffix = '' if degenerates == 'exclude' else '_incl_degenerate'
@@ -710,8 +740,10 @@ def derive_flags(per_entry, threshold=None, top_n=DEFAULT_TOP_N, pool_subset='al
         over = found
         reported = np.ones(found.shape, dtype=bool)
     else:
-        over = found & (score_best > threshold)
-        reported = frame['score_top'].to_numpy(dtype=np.float64) > threshold
+        cut_best = _resolve_threshold(threshold, frame, 'bravais_lattice_best_correct')
+        cut_top = _resolve_threshold(threshold, frame, 'bravais_lattice_top')
+        over = found & (score_best > cut_best)
+        reported = frame['score_top'].to_numpy(dtype=np.float64) > cut_top
 
     frame['found'] = found
     frame['rank_only'] = in_top

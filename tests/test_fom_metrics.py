@@ -442,6 +442,39 @@ def test_mcnemar_refuses_different_entry_sets():
         FomMetrics.mcnemar(both, one)
 
 
+def test_a_per_lattice_threshold_moves_the_accept_rule_and_not_the_ranking():
+    """S08's Q33 needs a per-lattice accept rule that leaves the cross-lattice order alone.
+
+    Expressing it as a score transform -- subtract each lattice's cut -- also reorders the pooled
+    ranking, and S08 measured that conflation costing 3.9 pp of top-10. A mapping applied at the
+    comparison instead has to leave every rank metric byte-identical.
+    """
+    rows = ([(f'A{position}', 'cP', 30.0, True) for position in range(6)]
+            + [(f'B{position}', 'aP', 12.0, True) for position in range(6)])
+    truth = {f'A{position}': 'cP' for position in range(6)}
+    truth.update({f'B{position}': 'aP' for position in range(6)})
+    candidates, entries = _tiny(rows, entries=truth)
+    common = dict(entries=entries, score='score', weights=None, n_bootstrap=0,
+                  strata=('bravais_lattice',))
+
+    scalar = FomMetrics.evaluate(candidates, threshold=20.0, **common)
+    mapped = FomMetrics.evaluate(candidates, threshold={'cP': 20.0, 'aP': 5.0}, **common)
+
+    # The rank half is untouched by any threshold, per-lattice or not.
+    for metric in ('top1', 'top10', 'rank_only', 'found'):
+        assert mapped.metric(metric) == scalar.metric(metric)
+    # The accept half moves, and only for the lattice whose cut changed.
+    per_lattice = mapped.stratum('bravais_lattice').set_index('level')
+    assert per_lattice.loc['aP', 'threshold_only'] == 1.0
+    assert FomMetrics.evaluate(candidates, threshold=20.0, **common) \
+        .stratum('bravais_lattice').set_index('level').loc['aP', 'threshold_only'] == 0.0
+    assert mapped.meta['threshold'] == {'cP': 20.0, 'aP': 5.0}
+
+    # A lattice the mapping omits is refused, not quietly given a neighbour's cut.
+    partial = FomMetrics.evaluate(candidates, threshold={'cP': 20.0}, **common)
+    assert partial.stratum('bravais_lattice').set_index('level').loc['aP', 'threshold_only'] == 0.0
+
+
 def test_mcnemar_accepts_a_boolean_mask_subset():
     """The documented mask path, which raised "truth value of an array is ambiguous" until S08.
 

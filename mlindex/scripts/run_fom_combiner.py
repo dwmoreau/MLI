@@ -327,16 +327,34 @@ def run_robustness(args, artifact_dir):
 
     variants = [
         ('combiner (global threshold)', combiner.score, threshold, columns),
-        ('combiner (per-lattice thresholds)', offset_score(combiner, thresholds), 0.0, columns),
+        # The accept rule alone, with the ranking left exactly as it was. This is the variant Q33
+        # actually asks about; the `offset_score` one below changes the ranking too, and reporting
+        # only that would have answered a different question.
+        ('combiner (per-lattice accept rule)', combiner.score, dict(thresholds), columns),
+        ('combiner (per-lattice offset score)', offset_score(combiner, thresholds), 0.0, columns),
         ('hybrid: M_sym-calibrated for aP', hybrid_score(combiner, knots), threshold,
          tuple(sorted(set(columns) | {'M_sym'}))),
         ]
+    # The hybrid needs its own cut for the lattice it replaces: an isotonic map of `M_sym` lands on
+    # a different part of the probability scale from the combiner's own output, so scoring aP one
+    # way and thresholding it the other measures the mismatch rather than the idea. Every other
+    # lattice keeps the global cut, so this is the hybrid and nothing else.
+    hybrid = hybrid_score(combiner, knots)
+    hybrid_cal = evaluate_score(cal_frames, entries, hybrid, threshold, args.train_split,
+                                tuple(sorted(set(columns) | {'M_sym'})))
+    hybrid_cuts = {lattice: threshold for lattice in FomMetrics.BRAVAIS_LATTICES}
+    hybrid_cuts['aP'] = per_lattice_thresholds(hybrid_cal, budget)['aP']
+    variants.append(('hybrid: M_sym for aP, with its own cut', hybrid, hybrid_cuts,
+                     tuple(sorted(set(columns) | {'M_sym'}))))
+    print(f"hybrid aP cut {hybrid_cuts['aP']:.5f} against the global {threshold:.5f}")
     rows, results = [], {}
     for label, score, cut, needed in variants:
         dev = evaluate_score(dev_frames, entries, score, cut, args.report_split, needed,
                              n_bootstrap=args.n_bootstrap, seed=args.seed)
         row = scope_row(dev, arm=label, groups='+'.join(groups), objective='none',
-                        n_features=len(combiner.names), threshold=cut, threshold_rule='q33',
+                        n_features=len(combiner.names),
+                        threshold=np.nan if isinstance(cut, dict) else cut,
+                        threshold_rule='per_lattice' if isinstance(cut, dict) else 'q33',
                         seconds_fit=0.0, per_lattice_models=False)
         row.update(per_lattice(dev, 'dev'))
         rows.append(row)
@@ -363,7 +381,8 @@ def run_robustness(args, artifact_dir):
         artifact_dir/f'{args.tag}_q33_by_lattice.csv', index=False)
 
     paired = []
-    for label in ('combiner (per-lattice thresholds)', 'hybrid: M_sym-calibrated for aP'):
+    for label in ('combiner (per-lattice accept rule)', 'combiner (per-lattice offset score)',
+                  'hybrid: M_sym-calibrated for aP'):
         for baseline in ('combiner (global threshold)', 'M_sym (raw)'):
             paired.append(paired_by_lattice(results[label], results[baseline], label, baseline))
     pd.concat(paired, ignore_index=True).to_csv(
@@ -395,7 +414,7 @@ def run_robustness(args, artifact_dir):
 
     # ---- leave one condition out ------------------------------------------------------
     loco = []
-    for held_out in args.bundles:
+    for held_out in ([] if args.skip_loco else args.bundles):
         keep = [index for index, bundle in enumerate(args.bundles) if bundle != held_out]
         held = [index for index, bundle in enumerate(args.bundles) if bundle == held_out]
         if not held or len(keep) < 2:
@@ -428,7 +447,10 @@ def run_robustness(args, artifact_dir):
         print(f'  LOCO {held_out:22s} without {loco[-1]["op_trained_without"]:.4f}  '
               f'with {loco[-1]["op_trained_with"]:.4f}  '
               f'cost {loco[-1]["op_transfer_cost"]:+.4f}')
-    pd.DataFrame(loco).to_csv(artifact_dir/f'{args.tag}_loco.csv', index=False)
+    if loco:
+        pd.DataFrame(loco).to_csv(artifact_dir/f'{args.tag}_loco.csv', index=False)
+    else:
+        print('  LOCO skipped; the previous pass table is left in place')
 
     pd.DataFrame(rows).to_csv(artifact_dir/f'{args.tag}_q33_table.csv', index=False)
     with open(artifact_dir/f'{args.tag}_robustness_meta.json', 'w', encoding='utf-8') as handle:
@@ -480,6 +502,7 @@ def run_distil(args, artifact_dir):
     for label, parent in (('full', teacher), ('cheap', cheap_teacher)):
         student = FomCombiner.DistilledCombiner.distil(
             parent, cal_frames, hidden=(32, 16), seed=args.seed)
+        student.fit_calibrators(cal_frames)
         students[label] = (parent, student)
         print(f'  distilled {label:6s} {len(parent.names):3d} features, '
               f'teacher correlation {student.meta["train_correlation"]:.4f}')
@@ -721,10 +744,15 @@ def _shuffle_labels(frame, seed):
 
 def _restrict(combiner, names, fit_frames, args):
     """Refit the same model class on a subset of its own feature columns."""
+    # `objective='pointwise'` regardless of the parent's, because this always fits a pointwise
+    # model. Inheriting the parent's label sent a `HistGradientBoostingClassifier` down
+    # `predict_batch`'s ranker branch, where `predict` returns 0/1 class labels rather than a
+    # probability -- a score with two distinct values, which ranks by the tie-break and scores
+    # nothing.
     restricted = FomCombiner.FomCombiner(
         names=names, categorical=tuple(n for n in combiner.categorical if n in names),
         categories={k: v for k, v in combiner.categories.items() if k in names},
-        groups=combiner.groups, objective=combiner.objective,
+        groups=combiner.groups, objective='pointwise',
         )
     frame = pd.concat(fit_frames, ignore_index=True) if len(fit_frames) > 1 else fit_frames[0]
     matrix = restricted.design_matrix(frame)
@@ -766,6 +794,9 @@ def main():
                              'robustness runs Q33, prior sensitivity and leave-one-condition-out; '
                              'distil fits the fast form and times it. Each later stage reads the '
                              'artefacts and the saved model the main stage wrote.')
+    parser.add_argument('--skip-loco', action='store_true',
+                        help='robustness stage: reuse the previous pass leave-one-condition-out '
+                             'table instead of refitting once per condition')
     parser.add_argument('--skip-lambdarank', action='store_true')
     parser.add_argument('--skip-importance', action='store_true')
     parser.add_argument('--importance-repeats', type=int, default=1)

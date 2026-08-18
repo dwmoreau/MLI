@@ -603,10 +603,16 @@ class DistilledCombiner:
     """
 
     def __init__(self, names=(), categorical=(), categories=None, weights=(), biases=(),
-                 centre=None, scale=None, median=None, meta=None):
+                 centre=None, scale=None, median=None, calibrators=None, meta=None):
         self.names = tuple(names)
         self.categorical = tuple(categorical)
         self.categories = categories or {}
+        # The student needs its own per-lattice isotonic, for the same reason the teacher does and
+        # not because it inherits one: a regression fitted to the teacher's *output* reproduces the
+        # ordering but not the scale, and an uncalibrated score has no threshold that meets a
+        # false-positive budget -- measured as an operating point of exactly zero before this was
+        # added, against a top-10 of 0.65.
+        self.calibrators = calibrators or {}
         self.weights = [np.asarray(weight, dtype=np.float64) for weight in weights]
         self.biases = [np.asarray(bias, dtype=np.float64) for bias in biases]
         self.centre = None if centre is None else np.asarray(centre, dtype=np.float64)
@@ -620,6 +626,8 @@ class DistilledCombiner:
     design_matrix = FomCombiner.design_matrix
     categorical_indices = FomCombiner.categorical_indices
     score_columns = FomCombiner.score_columns
+    fit_calibrators = FomCombiner.fit_calibrators
+    score = FomCombiner.score
 
     @classmethod
     def distil(cls, teacher, frames, hidden=(32, 16), seed=12345, max_iter=60, sample=400000):
@@ -671,14 +679,13 @@ class DistilledCombiner:
     def raw_score(self, frame):
         return self.predict_batch(self.design_matrix(frame))
 
-    def score(self, frame):
-        """The teacher's output is already a probability, so the student's is clipped to be one."""
-        return np.clip(self.raw_score(frame), 0.0, 1.0)
-
     def save(self, directory):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         arrays = {'centre': self.centre, 'scale': self.scale, 'median': self.median}
+        for name, (thresholds, targets) in self.calibrators.items():
+            arrays[f'calibrator_{name}__x'] = thresholds
+            arrays[f'calibrator_{name}__y'] = targets
         for index, (weight, bias) in enumerate(zip(self.weights, self.biases)):
             arrays[f'weight_{index}'] = weight
             arrays[f'bias_{index}'] = bias
@@ -697,12 +704,16 @@ class DistilledCombiner:
         with open(directory/'distilled.json', encoding='utf-8') as handle:
             specification = json.load(handle)
         n_layers = int(specification['meta']['n_layers'])
+        names = {key[len('calibrator_'):].rsplit('__', 1)[0] for key in arrays.files
+                 if key.startswith('calibrator_')}
+        calibrators = {name: (arrays[f'calibrator_{name}__x'], arrays[f'calibrator_{name}__y'])
+                       for name in names}
         return cls(names=specification['names'], categorical=specification['categorical'],
                    categories=specification['categories'],
                    weights=[arrays[f'weight_{index}'] for index in range(n_layers)],
                    biases=[arrays[f'bias_{index}'] for index in range(n_layers)],
                    centre=arrays['centre'], scale=arrays['scale'], median=arrays['median'],
-                   meta=specification['meta'])
+                   calibrators=calibrators, meta=specification['meta'])
 
 
 def _impute(matrix, median):

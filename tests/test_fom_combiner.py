@@ -325,16 +325,34 @@ def test_the_student_imputes_rather_than_propagating_nan(pool, teacher):
 def test_the_student_round_trips_without_pickling_anything(tmp_path, pool, teacher):
     student = FomCombiner.DistilledCombiner.distil(teacher, [pool], hidden=(8, 4), max_iter=30,
                                                    sample=None)
+    student.fit_calibrators([pool], minimum=20)
     before = student.score(pool)
     student.save(tmp_path/'student')
     reloaded = FomCombiner.DistilledCombiner.load(tmp_path/'student')
+    assert set(reloaded.calibrators) == set(student.calibrators)
     np.testing.assert_array_equal(reloaded.score(pool), before)
     arrays = np.load(tmp_path/'student'/'distilled.npz')
     assert all(arrays[key].dtype != object for key in arrays.files)
 
 
-def test_the_students_score_is_a_probability(pool, teacher):
+def test_the_student_is_a_probability_only_once_it_is_calibrated(pool, teacher):
+    """A regression on the teacher's output reproduces the ordering, not the scale.
+
+    Skipping the student's own isotonic left it with no threshold that met a false-positive
+    budget: its operating point measured exactly 0.0000 against a top-10 of 0.65 (F-092). So the
+    student calibrates like the teacher, and the uncalibrated form is deliberately *not* silently
+    clipped into looking like a probability.
+    """
     student = FomCombiner.DistilledCombiner.distil(teacher, [pool], hidden=(8, 4), max_iter=30,
                                                    sample=None)
+    assert not student.calibrators
+    student.fit_calibrators([pool], minimum=20)
     probability = student.score(pool)
     assert probability.min() >= 0.0 and probability.max() <= 1.0
+    # Calibration is monotone within a lattice, so it cannot reorder there -- the same invariant
+    # the teacher is held to.
+    raw = student.raw_score(pool)
+    for lattice in pool['bravais_lattice'].unique():
+        mask = (pool['bravais_lattice'] == lattice).to_numpy()
+        order = np.argsort(raw[mask], kind='stable')
+        assert np.all(np.diff(probability[mask][order]) >= -1e-12)
