@@ -584,6 +584,141 @@ class FomCombiner:
                    meta=specification.get('meta', {}))
 
 
+class DistilledCombiner:
+    """The combiner as three numpy matmuls, which is STATUS Q4 answered rather than assumed.
+
+    Q4 asks whether a small MLP evaluated as plain matmuls is actually slower than `get_M20` in the
+    inner loop. PLAN §4's guess was that it is not, and that the "networks are too slow" experience
+    came from per-candidate or ONNX-session overhead rather than arithmetic. F-085 measured the
+    600-tree ensemble at 2.46x `get_M20`, so the tree form misses the 2x budget *before any feature
+    is computed* -- which makes this the half of the cost problem that a distillation can address.
+
+    Fitted on the teacher's own output rather than on the labels: the target is a ranking, the
+    teacher already encodes one, and regressing on it keeps the ordering the teacher learned
+    instead of re-learning it from 0.9%-prevalence labels with far less capacity.
+
+    Held as plain arrays, so scoring is `relu(relu(X@W0 + b0)@W1 + b1)@W2 + b2` and nothing is
+    unpickled, no session is created, and there is no per-candidate Python. Non-finite features are
+    imputed with the training median, which the tree did not need and an MLP does.
+    """
+
+    def __init__(self, names=(), categorical=(), categories=None, weights=(), biases=(),
+                 centre=None, scale=None, median=None, meta=None):
+        self.names = tuple(names)
+        self.categorical = tuple(categorical)
+        self.categories = categories or {}
+        self.weights = [np.asarray(weight, dtype=np.float64) for weight in weights]
+        self.biases = [np.asarray(bias, dtype=np.float64) for bias in biases]
+        self.centre = None if centre is None else np.asarray(centre, dtype=np.float64)
+        self.scale = None if scale is None else np.asarray(scale, dtype=np.float64)
+        self.median = None if median is None else np.asarray(median, dtype=np.float64)
+        self.meta = meta or {}
+
+    # `design_matrix`, `categorical_indices` and `score_columns` are identical to the teacher's, so
+    # they are inherited rather than duplicated -- a distilled model that assembled its columns
+    # differently from its teacher would be measuring something else.
+    design_matrix = FomCombiner.design_matrix
+    categorical_indices = FomCombiner.categorical_indices
+    score_columns = FomCombiner.score_columns
+
+    @classmethod
+    def distil(cls, teacher, frames, hidden=(32, 16), seed=12345, max_iter=60, sample=400000):
+        """Fit an MLP to reproduce `teacher`'s ranking, and keep only its arrays."""
+        from sklearn.neural_network import MLPRegressor
+
+        frames = [frames] if isinstance(frames, pd.DataFrame) else list(frames)
+        frame = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+        matrix = teacher.design_matrix(frame)
+        target = teacher.raw_score(frame)
+
+        rng = np.random.default_rng(seed)
+        if sample and matrix.shape[0] > sample:
+            keep = rng.choice(matrix.shape[0], size=sample, replace=False)
+            matrix, target = matrix[keep], target[keep]
+
+        median = np.nanmedian(matrix, axis=0)
+        median = np.where(np.isfinite(median), median, 0.0)
+        clean = _impute(matrix, median)
+        centre = clean.mean(axis=0)
+        scale = clean.std(axis=0)
+        scale[scale < 1e-12] = 1.0
+        standardised = (clean - centre)/scale
+
+        model = MLPRegressor(hidden_layer_sizes=tuple(hidden), activation='relu',
+                             random_state=seed, max_iter=max_iter, early_stopping=True,
+                             n_iter_no_change=5, validation_fraction=0.1)
+        model.fit(standardised, target)
+        student = cls(names=teacher.names, categorical=teacher.categorical,
+                      categories=teacher.categories,
+                      weights=model.coefs_, biases=model.intercepts_,
+                      centre=centre, scale=scale, median=median,
+                      meta=dict(hidden=list(hidden), seed=int(seed), n_rows=int(matrix.shape[0]),
+                                n_features=len(teacher.names), teacher=teacher.objective,
+                                n_layers=len(model.coefs_)))
+        student.meta['train_correlation'] = float(
+            np.corrcoef(student.predict_batch(_undo(standardised, centre, scale)), target)[0, 1])
+        return student
+
+    def predict_batch(self, matrix):
+        """`relu` between layers, identity at the output. One matmul per layer, no Python loop."""
+        activations = (_impute(matrix, self.median) - self.centre)/self.scale
+        for index, (weight, bias) in enumerate(zip(self.weights, self.biases)):
+            activations = activations@weight + bias
+            if index < len(self.weights) - 1:
+                np.maximum(activations, 0.0, out=activations)
+        return activations.ravel()
+
+    def raw_score(self, frame):
+        return self.predict_batch(self.design_matrix(frame))
+
+    def score(self, frame):
+        """The teacher's output is already a probability, so the student's is clipped to be one."""
+        return np.clip(self.raw_score(frame), 0.0, 1.0)
+
+    def save(self, directory):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        arrays = {'centre': self.centre, 'scale': self.scale, 'median': self.median}
+        for index, (weight, bias) in enumerate(zip(self.weights, self.biases)):
+            arrays[f'weight_{index}'] = weight
+            arrays[f'bias_{index}'] = bias
+        np.savez_compressed(directory/'distilled.npz', **arrays)
+        with open(directory/'distilled.json', 'w', encoding='utf-8') as handle:
+            json.dump(dict(names=list(self.names), categorical=list(self.categorical),
+                           categories={name: {str(k): int(v) for k, v in lookup.items()}
+                                       for name, lookup in self.categories.items()},
+                           meta=self.meta), handle, indent=2)
+        return directory
+
+    @classmethod
+    def load(cls, directory):
+        directory = Path(directory)
+        arrays = np.load(directory/'distilled.npz')
+        with open(directory/'distilled.json', encoding='utf-8') as handle:
+            specification = json.load(handle)
+        n_layers = int(specification['meta']['n_layers'])
+        return cls(names=specification['names'], categorical=specification['categorical'],
+                   categories=specification['categories'],
+                   weights=[arrays[f'weight_{index}'] for index in range(n_layers)],
+                   biases=[arrays[f'bias_{index}'] for index in range(n_layers)],
+                   centre=arrays['centre'], scale=arrays['scale'], median=arrays['median'],
+                   meta=specification['meta'])
+
+
+def _impute(matrix, median):
+    """Non-finite entries replaced by the training median, without copying when nothing is bad."""
+    bad = ~np.isfinite(matrix)
+    if not bad.any():
+        return matrix
+    out = matrix.copy()
+    out[bad] = np.take(median, np.nonzero(bad)[1])
+    return out
+
+
+def _undo(standardised, centre, scale):
+    return standardised*scale + centre
+
+
 def _fit_pointwise(matrix, target, categorical_indices, seed, **params):
     """The headline model: gradient-boosted trees, not a network (S08 handoff, "Model choice")."""
     from sklearn.ensemble import HistGradientBoostingClassifier

@@ -95,6 +95,14 @@ CHEAP_MERITS = (
     'X_N', 'M_werner_frac', 'nll_exponential',
     )
 
+# `get_M20`'s own cost and the summed merit costs, from `S06_zoo_cost.csv`, so a timing can be
+# quoted in the units the acceptance gate is written in. The merit sums are lower bounds: S06 timed
+# the twenty-one merits but not the six descriptive covariates, which are byproducts of merit
+# routines that were themselves timed (F-085).
+GET_M20_SECONDS = 2.1625390721473303e-06
+CHEAP_MERIT_COST = 4.68
+FULL_MERIT_COST = 145.25
+
 
 def paired_by_lattice(result, baseline, label, baseline_label):
     """One McNemar per true Bravais lattice, for the saved model against a baseline.
@@ -156,6 +164,379 @@ def run_paired_only(args, artifact_dir):
     print(f'wrote {artifact_dir}/{args.tag}_mcnemar_by_lattice.csv')
     print(f'lattices with a negative top-10 delta: '
           f'{losses[["bravais_lattice", "baseline", "delta", "p_value"]].to_string(index=False)}')
+
+
+# ---------------------------------------------------------------------------------------
+# Session 2: does it hold up?
+# ---------------------------------------------------------------------------------------
+# Bravais-lattice mixes for the prior-sensitivity check (PLAN section 6.6). A learned prior is by
+# construction the CSD/COD symmetry distribution -- legitimate prior information, but the paper has
+# to quantify the dependence rather than assert it. F-086 makes this sharper than it was when the
+# plan was written: the extinction group is the single most important feature, so the model *is*
+# mostly a symmetry prior and this is the check that matters most.
+LATTICE_MIXES = {
+    'cnrs': None,
+    'uniform': {lattice: 1.0 for lattice in FomMetrics.BRAVAIS_LATTICES},
+    'low_symmetry_x3': {lattice: FomMetrics.CNRS_WEIGHTS[lattice]*(
+        3.0 if lattice in ('mP', 'mC', 'aP') else 1.0)
+        for lattice in FomMetrics.BRAVAIS_LATTICES},
+    'high_symmetry_x3': {lattice: FomMetrics.CNRS_WEIGHTS[lattice]*(
+        3.0 if lattice in ('cP', 'cI', 'cF', 'tP', 'tI', 'hP', 'hR') else 1.0)
+        for lattice in FomMetrics.BRAVAIS_LATTICES},
+    }
+
+# Volume tilts, applied on top of the CNRS lattice weighting. The decile is within-lattice
+# (METRICS.md section 5), so a tilt shifts the population towards larger or smaller cells *for its
+# own symmetry* rather than in absolute volume -- which is the axis the hard stratum is cut on.
+DECILE_TILTS = {
+    'flat': np.ones(FomMetrics.N_VOLUME_DECILES),
+    'large_cells': np.arange(1, FomMetrics.N_VOLUME_DECILES + 1, dtype=float),
+    'small_cells': np.arange(FomMetrics.N_VOLUME_DECILES, 0, -1, dtype=float),
+    }
+
+
+def reweighted(per_entry, metric, lattice_weights=None, decile_weights=None):
+    """A metric re-weighted over (Bravais lattice x volume decile) cells.
+
+    `FomMetrics.weighted_mean` does this over lattices alone, which is the standing CNRS
+    reweighting; PLAN section 6.6 asks for a deliberately shifted volume *and* symmetry mix, so the
+    same arithmetic is applied on a second axis. The cell means come from the per-entry flags the
+    metrics module produced -- only the weighting is done here.
+
+    Cells with no entries drop out and the weights renormalise over what is present, exactly as
+    `weighted_mean` does, so a tilt cannot manufacture a number from an empty stratum.
+    """
+    lattice_weights = lattice_weights or FomMetrics.CNRS_WEIGHTS
+    decile_weights = (np.ones(FomMetrics.N_VOLUME_DECILES) if decile_weights is None
+                      else np.asarray(decile_weights, dtype=float))
+    frame = per_entry.loc[per_entry[metric].notna(),
+                          ['bravais_lattice', 'volume_decile', metric]]
+    cells = frame.groupby(['bravais_lattice', 'volume_decile'])[metric].mean()
+    weights = np.array([lattice_weights.get(lattice, 0.0)*decile_weights[int(decile)]
+                        for lattice, decile in cells.index])
+    total = weights.sum()
+    return float((cells.to_numpy()*weights).sum()/total) if total > 0 else float('nan')
+
+
+def per_lattice_thresholds(result, budget):
+    """One threshold per Bravais lattice, each at the same false-positive budget *within* it.
+
+    Q33: the combiner's triclinic loss is on the operating point and not on top-10 (F-088), which
+    says the score ranks aP as well as `M_sym` does and is *thresholded* worse. A single global
+    threshold on a calibrated probability is the suspect: a well-calibrated score reports lower
+    confidence where the base rate is lower, and the operating point then penalises the honesty.
+
+    Built from `FomMetrics.threshold_curve` on a lattice-filtered per-entry frame, unweighted --
+    within one lattice the CNRS weighting is a constant and cancels.
+    """
+    thresholds = {}
+    for lattice, block in result.per_entry.groupby('bravais_lattice'):
+        curve = FomMetrics.threshold_curve(block, weighted=False)
+        affordable = curve.loc[curve['false_positive_rate'] <= budget]
+        if not affordable.shape[0]:
+            affordable = curve.loc[[curve['false_positive_rate'].idxmin()]]
+        best = affordable.loc[affordable['operating_point'].idxmax()]
+        thresholds[str(lattice)] = float(best['threshold'])
+    return thresholds
+
+
+def offset_score(combiner, thresholds):
+    """The combiner's probability minus its own lattice's threshold, so 0 is the accept boundary.
+
+    Subtracting a per-lattice constant is monotone *within* a lattice, so every lattice's internal
+    ranking is untouched and only the cross-lattice comparison moves -- the same property S07's
+    transforms have, and it is asserted in the tests. The consequence is that this is not purely a
+    threshold change: it is a per-lattice recalibration, and its effect on top-10 is reported
+    beside its effect on the operating point rather than assumed to be nil.
+    """
+    def score(frame):
+        values = combiner.score(frame)
+        offsets = np.array([thresholds.get(str(lattice), 0.0)
+                            for lattice in frame['bravais_lattice'].to_numpy()])
+        return values - offsets
+    return score
+
+
+def hybrid_score(combiner, knots, lattice='aP'):
+    """The combiner everywhere except one lattice, which is scored by `M_sym` put on the same scale.
+
+    The deployable form of "use `M_sym` for triclinic": an isotonic fitted on the calibration split
+    maps that lattice's `M_sym` onto P(correct), so the two halves are commensurable and the
+    cross-lattice pooling still means something. Scoring one lattice with a raw merit and the rest
+    with a probability would not be a score at all.
+    """
+    def score(frame):
+        values = combiner.score(frame)
+        mask = (frame['bravais_lattice'].to_numpy() == lattice)
+        if mask.any():
+            values[mask] = np.interp(frame['M_sym'].to_numpy(dtype=np.float64)[mask], *knots)
+        return values
+    return score
+
+
+def run_robustness(args, artifact_dir):
+    """Q33 (the triclinic loss), prior sensitivity (PLAN 6.6), and condition transfer (R11)."""
+    from sklearn.isotonic import IsotonicRegression
+
+    entries = FomBenchmark.load_entries(args.benchmark_dir)
+    covariates = FomCombiner.entry_covariates(entries)
+    scalers = FomCombiner.load_scalers(args.null_dir, groups=LOAD_GROUPS)
+    fit_ids, cal_ids = split_ids(entries, args.train_split, args.holdout_fraction, args.seed)
+    dev_ids = set(entries.loc[entries['split'] == args.report_split, 'entry_id'])
+
+    with open(artifact_dir/f'{args.tag}_meta.json', encoding='utf-8') as handle:
+        meta = json.load(handle)
+    # The feature groups and hyperparameters come off the *saved model's* specification rather than
+    # being re-derived from the arm's name: the specification is what the reported number was
+    # produced with, and a name is not a spec.
+    combiner = FomCombiner.FomCombiner.load(args.models_dir)
+    groups = tuple(combiner.groups)
+    args.model_params = dict(combiner.meta.get('params')
+                             or dict(max_iter=600, learning_rate=0.04, max_leaf_nodes=63))
+    print(f'groups {groups}; params {args.model_params}')
+
+    print('loading frames...')
+    started = time.perf_counter()
+    fit_frames = load_frames(args, entries, covariates, scalers, fit_ids,
+                             n_negatives=args.n_negatives, seed=args.seed)
+    cal_frames = load_frames(args, entries, covariates, scalers, cal_ids)
+    dev_frames = load_frames(args, entries, covariates, scalers, dev_ids)
+    print(f'  loaded ({time.perf_counter() - started:.0f} s)')
+
+    columns = combiner.score_columns
+    main_table = pd.read_csv(artifact_dir/f'{args.tag}_main_table.csv')
+    winner = meta['winner']
+    threshold = float(main_table.loc[main_table['arm'] == winner, 'threshold'].iloc[0])
+    budget = float(meta['matched_fpr_budget'])
+
+    # ---- Q33 -------------------------------------------------------------------------
+    cal = evaluate_score(cal_frames, entries, combiner.score, threshold, args.train_split,
+                         columns)
+    thresholds = per_lattice_thresholds(cal, budget)
+    print('per-lattice thresholds: '
+          + ', '.join(f'{k} {v:.4f}' for k, v in sorted(thresholds.items())))
+
+    cal_pool = pd.concat(cal_frames, ignore_index=True)
+    ap = cal_pool.loc[cal_pool['bravais_lattice'] == 'aP']
+    isotonic = IsotonicRegression(out_of_bounds='clip', y_min=0.0, y_max=1.0)
+    isotonic.fit(ap['M_sym'].to_numpy(dtype=np.float64),
+                 FomMetrics.as_bool(ap['is_correct']).astype(np.float64))
+    knots = (np.asarray(isotonic.X_thresholds_, dtype=np.float64),
+             np.asarray(isotonic.y_thresholds_, dtype=np.float64))
+    del cal_pool, ap
+
+    variants = [
+        ('combiner (global threshold)', combiner.score, threshold, columns),
+        ('combiner (per-lattice thresholds)', offset_score(combiner, thresholds), 0.0, columns),
+        ('hybrid: M_sym-calibrated for aP', hybrid_score(combiner, knots), threshold,
+         tuple(sorted(set(columns) | {'M_sym'}))),
+        ]
+    rows, results = [], {}
+    for label, score, cut, needed in variants:
+        dev = evaluate_score(dev_frames, entries, score, cut, args.report_split, needed,
+                             n_bootstrap=args.n_bootstrap, seed=args.seed)
+        row = scope_row(dev, arm=label, groups='+'.join(groups), objective='none',
+                        n_features=len(combiner.names), threshold=cut, threshold_rule='q33',
+                        seconds_fit=0.0, per_lattice_models=False)
+        row.update(per_lattice(dev, 'dev'))
+        rows.append(row)
+        results[label] = dev
+        print(f'  {label:36s} op {row["operating_point"]:.4f}  top10 {row["top10"]:.4f}')
+
+    # The per-lattice diagnosis: which half of the criterion is aP losing?
+    diagnosis = []
+    for merit, higher in BASELINES:
+        merit_threshold = float(main_table.loc[main_table['arm'] == f'{merit} (raw)',
+                                              'threshold'].iloc[0])
+        baseline = evaluate_score(dev_frames, entries, merit, merit_threshold, args.report_split,
+                                  higher_is_better=higher, n_bootstrap=0)
+        block = baseline.stratum('bravais_lattice').copy()
+        block['arm'] = f'{merit} (raw)'
+        diagnosis.append(block)
+        results[f'{merit} (raw)'] = baseline
+    for label in results:
+        if label.startswith('combiner') or label.startswith('hybrid'):
+            block = results[label].stratum('bravais_lattice').copy()
+            block['arm'] = label
+            diagnosis.append(block)
+    pd.concat(diagnosis, ignore_index=True).to_csv(
+        artifact_dir/f'{args.tag}_q33_by_lattice.csv', index=False)
+
+    paired = []
+    for label in ('combiner (per-lattice thresholds)', 'hybrid: M_sym-calibrated for aP'):
+        for baseline in ('combiner (global threshold)', 'M_sym (raw)'):
+            paired.append(paired_by_lattice(results[label], results[baseline], label, baseline))
+    pd.concat(paired, ignore_index=True).to_csv(
+        artifact_dir/f'{args.tag}_q33_mcnemar.csv', index=False)
+
+    # ---- prior sensitivity ------------------------------------------------------------
+    sensitivity = []
+    for label, result in results.items():
+        for mix, lattice_weights in LATTICE_MIXES.items():
+            for tilt, decile_weights in DECILE_TILTS.items():
+                sensitivity.append(dict(
+                    arm=label, lattice_mix=mix, volume_tilt=tilt,
+                    operating_point=reweighted(result.per_entry, 'operating_point',
+                                               lattice_weights, decile_weights),
+                    top10=reweighted(result.per_entry, 'top10', lattice_weights, decile_weights),
+                    found=reweighted(result.per_entry, 'found', lattice_weights, decile_weights),
+                    ))
+    sensitivity = pd.DataFrame(sensitivity)
+    sensitivity.to_csv(artifact_dir/f'{args.tag}_prior_sensitivity.csv', index=False)
+    base = sensitivity[(sensitivity['lattice_mix'] == 'cnrs')
+                       & (sensitivity['volume_tilt'] == 'flat')].set_index('arm')
+    worst = sensitivity.assign(
+        delta=sensitivity['operating_point'] - sensitivity['arm'].map(base['operating_point']))
+    print('prior sensitivity, worst shift per arm:')
+    for arm, block in worst.groupby('arm'):
+        row = block.loc[block['delta'].idxmin()]
+        print(f'  {arm:36s} {row["lattice_mix"]}/{row["volume_tilt"]}  '
+              f'{row["operating_point"]:.4f} ({row["delta"]:+.4f})')
+
+    # ---- leave one condition out ------------------------------------------------------
+    loco = []
+    for held_out in args.bundles:
+        keep = [index for index, bundle in enumerate(args.bundles) if bundle != held_out]
+        held = [index for index, bundle in enumerate(args.bundles) if bundle == held_out]
+        if not held or len(keep) < 2:
+            continue
+        trained = FomCombiner.FomCombiner.fit(
+            [fit_frames[index] for index in keep], groups=groups, scalers=scalers,
+            objective='pointwise', seed=args.seed, **args.model_params)
+        trained.fit_calibrators([cal_frames[index] for index in keep])
+        in_cal = evaluate_score([cal_frames[index] for index in keep], entries, trained.score,
+                                None, args.train_split, trained.score_columns)
+        choice, rule = choose_threshold(in_cal, budget)
+        target = [dev_frames[index] for index in held]
+        out_of = evaluate_score(target, entries, trained.score, float(choice.threshold),
+                                args.report_split, trained.score_columns, n_bootstrap=0)
+        within = evaluate_score(target, entries, combiner.score, threshold, args.report_split,
+                                columns, n_bootstrap=0)
+        loco.append(dict(
+            held_out_bundle=held_out,
+            label=FomMetrics.BUNDLE_LABELS.get(held_out, held_out),
+            n_entries=int(out_of.aggregate['n_entries'].iloc[0]),
+            threshold_rule=rule,
+            op_trained_without=float(out_of.metric('operating_point')),
+            op_trained_with=float(within.metric('operating_point')),
+            top10_trained_without=float(out_of.metric('top10')),
+            top10_trained_with=float(within.metric('top10')),
+            ceiling=float(out_of.metric('ceiling_rescorer')),
+            ))
+        loco[-1]['op_transfer_cost'] = (loco[-1]['op_trained_with']
+                                       - loco[-1]['op_trained_without'])
+        print(f'  LOCO {held_out:22s} without {loco[-1]["op_trained_without"]:.4f}  '
+              f'with {loco[-1]["op_trained_with"]:.4f}  '
+              f'cost {loco[-1]["op_transfer_cost"]:+.4f}')
+    pd.DataFrame(loco).to_csv(artifact_dir/f'{args.tag}_loco.csv', index=False)
+
+    pd.DataFrame(rows).to_csv(artifact_dir/f'{args.tag}_q33_table.csv', index=False)
+    with open(artifact_dir/f'{args.tag}_robustness_meta.json', 'w', encoding='utf-8') as handle:
+        json.dump(dict(commit=commit_hash(), per_lattice_thresholds=thresholds,
+                       global_threshold=threshold, matched_fpr_budget=budget,
+                       groups=list(groups), params=args.model_params,
+                       lattice_mixes=sorted(LATTICE_MIXES), volume_tilts=sorted(DECILE_TILTS),
+                       seconds=time.perf_counter() - started), handle, indent=2)
+    print(f'wrote {artifact_dir}/{args.tag}_{{q33_table,q33_by_lattice,q33_mcnemar,'
+          f'prior_sensitivity,loco}}.csv')
+
+
+def run_distil(args, artifact_dir):
+    """The fast form, and STATUS Q4: is a small MLP as numpy matmuls slower than `get_M20`?
+
+    F-085 measured the tree at 2.46x `get_M20`, so the inner-loop budget is missed before a single
+    feature is computed. Two students are fitted, because the two halves of that cost are separate
+    problems: one over the full feature set, which answers Q4 on its own terms, and one over the ten
+    merits priced below 1x, which is the variant S14 could actually deploy.
+    """
+    entries = FomBenchmark.load_entries(args.benchmark_dir)
+    covariates = FomCombiner.entry_covariates(entries)
+    scalers = FomCombiner.load_scalers(args.null_dir, groups=LOAD_GROUPS)
+    fit_ids, cal_ids = split_ids(entries, args.train_split, args.holdout_fraction, args.seed)
+    dev_ids = set(entries.loc[entries['split'] == args.report_split, 'entry_id'])
+
+    with open(artifact_dir/f'{args.tag}_meta.json', encoding='utf-8') as handle:
+        meta = json.load(handle)
+    budget = float(meta['matched_fpr_budget'])
+    teacher = FomCombiner.FomCombiner.load(args.models_dir)
+    args.model_params = dict(teacher.meta.get('params')
+                             or dict(max_iter=600, learning_rate=0.04, max_leaf_nodes=63))
+
+    print('loading frames...')
+    started = time.perf_counter()
+    fit_frames = load_frames(args, entries, covariates, scalers, fit_ids,
+                             n_negatives=args.n_negatives, seed=args.seed)
+    cal_frames = load_frames(args, entries, covariates, scalers, cal_ids)
+    dev_frames = load_frames(args, entries, covariates, scalers, dev_ids)
+    print(f'  loaded ({time.perf_counter() - started:.0f} s)')
+
+    # The cheap teacher is refitted here rather than read back: the main stage measured it but did
+    # not persist it, and a student needs its own teacher's exact feature list.
+    cheap_names = FomCombiner.affordable_features(teacher.names, CHEAP_MERITS)
+    cheap_teacher = _restrict(teacher, cheap_names, fit_frames, args)
+    cheap_teacher.fit_calibrators(cal_frames)
+
+    students = {}
+    for label, parent in (('full', teacher), ('cheap', cheap_teacher)):
+        student = FomCombiner.DistilledCombiner.distil(
+            parent, cal_frames, hidden=(32, 16), seed=args.seed)
+        students[label] = (parent, student)
+        print(f'  distilled {label:6s} {len(parent.names):3d} features, '
+              f'teacher correlation {student.meta["train_correlation"]:.4f}')
+        student.save(Path(args.models_dir)/f'distilled_{label}')
+
+    # ---- timing ----------------------------------------------------------------------
+    timings = []
+    sample = dev_frames[0]
+    for label, (parent, student) in students.items():
+        matrix = parent.design_matrix(sample)
+        for name, model in (('tree', parent), ('mlp', student)):
+            best = np.inf
+            for _ in range(5):
+                mark = time.perf_counter()
+                model.predict_batch(matrix)
+                best = min(best, time.perf_counter() - mark)
+            timings.append(dict(
+                feature_set=label, form=name, n_features=len(parent.names),
+                n_candidates=int(matrix.shape[0]),
+                seconds_per_candidate=best/matrix.shape[0],
+                cost_vs_get_M20=(best/matrix.shape[0])/GET_M20_SECONDS,
+                merit_cost_vs_get_M20=(CHEAP_MERIT_COST if label == 'cheap'
+                                       else FULL_MERIT_COST),
+                ))
+            print(f'  {label:6s} {name:4s} {timings[-1]["cost_vs_get_M20"]:.2f}x get_M20')
+    pd.DataFrame(timings).to_csv(artifact_dir/f'{args.tag}_distil_cost.csv', index=False)
+
+    # ---- what the fast form costs in accuracy ----------------------------------------
+    rows = []
+    for label, (parent, student) in students.items():
+        for name, model in (('tree', parent), ('mlp', student)):
+            columns = model.score_columns
+            cal = evaluate_score(cal_frames, entries, model.score, None, args.train_split,
+                                 columns)
+            choice, rule = choose_threshold(cal, budget)
+            dev = evaluate_score(dev_frames, entries, model.score, float(choice.threshold),
+                                 args.report_split, columns, n_bootstrap=args.n_bootstrap,
+                                 seed=args.seed)
+            row = scope_row(dev, arm=f'{label}/{name}', groups='+'.join(parent.groups),
+                            objective='none', n_features=len(parent.names),
+                            threshold=float(choice.threshold), threshold_rule=rule,
+                            seconds_fit=0.0, per_lattice_models=False)
+            row.update(per_lattice(dev, 'dev'))
+            rows.append(row)
+            print(f'  {label}/{name:4s} operating point {row["operating_point"]:.4f}  '
+                  f'top10 {row["top10"]:.4f}')
+    pd.DataFrame(rows).to_csv(artifact_dir/f'{args.tag}_distil_table.csv', index=False)
+
+    with open(artifact_dir/f'{args.tag}_distil_meta.json', 'w', encoding='utf-8') as handle:
+        json.dump(dict(commit=commit_hash(), hidden=[32, 16], seed=args.seed,
+                       cheap_features=list(cheap_names), cheap_merits=list(CHEAP_MERITS),
+                       get_M20_seconds=GET_M20_SECONDS,
+                       cheap_merit_cost=CHEAP_MERIT_COST, full_merit_cost=FULL_MERIT_COST,
+                       students={label: student.meta
+                                 for label, (_, student) in students.items()},
+                       seconds=time.perf_counter() - started), handle, indent=2)
+    print(f'wrote {artifact_dir}/{args.tag}_distil_{{cost,table,meta}}.*')
 
 
 def _uniform_random(frame):
@@ -379,9 +760,12 @@ def main():
     parser.add_argument('--skip-tuning', action='store_true')
     parser.add_argument('--n-bootstrap', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=12345)
-    parser.add_argument('--paired-only', action='store_true',
-                        help='re-score fom-dev with the saved model and emit only the '
-                             'per-Bravais-lattice paired tests')
+    parser.add_argument('--stage', default='main',
+                        choices=('main', 'paired', 'robustness', 'distil'),
+                        help='main fits every arm; paired emits the per-lattice paired tests; '
+                             'robustness runs Q33, prior sensitivity and leave-one-condition-out; '
+                             'distil fits the fast form and times it. Each later stage reads the '
+                             'artefacts and the saved model the main stage wrote.')
     parser.add_argument('--skip-lambdarank', action='store_true')
     parser.add_argument('--skip-importance', action='store_true')
     parser.add_argument('--importance-repeats', type=int, default=1)
@@ -392,8 +776,9 @@ def main():
     artifact_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
 
-    if args.paired_only:
-        run_paired_only(args, artifact_dir)
+    if args.stage != 'main':
+        {'paired': run_paired_only, 'robustness': run_robustness,
+         'distil': run_distil}[args.stage](args, artifact_dir)
         return
 
     entries = FomBenchmark.load_entries(args.benchmark_dir)

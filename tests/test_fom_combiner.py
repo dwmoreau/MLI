@@ -278,3 +278,63 @@ def test_a_threshold_cannot_be_reported_on_the_entries_it_was_chosen_on(pool):
     choice = FomMetrics.select_threshold(result, objective='youden')
     with pytest.raises(ValueError, match='PROTOCOL'):
         FomMetrics.check_threshold_transfer(choice, result)
+
+
+# ---------------------------------------------------------------------------------------
+# The distilled form (STATUS Q4)
+# ---------------------------------------------------------------------------------------
+@pytest.fixture(scope='module')
+def teacher(pool):
+    combiner = FomCombiner.FomCombiner.fit([pool], groups=('raw', 'structural', 'context'),
+                                           max_iter=30)
+    return combiner.fit_calibrators([pool], minimum=20)
+
+
+def test_the_student_reads_exactly_the_teachers_columns(pool, teacher):
+    """A distilled model that assembled its features differently would measure something else."""
+    student = FomCombiner.DistilledCombiner.distil(teacher, [pool], hidden=(8, 4), max_iter=30,
+                                                   sample=None)
+    assert student.names == teacher.names
+    assert student.categorical == teacher.categorical
+    np.testing.assert_array_equal(student.design_matrix(pool), teacher.design_matrix(pool))
+
+
+def test_the_student_is_three_matmuls_and_nothing_else(pool, teacher):
+    """`predict_batch` must be the forward pass written out, or the timing measures the wrong thing."""
+    student = FomCombiner.DistilledCombiner.distil(teacher, [pool], hidden=(8, 4), max_iter=30,
+                                                   sample=None)
+    matrix = student.design_matrix(pool)
+    activations = (matrix - student.centre)/student.scale
+    for index, (weight, bias) in enumerate(zip(student.weights, student.biases)):
+        activations = activations@weight + bias
+        if index < len(student.weights) - 1:
+            activations = np.maximum(activations, 0.0)
+    np.testing.assert_allclose(student.predict_batch(matrix), activations.ravel())
+
+
+def test_the_student_imputes_rather_than_propagating_nan(pool, teacher):
+    """Trees take NaN natively and an MLP does not, so the gap has to be closed explicitly."""
+    student = FomCombiner.DistilledCombiner.distil(teacher, [pool], hidden=(8, 4), max_iter=30,
+                                                   sample=None)
+    damaged = pool.copy()
+    damaged.loc[damaged.index[:20], 'M20'] = np.nan
+    damaged.loc[damaged.index[20:40], 'M_sym'] = np.inf
+    assert np.isfinite(student.raw_score(damaged)).all()
+
+
+def test_the_student_round_trips_without_pickling_anything(tmp_path, pool, teacher):
+    student = FomCombiner.DistilledCombiner.distil(teacher, [pool], hidden=(8, 4), max_iter=30,
+                                                   sample=None)
+    before = student.score(pool)
+    student.save(tmp_path/'student')
+    reloaded = FomCombiner.DistilledCombiner.load(tmp_path/'student')
+    np.testing.assert_array_equal(reloaded.score(pool), before)
+    arrays = np.load(tmp_path/'student'/'distilled.npz')
+    assert all(arrays[key].dtype != object for key in arrays.files)
+
+
+def test_the_students_score_is_a_probability(pool, teacher):
+    student = FomCombiner.DistilledCombiner.distil(teacher, [pool], hidden=(8, 4), max_iter=30,
+                                                   sample=None)
+    probability = student.score(pool)
+    assert probability.min() >= 0.0 and probability.max() <= 1.0
