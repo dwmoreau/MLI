@@ -584,6 +584,80 @@ class FomCombiner:
                    meta=specification.get('meta', {}))
 
 
+class PerLatticeCombiner:
+    """Fourteen models, one per Bravais lattice -- the architecture S08 argued against.
+
+    The handoff asserts one global model with the lattice as a categorical feature is preferable,
+    on two grounds: the rare lattices cannot support their own (oF has two entries in the whole
+    CNRS benchmark and cI has four), and S07's scaled inputs are already lattice-conditioned so the
+    global model is not fighting a scale difference. It then asks for the per-lattice model as an
+    ablation *to justify the choice*, which is the part that turns an argument into a measurement.
+
+    Each sub-model is fitted only on its own lattice's candidates, so `bravais_lattice` is constant
+    within it and the model cannot learn the cross-lattice prior at all -- which is the point.
+    Every sub-model gets its own isotonic, because the pooled ranking needs the fourteen outputs on
+    one probability scale; without that this arm would be measuring an arbitrary scale mismatch
+    rather than an architecture.
+
+    A lattice with too few positives to fit falls back to the global model, and which ones did is
+    recorded rather than absorbed -- the fallback count is itself part of the answer.
+    """
+
+    def __init__(self, models=None, fallback=None, meta=None):
+        self.models = models or {}
+        self.fallback = fallback
+        self.meta = meta or {}
+
+    @classmethod
+    def fit(cls, frames, fallback, groups=DEFAULT_GROUPS, scalers=(), seed=12345,
+            min_positive=25, **params):
+        frames = [frames] if isinstance(frames, pd.DataFrame) else list(frames)
+        frame = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+        correct = FomMetrics.as_bool(frame['is_correct'])
+        models, fell_back, sizes = {}, [], {}
+        for lattice in sorted(frame['bravais_lattice'].unique()):
+            mask = (frame['bravais_lattice'] == lattice).to_numpy()
+            positives = int(correct[mask].sum())
+            sizes[str(lattice)] = dict(rows=int(mask.sum()), positives=positives)
+            if positives < min_positive:
+                fell_back.append(str(lattice))
+                continue
+            models[str(lattice)] = FomCombiner.fit(
+                frame.loc[mask].reset_index(drop=True), groups=groups, scalers=scalers,
+                objective='pointwise', seed=seed, **params)
+        return cls(models=models, fallback=fallback,
+                   meta=dict(n_models=len(models), fell_back=fell_back, sizes=sizes,
+                             min_positive=int(min_positive), groups=list(groups)))
+
+    def fit_calibrators(self, frames, minimum=200):
+        frames = [frames] if isinstance(frames, pd.DataFrame) else list(frames)
+        frame = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+        for lattice, model in self.models.items():
+            mask = (frame['bravais_lattice'] == lattice).to_numpy()
+            if mask.any():
+                model.fit_calibrators(frame.loc[mask].reset_index(drop=True), minimum=minimum)
+        return self
+
+    def score(self, frame):
+        out = np.full(frame.shape[0], np.nan)
+        lattices = frame['bravais_lattice'].to_numpy()
+        for lattice in np.unique(lattices):
+            mask = lattices == lattice
+            model = self.models.get(str(lattice), self.fallback)
+            out[mask] = model.score(frame.loc[mask])
+        return out
+
+    @property
+    def names(self):
+        model = next(iter(self.models.values()), self.fallback)
+        return model.names
+
+    @property
+    def score_columns(self):
+        model = next(iter(self.models.values()), self.fallback)
+        return model.score_columns
+
+
 class DistilledCombiner:
     """The combiner as three numpy matmuls, which is STATUS Q4 answered rather than assumed.
 

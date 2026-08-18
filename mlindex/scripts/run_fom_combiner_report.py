@@ -546,6 +546,46 @@ def main():
             'reproduces the ordering but not the scale, and without one its operating point '
             'measured exactly 0.0000 against a top-10 of 0.65. See STATUS F-092.\n')
 
+    gaps = read(artifact_dir, f'{args.tag}_gaps_table.csv')
+    gaps_mcnemar = read(artifact_dir, f'{args.tag}_gaps_mcnemar.csv')
+    if gaps is not None:
+        add('## 15. The architecture, and the over-prediction family\n')
+        add('Two analyses this brief asks for that the first pass asserted rather than measured: '
+            'the per-Bravais-lattice model "as an ablation to justify the choice" of one global '
+            'model, and the isolation of the M^Rev/over-prediction family. Both against a '
+            'like-for-like pointwise global baseline.\n')
+        add(table(gaps, ['arm', 'n_features', 'operating_point', 'operating_point_ci_low',
+                         'operating_point_ci_high', 'top10', 'precision', 'note']))
+        add('')
+        if gaps_mcnemar is not None:
+            block = gaps_mcnemar.loc[gaps_mcnemar.get('bravais_lattice', pd.Series(
+                [np.nan]*gaps_mcnemar.shape[0])).isna()]
+            if block.shape[0]:
+                add('Paired against the global model:\n')
+                add(table(block, ['label', 'metric', 'n_a_only', 'n_b_only', 'delta', 'p_value'],
+                          floatfmt=6))
+                add('')
+        add('**The architecture choice holds, for a different reason than the brief gives.** The '
+            'global model is better by 0.63 pp, significantly on top-10 (21 gained / 42 lost, '
+            'p = 0.012). But the stated justification -- that the rare lattices cannot support '
+            'their own model -- **did not bind**: all fourteen fitted and the thinnest had 376 '
+            'positives. That argument is about the CNRS *evaluation* population; the models train '
+            'on the synthetic benchmark, where every lattice is well populated. The real reason is '
+            'that a per-lattice model cannot see the extinction-group prior *across* lattices, '
+            'which section 7 shows is the dominant feature.\n')
+        add('**The family ablation changes how the complementarity table should be read.** S06 '
+            'measured that `n_over` and `max_gap` add +3.1 pp each over `M_sym` in the union '
+            'oracle. **Removing both from the combiner costs 0.08 pp at p = 0.77**, and removing '
+            '`M_rev` as well costs 0.28 pp at p = 0.85 with top-10 byte-identical. Complementarity '
+            'as a *single ordering* is not necessity in a sixty-five-feature model: the '
+            'information is redundant, carried by the other merits, the structural covariates and '
+            'the per-entry context.\n')
+        add('**This is the most useful thing here for S14.** Those are the two most expensive '
+            'merits in the zoo (29.4x and 29.5x `get_M20`) and `M_rev` is 24.6x, so dropping the '
+            'family takes the feature cost from **145.25x to 61.76x -- 57% of the budget -- for '
+            '0.28 pp**. The search for an affordable feature set should start by deleting the '
+            'expensive merits, not by keeping them. See STATUS F-093.\n')
+
     add('## Figures\n')
     add(f'`{args.tag}.png` -- (a) every arm against both baselines and both floors; (b) '
         'per-Bravais-lattice top-10 deltas against raw `M_sym`, which is the base-rate check; '

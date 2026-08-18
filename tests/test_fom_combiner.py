@@ -356,3 +356,50 @@ def test_the_student_is_a_probability_only_once_it_is_calibrated(pool, teacher):
         mask = (pool['bravais_lattice'] == lattice).to_numpy()
         order = np.argsort(raw[mask], kind='stable')
         assert np.all(np.diff(probability[mask][order]) >= -1e-12)
+
+
+# ---------------------------------------------------------------------------------------
+# The per-lattice architecture (the ablation that justifies the global choice)
+# ---------------------------------------------------------------------------------------
+def test_per_lattice_models_are_fitted_only_on_their_own_lattice(pool, teacher):
+    """Each sub-model must be blind to the cross-lattice prior -- that is what it tests."""
+    per_bl = FomCombiner.PerLatticeCombiner.fit(
+        [pool], fallback=teacher, groups=('raw', 'context'), max_iter=20, min_positive=5)
+    assert set(per_bl.models) == set(pool['bravais_lattice'].unique())
+    for lattice, model in per_bl.models.items():
+        rows = int(model.meta['n_rows'])
+        assert rows == int((pool['bravais_lattice'] == lattice).sum())
+
+
+def test_a_lattice_too_thin_to_fit_falls_back_and_says_so(pool, teacher):
+    """oF has two entries in the whole CNRS benchmark; silence there would be the wrong answer."""
+    per_bl = FomCombiner.PerLatticeCombiner.fit(
+        [pool], fallback=teacher, groups=('raw',), max_iter=20, min_positive=10**6)
+    assert not per_bl.models
+    assert set(per_bl.meta['fell_back']) == set(pool['bravais_lattice'].unique())
+    np.testing.assert_array_equal(per_bl.score(pool), teacher.score(pool))
+
+
+def test_per_lattice_scores_dispatch_to_the_right_sub_model(pool, teacher):
+    per_bl = FomCombiner.PerLatticeCombiner.fit(
+        [pool], fallback=teacher, groups=('raw', 'context'), max_iter=20, min_positive=5)
+    per_bl.fit_calibrators([pool], minimum=20)
+    combined = per_bl.score(pool)
+    for lattice, model in per_bl.models.items():
+        mask = (pool['bravais_lattice'] == lattice).to_numpy()
+        np.testing.assert_array_equal(combined[mask], model.score(pool.loc[mask]))
+    assert np.isfinite(combined).all()
+
+
+def test_dropping_a_merit_family_removes_its_scaled_and_context_columns(pool):
+    """The over-prediction ablation has to take the whole family, not just the raw columns."""
+    names, _ = FomCombiner.feature_specification(FomCombiner.DEFAULT_GROUPS, ())
+    keep = (set(FomCombiner.RAW_MERITS) | set(FomCombiner.IN_SAMPLE_MERITS)
+            - {'n_over', 'max_gap', 'M_rev'})
+    kept = FomCombiner.affordable_features(names, keep - {'n_over', 'max_gap', 'M_rev'})
+    for merit in ('n_over', 'max_gap', 'M_rev'):
+        assert merit not in kept
+        assert not [name for name in kept if name.startswith(f'{merit}__')]
+        assert not [name for name in kept if name.startswith(f'ctx_{merit}_')]
+    # M_sym survives, and it is M_tilde * M_rev -- so the family is not fully separable.
+    assert 'M_sym' in kept

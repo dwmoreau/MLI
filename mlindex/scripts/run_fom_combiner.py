@@ -463,6 +463,126 @@ def run_robustness(args, artifact_dir):
           f'prior_sensitivity,loco}}.csv')
 
 
+# The explicit over-prediction counters. F-070 credits `n_over` and `max_gap` with the whole of
+# S08's headroom over `M_sym`, and `M_rev` is O-T (iii) reversed -- the penalty they are counting.
+# Dropped in two steps because `M_sym = M_tilde * M_rev`, so removing `M_rev` does not remove the
+# over-prediction signal from the merit that carries it: the family is not fully separable and
+# saying so is part of the result.
+OVER_PREDICTION_COUNTERS = ('n_over', 'max_gap')
+OVER_PREDICTION_FAMILY = OVER_PREDICTION_COUNTERS + ('M_rev',)
+
+
+def run_gaps(args, artifact_dir):
+    """The two required analyses S08's first pass asserted rather than measured.
+
+    The handoff asks for the per-Bravais-lattice model "as an ablation to justify the choice" of a
+    single global model, and for the ablation to isolate "the M^Rev/over-prediction family"
+    specifically. Neither was run; the architecture was argued for and the family was left inside
+    the feature set. Both are measured here against a like-for-like pointwise global baseline.
+    """
+    entries = FomBenchmark.load_entries(args.benchmark_dir)
+    covariates = FomCombiner.entry_covariates(entries)
+    scalers = FomCombiner.load_scalers(args.null_dir, groups=LOAD_GROUPS)
+    fit_ids, cal_ids = split_ids(entries, args.train_split, args.holdout_fraction, args.seed)
+    dev_ids = set(entries.loc[entries['split'] == args.report_split, 'entry_id'])
+
+    with open(artifact_dir/f'{args.tag}_meta.json', encoding='utf-8') as handle:
+        meta = json.load(handle)
+    budget = float(meta['matched_fpr_budget'])
+    saved = FomCombiner.FomCombiner.load(args.models_dir)
+    groups = tuple(saved.groups)
+    args.model_params = dict(saved.meta.get('params')
+                             or dict(max_iter=600, learning_rate=0.04, max_leaf_nodes=63))
+    print(f'groups {groups}; params {args.model_params}')
+
+    print('loading frames...')
+    started = time.perf_counter()
+    fit_frames = load_frames(args, entries, covariates, scalers, fit_ids,
+                             n_negatives=args.n_negatives, seed=args.seed)
+    cal_frames = load_frames(args, entries, covariates, scalers, cal_ids)
+    dev_frames = load_frames(args, entries, covariates, scalers, dev_ids)
+    print(f'  loaded ({time.perf_counter() - started:.0f} s)')
+
+    rows, results = [], {}
+
+    def report(label, model, note=''):
+        columns = model.score_columns
+        cal = evaluate_score(cal_frames, entries, model.score, None, args.train_split, columns)
+        choice, rule = choose_threshold(cal, budget)
+        dev = evaluate_score(dev_frames, entries, model.score, float(choice.threshold),
+                             args.report_split, columns, n_bootstrap=args.n_bootstrap,
+                             seed=args.seed)
+        FomMetrics.check_threshold_transfer(choice, dev)
+        row = scope_row(dev, arm=label, groups='+'.join(groups), objective='pointwise',
+                        n_features=len(model.names), threshold=float(choice.threshold),
+                        threshold_rule=rule, seconds_fit=np.nan,
+                        per_lattice_models=isinstance(model, FomCombiner.PerLatticeCombiner))
+        row['note'] = note
+        row.update(per_lattice(dev, 'dev'))
+        rows.append(row)
+        results[label] = dev
+        print(f'  {label:44s} op {row["operating_point"]:.4f}  top10 {row["top10"]:.4f}')
+        return dev
+
+    # ---- the like-for-like baseline ---------------------------------------------------
+    # Refitted pointwise rather than reusing the saved LambdaRank winner: an architecture
+    # comparison has to hold the objective fixed, or it measures both at once.
+    started_fit = time.perf_counter()
+    global_model = FomCombiner.FomCombiner.fit(
+        fit_frames, groups=groups, scalers=scalers, objective='pointwise', seed=args.seed,
+        **args.model_params)
+    global_model.fit_calibrators(cal_frames)
+    print(f'  global model fitted ({time.perf_counter() - started_fit:.0f} s)')
+    report('global, BL as a categorical', global_model, 'the architecture S08 chose')
+
+    # ---- gap 1: the per-lattice architecture ------------------------------------------
+    started_fit = time.perf_counter()
+    per_bl = FomCombiner.PerLatticeCombiner.fit(
+        fit_frames, fallback=global_model, groups=groups, scalers=scalers, seed=args.seed,
+        **args.model_params)
+    per_bl.fit_calibrators(cal_frames)
+    print(f'  {per_bl.meta["n_models"]} per-lattice models fitted '
+          f'({time.perf_counter() - started_fit:.0f} s); '
+          f'fell back to global for {per_bl.meta["fell_back"] or "nothing"}')
+    report('one model per Bravais lattice', per_bl,
+           f'{per_bl.meta["n_models"]} fitted, fell back for '
+           f'{",".join(per_bl.meta["fell_back"]) or "none"}')
+
+    # ---- gap 2: the over-prediction family ---------------------------------------------
+    keep_all = set(FomCombiner.RAW_MERITS) | set(FomCombiner.IN_SAMPLE_MERITS)
+    for label, dropped in (('drop n_over + max_gap', OVER_PREDICTION_COUNTERS),
+                           ('drop the whole M^Rev family', OVER_PREDICTION_FAMILY)):
+        names = FomCombiner.affordable_features(global_model.names, keep_all - set(dropped))
+        restricted = _restrict(global_model, names, fit_frames, args)
+        restricted.fit_calibrators(cal_frames)
+        report(label, restricted, f'-{len(global_model.names) - len(names)} columns')
+
+    # ---- paired against the architecture S08 chose -------------------------------------
+    paired = []
+    for label in results:
+        if label == 'global, BL as a categorical':
+            continue
+        for metric in ('operating_point', 'top10'):
+            paired.append(dict(FomMetrics.mcnemar(results[label],
+                                                  results['global, BL as a categorical'],
+                                                  metric=metric),
+                               label=label, baseline='global, BL as a categorical'))
+        paired.append(paired_by_lattice(results[label],
+                                        results['global, BL as a categorical'], label,
+                                        'global, BL as a categorical'))
+    flat = pd.concat([pd.DataFrame([row]) if isinstance(row, dict) else row for row in paired],
+                     ignore_index=True)
+    flat.to_csv(artifact_dir/f'{args.tag}_gaps_mcnemar.csv', index=False)
+    pd.DataFrame(rows).to_csv(artifact_dir/f'{args.tag}_gaps_table.csv', index=False)
+    with open(artifact_dir/f'{args.tag}_gaps_meta.json', 'w', encoding='utf-8') as handle:
+        json.dump(dict(commit=commit_hash(), groups=list(groups), params=args.model_params,
+                       matched_fpr_budget=budget, per_lattice=per_bl.meta,
+                       over_prediction_counters=list(OVER_PREDICTION_COUNTERS),
+                       over_prediction_family=list(OVER_PREDICTION_FAMILY),
+                       seconds=time.perf_counter() - started), handle, indent=2)
+    print(f'wrote {artifact_dir}/{args.tag}_gaps_{{table,mcnemar,meta}}.*')
+
+
 def run_distil(args, artifact_dir):
     """The fast form, and STATUS Q4: is a small MLP as numpy matmuls slower than `get_M20`?
 
@@ -789,10 +909,12 @@ def main():
     parser.add_argument('--n-bootstrap', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=12345)
     parser.add_argument('--stage', default='main',
-                        choices=('main', 'paired', 'robustness', 'distil'),
+                        choices=('main', 'paired', 'robustness', 'distil', 'gaps'),
                         help='main fits every arm; paired emits the per-lattice paired tests; '
                              'robustness runs Q33, prior sensitivity and leave-one-condition-out; '
-                             'distil fits the fast form and times it. Each later stage reads the '
+                             'distil fits the fast form and times it; gaps runs the per-lattice '
+                             'architecture and the over-prediction-family ablations the first '
+                             'pass asserted rather than measured. Each later stage reads the '
                              'artefacts and the saved model the main stage wrote.')
     parser.add_argument('--skip-loco', action='store_true',
                         help='robustness stage: reuse the previous pass leave-one-condition-out '
@@ -809,7 +931,7 @@ def main():
 
     if args.stage != 'main':
         {'paired': run_paired_only, 'robustness': run_robustness,
-         'distil': run_distil}[args.stage](args, artifact_dir)
+         'distil': run_distil, 'gaps': run_gaps}[args.stage](args, artifact_dir)
         return
 
     entries = FomBenchmark.load_entries(args.benchmark_dir)
