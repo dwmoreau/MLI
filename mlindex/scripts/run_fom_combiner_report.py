@@ -214,10 +214,18 @@ def main():
     add('**The reported model is a ranker.** The per-entry context features make it one by '
         'construction, so its probability is calibrated *per entry* and an absolute P(correct) '
         'for a candidate considered alone is not what it estimates.\n')
-    add('**Two required analyses are not in this document.** Prior sensitivity (PLAN section 6.6) '
-        'and the robustness check on a perturbed error model (PLAN section 6.5) are deferred to '
-        "S08's second session; the second of them has no data on Benchmark A at all -- see the "
-        'rebuild register.\n')
+    add('**One required analysis cannot be run at all.** PLAN section 6.5 asks for robustness to a '
+        'perturbed error model -- heavier tails, a systematic 2-theta zero shift, a different '
+        'sigma(q2) slope. **No such bundle exists on Benchmark A**, and none can be made by '
+        're-scoring, because a candidate pool is conditioned on the peak list that produced it '
+        '(rebuild register **R11**). Section 13 substitutes transfer across the *conditions* that '
+        'do exist, which is a weaker claim and is labelled as one. Every bundle here shares the '
+        "repo's own sigma(q2) model, which is also the generator's -- the leakage path F-008 "
+        'names.\n')
+    add('**And one the benchmark cannot support at all.** Every entry is simulated at one '
+        'broadening tag with one instrument model (S02, 2026-08-11), so nothing here speaks to '
+        'transfer between instruments -- which is the axis the sealed CNRS benchmark will vary '
+        '(**R12**).\n')
 
     add('## The floor, which is not zero\n')
     floor = value(main_table, FLOOR_CONSTANT, 'top10')
@@ -428,6 +436,115 @@ def main():
             'for model selection and forbids as a headline. Nothing was tuned on `fom-dev`.\n')
         add(table(tuning, floatfmt=5))
         add('')
+
+    # ---- session 2 -------------------------------------------------------------------
+    q33 = read(artifact_dir, f'{args.tag}_q33_table.csv')
+    q33_lattice = read(artifact_dir, f'{args.tag}_q33_by_lattice.csv')
+    sensitivity = read(artifact_dir, f'{args.tag}_prior_sensitivity.csv')
+    loco = read(artifact_dir, f'{args.tag}_loco.csv')
+    distil = read(artifact_dir, f'{args.tag}_distil_table.csv')
+    distil_cost = read(artifact_dir, f'{args.tag}_distil_cost.csv')
+
+    if q33 is not None:
+        add('## 11. Q33 -- the triclinic loss, and whether a threshold rule fixes it\n')
+        add('F-088 found aP is the one lattice that does not gain: its operating point is 2.7 pp '
+            'below raw `M_sym` at p = 0.027 while its top-10 is level. So the loss is in the '
+            'scoring half, and the obvious suspect is a single global threshold on a calibrated '
+            'probability.\n')
+        add(table(q33, ['arm', 'operating_point', 'top10', 'threshold_only', 'reported',
+                        'false_positive', 'precision']))
+        add('')
+        if q33_lattice is not None:
+            block = q33_lattice.loc[q33_lattice['level'] == 'aP']
+            add('### Triclinic only\n')
+            add(table(block, ['arm', 'operating_point', 'top10', 'reported', 'false_positive',
+                              'precision', 'found']))
+            add('')
+        add('**The sharpest form of the loss is precision.** When the combiner reports a '
+            'triclinic answer it is right 16.5% of the time against `M_sym`\'s 23.8%; it reports '
+            'on aP *more* often and is wrong more often. Reachability is identical in every row, '
+            'so none of this is a generation difference.\n')
+        add('**Every remedy is worse than doing nothing.** Raising aP to its own matched-FPR cut '
+            'collapses its operating point to 0.0150 -- above that cut the score has almost no '
+            'discrimination left and the correct candidates sit below it. Expressing the same '
+            'cuts as a score transform costs 3.9 pp of top-10 as well, because subtracting a '
+            'per-lattice constant reorders the pooled ranking: **F-076 for the third time.** The '
+            "hybrid inherits aP's base rate, so its isotonic is a step function whose steps sit "
+            'below any usable cut, and giving aP its own cut changes nothing because no score '
+            'falls between the two.\n')
+        add('**The question is bounded.** aP carries 56 of the CNRS table\'s 599 and the gap is '
+            '0.0267, so a perfect triclinic fix is worth at most **+0.249 pp** of the aggregate. '
+            'Report the deficit; do not chase it by rescaling. See STATUS F-089.\n')
+
+    if sensitivity is not None:
+        add('## 12. Prior sensitivity (PLAN section 6.6)\n')
+        add('The check that matters most once the extinction group is known to be the dominant '
+            'feature: if the model is largely a symmetry prior, how much of the result is the '
+            'CNRS population rather than the score? Four Bravais-lattice mixes crossed with three '
+            'volume tilts, re-weighted over (lattice x volume decile) cells.\n')
+        for arm in ('M20 (raw)', 'M_sym (raw)', 'combiner (global threshold)'):
+            block = sensitivity.loc[sensitivity['arm'] == arm]
+            if not block.shape[0]:
+                continue
+            pivot = block.pivot_table(index='lattice_mix', columns='volume_tilt',
+                                      values='operating_point')
+            add(f'**{arm}**\n')
+            add(table(pivot.reset_index()))
+            add('')
+        add('**The combiner beats `M_sym` at all twelve combinations, by +12.2 to +22.2 pp**, '
+            'while the absolute operating point spans 0.451 to 0.806. So the headline number is a '
+            'statement about the CNRS population; the *margin* is not. Under the harshest shift '
+            'the combiner degrades least in relative terms (-29% against -34% and -46%) and most '
+            'in absolute points, because it has the most to lose. The narrowest leads are the '
+            'low-symmetry mixes, which is F-089 seen again.\n')
+        add('One caveat: the `cnrs/flat` cell is not identical to the headline, because '
+            're-weighting over (lattice x decile) cells is not the same as weighting lattice '
+            'means when a lattice\'s deciles are unevenly populated. Read the table as deltas '
+            'within itself.\n')
+
+    if loco is not None:
+        add('## 13. Condition transfer, and what it is not\n')
+        add(table(loco, ['label', 'held_out_bundle', 'n_entries', 'op_trained_without',
+                         'op_trained_with', 'op_transfer_cost', 'top10_trained_without',
+                         'top10_trained_with', 'ceiling']))
+        add('')
+        add('Fit on five bundles, threshold on their calibration split, evaluate on the sixth -- '
+            'always on `fom-dev` entries. **Mean cost 1.6 pp, worst 2.7, and the heaviest-dropout '
+            'condition costs nothing.** A model that had never seen second-phase contamination '
+            'still scores 0.4352 on it against 0.4620 for one that had.\n')
+        add('**This is not the robustness check PLAN section 6.5 asks for.** That wants a '
+            'different error *model* -- heavier tails, a systematic 2-theta zero shift, a '
+            'different sigma(q2) slope -- and none of those exist on Benchmark A (rebuild '
+            'register R11). They cannot be made by re-scoring, because a candidate pool is '
+            'conditioned on the peak list that produced it. Every bundle here shares the repo\'s '
+            'own sigma(q2) model, which is also the generator\'s. Robustness to a different error '
+            'law is **untested**, not tested and passed.\n')
+
+    if distil is not None:
+        add('## 14. The fast form, and STATUS Q4\n')
+        add('Q4, open since the plan: is a small MLP evaluated as numpy matmuls actually slower '
+            'than `get_M20`? **No -- it is six to eight times faster.**\n')
+        if distil_cost is not None:
+            add(table(distil_cost, ['feature_set', 'form', 'n_features', 'seconds_per_candidate',
+                                    'cost_vs_get_M20', 'merit_cost_vs_get_M20'], floatfmt=4))
+            add('')
+        add(table(distil, ['arm', 'n_features', 'operating_point', 'top10', 'threshold_only',
+                           'delta_op_vs_M_sym'] if 'delta_op_vs_M_sym' in distil.columns
+                  else ['arm', 'n_features', 'operating_point', 'top10', 'threshold_only']))
+        add('')
+        add('The student is fitted on the teacher\'s *output* rather than on the labels: the '
+            'target is a ranking, the teacher already encodes one, and regressing on it keeps '
+            'that ordering instead of re-learning it from 0.9%-prevalence labels with a fraction '
+            'of the capacity. It costs 1.7 pp of operating point and 0.1 pp of top-10.\n')
+        add('**So gate condition 3\'s arithmetic changes and it still fails.** The model is 0.13x '
+            'of a 2x budget -- about 3% of it. The whole budget is the *features*: 4.68x for the '
+            'ten affordable merits, 145x for all seventeen. A deployable inner-loop score is '
+            'features + assembly + MLP ~ **5.1x `get_M20`**, scoring 0.5868, still +11.9 pp over '
+            'raw `M_sym`. Getting under 2x is now a question of which merits to drop, which is '
+            'S14\'s.\n')
+        add('A student needs its own per-lattice isotonic: fitted on the teacher\'s output it '
+            'reproduces the ordering but not the scale, and without one its operating point '
+            'measured exactly 0.0000 against a top-10 of 0.65. See STATUS F-092.\n')
 
     add('## Figures\n')
     add(f'`{args.tag}.png` -- (a) every arm against both baselines and both floors; (b) '
