@@ -83,8 +83,15 @@ DESCRIPTIVE = (
 # `volume_ratio_to_truth` is a stored *label*, not a feature (F-055), so it comes off the candidate
 # shard rather than the feature matrix. The over-prediction diagnostic needs it and would otherwise
 # look for it in the wrong parquet.
+#
+# `n_peaks`, `spacegroup` and `n_entering` are here for S07: the analytic null needs the line count,
+# the conditional null conditions on the extinction group -- which is what `spacegroup` holds, a
+# diffraction symbol like 'P 1 21/c 1', not a single space group (Smith & Snyder 1979, F-011) -- and
+# the look-elsewhere correction needs the number of candidates that entered deduplication. Adding
+# them is projection-only and changes no S06 number.
 POOL_COLUMNS = tuple(FomMetrics.SCORE_INDEPENDENT_COLUMNS) + (
     'Minfo', 'M20', 'volume', 'lattice_system', 'volume_ratio_to_truth',
+    'n_peaks', 'spacegroup', 'n_entering',
     )
 
 

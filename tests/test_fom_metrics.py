@@ -368,6 +368,27 @@ def test_hard_stratum_membership():
                                             'error1_cont1_drop6', 'error1_cont1_drop10'}
 
 
+def test_hard_min_decile_widens_the_stratum_and_defaults_to_the_literal_one():
+    """Q32's widening must be opt-in, so every number measured before it still means what it did.
+
+    S07 fits on `fom-train` and so cannot inherit S06's licence to pool the hard stratum over
+    train+dev; at the literal decile >= 8 cut `fom-dev` holds sixteen reachable entries and every
+    merit's threshold metrics come back exactly 0.0000 (F-063). DWMM resolved Q32 by reporting
+    hard-stratum *threshold* metrics at decile >= 6. The default is unchanged and this pins that.
+    """
+    entries = _stratum_entries()
+    default = FomMetrics.entry_context(entries)
+    explicit = FomMetrics.entry_context(entries, hard_min_decile=FomMetrics.HARD_MIN_DECILE)
+    assert default['is_hard'].equals(explicit['is_hard'])
+    assert FomMetrics.HARD_MIN_DECILE == 8
+
+    widened = FomMetrics.entry_context(entries, hard_min_decile=6)
+    assert set(widened.loc[widened['is_hard'], 'volume_decile']) == {6, 7, 8, 9}
+    # Strictly a superset: widening the volume cut cannot drop an entry that was already hard.
+    assert widened['is_hard'].sum() > default['is_hard'].sum()
+    assert not (default['is_hard'] & ~widened['is_hard']).any()
+
+
 def test_bootstrap_resamples_source_entries_not_rows():
     # The same crystal under seven conditions is one observation, not seven. Resampling rows
     # would shrink the interval by up to sqrt(7) and produce the absurdly tight CIs the handoff

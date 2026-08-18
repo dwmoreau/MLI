@@ -12,3 +12,9 @@ docs/
 
 # profiler output (tools/profile_run.py)
 indexing_profile/
+
+# S07's fitted nulls: 131 MB of generated data, regenerable in one command by
+# mlindex/scripts/run_fom_null.py. The directory is the deliverable's documented home, but the
+# files themselves follow the standing rule that generated data is not committed -- as the
+# benchmark pool and the FOM feature matrix already do.
+mlindex/models/fom_null/

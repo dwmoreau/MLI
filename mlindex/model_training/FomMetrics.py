@@ -190,7 +190,8 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
              pool='cross_bl', top_n=DEFAULT_TOP_N, strata=DEFAULT_STRATA, weights='cnrs',
              entries=None, bundles=None, split=None, bravais_lattices=None,
              pool_subset='all', degenerates='exclude', score_columns=(),
-             include_control=False, calibration=False, n_bootstrap=1000, seed=12345):
+             include_control=False, calibration=False, n_bootstrap=1000, seed=12345,
+             hard_min_decile=HARD_MIN_DECILE):
     """Turn a candidate pool plus a score into every number the project reports.
 
     `candidates` is a benchmark root, a DataFrame, or an iterable of DataFrames. A root is read
@@ -218,7 +219,7 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
         candidates, entries, bundles=bundles, split=split, bravais_lattices=bravais_lattices,
         score=score, score_columns=score_columns,
         )
-    context = entry_context(entries, weights=weights)
+    context = entry_context(entries, weights=weights, hard_min_decile=hard_min_decile)
     excluded = ([bundle for bundle in CONTROL_BUNDLES
                  if (context['condition_bundle'] == bundle).any()]
                 if not include_control else [])
@@ -284,6 +285,7 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
         n_clusters=int(per_entry['cluster'].nunique()),
         n_bootstrap=int(n_bootstrap),
         seed=int(seed),
+        hard_min_decile=int(hard_min_decile),
         entry_digest=entry_digest(per_entry),
         calibration_skipped_reason=calibration_reason,
         source=source,
@@ -560,12 +562,22 @@ def _combine_reductions(reductions):
 # ---------------------------------------------------------------------------------------
 # Entry-level context: strata and weights
 # ---------------------------------------------------------------------------------------
-def entry_context(entries, weights='cnrs'):
+def entry_context(entries, weights='cnrs', hard_min_decile=HARD_MIN_DECILE):
     """The stratification variables, one row per (entry_id, condition_bundle).
 
     Deciles are computed over `entries` as given -- the whole table, not one split -- so
     `fom-train` and `fom-dev` share bins by construction and no edges have to be threaded
     between calls.
+
+    `hard_min_decile` widens the hard stratum's volume cut, and exists for one reason: at the
+    literal cut of 8 the stratum holds 16 reachable source entries on `fom-dev`, where every merit
+    scores exactly 0.0000 and McNemar finds no discordant pairs, so its *threshold* metrics cannot
+    be produced from the reportable split at all (F-063). S06 got round that by pooling rank metrics
+    over `fom-train`+`fom-dev`, a licence that holds only while nothing is fitted on `fom-train`;
+    S07 fits, so it cannot inherit it. Q32 is resolved by reporting hard-stratum *threshold* metrics
+    at decile >= 6 -- 538 reachable rows over 313 reachable entries against 146/104 (F-062) -- while
+    rank metrics stay on the literal stratum. The default is unchanged, so every earlier number
+    means what it did.
     """
     required = ['entry_id', 'condition_bundle', 'split', 'bravais_lattice_true',
                 'lattice_system_true', 'volume_true']
@@ -598,7 +610,7 @@ def entry_context(entries, weights='cnrs'):
     context['cluster'] = pd.factorize(context['entry_id'], sort=True)[0]
     context['is_hard'] = (
         context['bravais_lattice'].isin(HARD_LATTICES)
-        & (context['volume_decile'] >= HARD_MIN_DECILE)
+        & (context['volume_decile'] >= int(hard_min_decile))
         & context['condition_bundle'].isin(HARD_BUNDLES)
         )
     return context
