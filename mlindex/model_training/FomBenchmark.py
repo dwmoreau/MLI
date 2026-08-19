@@ -385,6 +385,119 @@ def zoo_features(candidates, entries, g_min=1.0, min_discrepancy=0.0,
     return pd.concat([candidates[keys], features], axis=1), treatments
 
 
+
+# The columns cv_features reads. Same projection as the zoo, and for the same reason: this is a
+# 10M-row read and anything else on it is dead weight.
+CV_CANDIDATE_COLUMNS = ZOO_CANDIDATE_COLUMNS
+
+
+def cv_features(candidates, entries, schemes=('random', 'contiguous', 'high_q'), n_folds=5,
+                seed=12345, sigma_entrywise=True, min_discrepancy=0.0, holdout_peaks=None,
+                models_directory=None):
+    """S10's predictive merits for a whole candidate frame: cross-validated, and held out.
+
+    Built the same shape as `zoo_features` and for the same two reasons -- the reference list is
+    cctbx-backed and is built once per extinction group rather than once per row, and the entrywise
+    residual scale is a property of the entry's *whole* pool, so the inner groups are collected
+    before anything is scored. It is a separate function rather than a branch of `zoo_features`
+    because it costs ~29 get_M20-equivalents per fold scheme and nothing that already has the zoo
+    should have to pay that to re-read it.
+
+    `holdout_peaks`, when given, is a frame of (entry_id, condition_bundle, q2_holdout) from
+    `run_fom_cv_holdout.py`. Entries missing from it, or carrying no surplus lines, get no `ho_`
+    columns rather than zeros -- "this entry has no hold-out set" and "this candidate scored badly
+    on its hold-out set" are different statements and must not be merged (the S10 handoff asks for
+    the applicability fraction to be reported, which needs them separable).
+
+    Returns (features, sigma_treatment), aligned to `candidates`' own index and keyed on
+    ZOO_KEY_COLUMNS, exactly as `zoo_features` is, so the two matrices join on the same keys.
+    """
+    from mlindex.utilities.FigureOfMerits import SIGMA_TREATMENT
+    from mlindex.utilities.FigureOfMerits import estimate_sigma_entrywise
+    from mlindex.utilities.FigureOfMerits import get_cv_fom
+    from mlindex.utilities.FigureOfMerits import get_holdout_fom
+    from mlindex.utilities.FigureOfMerits import get_insample_fom
+
+    join_keys = _join_keys(candidates, entries)
+    peaks = entries.set_index(join_keys)['q2_obs']
+    extra_peaks = None
+    if holdout_peaks is not None:
+        extra_keys = [key for key in join_keys if key in holdout_peaks.columns]
+        extra_peaks = holdout_peaks.set_index(extra_keys)['q2_holdout']
+
+    collected = {}
+    for outer_key, entry_group in candidates.groupby(list(join_keys) + ['n_peaks'], sort=False):
+        n_peaks = int(outer_key[-1])
+        peak_key = outer_key[0] if len(join_keys) == 1 else outer_key[:len(join_keys)]
+        # The optimizer truncates the peak list with a plain prefix slice; cut it the same way.
+        q2_obs = np.asarray(peaks.loc[peak_key], dtype=np.float64)[:n_peaks]
+        q2_holdout = None
+        if extra_peaks is not None and peak_key in extra_peaks.index:
+            q2_holdout = np.asarray(extra_peaks.loc[peak_key], dtype=np.float64)
+            if q2_holdout.size == 0:
+                q2_holdout = None
+
+        inner_keys = ['lattice_system', 'bravais_lattice', 'spacegroup']
+        prepared = []
+        for (lattice_system, bravais_lattice, spacegroup), group in \
+                entry_group.groupby(inner_keys, sort=False):
+            xnn = np.vstack([np.asarray(v, dtype=np.float64) for v in group['xnn']])
+            q2_ref_calc, _, hkl, q2_calc = assign_lines(
+                q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory
+                )
+            hkl_ref = hkl_ref_for(lattice_system, bravais_lattice, spacegroup, models_directory)
+            prepared.append(
+                (group.index, lattice_system, bravais_lattice, xnn, hkl, hkl_ref, q2_calc,
+                 q2_ref_calc)
+                )
+
+        sigma = None
+        if sigma_entrywise:
+            sigma = estimate_sigma_entrywise(
+                q2_obs, np.vstack([item[6] for item in prepared])
+                )
+
+        for (index, lattice_system, bravais_lattice, xnn, hkl, hkl_ref, q2_calc,
+             q2_ref_calc) in prepared:
+            # The in-sample partner first, so is_M/cv_M is a like-for-like ratio rather than a
+            # comparison against a merit with a different baseline.
+            # q2_calc and q2_ref_calc come straight from assign_lines rather than being
+            # rederived, so is_M20 is get_M20 on exactly the arrays the pipeline used. See
+            # get_insample_fom's docstring for why a 1e-16 rederivation is not good enough.
+            features = dict(get_insample_fom(
+                q2_obs, xnn, hkl, lattice_system, bravais_lattice,
+                q2_calc=q2_calc, q2_ref_calc=q2_ref_calc,
+                sigma_entrywise=sigma, min_discrepancy=min_discrepancy,
+                ))
+            for scheme in schemes:
+                output = get_cv_fom(
+                    q2_obs, xnn, hkl, hkl_ref, lattice_system, bravais_lattice,
+                    scheme=scheme, n_folds=n_folds, seed=seed, sigma_entrywise=sigma,
+                    min_discrepancy=min_discrepancy,
+                    )
+                features.update(
+                    {f'{name}__{scheme}': values for name, values in output.items()}
+                    )
+            if q2_holdout is not None:
+                features.update(get_holdout_fom(
+                    q2_holdout, xnn, hkl_ref, lattice_system, bravais_lattice,
+                    sigma_entrywise=sigma, min_discrepancy=min_discrepancy,
+                    ))
+            for name, values in features.items():
+                collected.setdefault(name, {}).update(
+                    zip(index, np.asarray(values, dtype=float))
+                    )
+
+    frame = pd.DataFrame(
+        {name: pd.Series(values) for name, values in collected.items()}
+        ).reindex(candidates.index)
+    keys = [column for column in ZOO_KEY_COLUMNS if column in candidates.columns]
+    treatments = {
+        name: SIGMA_TREATMENT[name.split('__')[0]] for name in frame.columns
+        }
+    return pd.concat([candidates[keys], frame], axis=1), treatments
+
+
 # label_frame's cost is almost entirely validate_candidate_known_bl: profiled at 600 candidates it
 # is 95% of the time, calling np.isclose ~252 times per candidate as it searches the off-by-two
 # multiplier and permutation space. That is ~9 ms/candidate, which over a full S04 grid of ~20M

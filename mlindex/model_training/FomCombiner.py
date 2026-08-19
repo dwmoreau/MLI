@@ -109,8 +109,28 @@ STRUCTURAL_CATEGORICAL = ('bravais_lattice', 'spacegroup')
 CONTEXT_MERITS = (('M20', True), ('M_sym', True), ('n_over', False), ('max_gap', False))
 CONTEXT_STATISTICS = ('rank', 'gap_to_best', 'z')
 
+# S10's predictive merits, as their own droppable group. Not in DEFAULT_GROUPS: S08's model is
+# done and reported, and adding a feature to its default would silently redefine every number in
+# STATUS section 2. The group exists so S10 can measure what it adds by fitting the same
+# architecture twice and pairing the two.
+#
+# A subset of the thirty columns the CV matrix carries, not all of them. `contiguous` and `random`
+# differ only in whether the held-out peaks are adjacent and correlate above 0.99, so including
+# both would be one feature counted twice; the diagnostics (n_scored, n_voided, max_leverage) are
+# for reading the result rather than for the model. `is_*` is here because the *pair* is the
+# feature -- what a tree can use is that the in-sample and held-out statistics disagree.
+CV_MERITS = (
+    'cv_M20__random', 'cv_M__random', 'cv_tail_nll__random', 'cv_raw__random', 'cv_chi2__random',
+    'cv_M20__high_q', 'cv_M__high_q', 'cv_tail_nll__high_q',
+    'is_M', 'is_tail_nll',
+    'ho_M20', 'ho_M', 'ho_tail_nll',
+    )
+# `is_M20` is deliberately absent: it reproduces the pool's own `M20` to 1e-12, so including it
+# would add a column that is exactly collinear with one the model already has. It is built and
+# reported because it is the round-trip gate, not because it is a feature.
+
 SCALER_METHODS = ('analytic', 'z', 'rank')
-FEATURE_GROUPS = ('raw', 'scaled', 'structural', 'context', 'in_sample')
+FEATURE_GROUPS = ('raw', 'scaled', 'structural', 'context', 'in_sample', 'cv')
 DEFAULT_GROUPS = ('raw', 'scaled', 'structural', 'context')
 
 # Enforced by `check_no_leakage`, which every fit and every score call runs. A deny-list rather
@@ -200,6 +220,8 @@ def feature_specification(groups=DEFAULT_GROUPS, scalers=()):
         names.extend(RAW_MERITS)
     if 'in_sample' in groups:
         names.extend(IN_SAMPLE_MERITS)
+    if 'cv' in groups:
+        names.extend(CV_MERITS)
     if 'scaled' in groups:
         names.extend(scaled_names(scalers, merits))
     categorical = ()
@@ -229,10 +251,12 @@ def affordable_features(names, allowed_merits):
     costs is measured rather than asserted.
     """
     allowed = set(allowed_merits)
-    known = set(RAW_MERITS) | set(IN_SAMPLE_MERITS)
+    known = set(RAW_MERITS) | set(IN_SAMPLE_MERITS) | set(CV_MERITS)
     kept = []
     for name in names:
-        merit = name.split('__', 1)[0]
+        # A CV column carries its fold scheme after the separator, so it is its own merit rather
+        # than a scaled form of one; match the whole name before splitting on '__'.
+        merit = name if name in CV_MERITS else name.split('__', 1)[0]
         if name.startswith('ctx_') and name != 'ctx_pool_size':
             body = name[len('ctx_'):]
             merit = next((candidate for candidate, _ in CONTEXT_MERITS
@@ -319,7 +343,7 @@ def add_context(frame):
 
 
 def combiner_frames(benchmark_dir, feature_dir, bundles, keep_entry_ids, covariates, scalers,
-                    groups=DEFAULT_GROUPS):
+                    groups=DEFAULT_GROUPS, cv_dir=None):
     """Yield one fully-assembled frame per bundle: pool, features, S07 scales, entry, context.
 
     The same assembly serves training and evaluation, which is the point -- a context feature
@@ -351,6 +375,17 @@ def combiner_frames(benchmark_dir, feature_dir, bundles, keep_entry_ids, covaria
             # Inner: the feature matrix covers fom-train and fom-dev only, fom-test having never
             # been computed (it is sealed until S15). 1:1 on the four zoo keys.
             pool = pool.merge(features, on=keys, how='inner', validate='1:1')
+        if 'cv' in groups:
+            if cv_dir is None:
+                raise ValueError("feature group 'cv' needs cv_dir; S10's matrix is not in "
+                                 'feature_dir')
+            # Left, not inner: an entry with no surplus peaks has no `ho_` columns, and dropping
+            # its candidates would silently change the denominator. HistGradientBoosting takes
+            # NaN natively and "this entry had no extra peaks" is a real inference-time state.
+            cv_columns = [column for column in CV_MERITS if column not in pool.columns]
+            cv_frame = pd.read_parquet(Path(cv_dir)/f'cv_{bundle}.parquet')
+            cv_columns = [column for column in cv_columns if column in cv_frame.columns]
+            pool = pool.merge(cv_frame[keys + cv_columns], on=keys, how='left', validate='1:1')
         pool = pool.merge(covariates, on=['entry_id', 'condition_bundle'], how='left',
                           validate='m:1')
         pool['log_volume'] = np.log(pool['volume'].to_numpy(dtype=np.float64))

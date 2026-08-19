@@ -689,6 +689,37 @@ SIGMA_TREATMENT.update(
     }
 )
 
+# S10's predictive merits. The normalisation of cv_M and cv_tail_nll is the calculated-line
+# spacing of the *refit* cell, so they are sigma-free in exactly the sense the rest of the
+# classical family is; only the chi2 forms, which divide by an estimated residual scale, are not.
+SIGMA_TREATMENT.update(
+    {
+        "cv_raw": "free",
+        "cv_M": "free",
+        "cv_tail_nll": "free",
+        "cv_n_scored": "free",
+        "cv_n_voided": "free",
+        "cv_max_leverage": "free",
+        "ho_raw": "free",
+        "ho_M": "free",
+        "ho_tail_nll": "free",
+        "ho_n_scored": "free",
+        "is_raw": "free",
+        "is_M": "free",
+        "is_M20": "free",
+        "cv_M20": "free",
+        "ho_M20": "free",
+        "is_tail_nll": "free",
+        "is_n_scored": "free",
+        "cv_n_predicted": "free",
+        "ho_n_predicted": "free",
+        "is_n_predicted": "free",
+        "cv_chi2": "in-sample",
+        "ho_chi2": "in-sample",
+        "is_chi2": "in-sample",
+    }
+)
+
 
 def _sorted_lines_in_range(q2_ref_calc, cutoff, floor=None):
     """Reference lines below the cut-off, sorted ascending, with the rest pushed to +inf.
@@ -1163,6 +1194,434 @@ def get_bic(q2_obs, q2_calc, xnn, lattice_system, bravais_lattice):
     complexity = np.sum(np.log(assignments), axis=1)
 
     return -2*log_likelihood + N_CELL_PARAMETERS[lattice_system]*np.log(n_peaks) + complexity
+
+
+# ---------------------------------------------------------------------------------------------
+# S10: predictive figures of merit. Every merit above scores a candidate on the peaks it was
+# fitted to; these two score it on peaks it was not. The distinction is the whole point -- a cell
+# with six free parameters and a dense calculated spectrum can absorb any twenty peaks, and the
+# question is whether it can then *predict* one it has not seen.
+# ---------------------------------------------------------------------------------------------
+
+# ln 2, the median of Exp(1). Under de Wolff's idealised null a held-out discrepancy is a free-path
+# draw with mean Delta (de Wolff 1961 section 3), so median(|dQ|/Delta) = ln 2 and cv_M = 1 -- for
+# every lattice, every cell size and every peak count. That is what makes it comparable across
+# candidates without a fitted normalisation. tests/test_fom_cv.py asserts it on a construction that
+# satisfies the null; on the benchmark's refined survivors it does not hold and is not expected to.
+LOG_TWO = float(np.log(2.0))
+
+# A held-out fold is voided when the retained peaks cannot determine the cell. This is not a
+# nicety: gauss_newton_solve returns a *zero step* for a rank-deficient system, so an unvoided
+# fold would silently report the full fit as its own refit and score perfectly.
+CV_SCHEMES = ("random", "contiguous", "high_q")
+
+
+def _cv_folds(n_peaks, n_folds, scheme, seed):
+    """Which peaks are held out in each fold, as a list of index arrays.
+
+    'random'      n_folds interleaved folds over a seeded permutation. Tests general predictive
+                  accuracy. Every peak is held out exactly once.
+    'contiguous'  n_folds contiguous blocks in ascending q2. Every peak is held out exactly once.
+                  This exists to separate *contiguity* from *extrapolation* in the scheme below,
+                  which would otherwise be confounded.
+    'high_q'      the top block only, one fold. de Wolff's peaks are ascending in q2, so this is
+                  the extrapolation test -- closest to the real failure, and the only scheme whose
+                  out-of-fold sample is a block rather than the whole list.
+    """
+    order = np.arange(n_peaks)
+    if scheme == "random":
+        order = np.random.default_rng(seed).permutation(n_peaks)
+        return [np.sort(order[start::n_folds]) for start in range(n_folds)]
+    blocks = np.array_split(order, n_folds)
+    if scheme == "contiguous":
+        return list(blocks)
+    if scheme == "high_q":
+        return [blocks[-1]]
+    raise ValueError(f"unknown cv scheme {scheme!r}, expected one of {CV_SCHEMES}")
+
+
+def _refit_on_retained(q2_obs, xnn, hkl2_full, keep, pivot_tolerance=1e-12):
+    """Weighted least-squares refit of xnn on the retained peaks, with the assignment frozen.
+
+    Two things make this exact rather than iterative. The forward model q2 = hkl2 @ xnn is
+    *linear*, so at fixed weights a single Gauss-Newton step from any starting point lands on the
+    weighted optimum -- there is no convergence loop and no dependence on where it started.
+
+    The weights are the part that has to be got right. CandidateOptLoss builds
+    sigma = sqrt(q2 (|dQ| + eps)) from the residuals at its starting cell; carrying that over from
+    the full fit would let the *held-out* peaks influence the refit through the weights, and would
+    do so most for the cells with the most parameters -- which is exactly the effect being
+    measured. So the weights are rebuilt here from the retained peaks alone: pass one uses the
+    residual-free sigma_0 = sqrt(q2), pass two uses the pass-one retained residuals.
+
+    The eps floor is relative rather than CandidateOptLoss's absolute 1e-10. With sixteen retained
+    peaks, one peak landing on a calculated line would otherwise take a weight of ~1e12 and define
+    the refit by itself.
+
+    Returns (xnn_refit, ok), ok being False where the retained design is rank deficient.
+    """
+    from mlindex.utilities.numba_functions import gauss_newton_solve
+
+    hkl2 = np.ascontiguousarray(hkl2_full[:, keep, :])
+    q2 = np.ascontiguousarray(
+        np.repeat(q2_obs[keep][np.newaxis], xnn.shape[0], axis=0)
+    )
+
+    sigma = np.ascontiguousarray(np.sqrt(np.maximum(q2, 0.0)) + 1e-300)
+    step, ok = gauss_newton_solve(
+        hkl2, q2, sigma, np.ascontiguousarray(xnn), pivot_tolerance
+    )
+    refit = xnn + step
+
+    residual = np.abs(np.sum(hkl2 * refit[:, np.newaxis, :], axis=2) - q2)
+    # Two floors, and both are needed. The relative one stops a single peak that happens to land on
+    # a calculated line from taking a weight of ~1e12 and defining the refit by itself, which is
+    # what CandidateOptLoss's absolute 1e-10 permits at sixteen retained peaks. The second stops
+    # sigma reaching exactly zero when *every* residual does -- an exactly-fitting cell is not
+    # hypothetical here (F-054's zero-error bundle) and 1/sigma^2 inside the kernel would divide
+    # by zero for the whole candidate.
+    floor = np.maximum(0.1*np.median(residual, axis=1, keepdims=True), 1e-12*np.maximum(q2, 0.0))
+    sigma = np.ascontiguousarray(
+        np.sqrt(np.maximum(q2, 0.0) * np.maximum(residual, floor)) + 1e-300
+    )
+    step, ok_second = gauss_newton_solve(
+        hkl2, q2, sigma, np.ascontiguousarray(refit), pivot_tolerance
+    )
+    return refit + step, ok & ok_second
+
+
+def _held_out_leverage(hkl2_full, keep, held):
+    """Max leverage of the held-out peaks against the retained design, per candidate.
+
+    h_i = x_i^T (X_ret^T X_ret)^-1 x_i, unweighted. For a retained point this is bounded by 1;
+    for a held-out one it can exceed 1, and doing so means the prediction is an extrapolation
+    rather than an interpolation.
+
+    This is **reported, not used to void a fold.** The 'high_q' scheme holds out the top block on
+    purpose, so its leverage is large by construction and voiding on it would delete the very
+    measurement the scheme exists to make. It is a diagnostic for reading the result, and the
+    contrast between 'contiguous' and 'high_q' is what it explains.
+    """
+    design = hkl2_full[:, keep, :]
+    gram = np.matmul(np.swapaxes(design, 1, 2), design)
+    out = hkl2_full[:, held, :]
+    leverage = np.full(hkl2_full.shape[0], np.nan)
+    try:
+        solved = np.linalg.solve(
+            gram + 1e-12*np.eye(gram.shape[-1])[np.newaxis], np.swapaxes(out, 1, 2)
+        )
+    except np.linalg.LinAlgError:
+        return leverage
+    values = np.sum(out * np.swapaxes(solved, 1, 2), axis=2)
+    return np.max(values, axis=1)
+
+
+def _dewolff_baseline(q2_ref_calc, cutoff):
+    """Q_N/(2 N_cal): the expected discrepancy an arbitrary cell of this line density would give.
+
+    get_M20's own baseline, lifted out so a held-out score can use it unchanged. `cutoff` is the
+    calculated position of the line assigned to the *last observed* peak, which is what get_M20
+    uses (`q2_calc[:, -1]`) -- taking it from the held-out peaks instead would make the baseline
+    move with the fold. Returns (n_candidates,), zero where the candidate has no lines in range.
+
+    The cut-off is **snapped onto the reference grid before it is used**, and that is what makes
+    this exact rather than approximately right. The cut-off IS one of the reference lines -- the
+    one the last observed peak was assigned -- so a bare `<` turns on whether that line reproduces
+    itself to the last bit. It does not: get_M20 reaches it through `take_along_axis` on a matmul,
+    while a caller holding only the assigned Miller indices reaches it through a sum over them,
+    and the two differ by ~1e-16. Measured on 2.37M real candidates, that flipped N by one line
+    for a handful of monoclinic cells and moved the merit by up to 1.8%. Snapping to the *nearest*
+    reference line recovers the stored line itself -- the last peak's assignment is by definition
+    the nearest line to its own calculated position -- so the comparison is get_M20's.
+    """
+    nearest = np.argmin(np.abs(q2_ref_calc - cutoff[:, np.newaxis]), axis=1)
+    snapped = np.take_along_axis(q2_ref_calc, nearest[:, np.newaxis], axis=1)
+    in_range = q2_ref_calc < snapped
+    count = in_range.sum(axis=1)
+    q_n = np.max(np.where(in_range, q2_ref_calc, 0.0), axis=1)
+    expected = np.zeros(q2_ref_calc.shape[0])
+    good = count > 0
+    expected[good] = q_n[good]/(2*count[good])
+    return expected
+
+
+def _predictive_terms(q2_out, q2_assigned, xnn_used, lattice_system, bravais_lattice,
+                      min_discrepancy=0.0):
+    """|dQ| on the held-out peaks, and its ratio to the local calculated-line spacing there.
+
+    Delta is evaluated at the cell that made the prediction -- the *refit* cell for the
+    cross-validated form -- because that is the spectrum the held-out peak was assigned against.
+
+    `min_discrepancy` floors |dQ| for the same reason it does in get_null_tail_nll: a held-out peak
+    landing exactly on a calculated line sends the ratio to zero and the merit to infinity (F-026).
+    Pass the resolution of the peak positions being scored.
+    """
+    discrepancy = np.maximum(
+        np.abs(np.atleast_2d(q2_out) - q2_assigned), min_discrepancy
+    )
+    delta = get_delta_dewolff61(q2_out, xnn_used, lattice_system, bravais_lattice)
+    return discrepancy, discrepancy/np.maximum(delta, 1e-300)
+
+
+def _reduce_predictive(discrepancy, ratio, sigma_hat, prefix, expected=None):
+    """The three normalisations the S10 handoff asks for, plus the one that transfers.
+
+    Rows are candidates, columns are held-out peaks, NaN where a fold was voided.
+
+      {p}_raw       median |dQ|. No normalisation at all, so it inherits M20's coincidence
+                    problem -- a large cell with a dense spectrum always has a line nearby.
+      {p}_chi2      median |dQ|/sigma_hat, sigma_hat from estimate_sigma_entrywise. **in-sample**.
+      {p}_M         ln(2)/median(|dQ|/Delta). Keeps de Wolff's coincidence baseline while removing
+                    the fitting advantage. Under de Wolff's *idealised* null -- an arbitrary cell
+                    whose calculated lines are a Poisson process -- |dQ|/Delta is Exp(1), whose
+                    median is ln 2, so this is 1 by construction for every lattice and cell size.
+                    Real wrong candidates score above 1, for the two reasons the record already
+                    names: they are refined survivors rather than arbitrary cells (R10, F-075) and
+                    real calculated-Q sequences are more regular than exponential (F-015). How far
+                    above is a measurement, not an assumption.
+      {p}_M20       de Wolff's own statistic, computed on the held-out peaks: his global
+                    Q_N/(2 N_cal) baseline over the *mean* held-out |dQ|. This is the merit the
+                    project's baseline actually is, moved out of sample, and it exists because
+                    {p}_M is not: {p}_M swaps the global baseline for the local Delta(Q) and the
+                    mean for a median at the same time, so a difference against M20 could not be
+                    attributed. With this column the two changes are separable.
+      {p}_tail_nll  -sum log[1 - exp(-|dQ|/Delta)], the held-out counterpart of null_tail_nll.
+                    Gamma(n_scored, 1) under the same null, which is what lets FomNull turn it
+                    into a -log p that is comparable between a cubic candidate scored on ten peaks
+                    and a triclinic one scored on twenty (R5).
+
+    Larger is better for {p}_M and {p}_tail_nll; smaller is better for {p}_raw and {p}_chi2.
+    """
+    # Two masks, and keeping them apart matters. A peak has a *ratio* only where Delta(Q) is
+    # finite, which fails when a refit cell comes out unphysical -- arccos of an out-of-range
+    # argument -- while its *discrepancy* is perfectly well defined there. Sharing one mask made
+    # the de Wolff column average over a different set of peaks from the one get_M20 averages
+    # over, and the round trip came back 1.8e-2 instead of 1e-12.
+    scored = np.isfinite(ratio)
+    predicted = np.isfinite(discrepancy)
+    n_scored = scored.sum(axis=1)
+    n_predicted = predicted.sum(axis=1)
+    good = n_scored > 0
+    has_value = n_predicted > 0
+
+    # A candidate whose every fold was voided has an all-NaN row, and np.nanmedian warns on one.
+    # Fill those rows with zeros before reducing and discard the result afterwards, rather than
+    # silencing the warning -- an all-NaN row that was *not* expected should still be visible.
+    padded_ratio = np.where(scored, ratio, np.nan)
+    padded_discrepancy = np.where(predicted, discrepancy, np.nan)
+    padded_ratio[~good] = 0.0
+    padded_discrepancy[~has_value] = 0.0
+    median_ratio = np.where(good, np.nanmedian(padded_ratio, axis=1), np.nan)
+    median_discrepancy = np.where(has_value, np.nanmedian(padded_discrepancy, axis=1), np.nan)
+    tail = -np.sum(np.where(scored, np.log(1 - np.exp(-ratio) + 1e-100), 0.0), axis=1)
+
+    # A perfect prediction -- every held-out peak exactly on a calculated line -- sends the merit
+    # to infinity, exactly as M20 does when its mean discrepancy is zero (F-054). That is left as
+    # an infinity rather than clipped, so it ranks first (which is correct) and is counted by
+    # FomMetrics' n_non_finite_score diagnostic (which is how it stays visible). Callers with
+    # rounded input pass min_discrepancy instead of relying on this.
+    merit = np.zeros(ratio.shape[0])
+    usable = good & np.isfinite(median_ratio)
+    merit[usable] = np.where(
+        median_ratio[usable] > 0, LOG_TWO/np.maximum(median_ratio[usable], 1e-300), np.inf
+    )
+
+    features = {
+        f"{prefix}_raw": np.where(has_value, median_discrepancy, 0.0),
+        f"{prefix}_M": merit,
+        f"{prefix}_tail_nll": np.where(good, tail, 0.0),
+        f"{prefix}_n_scored": n_scored.astype(float),
+        f"{prefix}_n_predicted": n_predicted.astype(float),
+    }
+    if expected is not None:
+        # get_M20's arithmetic exactly: a mean over the scored peaks, and the guard that returns
+        # zero rather than dividing when a candidate's calculated lines have collapsed.
+        padded_expected = np.where(predicted, expected, np.nan)
+        padded_mean_discrepancy = np.where(predicted, discrepancy, np.nan)
+        padded_expected[~has_value] = 0.0
+        padded_mean_discrepancy[~has_value] = 0.0
+        mean_discrepancy = np.where(has_value, np.nanmean(padded_mean_discrepancy, axis=1), np.nan)
+        mean_expected = np.where(has_value, np.nanmean(padded_expected, axis=1), np.nan)
+        dewolff = np.zeros(ratio.shape[0])
+        usable_dewolff = has_value & np.isfinite(mean_discrepancy) & np.isfinite(mean_expected)
+        dewolff[usable_dewolff] = np.where(
+            mean_discrepancy[usable_dewolff] > 0,
+            mean_expected[usable_dewolff]/np.maximum(mean_discrepancy[usable_dewolff], 1e-300),
+            np.inf,
+        )
+        features[f"{prefix}_M20"] = dewolff
+    if sigma_hat is not None and sigma_hat > 0:
+        features[f"{prefix}_chi2"] = np.where(has_value, median_discrepancy/sigma_hat, 0.0)
+    return features
+
+
+def get_cv_fom(q2_obs, xnn, hkl, hkl_ref, lattice_system, bravais_lattice,
+               scheme="random", n_folds=5, seed=12345, sigma_entrywise=None,
+               min_discrepancy=0.0):
+    """K-fold cross-validation inside the observed peak list: does this cell *predict*?
+
+    Every classical figure of merit scores a candidate on the peaks it was refined against, so a
+    cell with more free parameters is rewarded twice -- once for fitting better and once for
+    having been able to. This measures the second effect directly and charges for it. Per fold:
+
+      1. hold out a subset of the observed peaks;
+      2. refit xnn on the rest, **with their existing Miller-index assignment frozen**. Re-assigning
+         the retained peaks would let the cell chase the held-out ones implicitly, and there would
+         be nothing left to measure;
+      3. rebuild the calculated spectrum from the refit cell and assign **only the held-out peaks**
+         to their nearest calculated line, which is what inference would do;
+      4. score the discrepancy there.
+
+    Each peak is held out exactly once (except under 'high_q'), so the per-peak terms are pooled
+    across folds and reduced once rather than averaged twice. The reduction is a **median**, not a
+    mean: a contaminant peak has no correct assignment under any cell and inflates the error for
+    the true candidate as much as for a false one, and a median is the robustification inference
+    can actually perform without knowing which peak is the contaminant.
+
+    The prediction that validates the implementation is that the penalty scales with the number of
+    free cell parameters (N_CELL_PARAMETERS): near-nil for cubic, largest for triclinic. If it does
+    not scale, something is wrong -- most likely the assignment was not frozen, or folds are being
+    voided silently.
+
+    Arguments follow get_M20_from_xnn rather than get_M20: q2_obs is (n_peaks,), xnn is
+    (n_candidates, n_free), hkl is (n_candidates, n_peaks, 3) as assigned by the full fit, and
+    hkl_ref is (n_ref, 3) for the candidate's extinction group. Nothing is modified.
+
+    Returns a dict of (n_candidates,) arrays; see _reduce_predictive for the columns.
+    """
+    q2_obs = np.asarray(q2_obs, dtype=np.float64)
+    xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
+    n_peaks = q2_obs.shape[0]
+    n_candidates = xnn.shape[0]
+
+    from mlindex.utilities.numba_functions import fast_assign
+
+    hkl2_full = get_hkl_matrix(np.asarray(hkl), lattice_system)
+    hkl2_ref = get_hkl_matrix(np.asarray(hkl_ref), lattice_system)
+
+    discrepancy = np.full((n_candidates, n_peaks), np.nan)
+    ratio = np.full((n_candidates, n_peaks), np.nan)
+    expected = np.full((n_candidates, n_peaks), np.nan)
+    voided = np.zeros(n_candidates)
+    leverage = np.zeros(n_candidates)
+
+    for held in _cv_folds(n_peaks, n_folds, scheme, seed):
+        keep = np.setdiff1d(np.arange(n_peaks), held)
+        if keep.size < hkl2_full.shape[2]:
+            # Fewer retained peaks than free parameters: the refit is not defined at all.
+            voided += held.size
+            continue
+        refit, ok = _refit_on_retained(q2_obs, xnn, hkl2_full, keep)
+        ok = ok & np.all(np.isfinite(refit), axis=1)
+
+        q2_ref_refit = np.matmul(refit, hkl2_ref.T)
+        assign = fast_assign(q2_obs[held], q2_ref_refit)
+        q2_assigned = np.take_along_axis(q2_ref_refit, assign, axis=1)
+
+        fold_discrepancy, fold_ratio = _predictive_terms(
+            q2_obs[held], q2_assigned, refit, lattice_system, bravais_lattice, min_discrepancy
+        )
+        fold_ratio = np.where(np.isfinite(fold_ratio), fold_ratio, np.nan)
+        # de Wolff's baseline at the refit cell. The cut-off is the calculated position of the
+        # line the *last observed* peak was assigned in the full fit, evaluated at the refit cell
+        # -- get_M20's own q2_calc[:, -1], and no held-out information beyond what M20 uses.
+        cutoff = np.sum(hkl2_full[:, -1, :]*refit, axis=1)
+        fold_expected = _dewolff_baseline(q2_ref_refit, cutoff)
+        discrepancy[np.ix_(ok, held)] = fold_discrepancy[ok]
+        ratio[np.ix_(ok, held)] = fold_ratio[ok]
+        expected[np.ix_(ok, held)] = fold_expected[ok][:, np.newaxis]
+        voided += (~ok)*held.size
+        leverage = np.maximum(leverage, _held_out_leverage(hkl2_full, keep, held))
+
+    features = _reduce_predictive(discrepancy, ratio, sigma_entrywise, "cv", expected=expected)
+    features["cv_n_voided"] = voided
+    features["cv_max_leverage"] = leverage
+    return features
+
+
+def get_insample_fom(q2_obs, xnn, hkl, lattice_system, bravais_lattice,
+                     q2_calc=None, q2_ref_calc=None, sigma_entrywise=None, min_discrepancy=0.0):
+    """The same four statistics as get_cv_fom, computed on the peaks the cell WAS fitted to.
+
+    This exists so the cross-validated numbers have an exactly comparable partner. `is_M/cv_M` is
+    then a clean ratio -- same reduction, same normalisation, same estimator, differing only in
+    whether the peak was in the fit -- and its scaling with the number of free cell parameters is
+    S10's second acceptance condition. Comparing `cv_M` against M20 instead would confound the
+    fitted/held-out question with de Wolff's global Q_N/(2N) baseline against the local Delta(Q).
+
+    No refit and no re-assignment: the cell and the Miller indices are the ones the pipeline
+    already produced, so `q2_calc` is just hkl2 @ xnn. Costs a fraction of one fold.
+
+    `q2_calc` and `q2_ref_calc` are optional and buy one column: with them, `is_M20` is emitted,
+    and it must reproduce the pipeline's stored M20 -- the round trip that proves the fold
+    machinery scores the object the benchmark ranked.
+
+    **Pass them; do not let this function derive them.** They are what `FomBenchmark.assign_lines`
+    already returns, and taking `q2_calc` out of `q2_ref_calc` by the assignment is not the same
+    float64 as summing hkl2 @ xnn over the assigned Miller indices. The difference is ~1e-16 and it
+    does not matter to any merit here except the de Wolff one, where the cut-off IS a reference
+    line: a 1e-16 shift moves a line across it, changes N by one, and moved M20 by up to 18% on
+    the candidates where it fired.
+
+    Returns a dict of (n_candidates,) arrays with the 'is' prefix.
+    """
+    q2_obs = np.asarray(q2_obs, dtype=np.float64)
+    xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
+    if q2_calc is None:
+        hkl2 = get_hkl_matrix(np.asarray(hkl), lattice_system)
+        q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
+    discrepancy, ratio = _predictive_terms(
+        q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy
+    )
+    ratio = np.where(np.isfinite(ratio), ratio, np.nan)
+    features = _reduce_predictive(discrepancy, ratio, sigma_entrywise, "is")
+    if q2_ref_calc is not None:
+        # get_M20 itself, on the caller's own arrays. Not a reimplementation: this column's whole
+        # job is to be comparable with the number the benchmark stored.
+        features["is_M20"] = get_M20(q2_obs, q2_calc, np.asarray(q2_ref_calc).copy())
+    return features
+
+
+def get_holdout_fom(q2_obs_holdout, xnn, hkl_ref, lattice_system, bravais_lattice,
+                    sigma_entrywise=None, min_discrepancy=0.0):
+    """The literal hold-out: score the fitted cell on peaks beyond the window it was fitted to.
+
+    This is approach 3 as the brief originally proposed it, and it needs no refit -- the cell was
+    already refined against all of the peaks it was given, and these are not among them. Assign
+    each extra peak to its nearest calculated line and score exactly as the cross-validated form
+    does, so the two are directly comparable on the entries where both exist.
+
+    Its limitations are real and were correctly anticipated. The extra peaks do not always exist;
+    where they do they come from the high-q2 region, where peaks are broad, weak and overlapped;
+    and on this benchmark they had to be re-synthesised, because Benchmark A stored only their
+    count (STATUS section 7, R13). Implemented because it is the obvious thing and a referee will
+    ask, not because it is expected to win.
+
+    `q2_obs_holdout` is (n_holdout,), ascending. Returns a dict of (n_candidates,) arrays with the
+    'ho' prefix.
+    """
+    q2_obs_holdout = np.asarray(q2_obs_holdout, dtype=np.float64)
+    xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
+
+    from mlindex.utilities.numba_functions import fast_assign
+
+    hkl2_ref = get_hkl_matrix(np.asarray(hkl_ref), lattice_system)
+    q2_ref_calc = np.matmul(xnn, hkl2_ref.T)
+    assign = fast_assign(q2_obs_holdout, q2_ref_calc)
+    q2_assigned = np.take_along_axis(q2_ref_calc, assign, axis=1)
+
+    discrepancy, ratio = _predictive_terms(
+        q2_obs_holdout, q2_assigned, xnn, lattice_system, bravais_lattice, min_discrepancy
+    )
+    ratio = np.where(np.isfinite(ratio), ratio, np.nan)
+    # The hold-out peaks lie *beyond* the fitted window, so the cut-off is the last of them rather
+    # than the last fitted peak: N is the number of calculated lines the cell predicts out to the
+    # point it is being asked about.
+    expected = np.repeat(
+        _dewolff_baseline(q2_ref_calc, np.full(xnn.shape[0], float(q2_obs_holdout[-1])))
+        [:, np.newaxis], q2_obs_holdout.size, axis=1,
+    )
+    return _reduce_predictive(discrepancy, ratio, sigma_entrywise, "ho", expected=expected)
 
 
 def compute_all(
