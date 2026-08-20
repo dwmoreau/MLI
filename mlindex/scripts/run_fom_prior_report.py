@@ -65,7 +65,7 @@ def figure(main, reliability, per_lattice, path, arm=None):
     axis.plot([0, 1], [0, 1], color='0.4', linestyle='--', linewidth=1, label='perfect')
     axis.set_xlabel('mean predicted confidence')
     axis.set_ylabel('observed accuracy')
-    axis.set_title('Reliability, after temperature scaling')
+    axis.set_title('Reliability -- stated confidence against observed accuracy')
     axis.legend(fontsize=8)
     axis.grid(alpha=0.3)
 
@@ -126,33 +126,44 @@ def markdown(main, per_lattice, meta, tag, bootstrap=None):
     lines.append(f'Commit `{meta["commit"]}`, seed {meta["seed"]}, stage `{meta["stage"]}`, '
                  f'{meta["wall_clock_seconds"]:.0f} s.')
     lines.append('')
-    lines.append(f'**{meta["scale"]}** Fitted on {meta["n_fit_structures"]:,} source structures '
-                 f'({meta["n_calibration_structures"]:,} held back for temperature scaling), '
-                 f'evaluated on {meta["n_evaluation_rows"]:,} `fom-dev` entry-conditions from the '
-                 f'benchmark\'s own peak lists. Broadening tag `{meta["broadening_tag"]}`, '
-                 f'{len(meta["condition_bundles"])} condition bundles.')
+    source = meta.get('eval_source', 'benchmark')
+    where = ('held-out source structures the network never saw, under freshly drawn conditions'
+             if source == 'heldout' else
+             "`fom-dev` entry-conditions from the FOM benchmark's own peak lists")
+    lines.append(f'Fitted on {meta["n_fit_structures"]:,} source structures, evaluated on '
+                 f'{meta["n_evaluation_rows"]:,} patterns from {where}. Broadening tag '
+                 f'`{meta["broadening_tag"]}`, {len(meta["condition_bundles"])} condition bundles.')
     lines.append('')
-    lines.append('The gate is **calibration, not accuracy** (S12, S13). A prior does not have to '
-                 'be sharp; it has to be honest. Accuracy is reported below and is explicitly not '
-                 'the criterion.')
     lines.append('')
 
-    lines.append('## 1. The heads')
+    lines.append('## 1. Volume branch')
     lines.append('')
-    lines.append('| arm | head | ECE | accuracy | base-rate entropy (bits) | gain over base rate '
-                 '(bits) | temperature |')
-    lines.append('|---|---|---|---|---|---|---|')
+    lines.append('| arm | branch accuracy | within one branch | median abs log volume error |')
+    lines.append('|---|---|---|---|')
+    for _, row in main.iterrows():
+        lines.append(
+            f'| {row["arm"]} | **{row.get("volume_branch_accuracy", float("nan")):.3f}** | '
+            f'{row.get("volume_branch_within_1", float("nan")):.3f} | '
+            f'{row["volume_median_abs_log_ratio"]:.3f} |'
+            )
+    lines.append('')
+    lines.append('## 2. The lattice heads')
+    lines.append('')
+    lines.append('')
+    lines.append('| arm | head | accuracy | ECE | base-rate entropy (bits) | gain over base rate '
+                 '(bits) |')
+    lines.append('|---|---|---|---|---|---|')
     for _, row in main.iterrows():
         for target in targets:
             lines.append(
-                f'| {row["arm"]} | `{target}` | {row[f"{target}_ece"]:.4f} | '
-                f'{row[f"{target}_accuracy"]:.3f} | '
+                f'| {row["arm"]} | `{target}` | **{row[f"{target}_accuracy"]:.3f}** | '
+                f'{row[f"{target}_ece"]:.4f} | '
                 f'{row[f"{target}_base_rate_entropy_bits"]:.3f} | '
-                f'**{row[f"{target}_information_gain_bits"]:+.3f}** | '
-                f'{row[f"{target}_temperature"]:.2f} |'
+                f'{row[f"{target}_information_gain_bits"]:+.3f} |'
                 )
     lines.append('')
-    lines.append(f'ECE gate is < {ECE_GATE}. The gain column is the honest statement of how much '
+    lines.append(f'ECE is reported for reference (gate {ECE_GATE}) and nothing is fitted to it. '
+                 'The gain column is the honest statement of how much '
                  'lattice information a realistic peak list carries: base-rate entropy minus the '
                  'model\'s cross entropy, both in bits, with the base rate taken from the '
                  '*training* population so the baseline cannot borrow from the evaluation split. '
@@ -183,7 +194,7 @@ def markdown(main, per_lattice, meta, tag, bootstrap=None):
                      f'{int(bootstrap["n_rows"].iloc[0]):,} entry-conditions.')
         lines.append('')
 
-    lines.append('## 2. Volume')
+    lines.append('## 3. Volume distribution')
     lines.append('')
     levels = sorted(int(name.rsplit('_', 1)[1]) for name in main.columns
                     if name.startswith('volume_coverage_'))
@@ -203,7 +214,7 @@ def markdown(main, per_lattice, meta, tag, bootstrap=None):
                  'names averaging that away as the failure that matters most.')
     lines.append('')
 
-    lines.append('## 3. The extraction grid')
+    lines.append('## 4. The extraction grid')
     lines.append('')
     lines.append('| arm | n_volumes | n_filters | sigma | filter spacing | sigma / spacing | '
                  'at floor | branches per decade |')
@@ -223,7 +234,7 @@ def markdown(main, per_lattice, meta, tag, bootstrap=None):
                  'wider, so the same filter count buys coarser spacing.')
     lines.append('')
 
-    lines.append('## 4. Per Bravais lattice')
+    lines.append('## 5. Per Bravais lattice')
     lines.append('')
     lines.append('An aggregate alone is the anti-pattern PROTOCOL section 10 names, and F-084 '
                  'warns specifically that a model which has learned "triclinic is usually wrong" '
@@ -240,7 +251,7 @@ def markdown(main, per_lattice, meta, tag, bootstrap=None):
             )
     lines.append('')
 
-    lines.append('## 5. Bounds on every number above')
+    lines.append('## 6. Bounds on every number above')
     lines.append('')
     for bound in meta['bounds']:
         lines.append(f'- {bound}')

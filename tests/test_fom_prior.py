@@ -152,13 +152,45 @@ def test_pinning_the_bundle_reproduces_that_bundles_conditions():
     assert np.abs(noisy - window).mean() > np.abs(clean - window).mean()
 
 
-def test_dropout_bundles_actually_punch_holes():
+def test_dropout_still_punches_holes_when_a_bundle_asks_for_it():
+    """The mechanism, not the configuration.
+
+    DWMM's condition mix carries no dropout, so asserting against the default bundles would assert
+    nothing. `draw_peak_lists` still supports it and S02/S04's grid still uses it, so the guard is
+    written against an explicit bundle instead -- it survives the configuration changing again.
+    """
     pool = _fake_pool()
     window = np.stack([np.asarray(values)[:20] for values in pool['q2_full']])
-    index = [bundle['n_dropout'] for bundle in Prior.CONDITION_BUNDLES].index(10)
-    dropped, _, _ = Prior.draw_peak_lists(pool, np.random.default_rng(0), bundle_index=index)
+    bundles = (dict(name='drop10', multiplier=1.0, n_contaminants=0, n_dropout=10,
+                    second_phase=0, weight=1.0),)
+    dropped, _, _ = Prior.draw_peak_lists(
+        pool, np.random.default_rng(0), bundles=bundles, bundle_index=0,
+        )
     # backfilling from beyond the window pushes the last peak out to higher q2
     assert (dropped[:, -1] > window[:, -1]).mean() > 0.9
+
+
+def test_conditions_are_drawn_at_their_specified_frequencies():
+    """0/1/2 contaminants at 1 : 0.5 : 0.25, which is 57.1 / 28.6 / 14.3 per cent."""
+    pool = _fake_pool(n_rows=4000)
+    _, drawn, _ = Prior.draw_peak_lists(pool, np.random.default_rng(11))
+    weights = np.array([bundle.get('weight', 1.0) for bundle in Prior.CONDITION_BUNDLES])
+    expected = weights/weights.sum()
+    observed = np.bincount(drawn, minlength=len(Prior.CONDITION_BUNDLES))/drawn.size
+    np.testing.assert_allclose(observed, expected, atol=0.02)
+
+
+def test_the_condition_mix_carries_no_dropout_or_second_phase():
+    """DWMM's specification, asserted so a silent revert to the S04 grid cannot happen.
+
+    Training across that grid cost about fourteen points of Bravais accuracy (F-110, F-112), and
+    the failure mode was invisible -- the loss curve looked fine.
+    """
+    for bundle in Prior.CONDITION_BUNDLES:
+        assert bundle['multiplier'] == 1.0
+        assert bundle['n_dropout'] == 0
+        assert bundle['second_phase'] == 0
+        assert bundle['n_contaminants'] in (0, 1, 2)
 
 
 # ---------------------------------------------------------------------------------------
@@ -249,3 +281,76 @@ def test_saved_model_reloads_to_the_same_predictions(keras_available, tmp_path):
     assert restored.extraction_layer.volume_normalization == pytest.approx(
         model.extraction_layer.volume_normalization
         )
+
+
+# ---------------------------------------------------------------------------------------
+# The split, and what the dense reference is compared against
+# ---------------------------------------------------------------------------------------
+def _args(**overrides):
+    import argparse
+
+    values = dict(datasets_dir=DATASETS, manifest=MANIFEST, limit_per_lattice=40,
+                  test_fraction=0.2, seed=5, include_cubic=False)
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+@pytest.mark.skipif(not (_have(MANIFEST) and _have(DATASETS)),
+                    reason='manifest or generated datasets not present')
+def test_cubic_is_excluded_by_default_and_restorable():
+    """The comparison against `scripts/classification.py` only means anything on the same lattices."""
+    from mlindex.scripts import run_fom_prior
+
+    default = run_fom_prior.active_lattices(_args())
+    assert default is not None
+    assert not any(code.startswith('c') for code in default)
+    assert len(default) == 11
+    assert run_fom_prior.active_lattices(_args(include_cubic=True)) is None
+
+
+@pytest.mark.skipif(not (_have(MANIFEST) and _have(DATASETS)),
+                    reason='manifest or generated datasets not present')
+def test_fit_and_heldout_pools_share_no_structure():
+    """Split by source structure, never by row.
+
+    One structure yields many patterns over training, under different drawn conditions. A row split
+    would put the same crystal on both sides and the held-out number would mean nothing.
+    """
+    from mlindex.scripts import run_fom_prior
+
+    fit, held_out = run_fom_prior.build_pools(_args())
+    assert len(fit) > 0 and len(held_out) > 0
+    assert set(fit['identifier']).isdisjoint(set(held_out['identifier']))
+    # and neither side may contain a benchmark structure the FOM is judged on
+    assert set(fit['identifier']).isdisjoint(Prior.held_out_identifiers(MANIFEST))
+
+
+@pytest.mark.skipif(not (_have(MANIFEST) and _have(DATASETS)),
+                    reason='manifest or generated datasets not present')
+def test_holdout_evaluation_carries_the_columns_the_scorer_reads():
+    from mlindex.scripts import run_fom_prior
+
+    _, held_out = run_fom_prior.build_pools(_args())
+    frame = run_fom_prior.holdout_evaluation(held_out, np.random.default_rng(0))
+    for column in ('entry_id', 'condition_bundle', 'q2_obs', 'volume_true', 'target_bravais'):
+        assert column in frame.columns
+    assert len(np.stack(frame['q2_obs'].to_numpy())[0]) == 20
+    assert set(frame['condition_bundle']).issubset(
+        {bundle['name'] for bundle in Prior.CONDITION_BUNDLES}
+        )
+
+
+def test_dense_baseline_matches_the_reference_architecture(keras_available):
+    """The baseline is `scripts/classification.py`'s stack, not a new invention."""
+    from mlindex.scripts import run_fom_prior
+
+    model = run_fom_prior.build_dense_baseline(20, {'bravais': 14, 'system': 7})
+    widths = [layer.units for layer in model.layers
+              if layer.__class__.__name__ == 'Dense' and layer.name.startswith('dense_')]
+    assert widths == [1024, 512, 256, 128, 64, 32]
+    assert all(not layer.use_bias for layer in model.layers
+               if layer.name.startswith('dense_'))
+    assert set(model.output.keys()) == {'bravais', 'system'}
+    # no volume-branch head: there is no branch grid without the extraction layer, which is the
+    # thing under comparison
+    assert 'volume_branch' not in model.output

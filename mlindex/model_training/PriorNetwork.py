@@ -85,17 +85,23 @@ TARGET_CLASSES = {
     'high_symmetry': 2,
     }
 
-# The six evaluable condition bundles, read off `entries.parquet` rather than off their names, so a
-# training draw covers exactly the conditions the model is evaluated under. C0 (`error0_cont0`) is
-# excluded here as it is everywhere else: zero error makes M20 diverge (F-054), and an idealised
-# peak list is the thing S12's pitfall list warns against training on.
+# The condition mix, specified by DWMM (2026-08-19): simulated error at x1 only, no dropout, no
+# second phase, and 0/1/2 contaminants drawn at relative frequencies 1 : 0.5 : 0.25 -- so a
+# two-contaminant pattern is four times rarer than a clean one.
+#
+# This deliberately departs from S02/S04's six evaluable bundles, which the first pass used. Those
+# span error x2, six and ten interior dropout holes and a three-line second phase, and training
+# across all of them was measured to cost about fourteen points of Bravais accuracy: your dense
+# reference reached a 52.1% macro diagonal on its own data and 26.5% pooled under the S04 grid,
+# which is the same collapse the prior network showed. The grid is a stress test, not the operating
+# condition, and block A is a prior over what patterns normally look like.
 CONDITION_BUNDLES = (
-    dict(name='error1_cont0', multiplier=1.0, n_contaminants=0, n_dropout=0, second_phase=0),
-    dict(name='error2_cont0', multiplier=2.0, n_contaminants=0, n_dropout=0, second_phase=0),
-    dict(name='error1_cont2', multiplier=1.0, n_contaminants=2, n_dropout=0, second_phase=0),
-    dict(name='error1_cont1_drop6', multiplier=1.0, n_contaminants=1, n_dropout=6, second_phase=0),
-    dict(name='error1_cont1_drop10', multiplier=1.0, n_contaminants=1, n_dropout=10, second_phase=0),
-    dict(name='error1_cont0_phase3', multiplier=1.0, n_contaminants=0, n_dropout=0, second_phase=3),
+    dict(name='error1_cont0', multiplier=1.0, n_contaminants=0, n_dropout=0, second_phase=0,
+         weight=1.0),
+    dict(name='error1_cont1', multiplier=1.0, n_contaminants=1, n_dropout=0, second_phase=0,
+         weight=0.5),
+    dict(name='error1_cont2', multiplier=1.0, n_contaminants=2, n_dropout=0, second_phase=0,
+         weight=0.25),
     )
 CONTAMINANT_BIAS = 1.0
 SECOND_PHASE_BIAS = 2.0
@@ -116,7 +122,7 @@ PRIOR_MODEL_DEFAULTS = {
     'extraction_peak_length': 12,
     'n_volumes': 128,
     'n_filters': 1024,
-    'layers': [256, 128],
+    'layers': [512, 256, 128],
     'l1_regularization': 0.0,
     'learning_rate': 0.0005,
     'd_model': 128,
@@ -217,7 +223,10 @@ def draw_peak_lists(frame, rng, n_peaks=20, bundles=CONDITION_BUNDLES, bundle_in
     """
     n_rows = len(frame)
     if bundle_index is None:
-        bundle_index = rng.integers(0, len(bundles), size=n_rows)
+        # Weighted, not uniform: the conditions have different frequencies of occurrence and the
+        # training mix should reflect that rather than over-representing the rare, hard ones.
+        weights = np.array([bundle.get('weight', 1.0) for bundle in bundles], dtype=float)
+        bundle_index = rng.choice(len(bundles), size=n_rows, p=weights/weights.sum())
     else:
         bundle_index = np.full(n_rows, int(bundle_index))
 
