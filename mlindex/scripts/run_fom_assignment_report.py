@@ -269,13 +269,19 @@ def markdown(data, tag, lattice):
         'worse fit. The cut is set at one error scale on that evidence.'
         )
     lines.append('')
+    near = setting.loc[setting['setting_residual_high'] <= 1.0, 'reachable_ceiling'].mean()
+    far = setting['reachable_ceiling'].iloc[-1]
     lines.append(
-        '**The ceiling is itself a finding.** Around 7-9% of real peaks cannot be assigned their '
-        'correct index by any rule, because the reflection is not in the list the candidate '
-        'assigns from -- the reference list is truncated to `hkl_ref_length` lines and then '
-        'narrowed to one extinction group. S01\'s truncation audit (F-023, Q10) measured this on '
-        '*true* cells and found it never binds; on real candidates it binds on roughly one peak '
-        'in twelve. That is the carried-over half of S01-C\'s A2 audit, now done.'
+        f'**The ceiling is itself a finding, and a mild one.** A real peak cannot be assigned its '
+        f'correct index if the reflection is absent from the list the candidate assigns from -- '
+        f'the reference list is truncated to `hkl_ref_length` lines and then narrowed to one '
+        f'extinction group. For a candidate in the truth\'s own setting that ceiling is '
+        f'**{near:.3f}**; ten error scales away it is **{far:.3f}**. Since the list length does '
+        f'not change with the candidate, what binds is the **extinction-group narrowing**, not the '
+        f'truncation -- a candidate that picked the wrong group has deleted whole families of '
+        f'reflections from its own vocabulary before assigning anything. That is the carried-over '
+        f'half of S01-C\'s A2 audit, and it comes back consistent with F-023, which measured the '
+        f'truncation on *true* cells and found it never binds.'
         )
     lines.append('')
     well = _table(table, WELL_POSED, lattice)
@@ -390,17 +396,30 @@ def markdown(data, tag, lattice):
             f'- **ECE < {ECE_GATE}: met.** {pooled_ece:.4f} on the pooled population, '
             f'{well_table["ece"].get("network_well_posed", np.nan):.4f} on the well-posed one.'
             )
+
+        def _relative(form, against, stratum):
+            if paired is None:
+                return float('nan')
+            match = paired.loc[
+                (paired['form'] == form) & (paired['against'] == against)
+                & (paired['stratum'] == stratum)
+                ]
+            return 100*float(match['relative'].iloc[0]) if len(match) else float('nan')
+
+        published_pooled = _relative('network_calibrated', 'rho', 'all')
+        published_well = _relative('network_well_posed', 'rho', 'well_posed')
+        bar_well = _relative('network_well_posed', 'isotonic_well_posed', 'well_posed')
         lines.append(
             f'- **Beats both analytic estimators on Brier, paired, by more than the '
             f'~{100*REPRODUCIBILITY_FLOOR:.0f}% floor: met against the published forms.** '
-            f'-95% against `rho` and `taupin` pooled, -13% against `rho` on the well-posed '
-            f'stratum.'
+            f'{published_pooled:+.1f}% against `rho` pooled, {published_well:+.1f}% against `rho` '
+            f'on the well-posed stratum.'
             )
         lines.append(
             f'- **Beats the recalibrated statistic -- the bar this session was given -- : not '
-            f'met.** {100*pooled_relative:+.1f}% pooled and -5.3% on the well-posed stratum, '
-            f'both inside the floor. The direction is right and the interval excludes zero; the '
-            f'size is not there.'
+            f'met.** {100*pooled_relative:+.1f}% pooled and {bar_well:+.1f}% on the well-posed '
+            f'stratum, both inside the floor. The direction is right and both intervals exclude '
+            f'zero; the size is not there.'
             )
         lines.append('')
         lines.append(
