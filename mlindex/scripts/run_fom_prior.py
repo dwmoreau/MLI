@@ -230,8 +230,17 @@ def fit_arm(pool_fit, model_params, args, tag):
             )
         history.append({key: float(value[-1]) for key, value in record.history.items()})
         if args.verbose:
+            # Per-head losses, not just the total. `fit` has carried them all along and logging only
+            # the total cost three runs: two collapsed with a total that was arithmetically
+            # impossible for the predictions they made, and which head died was only inferable
+            # afterwards. A head going flat is visible here on the epoch it happens (F-120).
+            parts = ' '.join(
+                f'{key[:-5]} {value:.3f}'
+                for key, value in sorted(history[-1].items())
+                if key.endswith('_loss') and key != 'loss'
+                )
             print(f'  {tag} epoch {epoch + 1}/{model.model_params["epochs"]} '
-                  f'loss {history[-1]["loss"]:.4f}', flush=True)
+                  f'loss {history[-1]["loss"]:.4f} | {parts}', flush=True)
     return model, history
 
 
@@ -998,6 +1007,11 @@ def write_outputs(args, records, pool_fit, pool_test, evaluation, base_rates, st
         dict(arm=record['arm'], **entry)
         for record in records for entry in record['tables']['per_lattice']
         ]).to_csv(os.path.join(args.artifact_dir, f'{args.tag}_per_lattice.csv'), index=False)
+
+    pd.DataFrame([
+        dict(arm=record['arm'], epoch=index + 1, **entry)
+        for record in records for index, entry in enumerate(record['history'])
+        ]).to_csv(os.path.join(args.artifact_dir, f'{args.tag}_history.csv'), index=False)
 
     meta = dict(
         commit=commit_hash(), seed=args.seed, stage=args.stage,

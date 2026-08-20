@@ -565,6 +565,8 @@ class PriorNetwork(IntegralFilter):
                 else keras.losses.SparseCategoricalCrossentropy(from_logits=True)
                 )
             weights[target] = self.model_params['target_loss_weights'].get(target, 1.0)
+            # Kept even in joint mode: the metric is what makes a head going flat visible
+            # during training rather than three runs later (F-120).
             metrics[target] = [] if joint else ['sparse_categorical_accuracy']
         self.model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=self.model_params['learning_rate']),
