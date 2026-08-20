@@ -354,3 +354,72 @@ def test_dense_baseline_matches_the_reference_architecture(keras_available):
     # no volume-branch head: there is no branch grid without the extraction layer, which is the
     # thing under comparison
     assert 'volume_branch' not in model.output
+
+
+def test_joint_loss_is_the_same_inside_fit_as_it_is_eagerly(keras_available):
+    """The test that would have caught a 30-epoch run descending a quantity that did not exist.
+
+    `_joint_loss` was first written with `y_pred[rows, branch]` and an `arange` over the batch.
+    That is correct eagerly -- a direct call reproduced `-log P(c*|v*)` exactly -- and wrong inside
+    the compiled training step, where the batch dimension is not resolved the same way. `fit`
+    reported 0.32 while the identical weights evaluated to 31.75. So checking the loss in isolation
+    is not enough: it has to be checked through `fit`.
+    """
+    import keras
+
+    n_v, n_classes, batch = 8, 4, 6
+    inputs = keras.Input(shape=(3,))
+    hidden = keras.layers.Dense(n_v*n_classes, use_bias=False)(inputs)
+    grid = keras.layers.Reshape((n_v, n_classes))(hidden)
+    outputs = keras.layers.Activation('log_softmax', name='bravais')(grid)
+    model = keras.Model(inputs, {'bravais': outputs})
+    model.compile(optimizer='sgd', loss={'bravais': Prior._joint_loss(n_classes)})
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(batch, 3)).astype('float32')
+    codes = rng.integers(0, n_classes, batch)
+    branches = rng.integers(0, n_v, batch)
+    labels = Prior.joint_targets(codes, branches)
+
+    reported = model.evaluate(x, {'bravais': labels}, batch_size=batch, verbose=0)
+    predicted = np.asarray(keras.ops.convert_to_numpy(model(x)['bravais']), dtype=float)
+    expected = float(np.mean(-predicted[np.arange(batch), branches, codes]))
+    assert reported == pytest.approx(expected, abs=1e-5), (
+        f'loss through the graph {reported} != -log P(c*|v*) {expected}'
+        )
+
+
+def test_soft_volume_target_is_ordinal_and_normalised():
+    """The branches discretise a continuous quantity, so the target should too.
+
+    Width 0 must reproduce the one-hot label exactly, so the default path is unchanged.
+    """
+    hard = Prior.soft_branch_targets([5, 20], 32, 0.0)
+    assert hard.shape == (2, 32)
+    np.testing.assert_allclose(hard.sum(axis=1), 1.0)
+    assert hard[0, 5] == 1.0 and hard[1, 20] == 1.0
+
+    soft = Prior.soft_branch_targets([5, 20], 32, 2.0)
+    np.testing.assert_allclose(soft.sum(axis=1), 1.0, atol=1e-6)
+    assert soft[0].argmax() == 5 and soft[1].argmax() == 20
+    # monotone decreasing away from the truth, which is the whole point
+    assert soft[0, 5] > soft[0, 6] > soft[0, 8] > soft[0, 15]
+
+
+def test_joint_api_scores_the_claimed_pair(keras_available, tmp_path):
+    """`score_candidates` must read the candidate's own claimed lattice, never the true one."""
+    model, pool, q2 = _tiny_model(tmp_path)
+    joint = model.joint_log_probability(q2, batch_size=8)
+    n_volumes = model.model_params['n_volumes']
+    assert joint.shape == (len(pool), n_volumes, Prior.TARGET_CLASSES['bravais'])
+    np.testing.assert_allclose(np.exp(joint).sum(axis=(1, 2)), 1.0, atol=1e-6)
+
+    volumes = pool['volume'].to_numpy(dtype=float)
+    claimed = pool['target_bravais'].to_numpy()
+    scored = model.score_candidates(q2, volumes, claimed, batch_size=8)
+    assert scored.shape == (len(pool),)
+    # the same volume under a different claimed lattice must give a different score, or the
+    # lattice axis is being ignored and the joint is doing nothing
+    other = (claimed + 1) % len(Prior.BRAVAIS_LATTICES)
+    assert not np.allclose(scored, model.score_candidates(q2, volumes, other, batch_size=8))
+    assert np.all(model.branch_volumes() > 0)

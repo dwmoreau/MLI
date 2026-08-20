@@ -214,9 +214,16 @@ def fit_arm(pool_fit, model_params, args, tag):
             )
         batch = pool_fit.iloc[rows].reset_index(drop=True)
         q2, _, _ = Prior.draw_peak_lists(batch, rng)
-        targets = {'volume_branch': model.get_branch_labels(batch)}
+        branch = model.get_branch_labels(batch)
+        joint = model.model_params['loss_mode'] == 'joint'
+        width = model.model_params.get('volume_target_width', 0.0)
+        targets = {'volume_branch': (
+            Prior.soft_branch_targets(branch, model.model_params['n_volumes'], width)
+            if width > 0 else branch
+            )}
         for name in Prior.TARGETS:
-            targets[name] = batch[f'target_{name}'].to_numpy()
+            codes = batch[f'target_{name}'].to_numpy()
+            targets[name] = Prior.joint_targets(codes, branch) if joint else codes
         record = model.model.fit(
             model.scale_peaks(q2), targets, epochs=1, verbose=0,
             batch_size=model.model_params['batch_size'],
@@ -251,8 +258,15 @@ def evaluate_arm(model, evaluation, base_rates):
         (np.abs(branch_log.argmax(axis=1) - branch_labels) <= 1).mean()
         )
 
+    joint_mode = model.model_params.get('loss_mode') == 'joint'
     for target in Prior.TARGETS:
         log_probability = np.asarray(raw[target], dtype=float)
+        if joint_mode:
+            # (n, n_volumes, n_classes) -> the marginal, so every number stays comparable with
+            # the marginally-trained arm. The joint itself is reported separately.
+            log_probability = _logsumexp(
+                branch_log[:, :, np.newaxis] + log_probability, axis=1,
+                )
         labels = evaluation[f'target_{target}'].to_numpy()
         probability = np.exp(log_probability)
         predicted = probability.argmax(axis=1)
@@ -278,6 +292,8 @@ def evaluate_arm(model, evaluation, base_rates):
             )
 
     lattice_log = np.asarray(raw['bravais'], dtype=float)
+    if joint_mode:
+        lattice_log = _logsumexp(branch_log[:, :, np.newaxis] + lattice_log, axis=1)
     labels = evaluation['target_bravais'].to_numpy()
     for index, code in enumerate(Prior.BRAVAIS_LATTICES):
         rows = np.flatnonzero(labels == index)
@@ -293,6 +309,11 @@ def evaluate_arm(model, evaluation, base_rates):
             mean_probability_on_truth=float(np.exp(lattice_log[rows, index]).mean()),
             ))
     return results, tables
+
+
+def _logsumexp(values, axis):
+    peak = values.max(axis=axis, keepdims=True)
+    return (peak + np.log(np.exp(values - peak).sum(axis=axis, keepdims=True))).squeeze(axis)
 
 
 def grid_diagnostics(model):
@@ -929,6 +950,10 @@ def run(args):
         params.setdefault('n_filters', args.n_filters)
         if args.extraction_peaks is not None:
             params.setdefault('extraction_peak_length', args.extraction_peaks)
+        if args.loss_mode is not None:
+            params.setdefault('loss_mode', args.loss_mode)
+        if args.volume_target_width is not None:
+            params.setdefault('volume_target_width', args.volume_target_width)
         model, history = fit_arm(pool_fit, params, args, tag)
         results, tables = evaluate_arm(model, evaluation, base_rates)
         model.save_prior()
@@ -1031,6 +1056,13 @@ def main():
     parser.add_argument('--epochs', type=int, default=12)
     parser.add_argument('--n-volumes', type=int, default=128)
     parser.add_argument('--n-filters', type=int, default=1024)
+    parser.add_argument('--volume-target-width', type=float, default=None,
+                        help='Width in branches of the soft volume target. 0 keeps the '
+                             'ordinal-blind one-hot label.')
+    parser.add_argument('--loss-mode', default=None, choices=('marginal', 'joint'),
+                        help="'joint' trains -log P(v*) - log P(c*|v*), the likelihood "
+                             'of the observed (volume, lattice) pair, instead of the '
+                             'branch-averaged marginal.')
     parser.add_argument('--extraction-peaks', type=int, default=None,
                         help='Peaks the render reads. Default 12, inherited from the '
                              'triclinic ABNN config; peaks 13-20 land inside the filter '

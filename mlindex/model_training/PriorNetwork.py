@@ -133,13 +133,32 @@ PRIOR_MODEL_DEFAULTS = {
     'volume_upper_percentile': 0.999,
     'volume_spacing_blend': 0.5,
     'head_mode': 'conditional',
+    # 'marginal': train each class head on log sum_v P(v) P(c|v), the branch-averaged
+    # posterior. 'joint': train on log P(v*) + log P(c* | v*), the likelihood of the
+    # observed (volume, lattice) pair. The second supervises the cell of the 128 x C
+    # table a candidate is actually scored against; the first only ever sees its shadow,
+    # which leaves P(c | v) free to be arbitrary wherever it does not move the marginal.
+    'loss_mode': 'marginal',
     'model_type': 'prior',
     # The volume branch carries the factorisation, so it is a primary term here rather than the
     # 0.2-weighted auxiliary it is in the generators.
     'volume_loss_weight': 1.0,
+    # Width, in branches, of the soft target for the volume head. 0 keeps the one-hot label and
+    # plain sparse cross entropy, which is ordinal-blind: with branches ordered by volume, missing
+    # by one is penalised exactly as much as missing by ninety. Because the branches discretise a
+    # continuous quantity, spreading the target over neighbours is more faithful to the truth
+    # rather than less -- unlike a cost matrix over the *unordered* lattice classes, which would
+    # distort a posterior block C reads as a probability.
+    'volume_target_width': 0.0,
     'target_loss_weights': {'bravais': 1.0, 'system': 1.0, 'centring': 0.5,
                             'n_free': 0.5, 'high_symmetry': 0.5},
     }
+
+
+def _log_normalise(values, axis):
+    """log_softmax in numpy, stable, without routing float64 through the keras backend."""
+    peak = values.max(axis=axis, keepdims=True)
+    return values - (peak + np.log(np.exp(values - peak).sum(axis=axis, keepdims=True)))
 
 
 def target_codes(bravais_lattice):
@@ -334,6 +353,57 @@ def _marginalize_layer():
     return _Marginalize
 
 
+
+def soft_branch_targets(branch_labels, n_volumes, width):
+    """A Gaussian target over branches, centred on the branch the true volume falls in.
+
+    In branch index rather than in log volume, which is the same thing: the grid is spaced
+    geometrically, so log V is linear in the index and a fixed width in one is a fixed ratio in the
+    other. `width` 0 returns the one-hot label unchanged.
+    """
+    branch_labels = np.asarray(branch_labels, dtype=np.int64)
+    if width <= 0:
+        target = np.zeros((branch_labels.size, n_volumes), dtype=np.float32)
+        target[np.arange(branch_labels.size), branch_labels] = 1.0
+        return target
+    grid = np.arange(n_volumes, dtype=np.float64)[np.newaxis]
+    weight = np.exp(-0.5*((grid - branch_labels[:, np.newaxis])/float(width))**2)
+    return (weight/weight.sum(axis=1, keepdims=True)).astype(np.float32)
+
+
+def _joint_loss(n_classes):
+    """-log P(c* | v*): the conditional evaluated at the branch the true volume falls in.
+
+    `y_true` packs (class, branch) because a keras loss only sees one label tensor per output, and
+    this loss needs both -- which is the whole point, since it is the *pair* being supervised.
+    Added to the volume head's own -log P(v*), the two terms are the joint negative log likelihood
+    of the observed (volume, lattice) pair.
+    """
+    import keras
+
+    def loss(y_true, y_pred):
+        # `take_along_axis`, not `y_pred[rows, branch]`. Python-style advanced indexing with an
+        # `arange` over the batch works eagerly and silently gathers the wrong elements inside the
+        # compiled training step, where the batch dimension is not resolved the same way. That cost
+        # a full 30-epoch run: `fit` reported a loss of 0.32 while the same weights scored 31.75
+        # when evaluated, and the model had descended a quantity that did not exist.
+        y_true = keras.ops.cast(y_true, 'int32')
+        target = y_true[:, 0:1]
+        branch = y_true[:, 1]
+        at_branch = keras.ops.take_along_axis(
+            y_pred, branch[:, None, None], axis=1,
+            )[:, 0, :]
+        return -keras.ops.take_along_axis(at_branch, target, axis=1)[:, 0]
+
+    return loss
+
+
+def joint_targets(class_codes, branch_labels):
+    """Pack (class, branch) into the single label tensor a keras loss receives."""
+    return np.stack([np.asarray(class_codes, dtype=np.int64),
+                     np.asarray(branch_labels, dtype=np.int64)], axis=1)
+
+
 class PriorNetwork(IntegralFilter):
     """One network, every Bravais lattice: P(volume branch) and P(lattice | volume branch).
 
@@ -463,7 +533,14 @@ class PriorNetwork(IntegralFilter):
                 logits = keras.layers.Dense(
                     n_classes, activation='linear', name=f'{target}_dense',
                     )(x)
-                outputs[target] = marginalize(name=target)([branch, logits])
+                if self.model_params['loss_mode'] == 'joint':
+                    # The output *is* the per-branch conditional, so the cell a candidate is
+                    # scored against is the thing being trained and the thing being served.
+                    outputs[target] = keras.layers.Activation(
+                        'log_softmax', name=target,
+                        )(logits)
+                else:
+                    outputs[target] = marginalize(name=target)([branch, logits])
         return outputs
 
     def compile_model(self):
@@ -474,13 +551,21 @@ class PriorNetwork(IntegralFilter):
         """
         import keras
 
-        losses = {'volume_branch': keras.losses.SparseCategoricalCrossentropy(from_logits=True)}
+        joint = self.model_params['loss_mode'] == 'joint'
+        soft = self.model_params.get('volume_target_width', 0.0) > 0
+        losses = {'volume_branch': (
+            keras.losses.CategoricalCrossentropy(from_logits=True) if soft
+            else keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+            )}
         weights = {'volume_branch': self.model_params['volume_loss_weight']}
-        metrics = {'volume_branch': ['sparse_categorical_accuracy']}
-        for target in self.targets:
-            losses[target] = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        metrics = {'volume_branch': [] if soft else ['sparse_categorical_accuracy']}
+        for target, n_classes in self.targets.items():
+            losses[target] = (
+                _joint_loss(n_classes) if joint
+                else keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+                )
             weights[target] = self.model_params['target_loss_weights'].get(target, 1.0)
-            metrics[target] = ['sparse_categorical_accuracy']
+            metrics[target] = [] if joint else ['sparse_categorical_accuracy']
         self.model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=self.model_params['learning_rate']),
             loss=losses, loss_weights=weights, metrics=metrics, run_eagerly=False,
@@ -514,6 +599,71 @@ class PriorNetwork(IntegralFilter):
         for target in self.targets:
             out[target] = np.exp(np.asarray(raw[target], dtype=float))
         return out
+
+    # -------------------------------------------------------------------------------------
+    # The joint, which is what a candidate is actually scored against
+    # -------------------------------------------------------------------------------------
+    def branch_volumes(self):
+        """The direct-space volume each branch stands for.
+
+        `get_branch_labels` matches on `(1/V / q2_obs_scale**2)**(2/3) / volume_normalization`, so
+        inverting that turns a branch index back into the volume it represents.
+        """
+        volumes = np.asarray(self.extraction_layer.volumes).ravel().astype(float)
+        reciprocal = (
+            (volumes*self.extraction_layer.volume_normalization)**1.5*self.q2_obs_scale**2
+            )
+        return 1.0/reciprocal
+
+    def _conditional_model(self):
+        """A view onto `P(class | branch)`, which the trained graph computes and then discards.
+
+        `MarginalizeOverBranches` collapses the branch axis before the output leaves the model, so
+        the per-branch conditional is not reachable from `predict`. It is the same weights either
+        way -- this exposes them rather than recomputing anything.
+        """
+        import keras
+
+        if getattr(self, '_conditional_cache', None) is None:
+            self._conditional_cache = keras.Model(
+                self.model.input,
+                {'volume_branch': self.model.get_layer('volume_branch').output,
+                 **{target: self.model.get_layer(f'{target}_dense').output
+                    for target in self.targets}},
+                )
+        return self._conditional_cache
+
+    def joint_log_probability(self, q2, target='bravais', batch_size=None):
+        """log P(volume branch, class) for each pattern -- the (n, n_volumes, n_classes) table.
+
+        This is what block C reads: a candidate arrives claiming a lattice *and* a volume, and the
+        honest question is the mass at that cell. The two marginals are projections of this table
+        and lose the correlation between the axes -- measured at 37% of the volume error (F-117),
+        because the volume marginal silently inherits the volume scale of whichever lattice the
+        model happens to believe.
+        """
+        raw = self._conditional_model().predict(
+            self.scale_peaks(q2), batch_size=batch_size or 32, verbose=0,
+            )
+        # Normalised in numpy, not through keras.ops: MPS has no float64, and these are log
+        # probabilities that get exponentiated and multiplied, so the precision is worth having.
+        branch = _log_normalise(np.asarray(raw['volume_branch'], dtype=np.float64), axis=1)
+        conditional = _log_normalise(np.asarray(raw[target], dtype=np.float64), axis=2)
+        return branch[:, :, np.newaxis] + conditional
+
+    def score_candidates(self, q2, volumes, class_indices, target='bravais', batch_size=None):
+        """log P(V, class) at each candidate's own claimed pair -- one number per candidate.
+
+        The claimed lattice is used, never the true one: a candidate that claims a lattice whose
+        volume prior it violates should score badly, and that is the whole point.
+        """
+        joint = self.joint_log_probability(q2, target=target, batch_size=batch_size)
+        grid = np.log(self.branch_volumes())
+        nearest = np.abs(
+            grid[np.newaxis] - np.log(np.asarray(volumes, dtype=float))[:, np.newaxis]
+            ).argmin(axis=1)
+        rows = np.arange(joint.shape[0])
+        return joint[rows, nearest, np.asarray(class_indices, dtype=int)]
 
     # -------------------------------------------------------------------------------------
     # Persistence
