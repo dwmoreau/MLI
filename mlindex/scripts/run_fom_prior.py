@@ -194,6 +194,23 @@ def load_evaluation(benchmark_dir, split, bundles=None, limit=None, seed=12345):
 # -----------------------------------------------------------------------------------------
 # Fit and evaluate
 # -----------------------------------------------------------------------------------------
+def check_balanced(batch, pool, per_class, epoch):
+    """Assert the invariant balanced sampling is supposed to guarantee, every epoch.
+
+    A sampler that silently narrows its own pool cost two 80-minute runs, four wrong hypotheses and
+    two withdrawn findings before anyone looked at what was actually in a batch (F-121). Balanced
+    sampling has exactly one invariant -- every class present, in equal numbers -- so it is checked
+    rather than inferred from a loss curve.
+    """
+    present = batch['bravais_lattice'].nunique()
+    expected = pool['bravais_lattice'].nunique()
+    if present != expected or len(batch) != per_class*expected:
+        raise RuntimeError(
+            f'epoch {epoch}: balanced batch holds {len(batch)} rows over {present} lattices, '
+            f'expected {per_class*expected} over {expected}. The sampler has lost the pool.'
+            )
+
+
 def fit_arm(pool_fit, model_params, args, tag):
     """Fit one arm. A fresh condition draw per epoch, which is what makes balancing honest."""
     rng = np.random.default_rng(args.seed)
@@ -213,6 +230,7 @@ def fit_arm(pool_fit, model_params, args, tag):
             codes, len(Prior.BRAVAIS_LATTICES), rng, args.per_class,
             )
         batch = pool_fit.iloc[rows].reset_index(drop=True)
+        check_balanced(batch, pool_fit, args.per_class, epoch + 1)
         q2, _, _ = Prior.draw_peak_lists(batch, rng)
         branch = model.get_branch_labels(batch)
         joint = model.model_params['loss_mode'] == 'joint'
@@ -222,8 +240,16 @@ def fit_arm(pool_fit, model_params, args, tag):
             if width > 0 else branch
             )}
         for name in Prior.TARGETS:
-            codes = batch[f'target_{name}'].to_numpy()
-            targets[name] = Prior.joint_targets(codes, branch) if joint else codes
+            # `values`, not `codes`. Rebinding `codes` here shadowed the sampler's input, which is
+            # bound once outside this loop: from epoch 2 onward `balanced_indices` was handed the
+            # previous batch's `high_symmetry` labels -- a 2-class array of *batch* length -- so its
+            # row indices were bounded by that length and `iloc` took the front of the pool. The
+            # pool is concatenated per lattice, so the front is tP, and the batch converged to
+            # 6 000 identical-lattice rows by epoch 5. The five class losses then read 0.000
+            # because they were predicting a constant, and two 30-epoch runs plus two wrong
+            # conclusions came out of it (F-120).
+            values = batch[f'target_{name}'].to_numpy()
+            targets[name] = Prior.joint_targets(values, branch) if joint else values
         record = model.model.fit(
             model.scale_peaks(q2), targets, epochs=1, verbose=0,
             batch_size=model.model_params['batch_size'],
@@ -684,6 +710,7 @@ def run_baseline(args):
     for epoch in range(args.epochs):
         rows = Prior.balanced_indices(codes, len(Prior.BRAVAIS_LATTICES), rng, args.per_class)
         batch = pool_fit.iloc[rows].reset_index(drop=True)
+        check_balanced(batch, pool_fit, args.per_class, epoch + 1)
         q2, _, _ = Prior.draw_peak_lists(batch, rng)
         targets = {name: batch[f'target_{name}'].to_numpy() for name in Prior.TARGETS}
         record = model.model.fit(

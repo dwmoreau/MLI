@@ -423,3 +423,42 @@ def test_joint_api_scores_the_claimed_pair(keras_available, tmp_path):
     other = (claimed + 1) % len(Prior.BRAVAIS_LATTICES)
     assert not np.allclose(scored, model.score_candidates(q2, volumes, other, batch_size=8))
     assert np.all(model.branch_volumes() > 0)
+
+
+def test_balanced_sampler_input_is_not_shadowed_by_the_target_loop():
+    """The regression test for F-121, written against the shape of the bug rather than its symptom.
+
+    `fit_arm` binds the sampler's input once outside the epoch loop and then builds per-target
+    arrays inside it. A rebinding there fed `balanced_indices` the previous batch's
+    `high_symmetry` labels -- a 2-class array of batch length -- so its indices were bounded by that
+    length, `iloc` took the front of the lattice-ordered pool, and the training set decayed to one
+    lattice by epoch 5. Every class loss then read 0.000 because it was predicting a constant.
+
+    Simulated here rather than trained: the failure is in the index arithmetic, and it needs no
+    model to reproduce.
+    """
+    rng = np.random.default_rng(0)
+    n_classes = len(Prior.BRAVAIS_LATTICES)
+    pool_codes = np.repeat(np.arange(n_classes), 300)          # lattice-ordered, as the real pool is
+    per_class = 50
+
+    codes = pool_codes
+    seen = []
+    for _ in range(6):
+        rows = Prior.balanced_indices(codes, n_classes, rng, per_class)
+        batch = pool_codes[rows]
+        seen.append(len(np.unique(batch)))
+        # the bug: rebinding the sampler's input to a per-batch target array
+        codes = (batch >= n_classes - 4).astype(np.int64)       # stands in for `high_symmetry`
+    assert seen[0] == n_classes, 'the first epoch is always fine, which is what hid this'
+    assert min(seen) < n_classes, 'the shadowing must actually degrade the batch'
+
+    # and the correct form keeps every class present at every epoch
+    codes = pool_codes
+    for _ in range(6):
+        rows = Prior.balanced_indices(codes, n_classes, rng, per_class)
+        batch = pool_codes[rows]
+        assert len(np.unique(batch)) == n_classes
+        assert len(batch) == per_class*n_classes
+        values = (batch >= n_classes - 4).astype(np.int64)      # bound to a *different* name
+        assert values.size == batch.size
