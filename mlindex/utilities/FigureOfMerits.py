@@ -567,6 +567,106 @@ def get_multiplicity_taupin88(bravais_lattice):
         return 1 * 1.8, 6
 
 
+# ---------------------------------------------------------------------------------------------
+# Per-peak assignment probability -- S11 block B / S01-C
+#
+# The question these answer is not "is this cell right" but "is *this peak* assigned to the right
+# Miller index", one number per observed line. PLAN section 4's assumptions A6 and A7 turn on it,
+# and the S11 handoff asks for two analytic estimators: the repo's rho = 1/(1 + eps*dN) and
+# Taupin 1988's P = 1 - exp(-2*eps*n).
+#
+# **They are the same statistic under two link functions.** get_M20_likelihood already computes
+#
+#     arg = 8 pi q2_obs |sqrt(q2_obs) - sqrt(q2_calc)| / (V* mu)
+#         = 2 eps n(q),    n(q) = dN/dq = 4 pi q^2 / (V* mu)
+#
+# and returns *both* 1/(1 + arg) per peak and -log2 prod(1 - exp(-arg)) as Minfo. So rho and
+# Taupin's P are one number seen through 1/(1+x) and 1 - e^-x; they agree to first order, diverge
+# where coincidence approaches certainty, and are **identically ranked** because both links are
+# monotone. Any comparison between them is a comparison of calibration alone, and the best that
+# any monotone function of arg can do is its isotonic recalibration -- which is why S11 measures
+# that as the bar rather than the two raw forms (STATUS section 6, 2026-08-20).
+#
+# The genuinely different third form is the same link with de Wolff 1961's Delta(Q) in place of
+# Taupin's 4 pi q^2 V / mu, which S01 measured under-counting lines by 30-58% (F-027).
+#
+# **Units differ between the two families, and this is not cosmetic.** The Taupin family's eps is
+# a discrepancy in q, |sqrt(q2_obs) - sqrt(q2_calc)| (FigureOfMerits.py, get_M20_likelihood),
+# while get_M20, get_nll_exponential, get_null_tail_nll and get_M_info_clipped all work in q^2.
+# A per-peak comparison that does not say which is which is not reproducible.
+# ---------------------------------------------------------------------------------------------
+
+
+def get_assignment_argument(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
+    """Taupin's 2*eps*n: the expected number of lines of a random cell within eps of this peak.
+
+    Lifted verbatim out of get_M20_likelihood so the two probability forms below cannot drift
+    from the shipped merit. get_assignment_probability(form='rho') reproduces
+    get_M20_likelihood(...)[1] exactly, and a test asserts it.
+
+    Returns (n_candidates, n_peaks), larger meaning the match is easier to get by chance.
+    """
+    mu, _ = get_multiplicity_taupin88(bravais_lattice)
+    eps = np.abs(np.sqrt(np.atleast_1d(q2_obs))[np.newaxis] - np.sqrt(q2_calc))
+    return (
+        8*np.pi*q2_obs*eps/(np.atleast_1d(reciprocal_volume)[:, np.newaxis]*mu + 1e-100)
+        )
+
+
+def get_assignment_probability(q2_obs, q2_calc, bravais_lattice, reciprocal_volume, form='rho'):
+    """Per-peak P(this peak is assigned its correct Miller index), from the Taupin density.
+
+    `form` selects the link on the shared argument (see the note above):
+
+      - 'rho'    -> 1/(1 + arg), the repo's own expression, what get_M20_likelihood returns and
+                    what feeds refine_cell's peak selection and the assignment threshold.
+      - 'taupin' -> exp(-arg), the complement of Taupin 1988 eq. (10)'s coincidence probability
+                    1 - exp(-2 eps n). Note the orientation: Taupin's published P is the chance a
+                    *random* line falls this close, so the probability the assignment is right is
+                    one minus it. The handoff quotes the coincidence form; calibrating that
+                    against a correctness label would report a reliability curve upside down.
+      - 'arg'    -> the raw statistic, for fitting a recalibration to.
+
+    Returns (n_candidates, n_peaks) in [0, 1] for the two probability forms.
+    """
+    argument = get_assignment_argument(q2_obs, q2_calc, bravais_lattice, reciprocal_volume)
+    if form == 'arg':
+        return argument
+    if form == 'rho':
+        return 1/(1 + argument)
+    if form == 'taupin':
+        return np.exp(-argument)
+    raise ValueError(f"form must be 'rho', 'taupin' or 'arg', not {form!r}")
+
+
+def get_assignment_probability_dewolff(
+    q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=0.0
+):
+    """The same question with de Wolff 1961's line density instead of Taupin's.
+
+        P(correct) = exp(-|dQ| / Delta(Q))
+
+    Under de Wolff's exponential interval statistics the chance that an arbitrary cell puts a line
+    at least this close is 1 - exp(-|dQ|/Delta), so the complement is the probability the match is
+    not a coincidence. Summing -log2(1 - P) over the peaks returns get_M_info_clipped with the
+    neighbour clipping inactive, and -log(1 - P) returns get_null_tail_nll; a test asserts both,
+    so this is the same family and not a fourth convention.
+
+    S01-C names this the front-runner: it is parameter-free, sigma-free, local in Q, and F-027
+    measured its density model beating the 4 pi q^2 V / mu form by 30-58% on exactly the count
+    these probabilities are built from. Unlike the Taupin forms its discrepancy is in q^2.
+
+    `min_discrepancy` floors |dQ| the way get_null_tail_nll's does (F-026); it does not bind on a
+    probability the way it does on a log, but it is kept so the two agree term by term.
+
+    Returns (n_candidates, n_peaks) in [0, 1].
+    """
+    delta = get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)
+    discrepancy = np.maximum(np.abs(np.atleast_2d(q2_obs) - q2_calc), min_discrepancy)
+    return np.exp(-discrepancy/delta)
+
+
+
 def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
     """SUPERSEDED by get_M_rev_sym. Dead code, kept only so the name still resolves.
 
