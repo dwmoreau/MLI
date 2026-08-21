@@ -248,12 +248,19 @@ def run_family(args, entries):
     contrasts = [(label, 'S08 baseline') for label in results if label != 'S08 baseline']
     contrasts += [('+ both (S10 as shipped)', '+ ho_* only'),
                   ('+ ho_* only', '+ cv_*/is_* only')]
+    # Both scopes, always. PROTOCOL §3 rule 6: the hard stratum carries the claim, and an
+    # aggregate alone is dominated by the easy cases. It matters here -- the two scopes do
+    # not agree, and reporting only the aggregate would have recommended deleting the very
+    # columns the hard stratum depends on.
     paired = []
     for metric in ('operating_point', 'top10'):
-        for treatment, control in contrasts:
-            test = FomMetrics.mcnemar(results[treatment], results[control], metric=metric)
-            test['comparison'] = f'{treatment} vs {control}'
-            paired.append(test)
+        for scope in (None, 'hard'):
+            for treatment, control in contrasts:
+                test = FomMetrics.mcnemar(results[treatment], results[control], metric=metric,
+                                          subset=scope)
+                test['comparison'] = f'{treatment} vs {control}'
+                test['scope'] = 'aggregate' if scope is None else 'hard'
+                paired.append(test)
     mcnemar = pd.DataFrame(paired)
     mcnemar.to_csv(os.path.join(args.artifact_dir, f'{args.tag}_family_mcnemar.csv'), index=False,
                    encoding='utf-8')
@@ -268,7 +275,7 @@ def run_family(args, entries):
                        seed=args.seed, holdout_merits=list(HOLDOUT_MERITS),
                        crossval_merits=list(CROSSVAL_MERITS),
                        arms={label: len(names)
-                             for label, names, _ in family_arms(tuple(full_combiner.names))}),
+                             for label, names, _ in family_arms(tuple(full.names))}),
                   handle, indent=2, default=str)
     return table
 
