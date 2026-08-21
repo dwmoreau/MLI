@@ -416,3 +416,50 @@ def test_the_loss_check_catches_a_loss_its_own_predictions_could_not_produce():
         loss_ = float(np.log(2.0))
 
     assert Neural.check_loss_is_possible(_Honest(), matrix, target)['observed_loss'] > 0
+
+
+# ---------------------------------------------------------------------------------------
+# The hard stratum, which PROTOCOL section 3 rule 6 says carries the claim
+# ---------------------------------------------------------------------------------------
+def test_the_hard_masks_select_the_stratum_the_protocol_defines():
+    """Three conditions and two cuts, and `condition_bundle` is half the index, not a column.
+
+    This function decides which entries the hard-stratum result is computed over, so a mask that
+    quietly selected the wrong rows would move a number the protocol says carries the claim. Each
+    row below fails a different one of the four conditions.
+    """
+    import pandas as pd
+    import run_fom_neural as neural
+    from mlindex.model_training import FomMetrics
+
+    frame = pd.DataFrame({
+        'entry_id': ['keep', 'keep_d6', 'wrong_bundle', 'wrong_lattice', 'too_low', 'unreachable'],
+        # `error1_cont0` is not a hard bundle; the rest are.
+        'condition_bundle': ['error2_cont0', 'error2_cont0', 'error1_cont0', 'error2_cont0',
+                             'error2_cont0', 'error1_cont2'],
+        'bravais_lattice': ['aP', 'mP', 'aP', 'cP', 'aP', 'mC'],
+        'volume_decile': [9, 7, 9, 9, 5, 6],
+        'found': [True, True, True, True, True, False],
+        }).set_index(['entry_id', 'condition_bundle']).sort_index()
+
+    masks = {name: np.asarray(mask) for name, mask in neural.hard_masks(frame).items()}
+    selected = {name: set(frame.index[mask].get_level_values('entry_id'))
+                for name, mask in masks.items()}
+
+    # The literal cut keeps only the decile >= 8 entry that also passes lattice and bundle.
+    assert selected[f'hard_d{FomMetrics.HARD_MIN_DECILE}'] == {'keep'}
+    # Q32's threshold cut widens to decile >= 6, admitting the mP and mC rows.
+    assert selected[f'hard_d{neural.HARD_THRESHOLD_DECILE}'] == {'keep', 'keep_d6', 'unreachable'}
+    # `_found` divides out generation failure, which F-059 measured at 87% of this stratum.
+    assert selected[f'hard_d{neural.HARD_THRESHOLD_DECILE}_found'] == {'keep', 'keep_d6'}
+
+    # Every rejection is for its own reason, and none of them is the volume cut alone.
+    for name, chosen in selected.items():
+        assert 'wrong_bundle' not in chosen, f'{name} admitted a non-hard condition bundle'
+        assert 'wrong_lattice' not in chosen, f'{name} admitted a high-symmetry lattice'
+        assert 'too_low' not in chosen, f'{name} admitted a low volume decile'
+
+    # The widened cut must be a superset of the literal one, or the two are measuring different
+    # populations and the pair cannot be reported side by side.
+    assert masks[f'hard_d{FomMetrics.HARD_MIN_DECILE}'].sum() <= masks[
+        f'hard_d{neural.HARD_THRESHOLD_DECILE}'].sum()
