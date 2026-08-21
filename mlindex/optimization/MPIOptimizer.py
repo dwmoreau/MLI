@@ -514,6 +514,13 @@ class OptimizerManager(OptimizerBase):
         best_Minfo_all = best_Minfo_all[good_indices]
         best_xnn_all = best_xnn_all[good_indices]
         best_n_indexed_all = best_n_indexed_all[good_indices]
+        # best_spacegroup_all is a list and was left unfiltered here, while sort_indices
+        # below index the *filtered* arrays -- so a single dropped row slid every later
+        # spacegroup onto a different candidate's cell, silently, including onto the
+        # highest-M20 candidate that ranking goes on to report.
+        best_spacegroup_all = [
+            spacegroup for spacegroup, keep in zip(best_spacegroup_all, good_indices) if keep
+            ]
 
         # Next remove nearly identical xnn's by selecting the xnn within an arbitrary radius
         # with the highest M20 score. The candidates are sorted by reciprocal volume so the

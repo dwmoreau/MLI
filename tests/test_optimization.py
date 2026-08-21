@@ -259,3 +259,34 @@ def test_standardize_cell_is_a_no_op_off_monoclinic_and_triclinic():
     before = candidates.best_xnn.copy()
     candidates.standardize_cell()
     assert np.array_equal(candidates.best_xnn, before)
+
+
+def _downsample_manager():
+    """An OptimizerManager stub carrying only what _downsample_computation touches."""
+    from mlindex.optimization.MPIOptimizer import OptimizerManager
+    manager = OptimizerManager.__new__(OptimizerManager)
+    manager.lattice_system = 'cubic'
+    manager.n_ranks = 1
+    manager.zero_error = False
+    manager.opt_params = {'downsample_radius': 1e-9, 'dump_candidates': None}
+    return manager
+
+
+def test_a_dropped_nan_cell_does_not_shift_the_spacegroups():
+    """The NaN filter sliced four arrays and not the spacegroup list beside them, while
+    the reciprocal-volume sort indexes the *filtered* arrays -- so one dropped row moved
+    every later spacegroup onto a different candidate. It reaches the reported answer:
+    in this construction the bad label lands on the highest-M20 candidate."""
+    manager = _downsample_manager()
+    xnn = [np.array([[1.0], [2.0], [np.nan], [3.0]])]
+    M20 = [np.array([10.0, 20.0, 999.0, 30.0])]
+    Minfo = [np.array([1.0, 2.0, 3.0, 4.0])]
+    n_indexed = [np.array([5, 6, 7, 8])]
+    spacegroup = ['A', 'B', 'BAD', 'D']
+
+    manager._downsample_computation(M20, Minfo, xnn, n_indexed, spacegroup,
+                                    n_top_candidates=10)
+
+    assert 'BAD' not in manager.top_spacegroup
+    assert manager.top_M20.tolist() == [30.0, 20.0, 10.0]
+    assert manager.top_spacegroup == ['D', 'B', 'A']
