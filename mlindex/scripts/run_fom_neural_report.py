@@ -410,11 +410,34 @@ def markdown(data, tag):
                   'monotone within a lattice, and F-081 says S11 and S14 must re-measure rather '
                   'than assume for a network.']
 
+    # The hard stratum is reported beside the aggregate rather than under it, because PROTOCOL
+    # section 3 rule 6 says it carries the claim -- and here the two halves disagree, so quoting
+    # either one alone would misstate the result.
+    hard_line = ''
+    if len(hard_rows):
+        reachable = hard_rows.loc[
+            (hard_rows['bravais_lattice'] == 'hard_d6_found')
+            & (hard_rows['arm'] == best_name)
+            & (hard_rows['metric'] == 'operating_point')]
+        if len(reachable):
+            row = reachable.iloc[0]
+            hard_delta = 100*row['delta']
+            hard_floor = 100*REPRODUCIBILITY_FLOOR*baseline['hard_op_given_found_d6']
+            hard_line = (
+                f'- the same on the **hard stratum with a reachable solution**, which PROTOCOL '
+                f'section 3 rule 6 says carries the claim (floor {hard_floor:.2f} pp there): '
+                f'**{"met" if hard_delta >= hard_floor else "not met"}** ({hard_delta:+.2f} pp, '
+                f'{int(row["n_gained"])} gained / {int(row["n_lost"])} lost, '
+                f'p = {row["p_value"]:.3g}, on {int(row["n_entries"])} entries)')
+
     lines += ['', '## Gate', '',
-              f'- paired gain over the 78-feature baseline, larger than the ~10% reproducibility '
-              f'floor ({floor_points:.2f} pp here): '
+              f'- paired gain over the 78-feature baseline on the **aggregate** operating point, '
+              f'larger than the ~10% reproducibility floor ({floor_points:.2f} pp here): '
               f'**{"met" if delta >= floor_points else "not met"}** ({delta:+.2f} pp, '
-              f'{_significance(paired)})',
+              f'{_significance(paired)})']
+    if hard_line:
+        lines.append(hard_line)
+    lines += [
               f'- the per-lattice table shows it is not the base rate: see above',
               f'- ECE < {ECE_GATE}: **{"met" if best["ece"] < ECE_GATE else "not met"}** '
               f'({best["ece"]:.4f} on the best arm)',
