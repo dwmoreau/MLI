@@ -73,6 +73,30 @@ CANDIDATE_COLUMNS = (
     'downsample_radius',
 )
 
+# Written by the pre-deduplication dump hook (S14), one row per candidate *entering*
+# deduplication. A separate stream from CANDIDATE_COLUMNS on purpose: this population is
+# ~2x the survivors at the production prune threshold and far larger at threshold 0, and
+# unit_cell / volume / reciprocal_volume are all recoverable from xnn. Keeping it separate
+# leaves Benchmark A's candidate schema and its loaders untouched.
+PREDOWNSAMPLE_COLUMNS = (
+    'entry_id',
+    'q2_digest',
+    'bravais_lattice',
+    'lattice_system',
+    'candidate_id',
+    'xnn',
+    'spacegroup',
+    'hkl_ref_length',
+    'n_peaks',
+    'M20',
+    'Minfo',
+    'n_indexed',
+    'm20_at_prune',
+    'n_entering',
+    'prune_m20_threshold',
+    'downsample_radius',
+)
+
 # Written by the driver, one row per indexed pattern.
 ENTRY_COLUMNS = (
     'entry_id',
@@ -164,6 +188,51 @@ def records_to_frame(records):
                 })
     frame = pd.DataFrame(rows, columns=list(CANDIDATE_COLUMNS))
     return frame
+
+
+def predownsample_records_to_frame(records):
+    """Flatten the pre-deduplication records into a tidy frame.
+
+    Built column-wise rather than row-wise, unlike ``records_to_frame``. At prune
+    threshold 0 a single hard-stratum entry can contribute tens of thousands of rows
+    across the fourteen lattices, and a per-row dict there costs both time and a large
+    transient. The two builders are otherwise the same shape.
+    """
+    columns = {name: [] for name in PREDOWNSAMPLE_COLUMNS}
+    for record in records:
+        n_candidates = record['xnn'].shape[0]
+        if n_candidates == 0:
+            continue
+        context = record.get('context') or {}
+        columns['entry_id'].append(np.repeat(context.get('entry_id'), n_candidates))
+        columns['q2_digest'].append(np.repeat(record['q2_digest'], n_candidates))
+        columns['bravais_lattice'].append(np.repeat(record['bravais_lattice'], n_candidates))
+        columns['lattice_system'].append(np.repeat(record['lattice_system'], n_candidates))
+        columns['candidate_id'].append(np.arange(n_candidates, dtype=np.int64))
+        columns['xnn'].append(list(record['xnn'].astype(np.float64)))
+        columns['spacegroup'].append(np.asarray(record['spacegroup'], dtype=object))
+        columns['hkl_ref_length'].append(np.repeat(record['hkl_ref_length'], n_candidates))
+        columns['n_peaks'].append(np.repeat(record['n_peaks'], n_candidates))
+        columns['M20'].append(record['M20'].astype(np.float64))
+        columns['Minfo'].append(record['Minfo'].astype(np.float64))
+        columns['n_indexed'].append(record['n_indexed'].astype(np.int64))
+        columns['m20_at_prune'].append(record['m20_at_prune'].astype(np.float64))
+        columns['n_entering'].append(np.repeat(record['n_entering'], n_candidates))
+        columns['prune_m20_threshold'].append(
+            np.repeat(record['prune_m20_threshold'], n_candidates))
+        columns['downsample_radius'].append(
+            np.repeat(record['downsample_radius'], n_candidates))
+
+    if not columns['entry_id']:
+        return pd.DataFrame(columns=list(PREDOWNSAMPLE_COLUMNS))
+
+    data = {}
+    for name, chunks in columns.items():
+        if name == 'xnn':
+            data[name] = [row for chunk in chunks for row in chunk]
+        else:
+            data[name] = np.concatenate(chunks)
+    return pd.DataFrame(data, columns=list(PREDOWNSAMPLE_COLUMNS))
 
 
 def _hkl_ref_path(lattice_system, bravais_lattice, models_directory=None):
@@ -596,6 +665,12 @@ def label_frame(candidates, entries, rtol=1e-2, n_processes=1):
 
 def write_candidate_shard(frame, out_dir, shard_tag):
     path = Path(out_dir) / f'candidates_{shard_tag}.parquet'
+    _to_parquet(frame, path)
+    return path
+
+
+def write_predownsample_shard(frame, out_dir, shard_tag):
+    path = Path(out_dir) / f'predownsample_{shard_tag}.parquet'
     _to_parquet(frame, path)
     return path
 

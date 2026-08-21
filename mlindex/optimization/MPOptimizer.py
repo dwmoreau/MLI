@@ -96,6 +96,7 @@ class MPOptimizerManager(OptimizerManager):
         best_xnn_all = [candidates.best_xnn]
         best_n_indexed_all = [candidates.n_indexed]
         best_spacegroup_all = list(candidates.best_spacegroup)
+        m20_at_prune_all = [candidates.m20_at_prune]
         for r in range(1, self.n_ranks):
             result = self._result_queues[r].get()
             if isinstance(result, Exception):
@@ -104,10 +105,11 @@ class MPOptimizerManager(OptimizerManager):
             best_Minfo_all.append(result['Minfo'])
             best_xnn_all.append(result['xnn'])
             best_n_indexed_all.append(result['n_indexed'])
+            m20_at_prune_all.append(result['m20_at_prune'])
             best_spacegroup_all += result['spacegroup']
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates)
+                                     n_top_candidates, m20_at_prune_all)
 
     def convergence_testing(self, candidates):
         n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])
@@ -158,6 +160,7 @@ class MPOptimizerWorker(OptimizerWorker):
             'Minfo': candidates.best_Minfo,
             'xnn': candidates.best_xnn,
             'n_indexed': candidates.n_indexed,
+            'm20_at_prune': candidates.m20_at_prune,
             'spacegroup': list(candidates.best_spacegroup),
         }
         self._result_q.put(result)
@@ -190,11 +193,18 @@ def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None,
         result_queue.put(e)
 
 
-def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345):
+def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345,
+                        options=None):
     """Spawn worker processes and construct manager optimizers for all 14 BLs.
 
     Returns (optimizers, processes, task_queues).
     Call shutdown_mp_workers(processes, task_queues) when done.
+
+    ``options`` overrides opt_params entries on every lattice. It has to be passed here
+    rather than assigned to the returned optimizers: opt_params is put on each worker's
+    data queue as its manager is constructed (`_init_workers`), so a key read inside
+    ``Candidates`` -- which runs on the workers too -- would otherwise take effect only on
+    the manager's share of the candidates.
     """
     from mlindex.optimization.UtilitiesOptimizer import get_optimizers
     import mlindex
@@ -226,7 +236,8 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
                      for bl in bravais_lattices}
 
     optimizers = get_optimizers(0, mp_organizers, broadening_tag, n_candidates_scale,
-                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed)
+                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed,
+                                options=options)
 
     # Clean up class-level injection
     MPOptimizerManager._mp_data_queues   = None

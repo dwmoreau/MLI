@@ -57,6 +57,9 @@ class Candidates:
             self.best_zeropoint = self.zeropoint.copy()
         self.best_hkl = self.hkl.copy()
         self.best_M20 = self.M20
+        # Filled by prune_below_m20; initialised so a Candidates that is never pruned still
+        # satisfies the manager's payload contract.
+        self.m20_at_prune = np.full(self.best_M20.shape, np.nan)
 
     def fix_bad_conversions(self):
         bad_conversions = np.sum(np.isnan(self.reciprocal_unit_cell), axis=1) > 0
@@ -290,6 +293,13 @@ class Candidates:
         keep = self.best_M20 >= threshold
         if not np.any(keep):
             keep[np.argmax(self.best_M20)] = True
+        # The M20 this cut was actually applied to. It is the *pre*-extinction-group value,
+        # which assign_extinction_group later replaces with the maximum over spacegroups --
+        # so the stored M20 is a different quantity from the one that decided survival
+        # (F-049), and without keeping this the cut cannot be reconstructed afterwards.
+        # Carrying it lets one threshold-0 run answer what the production threshold would
+        # have deleted, instead of needing a second run whose repair RNG has diverged.
+        self.m20_at_prune = self.best_M20[keep].copy()
         self.best_xnn = self.best_xnn[keep]
         self.best_M20 = self.best_M20[keep]
         self.best_hkl = self.best_hkl[keep]
@@ -450,6 +460,10 @@ class Candidates:
         if np.any(improved):
             self.best_xnn = np.concatenate([self.best_xnn, best_mf_xnn[improved]], axis=0)
             self.best_M20 = np.concatenate([self.best_M20, best_mf_M20[improved]])
+            # An off-by-two row is a multiple of its parent, so it inherits the parent's
+            # fate at the prune: had the parent been cut, this row would never have existed.
+            self.m20_at_prune = np.concatenate(
+                [self.m20_at_prune, self.m20_at_prune[improved]])
             self.best_hkl = np.concatenate([self.best_hkl, best_mf_hkl[improved]], axis=0)
             if self.zero_error:
                 self.best_zeropoint = np.concatenate(

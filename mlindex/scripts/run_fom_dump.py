@@ -108,6 +108,23 @@ def _parse_args():
                              'Only for deliberately reduced runs: at the production settings the '
                              'sampling reproduces the manifest exactly, so a shortfall otherwise '
                              'means a parameter has drifted')
+    # S14 (Q31, F-065). All three default to the S03/S04 behaviour, so an invocation
+    # written before they existed produces the same pool.
+    parser.add_argument('--entry-ids-file', type=str, default=None,
+                        help='CSV holding an identifier column. Restricts the run to those '
+                             'entries after sampling, for a targeted regeneration. Note the '
+                             'search RNG is seeded per pool and advances per entry, so a '
+                             'restricted run does not reproduce a full one candidate for '
+                             'candidate -- only the peak lists are identical')
+    parser.add_argument('--prune-threshold', type=float, default=5.0,
+                        help='M20 below which a candidate is discarded before deduplication. '
+                             'Production is 5.0, which removes 94.2 percent of generated '
+                             'candidates; 0 keeps everything, which is how Q31 asks whether '
+                             'the cut deletes correct cells')
+    parser.add_argument('--dump-predownsample', action='store_true',
+                        help='Also write every candidate entering deduplication, before the '
+                             'highest-M20 tiebreak collapses each neighbourhood. This is the '
+                             'population Benchmark A never stored (F-065)')
     parser.add_argument('--out-dir', type=str, required=True)
     return parser.parse_args()
 
@@ -167,10 +184,17 @@ def entry_record(entry, args, q2_obs, hkl_true, n_dropout_achieved, split, partn
         }
 
 
-def _pool_output_is_complete(out_dir, pool_tag):
-    """Both of a pool's tables present and readable, so a resumed task can skip it."""
+def _pool_output_is_complete(out_dir, pool_tag, want_predownsample=False):
+    """Every one of a pool's tables present and readable, so a resumed task can skip it.
+
+    The pre-deduplication shard counts when it was asked for: without it a task requeued
+    after --dump-predownsample was added would skip pools that hold only the survivors,
+    and the missing rows are the whole point of the run.
+    """
     paths = [Path(out_dir) / f'entries_{pool_tag}.parquet',
              Path(out_dir) / f'candidates_{pool_tag}.parquet']
+    if want_predownsample:
+        paths.append(Path(out_dir) / f'predownsample_{pool_tag}.parquet')
     if not all(path.exists() for path in paths):
         return False
     try:
@@ -197,19 +221,29 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
     # Resume: a requeued array task must not redo pools that already finished. Both tables have to
     # be present and readable -- a pool killed mid-write can leave the entry table complete and the
     # candidate shard truncated, and silently skipping that would lose its candidates for good.
-    if _pool_output_is_complete(out_dir, pool_tag):
+    if _pool_output_is_complete(out_dir, pool_tag, args.dump_predownsample):
         print(f'[pool {pool_index:02d}] already written, skipping', flush=True)
         return
 
+    # Both keys are read inside Candidates, which runs on the workers too, so they go in
+    # at construction rather than being assigned to the returned managers afterwards --
+    # opt_params is put on the worker queues by _init_workers and never updated again.
+    # dump_candidates below is safe to set afterwards only because it is read on the
+    # manager alone.
     optimizers, processes, task_queues = setup_mp_optimizers(
         args.pool_size, mirror.BROADENING_TAG, n_candidates_scale=1,
         seed=args.seed + pool_index,
+        options={
+            'prune_m20_threshold': float(args.prune_threshold),
+            'dump_predownsample': bool(args.dump_predownsample),
+            },
         )
     for bravais_lattice in BRAVAIS_LATTICES:
         optimizers[bravais_lattice].opt_params['dump_candidates'] = True
 
     entry_rows = []
     candidate_frames = []
+    predownsample_frames = []
     failures = []
     consecutive_failures = 0
     started = time.time()
@@ -235,6 +269,7 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
                 'q2_digest': digest,
                 }
             records = []
+            predownsample_records = []
             try:
                 for bravais_lattice in BRAVAIS_LATTICES:
                     optimizer = optimizers[bravais_lattice]
@@ -243,6 +278,8 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
                               zero_error=False, wavelength=None,
                               n_top=mirror.N_TOP_CANDIDATES)
                     records += optimizer.drain_candidate_dump()
+                    if args.dump_predownsample:
+                        predownsample_records += optimizer.drain_predownsample_dump()
             except Exception as error:
                 failures.append({'identifier': entry['identifier'],
                                  'reason': 'optimizer', 'detail': repr(error)})
@@ -253,6 +290,9 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
             consecutive_failures = 0
 
             candidate_frames.append(FomBenchmark.records_to_frame(records))
+            if args.dump_predownsample:
+                predownsample_frames.append(
+                    FomBenchmark.predownsample_records_to_frame(predownsample_records))
             entry_rows.append(entry_record(
                 entry, args, q2_obs, hkl_true, n_dropout_achieved,
                 split_by_id.get(entry['identifier'], 'unassigned'), partner_id,
@@ -292,6 +332,9 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
     if candidate_frames:
         FomBenchmark.write_candidate_shard(
             pd.concat(candidate_frames, ignore_index=True), out_dir, pool_tag)
+    if predownsample_frames:
+        FomBenchmark.write_predownsample_shard(
+            pd.concat(predownsample_frames, ignore_index=True), out_dir, pool_tag)
     elapsed = time.time() - started
     print(f'[pool {pool_index:02d}] {"ABORTED" if aborted else "done"}: '
           f'{len(entry_rows)}/{entries.shape[0]} entries, '
@@ -351,6 +394,24 @@ def main():
                 )
         print(f'WARNING: {message}', flush=True)
 
+    # Targeted regeneration: keep only the named entries. Applied after sampling and
+    # before striping, so every pool still draws from the same set and the restriction is
+    # a filter on the frozen sample rather than a different sample.
+    if args.entry_ids_file:
+        wanted = pd.read_csv(args.entry_ids_file)
+        id_column = 'identifier' if 'identifier' in wanted.columns else 'entry_id'
+        wanted_ids = set(wanted[id_column])
+        missing = wanted_ids - set(entries['identifier'])
+        if missing:
+            raise SystemExit(
+                f'{len(missing)} of {len(wanted_ids)} entries in {args.entry_ids_file} were '
+                f'not sampled, e.g. {sorted(missing)[:3]}. Check --n-entries-per-bl, --seed '
+                'and --bravais-lattices reproduce the set the list was drawn from.'
+                )
+        entries = entries[entries['identifier'].isin(wanted_ids)].reset_index(drop=True)
+        print(f'restricted to {entries.shape[0]} entries from {args.entry_ids_file}',
+              flush=True)
+
     entries = entries.iloc[args.shard::args.n_shards].reset_index(drop=True)
     print(f'shard {args.shard}/{args.n_shards}: {entries.shape[0]} entries, bundle {tag}; '
           f'{args.n_pools} pools x {args.pool_size} processes', flush=True)
@@ -395,7 +456,9 @@ def main():
         n_dropout=args.n_dropout,
         second_phase_lines=args.second_phase_lines,
         second_phase_bias=args.second_phase_bias,
-        prune_threshold=5.0,
+        prune_threshold=float(args.prune_threshold),
+        dump_predownsample=bool(args.dump_predownsample),
+        entry_ids_file=args.entry_ids_file,
         split_manifest=str(args.split_manifest),
         commit=_commit_hash(),
         seconds_total=round(time.time() - started, 1),
