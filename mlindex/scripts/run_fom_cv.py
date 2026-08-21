@@ -185,7 +185,8 @@ def run_features(args, entries):
 def main():
     parser = argparse.ArgumentParser(description='S10 cross-validated and hold-out figures of merit.')
     parser.add_argument('--stage', default='features',
-                        choices=['features', 'main', 'scaling', 'gate', 'confound', 'cost', 'combiner'])
+                        choices=['features', 'main', 'scaling', 'gate', 'confound', 'cost', 'combiner',
+                                 'family'])
     parser.add_argument('--benchmark-dir',
                         default=os.path.join('mlindex', 'data', 'fom_benchmark'))
     parser.add_argument('--feature-dir', default=os.path.join('mlindex', 'data', 'fom_features'))

@@ -686,4 +686,7 @@ def dispatch(args, entries):
     if args.stage == 'combiner':
         import run_fom_cv_combiner
         return run_fom_cv_combiner.run(args, entries)
+    if args.stage == 'family':
+        import run_fom_cv_combiner
+        return run_fom_cv_combiner.run_family(args, entries)
     raise ValueError(f'unknown stage {args.stage!r}')

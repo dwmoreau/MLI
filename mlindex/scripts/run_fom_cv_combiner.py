@@ -141,6 +141,138 @@ def run(args, entries):
     return table
 
 
+# ---------------------------------------------------------------------------------------
+# Q35 -- does `ho_M20` alone carry S10's +1.83 pp, or is the cross-validated half needed?
+# ---------------------------------------------------------------------------------------
+#
+# F-099 ranks `ho_M20` **second of all seventy-eight features** at 8.7x `get_M20`, an order of
+# magnitude cheaper than `cv_M20__random` at 36.7x, and four of the thirteen CV columns carry
+# *negative* importance. If the cheap column is the whole gain then S10 delivers a merit S14 can
+# actually afford, and the cross-validation half can be dropped outright.
+#
+# Held to the same discipline as `run()`: one architecture, one set of hyperparameters taken from
+# S08's own artefacts, four arms differing only in which columns they may see, paired on the same
+# entries. `fit_arm(names_override=...)` refits the same model class on a subset of its own
+# columns, which is F-093's ablation template rather than a new one.
+
+# The thirteen CV_MERITS split three ways by what they cost to compute.
+HOLDOUT_MERITS = ('ho_M20', 'ho_M', 'ho_tail_nll')
+CROSSVAL_MERITS = tuple(name for name in FomCombiner.CV_MERITS if name not in HOLDOUT_MERITS)
+
+
+def family_arms(full_names):
+    """(label, names, note) per arm, as subsets of the full 78-column feature set."""
+    full = tuple(full_names)
+    baseline = tuple(n for n in full if n not in set(FomCombiner.CV_MERITS))
+    holdout_only = tuple(n for n in full if n in set(baseline) | set(HOLDOUT_MERITS))
+    crossval_only = tuple(n for n in full if n in set(baseline) | set(CROSSVAL_MERITS))
+    return [
+        ('S08 baseline', baseline, 'no predictive columns at all'),
+        ('+ ho_* only', holdout_only, f'{len(HOLDOUT_MERITS)} columns, ho_M20 at 8.7x get_M20'),
+        ('+ cv_*/is_* only', crossval_only,
+         f'{len(CROSSVAL_MERITS)} columns, cv_M20__random at 36.7x'),
+        ('+ both (S10 as shipped)', full, 'all thirteen'),
+        ]
+
+
+def _report(combiner, cal_frames, dev_frames, entries, budget, args, name, note=''):
+    """Calibrate, choose a threshold on the calibration split, report on dev -- `fit_arm`'s tail.
+
+    Separated from the fit so an arm that is a restriction of an already-fitted model does not
+    pay for a second full fit.
+    """
+    combiner.fit_calibrators(cal_frames)
+    columns = combiner.score_columns
+    cal = s08.evaluate_score(cal_frames, entries, combiner.score, None, args.train_split, columns)
+    choice, rule = s08.choose_threshold(cal, budget)
+    dev = s08.evaluate_score(dev_frames, entries, combiner.score, float(choice.threshold),
+                             args.report_split, columns, n_bootstrap=args.n_bootstrap,
+                             seed=args.seed)
+    FomMetrics.check_threshold_transfer(choice, dev)
+    row = s08.scope_row(dev, arm=name, question=note, n_features=len(combiner.names),
+                        threshold=float(choice.threshold), threshold_rule=rule)
+    row.update(s08.per_lattice(dev, 'dev'))
+    return dev, row
+
+
+def run_family(args, entries):
+    meta, params = _s08_settings(args.artifact_dir)
+    budget = float(meta['matched_fpr_budget'])
+    n_negatives = int(meta.get('n_negatives', 40))
+    holdout_fraction = float(meta.get('holdout_fraction', 0.2))
+    args.objective = 'pointwise'
+    args.model_params = params
+
+    covariates = FomCombiner.entry_covariates(entries)
+    scalers = FomCombiner.load_scalers(args.null_dir, groups=LOAD_GROUPS)
+    fit_ids, cal_ids = s08.split_ids(entries, args.train_split, holdout_fraction, args.seed)
+    dev_ids = set(entries.loc[entries['split'] == args.report_split, 'entry_id'])
+
+    print('loading frames...', flush=True)
+    started = time.perf_counter()
+    fit_frames = load_frames(args, entries, covariates, scalers, fit_ids, args.out_dir,
+                             n_negatives=n_negatives, seed=args.seed)
+    cal_frames = load_frames(args, entries, covariates, scalers, cal_ids, args.out_dir)
+    dev_frames = load_frames(args, entries, covariates, scalers, dev_ids, args.out_dir)
+    print(f'  {time.perf_counter() - started:.0f}s; '
+          f'{sum(f.shape[0] for f in fit_frames):,} fit / '
+          f'{sum(f.shape[0] for f in dev_frames):,} dev candidates', flush=True)
+
+    # The full model is fitted once and every arm is a refit of the same class on a subset of
+    # its own columns, so each arm costs one fit rather than two -- run_fom_neural's ablation
+    # stage does the same, for the same reason. Taking every arm's columns from the *full*
+    # model's list is also what keeps them comparable: fitting each from its own group list
+    # would let the column order drift between arms.
+    print('fitting the full model...', flush=True)
+    full = FomCombiner.FomCombiner.fit(
+        fit_frames, groups=CV_GROUPS, scalers=scalers, objective='pointwise', seed=args.seed,
+        **params)
+    print(f'  {len(full.names)} features', flush=True)
+
+    rows, results = [], {}
+    for label, names, note in family_arms(tuple(full.names)):
+        model = full if len(names) == len(full.names) else s08._restrict(
+            full, list(names), fit_frames, args)
+        dev, row = _report(model, cal_frames, dev_frames, entries, budget, args, label, note)
+        rows.append(row)
+        results[label] = dev
+        print(f'  {label:24s} {len(names):3d} features  op {row["operating_point"]:.4f}  '
+              f'top10 {row["top10"]:.4f}', flush=True)
+
+    table = pd.DataFrame(rows)
+    table.to_csv(os.path.join(args.artifact_dir, f'{args.tag}_family_table.csv'), index=False,
+                 encoding='utf-8')
+
+    # Every arm against the baseline, and the two cheap-versus-expensive contrasts that answer
+    # the question directly.
+    contrasts = [(label, 'S08 baseline') for label in results if label != 'S08 baseline']
+    contrasts += [('+ both (S10 as shipped)', '+ ho_* only'),
+                  ('+ ho_* only', '+ cv_*/is_* only')]
+    paired = []
+    for metric in ('operating_point', 'top10'):
+        for treatment, control in contrasts:
+            test = FomMetrics.mcnemar(results[treatment], results[control], metric=metric)
+            test['comparison'] = f'{treatment} vs {control}'
+            paired.append(test)
+    mcnemar = pd.DataFrame(paired)
+    mcnemar.to_csv(os.path.join(args.artifact_dir, f'{args.tag}_family_mcnemar.csv'), index=False,
+                   encoding='utf-8')
+    print()
+    print(mcnemar.to_string(index=False))
+
+    with open(os.path.join(args.artifact_dir, f'{args.tag}_family_meta.json'),
+              'w', encoding='utf-8') as handle:
+        json.dump(dict(commit=commit_hash(), tag=args.tag, stage='family',
+                       question='Q35', params=params, matched_fpr_budget=budget,
+                       n_negatives=n_negatives, holdout_fraction=holdout_fraction,
+                       seed=args.seed, holdout_merits=list(HOLDOUT_MERITS),
+                       crossval_merits=list(CROSSVAL_MERITS),
+                       arms={label: len(names)
+                             for label, names, _ in family_arms(tuple(full_combiner.names))}),
+                  handle, indent=2, default=str)
+    return table
+
+
 def _importance(combiner, dev_frames, seed, n_repeats=1, sample=30000):
     """Permutation importance of each feature on average precision, on the dev split.
 
