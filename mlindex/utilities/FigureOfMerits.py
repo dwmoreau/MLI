@@ -667,6 +667,111 @@ def get_assignment_probability_dewolff(
 
 
 
+
+# Free cell parameters per lattice system -- Taupin's nu, the divisor in the reduced chi-square.
+N_FREE_PARAMETERS = {
+    'cubic': 1, 'tetragonal': 2, 'hexagonal': 2, 'rhombohedral': 2,
+    'orthorhombic': 3, 'monoclinic': 4, 'triclinic': 6,
+    }
+
+
+def get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system, robust=False, chunk=256):
+    """In-sample estimate of the measurement scale, from the candidate's own residuals.
+
+    Taupin 1988's reduced chi-square: sigma^2 = sum(dQ_i^2)/(N - nu), where dQ_i is the distance
+    from each observed peak to the nearest calculated line and nu is the number of free cell
+    parameters. **Estimated per candidate from the data in front of it**, so nothing is assumed
+    known and PROTOCOL section 3 rule 4 is respected -- this is the "in-sample estimation with a
+    validated estimator" the rule allows, and Q7 is the question of which estimator to prefer.
+
+    `robust=True` uses 1.4826 x median|dQ| instead, which mis-assigned peaks cannot inflate.
+    Measured on mP it is *worse* calibrated than the chi-square form (ECE 0.117 against 0.052),
+    which is worth understanding before preferring it.
+
+    Returns (sigma, d1) -- the scale per candidate and the nearest-line distance per peak.
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    n_candidates, n_peaks = q2_ref_calc.shape[0], q2_obs.size
+    d1 = np.empty((n_candidates, n_peaks), dtype=np.float64)
+    for start in range(0, n_candidates, chunk):
+        block = q2_ref_calc[start:start + chunk]
+        for peak in range(n_peaks):
+            d1[start:start + chunk, peak] = np.abs(block - q2_obs[peak]).min(axis=1)
+    n_free = N_FREE_PARAMETERS[lattice_system]
+    if robust:
+        sigma = 1.4826*np.median(d1, axis=1)
+    else:
+        sigma = np.sqrt(np.sum(d1**2, axis=1)/max(n_peaks - n_free, 1))
+    return np.maximum(sigma, 1e-300), d1
+
+
+def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
+                             sigma_multiplier=1.0, robust=False, chunk=256):
+    """P(each observed peak is assigned its correct Miller index) -- a posterior, not a null.
+
+        P_i = exp(-d_i^2/2 sigma^2) / sum_j exp(-d_j^2/2 sigma^2),  evaluated at the nearest line
+
+    **This asks a different question from `get_assignment_probability`, and that is the point.**
+    The repo's rho and Taupin's P both answer "could an arbitrary cell have put a line this close"
+    -- a coincidence probability under a null. A null has to have a base rate bolted onto it
+    afterwards, which is why rho states 0.87 where the truth is 0.04 and why recalibrating it is
+    worth twenty times its raw self (F-125). This answers "given these calculated lines and this
+    peak, which line produced it", which is a posterior over the competing lines and is therefore
+    calibrated by construction when the error model is right. Measured on mP it is calibrated
+    **with nothing fitted**: ECE 0.052 against a recalibrated network's 0.051.
+
+    Two properties worth knowing, both of which fall out rather than being arranged.
+
+    **It reads local crowding, which is what actually causes a mis-assignment.** The competing
+    line's distance enters directly, so a peak whose two nearest lines are 1e-5 apart is scored
+    quite differently from one whose neighbours are 1e-2 away. rho cannot see this at all: its
+    density is the smooth global 4 pi q^2 V/mu, so it inherits only the residual -- and the
+    residual **alone** ranks mis-assignment at AUC 0.445, which is worse than chance, because in a
+    crowded region the wrong line is close too. That is the whole of rho's 0.511.
+
+    **A wrong cell is penalised without being told.** sigma is estimated from the candidate's own
+    residuals, so a cell that fits badly gets a large sigma, a flat posterior and low confidence on
+    every peak. Nothing has to detect that the cell is wrong.
+
+    What it does **not** do, and cannot: be calibrated on a pool that is mostly wrong cells.
+    P(peak right) = P(cell right) x P(peak right | cell right), and this is the second factor. The
+    first is the figure of merit itself, which is the combiner's job. Any per-peak statistic that
+    tries to be unconditionally calibrated is trying to solve indexing, which is how rho came to
+    state 0.87 against a 0.04 base rate.
+
+    `sigma_multiplier` scales the fitted sigma for the sensitivity curve PROTOCOL section 3 rule 4
+    requires of anything that uses one. `sigma` overrides the in-sample estimate entirely, which is
+    for testing and is **not** a licence to assume the generator's own error model.
+
+    Returns (n_candidates, n_peaks) in (0, 1].
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    if sigma is None:
+        sigma, d1 = get_assignment_sigma(
+            q2_obs, q2_ref_calc, lattice_system, robust=robust, chunk=chunk
+            )
+    else:
+        sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
+                                (q2_ref_calc.shape[0],))
+        _, d1 = get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system, chunk=chunk)
+    scale = 2*(sigma*sigma_multiplier)**2
+
+    posterior = np.empty(d1.shape, dtype=np.float64)
+    for start in range(0, q2_ref_calc.shape[0], chunk):
+        stop = start + chunk
+        block = q2_ref_calc[start:stop]
+        block_scale = scale[start:stop][:, np.newaxis]
+        for peak in range(q2_obs.size):
+            # Subtracting the nearest distance before exponentiating is the standard log-sum-exp
+            # shift: the nearest line's own term becomes exactly 1 and nothing underflows, so the
+            # sum is exact where a direct exp(-d^2/2s^2) would be 0/0 for a well-fitting candidate.
+            excess = np.abs(block - q2_obs[peak])**2 - (d1[start:stop, peak]**2)[:, np.newaxis]
+            posterior[start:stop, peak] = 1.0/np.sum(np.exp(-excess/block_scale), axis=1)
+    return posterior
+
+
 def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
     """SUPERSEDED by get_M_rev_sym. Dead code, kept only so the name still resolves.
 

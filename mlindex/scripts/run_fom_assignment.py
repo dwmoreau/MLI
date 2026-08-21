@@ -33,6 +33,7 @@ os.environ.setdefault('KERAS_BACKEND', 'torch')
 
 from mlindex.model_training import AssignmentModel as Assign
 from mlindex.model_training import FomBenchmark as Bench
+from mlindex.model_training.FomMetrics import BRAVAIS_LATTICES
 from mlindex.scripts.run_fom_prior import commit_hash
 from mlindex.scripts.run_fom_prior import reliability
 from mlindex.utilities import FigureOfMerits as fom
@@ -50,6 +51,12 @@ DEFAULT_PEAKS = os.path.join('mlindex', 'data', 'fom_assignment')
 # not a condition anything is calibrated on.
 CONTROL_BUNDLES = ('error0_cont0',)
 
+# PROTOCOL section 3 rule 4: anything that uses a sigma reports a sensitivity curve over it. The
+# posterior estimates sigma in sample rather than assuming it, so this asks what a mis-estimate
+# of that scale costs -- which is the honest form of the question for an estimator rather than an
+# assumption.
+SIGMA_MULTIPLIERS = (0.25, 0.5, 2.0, 4.0)
+
 # The probability forms, in the order they are reported. `arg` is the shared statistic and is kept
 # as a column so the recalibrations have something to fit to.
 #
@@ -64,7 +71,13 @@ CONTROL_BUNDLES = ('error0_cont0',)
 # statistic.** rho, taupin and dewolff are monotone transforms of arg, so they cannot beat it, and
 # neither can any relabelling of arg. A network that beats it is using information that is not in
 # arg; a network that does not is supplying a link function that already exists.
-ANALYTIC_FORMS = ('rho', 'taupin', 'dewolff', 'constant', 'isotonic')
+ANALYTIC_FORMS = ('rho', 'taupin', 'dewolff', 'constant', 'isotonic',
+                  'posterior', 'posterior_robust')
+
+# The posterior forms answer a different question from the other three -- "which line produced this
+# peak" rather than "could a random cell have come this close" -- and the difference is what makes
+# them calibrated with nothing fitted. See `FigureOfMerits.get_assignment_posterior`.
+POSTERIOR_FORMS = ('posterior', 'posterior_robust')
 
 # Fitted on the well-posed subpopulation and reported only there -- see STRATA. At deployment you
 # do not know whether a candidate is correct, so this is not a deployable score; it is the answer
@@ -265,7 +278,7 @@ def collect_peaks(root, bravais_lattice, bundles, split, max_entries=None,
         xnn = np.stack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
         reciprocal_volume = np.asarray(group['reciprocal_volume'], dtype=np.float64)
 
-        _, _, hkl_assigned, q2_calc = Bench.assign_lines(
+        q2_ref_calc, _, hkl_assigned, q2_calc = Bench.assign_lines(
             q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory,
             )
         argument = fom.get_assignment_argument(
@@ -274,6 +287,19 @@ def collect_peaks(root, bravais_lattice, bundles, split, max_entries=None,
         dewolff = fom.get_assignment_probability_dewolff(
             q2_obs, q2_calc, xnn, lattice_system, bravais_lattice,
             )
+        # Computed here rather than in a second pass because it needs `q2_ref_calc`, the full set
+        # of calculated lines, which is far too large to store -- (n_candidates, up to 1000) per
+        # group -- and is already in hand from `assign_lines`.
+        posterior = fom.get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system)
+        posterior_robust = fom.get_assignment_posterior(
+            q2_obs, q2_ref_calc, lattice_system, robust=True,
+            )
+        sigma_curve = {
+            f'posterior_sigma{multiplier:g}': fom.get_assignment_posterior(
+                q2_obs, q2_ref_calc, lattice_system, sigma_multiplier=multiplier,
+                )
+            for multiplier in SIGMA_MULTIPLIERS
+            }
         label = Assign.assignment_labels(hkl_assigned, hkl_true[np.newaxis], lattice_system)
         assign_class = Assign.hkl_class_index(hkl_assigned, hkl_ref, lattice_system)
         true_class = Assign.hkl_class_index(hkl_true, hkl_ref, lattice_system)
@@ -306,6 +332,9 @@ def collect_peaks(root, bravais_lattice, bundles, split, max_entries=None,
             # says does not exist.
             argument=argument.reshape(-1),
             dewolff=dewolff.reshape(-1),
+            posterior=posterior.reshape(-1),
+            posterior_robust=posterior_robust.reshape(-1),
+            **{name: values.reshape(-1) for name, values in sigma_curve.items()},
             assign_class=assign_class.reshape(-1).astype(np.int32),
             true_class=np.tile(true_class, n_candidates).astype(np.int32),
             is_contaminant=np.tile(
@@ -522,6 +551,65 @@ STRATA = (
     )
 
 
+# -------------------------------------------------------------------------------------------
+# What block C actually consumes
+# -------------------------------------------------------------------------------------------
+def candidate_summaries(peaks, form):
+    """Per-candidate summaries of a per-peak probability, and the label they will be judged on.
+
+    Block C is handed a candidate, not a peak, so the number that decides which per-peak form to
+    ship is not its per-peak calibration -- it is whether a *summary* of it separates a correct
+    candidate from a wrong one. Two summaries, both of which the existing pipeline already has
+    analogues of:
+
+      - `n_modelled = sum(P)`, the expected number of correctly indexed peaks. This is what
+        `refine_cell`'s rho > 0.95 mask and the assignment threshold are counting today.
+      - `mean_log = mean(log P)`, a per-peak log-likelihood. Taupin's merit is this shape, and it
+        weights a single confidently-wrong peak far more heavily than the count does.
+    """
+    probability = np.clip(peaks[form].to_numpy(dtype=np.float64), 1e-12, 1.0)
+    frame = peaks[['entry_id', 'condition_bundle', 'candidate_id', 'is_correct']].copy()
+    frame['probability'] = probability
+    frame['log_probability'] = np.log(probability)
+    grouped = frame.groupby(['entry_id', 'condition_bundle', 'candidate_id'], sort=False)
+    summary = grouped.agg(
+        n_modelled=('probability', 'sum'), mean_log=('log_probability', 'mean'),
+        is_correct=('is_correct', 'first'),
+        ).reset_index()
+    return summary
+
+
+def summary_scores(summary, form, summary_name, n_bootstrap=0, seed=12345):
+    """Discrimination of one summary, pooled and per entry.
+
+    Pooled AUC says whether the summary separates correct candidates from wrong ones at all.
+    `top1_rate` is the number that matches what `run.py` does: within each entry's own pool, is
+    the highest-scoring candidate a correct one. An entry with no correct candidate is excluded
+    rather than counted as a loss -- that is a generation failure and belongs to S14, not here
+    (METRICS section 3).
+    """
+    labels = summary['is_correct'].to_numpy(dtype=bool)
+    values = summary[summary_name].to_numpy(dtype=np.float64)
+    row = dict(form=form, summary=summary_name, n_candidates=int(len(summary)),
+               n_correct=int(labels.sum()), auc=roc_auc(values, labels))
+
+    reachable, wins = 0, 0
+    for _, group in summary.groupby(['entry_id', 'condition_bundle'], sort=False):
+        correct = group['is_correct'].to_numpy(dtype=bool)
+        if not correct.any():
+            continue
+        reachable += 1
+        scores = group[summary_name].to_numpy(dtype=np.float64)
+        best = np.flatnonzero(scores == scores.max())
+        # A tie is scored as the fraction of the tied set that is correct, so a form that cannot
+        # separate two candidates is not credited with picking the right one by file order --
+        # F-083's warning, which found a *constant* score scoring 0.27 on top-10 for exactly that
+        # reason.
+        wins += float(correct[best].mean())
+    row['n_entries_reachable'] = reachable
+    row['top1_rate'] = wins/reachable if reachable else np.nan
+    return row
+
 def run_analytic(args):
     import pandas as pd
 
@@ -531,7 +619,7 @@ def run_analytic(args):
     os.makedirs(args.artifact_dir, exist_ok=True)
 
     baseline_rows, reliability_rows, modelled_rows, paired_rows, summaries = [], [], [], [], []
-    setting_rows = []
+    setting_rows, summary_rows = [], []
     for lattice in args.lattices:
         train, train_candidates, summary_train = collect_peaks(
             args.benchmark_dir, lattice, bundles, 'fom-train', args.train_entries,
@@ -549,6 +637,7 @@ def run_analytic(args):
               flush=True)
 
         isotonic = fit_isotonic(train)
+        sigma_forms = [f'posterior_sigma{multiplier:g}' for multiplier in SIGMA_MULTIPLIERS]
         well_posed_train = train.loc[train['is_correct'] & train['same_setting']]
         isotonic_well_posed = (
             fit_isotonic(well_posed_train) if len(well_posed_train) > 100 else None
@@ -570,11 +659,26 @@ def run_analytic(args):
             )
 
         setting_rows.append(setting_cut_table(dev).assign(bravais_lattice=lattice))
+
+        # The number that decides which form block C is given: not per-peak calibration, but
+        # whether a *summary* of the per-peak probabilities separates a correct candidate from a
+        # wrong one.
+        well_posed_dev_frame = dev.loc[dev['is_correct'] & dev['same_setting']]
+        for form in list(ANALYTIC_FORMS) + sigma_forms:
+            for stratum, frame in (('all', dev), ('well_posed', well_posed_dev_frame)):
+                if not len(frame):
+                    continue
+                summary = candidate_summaries(frame, form)
+                for summary_name in ('n_modelled', 'mean_log'):
+                    summary_rows.append(dict(
+                        bravais_lattice=lattice, stratum=stratum,
+                        **summary_scores(summary, form, summary_name),
+                        ))
         for stratum, select in STRATA:
             slice_ = select(dev)
             if not len(slice_):
                 continue
-            forms = list(ANALYTIC_FORMS)
+            forms = list(ANALYTIC_FORMS) + sigma_forms
             if stratum.startswith('well_posed') and WELL_POSED_FORM in dev.columns:
                 forms.append(WELL_POSED_FORM)
             for form in forms:
@@ -608,7 +712,8 @@ def run_analytic(args):
                 ))
         well_posed_dev = dev.loc[dev['is_correct'] & dev['same_setting']]
         if len(well_posed_dev) and WELL_POSED_FORM in dev.columns:
-            for form in ('rho', 'taupin', 'dewolff', 'constant'):
+            for form in ('rho', 'taupin', 'dewolff', 'constant', 'posterior',
+                         'posterior_robust'):
                 paired_rows.append(dict(
                     bravais_lattice=lattice, stratum='well_posed',
                     **paired_delta(
@@ -620,6 +725,8 @@ def run_analytic(args):
     baselines = pd.DataFrame(baseline_rows)
     if setting_rows:
         write(pd.concat(setting_rows, ignore_index=True), args, 'setting_cut')
+    if summary_rows:
+        write(pd.DataFrame(summary_rows), args, 'candidate_summary')
     write(baselines, args, 'analytic_baselines')
     write(pd.DataFrame(reliability_rows), args, 'reliability')
     write(pd.DataFrame(modelled_rows), args, 'modelled_count')
@@ -1039,6 +1146,97 @@ def run_cost(args):
     return table
 
 
+def run_block_c(args):
+    """The session's actual question: which per-peak form should block C be given?
+
+    Per-peak calibration does not answer it. Block C is handed a candidate and asks "is this cell
+    right", so a per-peak form earns its place only if a *summary* of it adds discrimination on top
+    of what the combiner already has. Two baselines, and the second is the one that matters:
+
+      - **M20 alone**, the merit the pipeline ranks on today;
+      - **M20 + Minfo**, which is what the benchmark actually stores -- and Minfo is built from the
+        same `arg` as rho, so "add rho" and "add Minfo" are close to the same experiment. Measuring
+        against M20 alone flatters any form built on that statistic.
+
+    A logistic on standardised features, fitted on `fom-train` and reported on `fom-dev`, per
+    lattice. Deliberately a linear model rather than a tree: this is a question about whether the
+    information is *present*, not about how well it can be exploited, and S08 already owns the
+    second question.
+    """
+    import pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    key = ['entry_id', 'condition_bundle', 'candidate_id']
+    feature_sets = {
+        'M20': ['m'],
+        'M20 + rho': ['m', 'rho_n', 'rho_l'],
+        'M20 + posterior': ['m', 'post_n', 'post_l'],
+        'M20 + rho + posterior': ['m', 'rho_n', 'rho_l', 'post_n', 'post_l'],
+        'M20 + Minfo (stored)': ['m', 'mi'],
+        'M20 + Minfo + posterior': ['m', 'mi', 'post_n', 'post_l'],
+        }
+
+    def summarise(peaks):
+        frame = peaks.copy()
+        for column in ('rho', 'posterior'):
+            frame[f'log_{column}'] = np.log(np.clip(frame[column], 1e-12, 1.0))
+        return frame.groupby(key, sort=False).agg(
+            rho_n=('rho', 'sum'), post_n=('posterior', 'sum'),
+            rho_l=('log_rho', 'mean'), post_l=('log_posterior', 'mean'),
+            is_correct=('is_correct', 'first'),
+            ).reset_index()
+
+    rows = []
+    for lattice in args.lattices:
+        paths = {
+            split: os.path.join(args.peaks_dir, f'peaks_{lattice}_{split}.parquet')
+            for split in ('fom-train', 'fom-dev')
+            }
+        if not all(os.path.exists(path) for path in paths.values()):
+            print(f'{lattice}: no peak table, run --stage analytic first', flush=True)
+            continue
+        frames = {split: summarise(pd.read_parquet(path)) for split, path in paths.items()}
+        merits = Bench.load_candidates(
+            args.benchmark_dir, bravais_lattices=[lattice],
+            columns=['candidate_id', 'entry_id', 'M20', 'Minfo'],
+            )[key + ['M20', 'Minfo']]
+        for split, frame in frames.items():
+            frame = frame.merge(merits, on=key, how='left', validate='1:1')
+            frame['m'] = np.log1p(frame['M20'].fillna(0.0).to_numpy())
+            frame['mi'] = frame['Minfo'].fillna(0.0).to_numpy()
+            frames[split] = frame
+        train, dev = frames['fom-train'], frames['fom-dev']
+        if train['is_correct'].nunique() < 2 or dev['is_correct'].nunique() < 2:
+            print(f'{lattice}: one class only, skipped', flush=True)
+            continue
+
+        row = dict(bravais_lattice=lattice, n_dev=int(len(dev)),
+                   n_correct=int(dev['is_correct'].sum()))
+        labels = dev['is_correct'].to_numpy(dtype=bool)
+        for name, columns in feature_sets.items():
+            scaler = StandardScaler().fit(train[columns])
+            model = LogisticRegression(max_iter=2000).fit(
+                scaler.transform(train[columns]), train['is_correct'].astype(int),
+                )
+            row[name] = roc_auc(model.predict_proba(scaler.transform(dev[columns]))[:, 1], labels)
+        rows.append(row)
+
+    table = pd.DataFrame(rows)
+    for name in ('M20 + rho', 'M20 + posterior', 'M20 + rho + posterior'):
+        table[f'delta_vs_M20: {name}'] = 100*(table[name] - table['M20'])
+    table['delta_vs_stored: + posterior'] = 100*(
+        table['M20 + Minfo + posterior'] - table['M20 + Minfo (stored)']
+        )
+    write(table, args, 'block_c_features')
+    write_meta(args, 'block_c', dict(
+        lattices=list(args.lattices), feature_sets={k: v for k, v in feature_sets.items()},
+        model='logistic on standardised features, fitted on fom-train, reported on fom-dev',
+        ))
+    print(table.round(3).to_string(index=False))
+    return table
+
+
 def write(frame, args, name):
     path = os.path.join(args.artifact_dir, f'{args.tag}_{name}.csv')
     frame.to_csv(path, index=False, encoding='utf-8')
@@ -1071,8 +1269,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='S11 block B: per-peak Miller-index assignment probability.'
         )
-    parser.add_argument('--stage', default='analytic', choices=('analytic', 'main', 'cost'))
-    parser.add_argument('--lattices', nargs='+', default=['mP'])
+    parser.add_argument('--stage', default='analytic', choices=('analytic', 'main', 'block_c', 'cost'))
+    parser.add_argument('--lattices', nargs='+', default=list(BRAVAIS_LATTICES))
     parser.add_argument('--bundles', nargs='+', default=None,
                         help='condition bundles; default is every bundle except the control')
     parser.add_argument('--benchmark-dir', default=DEFAULT_BENCHMARK)
@@ -1115,6 +1313,8 @@ def main():
         run_analytic(args)
     elif args.stage == 'main':
         run_main(args)
+    elif args.stage == 'block_c':
+        run_block_c(args)
     elif args.stage == 'cost':
         run_cost(args)
     else:

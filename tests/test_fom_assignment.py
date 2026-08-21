@@ -433,3 +433,70 @@ def test_every_reference_line_maps_back_to_its_own_index():
             f'{lattice}: {len(fell_through)} reference rows do not find themselves'
             )
         assert np.array_equal(canonical[codes], canonical)
+
+
+# ---------------------------------------------------------------------------------------
+# The posterior form
+# ---------------------------------------------------------------------------------------
+def test_the_posterior_is_a_distribution_over_the_competing_lines():
+    """It is a normalised weight, so it is bounded, and it is 1 only when nothing competes."""
+    rng = np.random.default_rng(20)
+    ref = np.sort(rng.uniform(0.01, 0.5, size=(4, 300)), axis=1)
+    q2 = np.sort(rng.uniform(0.02, 0.4, size=20))
+    p = fom.get_assignment_posterior(q2, ref, 'monoclinic')
+    assert p.shape == (4, 20)
+    assert (p > 0).all() and (p <= 1.0 + 1e-12).all()
+
+    # An isolated line takes all the mass; a line with a close neighbour splits it.
+    isolated = np.array([[0.1, 5.0, 9.0]])
+    crowded = np.array([[0.1, 0.1 + 1e-9, 9.0]])
+    one = np.array([0.1])
+    assert fom.get_assignment_posterior(one, isolated, 'cubic', sigma=1e-3)[0, 0] > 0.999
+    assert fom.get_assignment_posterior(
+        one, crowded, 'cubic', sigma=1e-3,
+        )[0, 0] == pytest.approx(0.5, abs=1e-6)
+
+
+def test_the_posterior_is_scale_invariant_and_that_is_why_it_cannot_rank_candidates():
+    """The finding F-130 turns on, pinned as a property rather than left as a story.
+
+    `chi_r` normalises the residuals by the candidate's own fit, so scaling every distance by a
+    constant leaves the posterior unchanged. That is what makes it calibrated per peak and blind to
+    whether the cell fits at all -- a wrong cell and a right one look the same to it, which is
+    exactly the signal a figure of merit needs and `rho` keeps.
+    """
+    rng = np.random.default_rng(21)
+    ref = np.sort(rng.uniform(0.01, 0.5, size=(1, 200)), axis=1)
+    q2 = np.sort(rng.uniform(0.02, 0.4, size=20))
+    tight = fom.get_assignment_posterior(q2, ref, 'monoclinic')
+    # Push every calculated line ten times further from every observation, about their own mean.
+    loose = fom.get_assignment_posterior(
+        q2.mean() + 10*(q2 - q2.mean()), q2.mean() + 10*(ref - q2.mean()), 'monoclinic',
+        )
+    assert np.allclose(tight, loose, rtol=1e-6), (
+        'the posterior must be invariant to the overall residual scale -- that invariance is '
+        'F-130s explanation for why it cannot discriminate candidates'
+        )
+
+
+def test_the_sigma_estimate_is_taupins_reduced_chi_square():
+    rng = np.random.default_rng(22)
+    ref = np.sort(rng.uniform(0.01, 0.5, size=(2, 150)), axis=1)
+    q2 = np.sort(rng.uniform(0.02, 0.4, size=20))
+    sigma, d1 = fom.get_assignment_sigma(q2, ref, 'monoclinic')
+    expected = np.sqrt(np.sum(d1**2, axis=1)/(20 - fom.N_FREE_PARAMETERS['monoclinic']))
+    assert np.allclose(sigma, expected)
+    assert fom.N_FREE_PARAMETERS['triclinic'] == 6 and fom.N_FREE_PARAMETERS['cubic'] == 1
+    # d1 really is the nearest line, which is what `fast_assign` picks.
+    assert np.allclose(d1[0, 0], np.abs(ref[0] - q2[0]).min())
+
+
+def test_a_wider_sigma_spreads_the_posterior():
+    """The sensitivity knob PROTOCOL section 3 rule 4 requires, and its direction."""
+    rng = np.random.default_rng(23)
+    ref = np.sort(rng.uniform(0.01, 0.5, size=(1, 200)), axis=1)
+    q2 = np.sort(rng.uniform(0.02, 0.4, size=20))
+    narrow = fom.get_assignment_posterior(q2, ref, 'monoclinic', sigma_multiplier=0.25)
+    wide = fom.get_assignment_posterior(q2, ref, 'monoclinic', sigma_multiplier=4.0)
+    assert (narrow >= wide - 1e-12).all()
+    assert narrow.mean() > wide.mean()
