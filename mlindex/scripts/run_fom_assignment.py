@@ -1167,6 +1167,8 @@ def run_block_c(args):
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 
+    from mlindex.utilities.FigureOfMerits import N_FREE_PARAMETERS
+
     key = ['entry_id', 'condition_bundle', 'candidate_id']
     feature_sets = {
         'M20': ['m'],
@@ -1175,17 +1177,34 @@ def run_block_c(args):
         'M20 + rho + posterior': ['m', 'rho_n', 'rho_l', 'post_n', 'post_l'],
         'M20 + Minfo (stored)': ['m', 'mi'],
         'M20 + Minfo + posterior': ['m', 'mi', 'post_n', 'post_l'],
+        'M20 + Minfo + sigma': ['m', 'mi', 'sigma'],
+        'M20 + Minfo + sigma + posterior': ['m', 'mi', 'sigma', 'post_n', 'post_l'],
+        'sigma alone': ['sigma'],
         }
 
-    def summarise(peaks):
+    def summarise(peaks, n_free):
+        """Per-candidate summaries, including the misfit scale the posterior divides out.
+
+        `sigma` is Taupin's chi_r -- the same quantity `get_assignment_sigma` computes as the
+        posterior's denominator -- carried here as a feature in its own right. That it belongs on
+        this list at all is F-131, and it is the correction to F-130: the posterior throws away the
+        absolute misfit in order to be a clean conditional, and the absolute misfit is the half a
+        figure of merit actually needs. Reported as a log, because it spans orders of magnitude.
+        """
         frame = peaks.copy()
         for column in ('rho', 'posterior'):
             frame[f'log_{column}'] = np.log(np.clip(frame[column], 1e-12, 1.0))
-        return frame.groupby(key, sort=False).agg(
+        frame['squared_residual'] = (frame['q2_obs'] - frame['q2_calc'])**2
+        summary = frame.groupby(key, sort=False).agg(
             rho_n=('rho', 'sum'), post_n=('posterior', 'sum'),
             rho_l=('log_rho', 'mean'), post_l=('log_posterior', 'mean'),
+            residual_sum=('squared_residual', 'sum'), n_peaks=('squared_residual', 'size'),
             is_correct=('is_correct', 'first'),
             ).reset_index()
+        summary['sigma'] = np.log(np.sqrt(
+            summary['residual_sum']/np.maximum(summary['n_peaks'] - n_free, 1)
+            ) + 1e-12)
+        return summary
 
     rows = []
     for lattice in args.lattices:
@@ -1196,7 +1215,10 @@ def run_block_c(args):
         if not all(os.path.exists(path) for path in paths.values()):
             print(f'{lattice}: no peak table, run --stage analytic first', flush=True)
             continue
-        frames = {split: summarise(pd.read_parquet(path)) for split, path in paths.items()}
+        n_free = N_FREE_PARAMETERS[Assign.lattice_system_of(lattice)]
+        frames = {
+            split: summarise(pd.read_parquet(path), n_free) for split, path in paths.items()
+            }
         merits = Bench.load_candidates(
             args.benchmark_dir, bravais_lattices=[lattice],
             columns=['candidate_id', 'entry_id', 'M20', 'Minfo'],
@@ -1225,9 +1247,9 @@ def run_block_c(args):
     table = pd.DataFrame(rows)
     for name in ('M20 + rho', 'M20 + posterior', 'M20 + rho + posterior'):
         table[f'delta_vs_M20: {name}'] = 100*(table[name] - table['M20'])
-    table['delta_vs_stored: + posterior'] = 100*(
-        table['M20 + Minfo + posterior'] - table['M20 + Minfo (stored)']
-        )
+    for name in ('M20 + Minfo + posterior', 'M20 + Minfo + sigma',
+                 'M20 + Minfo + sigma + posterior'):
+        table[f'delta_vs_stored: {name}'] = 100*(table[name] - table['M20 + Minfo (stored)'])
     write(table, args, 'block_c_features')
     write_meta(args, 'block_c', dict(
         lattices=list(args.lattices), feature_sets={k: v for k, v in feature_sets.items()},
