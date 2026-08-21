@@ -1064,8 +1064,182 @@ def run_network(args):
 
 
 # ---------------------------------------------------------------------------------------
+# Stage: diagnose -- where the remaining loss actually is
+# ---------------------------------------------------------------------------------------
+def run_diagnose(args):
+    """Why block C gained so little, asked of the pool rather than of the model.
+
+    The gate compared a gain in percentage points against a floor in percentage points, and
+    METRICS.md section 3 says improvements are quoted as a **fraction of headroom** instead
+    (F-042). The two disagree here, so this stage measures the headroom and then decomposes what
+    is left of it:
+
+      * `ceiling_rescorer` is the operating point a **perfect** score reaches -- a correct
+        candidate exists somewhere in the pool. Everything above it is a *generation* failure and
+        belongs to S14/S15, not to any figure of merit (METRICS.md section 3).
+      * of the reachable entries that are still lost, `share_rank_failure` /
+        `share_threshold_failure` / `share_both` say which half of the criterion failed. A rank
+        failure cannot be fixed by a better-calibrated score and a threshold failure cannot be
+        fixed by a better ranking, so the two point at different work.
+      * and for block A specifically: the prior can only pay where it is right, so its accuracy on
+        these entries bounds what it could ever contribute.
+    """
+    import pandas as pd
+    from mlindex.model_training import FomCombiner
+    from mlindex.model_training import FomMetrics
+
+    s08 = _s08()
+    meta, params = s08_settings(args.artifact_dir)
+    holdout_fraction = float(meta.get('holdout_fraction', 0.2))
+    args.objective, args.model_params = 'pointwise', params
+
+    entries = Bench.load_entries(args.benchmark_dir)
+    covariates = FomCombiner.entry_covariates(entries)
+    scalers = FomCombiner.load_scalers(args.null_dir, groups=LOAD_GROUPS)
+    dev_ids = set(entries.loc[entries['split'] == args.report_split, 'entry_id'])
+
+    print('loading frames...', flush=True)
+    dev_frames = load_frames(args, covariates, scalers, dev_ids)
+
+    combiner = FomCombiner.FomCombiner.load(
+        os.path.join(args.models_dir, 'fom_combiner_blockc'))
+    table = pd.read_csv(os.path.join(args.artifact_dir, f'{args.tag}_main_table.csv'))
+    threshold = float(table.loc[table['arm'] == '+ both', 'threshold'].iloc[0])
+    print(f'block C loaded: {len(combiner.names)} features, threshold {threshold:.6f}', flush=True)
+
+    result = s08.evaluate_score(
+        dev_frames, entries, combiner.score, threshold, args.report_split,
+        combiner.score_columns, n_bootstrap=0,
+        )
+
+    # ---- 1. the headroom, and what fraction of it was taken -------------------------------
+    baseline_op = float(table.loc[table['arm'] == 'S08 baseline', 'operating_point'].iloc[0])
+    block_c_op = float(result.metric('operating_point'))
+    ceiling = float(result.metric('ceiling_rescorer'))
+    reranker = float(result.metric('ceiling_reranker'))
+    headroom = ceiling - baseline_op
+    rows = [dict(
+        quantity='S08 baseline operating point', value=baseline_op,
+        note='the 78-feature combiner, refitted in this harness'),
+        dict(quantity='block C operating point', value=block_c_op, note='+ both arm'),
+        dict(quantity='ceiling_rescorer', value=ceiling,
+             note='a PERFECT score: a correct candidate exists in the pool at all'),
+        dict(quantity='ceiling_reranker', value=reranker,
+             note='reordering only, every candidate keeping its score (= threshold_only)'),
+        dict(quantity='headroom above the baseline, pp', value=100*headroom,
+             note='what ANY re-scorer could still win'),
+        dict(quantity='reproducibility floor, pp', value=100*REPRODUCIBILITY_FLOOR*baseline_op,
+             note='10% of the baseline (Shirley 1980); the gate asked for more than this'),
+        dict(quantity='block C gain, pp', value=100*(block_c_op - baseline_op), note=''),
+        dict(quantity='block C gain as a fraction of headroom',
+             value=(block_c_op - baseline_op)/headroom if headroom else float('nan'),
+             note="METRICS.md section 3's convention (F-042), which the gate did not use"),
+        dict(quantity='entries with no correct candidate anywhere', value=1.0 - ceiling,
+             note='generation failure; belongs to S14/S15, not to a figure of merit'),
+        ]
+    headroom_table = pd.DataFrame(rows)
+    write(headroom_table, args, 'diagnose_headroom')
+    print(headroom_table.to_string(index=False, float_format=lambda x: f'{x:.4f}'))
+
+    # ---- 2. where the reachable-lost entries went -----------------------------------------
+    decomposition = []
+    for scope, frame in (('all', result.aggregate), ('hard', result.hard)):
+        if frame is None or not len(frame):
+            continue
+        row = frame.iloc[0]
+        decomposition.append(dict(
+            scope=scope, n_entries=int(row['n_entries']),
+            operating_point=float(row['operating_point']),
+            ceiling_rescorer=float(row['ceiling_rescorer']),
+            lost_not_found=float(row['lost_not_found']),
+            lost_rank_failure=float(row['lost_rank_failure']),
+            lost_threshold_failure=float(row['lost_threshold_failure']),
+            lost_both=float(row['lost_both']),
+            share_rank_failure=float(row['share_rank_failure']),
+            share_threshold_failure=float(row['share_threshold_failure']),
+            share_both=float(row['share_both']),
+            ))
+    for _, row in result.stratum('bravais_lattice').iterrows():
+        decomposition.append(dict(
+            scope=str(row['level']), n_entries=int(row['n_entries']),
+            operating_point=float(row['operating_point']),
+            ceiling_rescorer=float(row['ceiling_rescorer']),
+            lost_not_found=float(row['lost_not_found']),
+            lost_rank_failure=float(row['lost_rank_failure']),
+            lost_threshold_failure=float(row['lost_threshold_failure']),
+            lost_both=float(row['lost_both']),
+            share_rank_failure=float(row['share_rank_failure']),
+            share_threshold_failure=float(row['share_threshold_failure']),
+            share_both=float(row['share_both']),
+            ))
+    decomposition = pd.DataFrame(decomposition)
+    write(decomposition, args, 'diagnose_decomposition')
+    print()
+    print(decomposition.to_string(index=False, float_format=lambda x: f'{x:.4f}'))
+
+    # ---- 3. block A's own accuracy, which bounds what the prior could contribute -----------
+    prior_columns = [f'prior_bravais_p_{code}' for code in BRAVAIS_LATTICES]
+    per_entry = []
+    for frame in dev_frames:
+        available = [column for column in prior_columns if column in frame.columns]
+        if len(available) != len(prior_columns):
+            continue
+        first = frame.groupby(['entry_id', 'condition_bundle'], sort=False).first().reset_index()
+        per_entry.append(first[['entry_id', 'condition_bundle'] + prior_columns])
+    prior_rows = None
+    if per_entry:
+        prior_rows = pd.concat(per_entry, ignore_index=True)
+        truth = entries[['entry_id', 'condition_bundle', 'bravais_lattice_true']]
+        prior_rows = prior_rows.merge(truth, on=['entry_id', 'condition_bundle'], how='left')
+        matrix = prior_rows[prior_columns].to_numpy()
+        order = np.argsort(-matrix, axis=1)
+        codes = np.array(BRAVAIS_LATTICES)
+        prior_rows['prior_top1'] = codes[order[:, 0]]
+        true_index = np.array([list(BRAVAIS_LATTICES).index(code)
+                               for code in prior_rows['bravais_lattice_true']])
+        rank = np.empty(len(prior_rows), dtype=int)
+        for position in range(matrix.shape[1]):
+            rank[order[:, position] == true_index] = position
+        prior_rows['true_rank'] = rank
+        prior_rows['p_true'] = matrix[np.arange(len(prior_rows)), true_index]
+        summary = prior_rows.groupby('bravais_lattice_true').agg(
+            n=('true_rank', 'size'),
+            top1_accuracy=('true_rank', lambda values: float((values == 0).mean())),
+            top3_accuracy=('true_rank', lambda values: float((values < 3).mean())),
+            mean_p_true=('p_true', 'mean'),
+            ).reset_index()
+        overall = pd.DataFrame([dict(
+            bravais_lattice_true='ALL', n=len(prior_rows),
+            top1_accuracy=float((prior_rows['true_rank'] == 0).mean()),
+            top3_accuracy=float((prior_rows['true_rank'] < 3).mean()),
+            mean_p_true=float(prior_rows['p_true'].mean()),
+            )])
+        summary = pd.concat([overall, summary], ignore_index=True)
+        write(summary, args, 'diagnose_prior_accuracy')
+        print()
+        print('block A accuracy on the entries block C scores:')
+        print(summary.to_string(index=False, float_format=lambda x: f'{x:.4f}'))
+
+    write_meta(args, 'diagnose', dict(
+        threshold=threshold, baseline_operating_point=baseline_op,
+        block_c_operating_point=block_c_op, ceiling_rescorer=ceiling,
+        headroom_pp=100*headroom, floor_pp=100*REPRODUCIBILITY_FLOOR*baseline_op,
+        fraction_of_headroom=(block_c_op - baseline_op)/headroom if headroom else None,
+        ))
+    return headroom_table, decomposition
+
+
+# ---------------------------------------------------------------------------------------
 # Shared
 # ---------------------------------------------------------------------------------------
+def write(frame, args, name):
+    """One artefact path convention for every stage, so a table cannot land somewhere else."""
+    path = os.path.join(args.artifact_dir, f'{args.tag}_{name}.csv')
+    frame.to_csv(path, index=False, encoding='utf-8')
+    print(f'wrote {path}', flush=True)
+    return path
+
+
 def commit_hash():
     import subprocess
     try:
@@ -1104,7 +1278,7 @@ def main():
         description='S11 block C: combine the volume/symmetry prior with the fit statistic.')
     parser.add_argument('--stage', default='assignment',
                         choices=('assignment', 'prior', 'combiner', 'ablation', 'cost',
-                                 'network'))
+                                 'network', 'diagnose'))
     parser.add_argument('--lattices', nargs='+', default=list(BRAVAIS_LATTICES))
     parser.add_argument('--bundles', nargs='+', default=list(EVALUABLE_BUNDLES))
     parser.add_argument('--splits', nargs='+', default=list(SPLITS))
@@ -1150,6 +1324,8 @@ def main():
         run_cost(args)
     elif args.stage == 'network':
         run_network(args)
+    elif args.stage == 'diagnose':
+        run_diagnose(args)
     else:
         raise SystemExit(f'stage {args.stage} is not implemented yet')
 
