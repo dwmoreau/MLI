@@ -635,6 +635,30 @@ class PriorNetwork(IntegralFilter):
                 )
         return self._conditional_cache
 
+    def joint_log_probabilities(self, q2, targets=None, batch_size=None):
+        """Every head's joint table from **one** forward pass, as `{target: (n, n_v, n_c)}`.
+
+        The graph computes all five heads together and `joint_log_probability` then throws four of
+        them away, which is fine for one head and is five redundant passes for a caller that wants
+        the lot -- block C reads all five at each candidate's claimed pair. Same arithmetic, same
+        results; it just stops discarding what has already been computed.
+
+        The branch log-probability is returned under `volume_branch`, since it is the (n, n_v)
+        marginal every table in the dict shares and the caller would otherwise recover it by
+        summing one of them back up.
+        """
+        raw = self._conditional_model().predict(
+            self.scale_peaks(q2), batch_size=batch_size or 32, verbose=0,
+            )
+        # Normalised in numpy, not through keras.ops: MPS has no float64, and these are log
+        # probabilities that get exponentiated and multiplied, so the precision is worth having.
+        branch = _log_normalise(np.asarray(raw['volume_branch'], dtype=np.float64), axis=1)
+        tables = {'volume_branch': branch}
+        for target in (targets if targets is not None else self.targets):
+            conditional = _log_normalise(np.asarray(raw[target], dtype=np.float64), axis=2)
+            tables[target] = branch[:, :, np.newaxis] + conditional
+        return tables
+
     def joint_log_probability(self, q2, target='bravais', batch_size=None):
         """log P(volume branch, class) for each pattern -- the (n, n_volumes, n_classes) table.
 
@@ -644,14 +668,9 @@ class PriorNetwork(IntegralFilter):
         because the volume marginal silently inherits the volume scale of whichever lattice the
         model happens to believe.
         """
-        raw = self._conditional_model().predict(
-            self.scale_peaks(q2), batch_size=batch_size or 32, verbose=0,
-            )
-        # Normalised in numpy, not through keras.ops: MPS has no float64, and these are log
-        # probabilities that get exponentiated and multiplied, so the precision is worth having.
-        branch = _log_normalise(np.asarray(raw['volume_branch'], dtype=np.float64), axis=1)
-        conditional = _log_normalise(np.asarray(raw[target], dtype=np.float64), axis=2)
-        return branch[:, :, np.newaxis] + conditional
+        return self.joint_log_probabilities(
+            q2, targets=(target,), batch_size=batch_size,
+            )[target]
 
     def score_candidates(self, q2, volumes, class_indices, target='bravais', batch_size=None):
         """log P(V, class) at each candidate's own claimed pair -- one number per candidate.

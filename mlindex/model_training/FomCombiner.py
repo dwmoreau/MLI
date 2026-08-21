@@ -129,9 +129,62 @@ CV_MERITS = (
 # would add a column that is exactly collinear with one the model already has. It is built and
 # reported because it is the round-trip gate, not because it is a feature.
 
+# S11 block B, as its own droppable group, on the same terms as `cv`: not in DEFAULT_GROUPS, so
+# S08's numbers keep meaning what they meant. Three columns out of one `assign_lines` pass.
+#
+# `asg_sigma` is Taupin 1988's reduced chi-square -- the absolute misfit, normalised by the number
+# of free cell parameters. F-131 measured it at +2.82 pp of AUC over M20 + Minfo on 10 of 14
+# lattices, and it is *not* a merit on its own: alone it scores 0.615, twenty-two points below
+# M20. A complement to a merit that already carries the volume and symmetry scale is what a fit
+# term should look like.
+#
+# The two posterior summaries average to -0.41 pp and are kept for one measured interaction: mC
+# goes 0.805 -> 0.864 when they sit beside `asg_sigma` (F-131), and mC is a hard-stratum lattice
+# and S08's second-worst. The ablation is what decides whether they stay.
+ASSIGNMENT_MERITS = ('asg_sigma', 'asg_post_n', 'asg_post_l')
+
+# S11 block A, likewise. The candidate's claimed (volume, Bravais) pair read against what the peak
+# list implies -- PLAN section 3's prior term, handed to the model explicitly for the first time.
+#
+# Three things about the shape, each of which is a handoff pitfall made concrete:
+#
+#   * `prior_joint` reads the *joint* table at the claimed pair rather than the two marginals.
+#     F-117 measured that difference at 37% of the volume error, because the volume marginal
+#     silently inherits the volume scale of whichever lattice the model happens to believe.
+#   * The lattice distribution ships as fourteen columns, never an argmax. F-106 measured the
+#     centring head delivering 1.0% of its available information under ten interior holes, so a
+#     hard label from it would be noise presented as fact; a distribution says so itself.
+#   * `prior_base_rate` gives back what class-balanced training removed. F-086 says the base rate
+#     is where S08's gain came from, and block A is trained balanced. Estimated on `fom-train`
+#     rows only -- see `base_rate_by_lattice`.
+#
+# The eight entry-level columns (the fourteen `p_*`, the two entropies) are constant within an
+# entry, so they cannot reorder candidates inside one; they act on the cross-entry threshold,
+# which is exactly what the operating point measures and the top-10 does not.
+PRIOR_CLAIMED = (
+    'prior_joint', 'prior_joint_system', 'prior_joint_centring', 'prior_joint_n_free',
+    'prior_joint_high_symmetry', 'prior_branch_lp', 'prior_bravais_lp', 'prior_joint_margin',
+    'prior_branch_rank', 'prior_bravais_rank',
+    )
+PRIOR_ENTRY = tuple(
+    f'prior_bravais_p_{code}' for code in
+    ('cP', 'cI', 'cF', 'tP', 'tI', 'hP', 'hR', 'oP', 'oC', 'oF', 'oI', 'mP', 'mC', 'aP')
+    ) + ('prior_branch_entropy', 'prior_bravais_entropy')
+PRIOR_MERITS = PRIOR_CLAIMED + PRIOR_ENTRY + ('prior_base_rate',)
+
 SCALER_METHODS = ('analytic', 'z', 'rank')
-FEATURE_GROUPS = ('raw', 'scaled', 'structural', 'context', 'in_sample', 'cv')
+FEATURE_GROUPS = ('raw', 'scaled', 'structural', 'context', 'in_sample', 'cv', 'assignment',
+                  'prior')
 DEFAULT_GROUPS = ('raw', 'scaled', 'structural', 'context')
+
+# The groups whose columns are joined in from a directory of per-bundle parquets rather than read
+# out of the pool or the feature matrix. Kept as one map so `combiner_frames` has a single join
+# path instead of one branch per group.
+EXTERNAL_GROUPS = {
+    'cv': ('cv', CV_MERITS),
+    'assignment': ('assignment', ASSIGNMENT_MERITS),
+    'prior': ('prior', PRIOR_MERITS),
+    }
 
 # Enforced by `check_no_leakage`, which every fit and every score call runs. A deny-list rather
 # than trust in the allow-list, because the two failure modes are different: the allow-list catches
@@ -222,6 +275,10 @@ def feature_specification(groups=DEFAULT_GROUPS, scalers=()):
         names.extend(IN_SAMPLE_MERITS)
     if 'cv' in groups:
         names.extend(CV_MERITS)
+    if 'assignment' in groups:
+        names.extend(ASSIGNMENT_MERITS)
+    if 'prior' in groups:
+        names.extend(PRIOR_MERITS)
     if 'scaled' in groups:
         names.extend(scaled_names(scalers, merits))
     categorical = ()
@@ -251,12 +308,14 @@ def affordable_features(names, allowed_merits):
     costs is measured rather than asserted.
     """
     allowed = set(allowed_merits)
-    known = set(RAW_MERITS) | set(IN_SAMPLE_MERITS) | set(CV_MERITS)
+    known = (set(RAW_MERITS) | set(IN_SAMPLE_MERITS) | set(CV_MERITS)
+             | set(ASSIGNMENT_MERITS) | set(PRIOR_MERITS))
     kept = []
     for name in names:
-        # A CV column carries its fold scheme after the separator, so it is its own merit rather
-        # than a scaled form of one; match the whole name before splitting on '__'.
-        merit = name if name in CV_MERITS else name.split('__', 1)[0]
+        # A CV column carries its fold scheme after the separator, and an assignment or prior
+        # column has no scaled form at all, so both are their own merit; match the whole name
+        # before the '__' split that unpacks a scaled one.
+        merit = name if name in known else name.split('__', 1)[0]
         if name.startswith('ctx_') and name != 'ctx_pool_size':
             body = name[len('ctx_'):]
             merit = next((candidate for candidate, _ in CONTEXT_MERITS
@@ -342,8 +401,33 @@ def add_context(frame):
     return frame.assign(**columns)
 
 
+def _merge_external(pool, keys, group, prefix, columns, directory, bundle):
+    """Join one externally-generated feature group onto a bundle's pool, on the four zoo keys.
+
+    **Left, not inner, and that is a decision rather than a default.** An entry with no surplus
+    peaks has no `ho_` columns; a candidate whose assignment pass found no reference line has no
+    `asg_` ones. Dropping those rows would silently change the denominator every metric is
+    computed over. HistGradientBoosting takes NaN natively, and "this candidate had no such
+    statistic" is a real inference-time state rather than missing data.
+
+    One path for `cv`, `assignment` and `prior` because they differ only in a filename prefix, and
+    three copies of this is how the second one drifts from the first.
+    """
+    if directory is None:
+        raise ValueError(f"feature group '{group}' needs a directory; its matrix is not in "
+                         'feature_dir')
+    wanted = [column for column in columns if column not in pool.columns]
+    if not wanted:
+        return pool
+    frame = pd.read_parquet(Path(directory)/f'{prefix}_{bundle}.parquet')
+    wanted = [column for column in wanted if column in frame.columns]
+    if not wanted:
+        return pool
+    return pool.merge(frame[keys + wanted], on=keys, how='left', validate='1:1')
+
+
 def combiner_frames(benchmark_dir, feature_dir, bundles, keep_entry_ids, covariates, scalers,
-                    groups=DEFAULT_GROUPS, cv_dir=None):
+                    groups=DEFAULT_GROUPS, cv_dir=None, assignment_dir=None, prior_dir=None):
     """Yield one fully-assembled frame per bundle: pool, features, S07 scales, entry, context.
 
     The same assembly serves training and evaluation, which is the point -- a context feature
@@ -354,6 +438,7 @@ def combiner_frames(benchmark_dir, feature_dir, bundles, keep_entry_ids, covaria
     does, rather than re-reading 2.3 GB of parquet per pass.
     """
     keys = list(FomBenchmark.ZOO_KEY_COLUMNS)
+    external_dirs = {'cv': cv_dir, 'assignment': assignment_dir, 'prior': prior_dir}
     merits = active_merits(groups)
     # The context features are computed for four reference orderings whatever the feature groups
     # are, so their merits are always read even when the raw group is dropped for an ablation.
@@ -375,17 +460,10 @@ def combiner_frames(benchmark_dir, feature_dir, bundles, keep_entry_ids, covaria
             # Inner: the feature matrix covers fom-train and fom-dev only, fom-test having never
             # been computed (it is sealed until S15). 1:1 on the four zoo keys.
             pool = pool.merge(features, on=keys, how='inner', validate='1:1')
-        if 'cv' in groups:
-            if cv_dir is None:
-                raise ValueError("feature group 'cv' needs cv_dir; S10's matrix is not in "
-                                 'feature_dir')
-            # Left, not inner: an entry with no surplus peaks has no `ho_` columns, and dropping
-            # its candidates would silently change the denominator. HistGradientBoosting takes
-            # NaN natively and "this entry had no extra peaks" is a real inference-time state.
-            cv_columns = [column for column in CV_MERITS if column not in pool.columns]
-            cv_frame = pd.read_parquet(Path(cv_dir)/f'cv_{bundle}.parquet')
-            cv_columns = [column for column in cv_columns if column in cv_frame.columns]
-            pool = pool.merge(cv_frame[keys + cv_columns], on=keys, how='left', validate='1:1')
+        for group, (prefix, columns) in EXTERNAL_GROUPS.items():
+            if group in groups:
+                pool = _merge_external(pool, keys, group, prefix, columns,
+                                       external_dirs.get(group), bundle)
         pool = pool.merge(covariates, on=['entry_id', 'condition_bundle'], how='left',
                           validate='m:1')
         pool['log_volume'] = np.log(pool['volume'].to_numpy(dtype=np.float64))

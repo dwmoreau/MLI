@@ -707,7 +707,7 @@ def get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system, robust=False, chun
 
 
 def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
-                             sigma_multiplier=1.0, robust=False, chunk=256):
+                             sigma_multiplier=1.0, robust=False, chunk=256, d1=None):
     """P(each observed peak is assigned its correct Miller index) -- a posterior, not a null.
 
         P_i = exp(-d_i^2/2 sigma^2) / sum_j exp(-d_j^2/2 sigma^2),  evaluated at the nearest line
@@ -744,18 +744,24 @@ def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
     requires of anything that uses one. `sigma` overrides the in-sample estimate entirely, which is
     for testing and is **not** a licence to assume the generator's own error model.
 
+    `sigma` and `d1` may both be passed straight from a previous `get_assignment_sigma` call, which
+    is how a caller that wants *both* the scale and the posterior -- S11 block C, over ten million
+    candidates -- pays for the nearest-line scan once instead of twice. That scan is the whole cost
+    of this function; passing them halves it and changes no result.
+
     Returns (n_candidates, n_peaks) in (0, 1].
     """
     q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
     q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
-    if sigma is None:
-        sigma, d1 = get_assignment_sigma(
+    if sigma is None or d1 is None:
+        estimated, distances = get_assignment_sigma(
             q2_obs, q2_ref_calc, lattice_system, robust=robust, chunk=chunk
             )
-    else:
-        sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
-                                (q2_ref_calc.shape[0],))
-        _, d1 = get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system, chunk=chunk)
+        sigma = estimated if sigma is None else sigma
+        d1 = distances if d1 is None else d1
+    sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
+                            (q2_ref_calc.shape[0],))
+    d1 = np.asarray(d1, dtype=np.float64)
     scale = 2*(sigma*sigma_multiplier)**2
 
     posterior = np.empty(d1.shape, dtype=np.float64)
