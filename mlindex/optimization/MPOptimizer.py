@@ -97,6 +97,7 @@ class MPOptimizerManager(OptimizerManager):
         best_n_indexed_all = [candidates.n_indexed]
         best_spacegroup_all = list(candidates.best_spacegroup)
         m20_at_prune_all = [candidates.m20_at_prune]
+        retained_by_all = [candidates.retained_by]
         for r in range(1, self.n_ranks):
             result = self._result_queues[r].get()
             if isinstance(result, Exception):
@@ -106,10 +107,12 @@ class MPOptimizerManager(OptimizerManager):
             best_xnn_all.append(result['xnn'])
             best_n_indexed_all.append(result['n_indexed'])
             m20_at_prune_all.append(result['m20_at_prune'])
+            retained_by_all.append(result['retained_by'])
             best_spacegroup_all += result['spacegroup']
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates, m20_at_prune_all)
+                                     n_top_candidates, m20_at_prune_all,
+                                     retained_by_all)
 
     def convergence_testing(self, candidates):
         n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])
@@ -161,6 +164,7 @@ class MPOptimizerWorker(OptimizerWorker):
             'xnn': candidates.best_xnn,
             'n_indexed': candidates.n_indexed,
             'm20_at_prune': candidates.m20_at_prune,
+            'retained_by': candidates.retained_by,
             'spacegroup': list(candidates.best_spacegroup),
         }
         self._result_q.put(result)

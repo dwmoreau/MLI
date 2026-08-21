@@ -14,6 +14,14 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 
 
+# S14 item 2. The merits a deduplication neighbourhood may additionally be collapsed
+# under. All three are already carried into the chunk, so rescuing by one of them costs an
+# argmax per neighbourhood and no new plumbing. Note the 2x inner-loop budget does not
+# apply here: deduplication runs once per (entry, Bravais lattice), not 100 times over
+# every candidate.
+DEDUP_TIEBREAK_FOMS = ('M20', 'Minfo', 'n_indexed')
+
+
 def _downsample_chunk(args):
     """Collapse each dense neighbourhood in a chunk to its highest-M20 member.
 
@@ -31,9 +39,20 @@ def _downsample_chunk(args):
     best-neighbour choice depend on the current ordering, and the collapse
     permutes it in a specific way (survivors keep their relative order, the
     kept point moves to the end).
+
+    ``tiebreak_foms`` (S14 item 2, F-065) names merits that additionally *rescue* the
+    member of each collapsed neighbourhood that maximises them. The clustering, the
+    densest-point choice and the M20 winner are all untouched -- a rescued point is simply
+    carried out of the neighbourhood instead of being deleted, and is then frozen, so it
+    cannot re-trigger a collapse against the winner it sits next to. That keeps this one
+    change rather than two, and makes the default bit-identical by construction: with no
+    extra merits nothing is rescued and ``order`` is exactly what it was.
     """
+    # Tail-tolerant so captured chunk arguments from before this key still replay
+    # (tools/repro_downsample.py pickles them).
     (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk,
-     downsample_radius) = args
+     downsample_radius) = args[:6]
+    tiebreak_foms = args[6] if len(args) > 6 else ()
     n = xnn_chunk.shape[0]
     if n == 0:
         return (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk)
@@ -43,6 +62,11 @@ def _downsample_chunk(args):
     # neighbor_count[o]: how many still-live points lie within the radius of o.
     # Maintained by subtracting removed columns instead of being recounted.
     neighbor_count = neighbor_array.sum(axis=1)
+
+    merit_arrays = {'M20': M20_chunk, 'Minfo': Minfo_chunk, 'n_indexed': n_indexed_chunk}
+    rescue_arrays = [merit_arrays[name] for name in tiebreak_foms if name != 'M20']
+    rescued = []
+    rescued_set = set()
 
     while order.size:
         counts_in_position_order = neighbor_count[order]
@@ -55,6 +79,12 @@ def _downsample_chunk(args):
         best_neighbor = int(np.argmax(M20_chunk[neighbor_indices]))
         keep_index = neighbor_indices[best_neighbor]
 
+        for merit in rescue_arrays:
+            rescue_index = int(neighbor_indices[np.argmax(merit[neighbor_indices])])
+            if rescue_index != keep_index and rescue_index not in rescued_set:
+                rescued.append(rescue_index)
+                rescued_set.add(rescue_index)
+
         removed = neighbor_indices[neighbor_indices != keep_index]
         if removed.size:
             neighbor_count -= neighbor_array[:, removed].sum(axis=1)
@@ -62,6 +92,13 @@ def _downsample_chunk(args):
         survivors = np.ones(order.size, dtype=bool)
         survivors[neighbor_positions] = False
         order = np.concatenate((order[survivors], [keep_index]))
+
+    # Rescued points left `order` when their neighbourhood collapsed and were never
+    # re-appended, so this cannot duplicate a survivor. They go at the end: the caller
+    # re-sorts by M20 before truncating to the top n, so position carries no meaning
+    # beyond keeping the production prefix intact.
+    if rescued:
+        order = np.concatenate((order, np.asarray(rescued, dtype=order.dtype)))
 
     return (xnn_chunk[order], M20_chunk[order], Minfo_chunk[order],
             n_indexed_chunk[order], [spacegroup_chunk[i] for i in order])
@@ -129,6 +166,9 @@ class OptimizerBase:
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
         candidates.prune_below_m20(threshold=self.opt_params['prune_m20_threshold'])
+        # S14 item 1. A no-op unless opt_params['retention_foms'] names something beyond
+        # M20; after the prune so that the two mechanisms stay separable (Q31).
+        candidates.merge_retained_iterates()
         candidates.refine_cell()
         candidates.standardize_cell()
         candidates.correct_off_by_two()
@@ -172,6 +212,7 @@ class OptimizerWorker(OptimizerBase):
         self.comm.Send(candidates.best_xnn, dest=self.root)
         self.comm.Send(candidates.n_indexed, dest=self.root)
         self.comm.Send(candidates.m20_at_prune, dest=self.root)
+        self.comm.Send(candidates.retained_by, dest=self.root)
         self.comm.send(candidates.best_spacegroup, dest=self.root)
 
     def convergence_testing(self, candidates):
@@ -212,6 +253,12 @@ class OptimizerManager(OptimizerBase):
             # setting it after construction reaches the manager only.
             'prune_m20_threshold': 5.0,
             'dump_predownsample': None,
+            # S14 items 1 and 2. ('M20',) is the production behaviour in both cases.
+            # retention_foms is read inside Candidates, which runs on every rank, so it
+            # must arrive through get_optimizers(options=...); dedup_tiebreak_foms is read
+            # on the manager only, but is kept here so the two read the same way.
+            'retention_foms': ('M20',),
+            'dedup_tiebreak_foms': ('M20',),
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
@@ -576,7 +623,7 @@ class OptimizerManager(OptimizerBase):
             })
 
     def _record_predownsample_dump(self, xnn, M20, Minfo, n_indexed, spacegroup, n_entering,
-                                   m20_at_prune):
+                                   m20_at_prune, retained_by):
         """Buffer every candidate entering deduplication, before any is collapsed.
 
         Deduplication keeps the highest-M20 member of each xnn-space neighbourhood and
@@ -618,6 +665,8 @@ class OptimizerManager(OptimizerBase):
             'Minfo': np.array(Minfo, dtype=np.float64, copy=True),
             'n_indexed': np.array(n_indexed, dtype=int, copy=True),
             'm20_at_prune': np.array(m20_at_prune, dtype=np.float64, copy=True),
+            'retained_by': np.array(retained_by, dtype=int, copy=True),
+            'retention_foms': ','.join(self.opt_params.get('retention_foms', ('M20',))),
             'spacegroup': list(spacegroup),
             })
 
@@ -635,7 +684,8 @@ class OptimizerManager(OptimizerBase):
 
     def _downsample_computation(self, best_M20_all, best_Minfo_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
-                                n_top_candidates, m20_at_prune_all=None):
+                                n_top_candidates, m20_at_prune_all=None,
+                                retained_by_all=None):
         best_M20_all = np.concatenate(best_M20_all, axis=0)
         best_Minfo_all = np.concatenate(best_Minfo_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
@@ -645,6 +695,11 @@ class OptimizerManager(OptimizerBase):
             m20_at_prune_all = np.full(best_M20_all.shape, np.nan)
         else:
             m20_at_prune_all = np.concatenate(m20_at_prune_all, axis=0)
+        # Zeros means "the M20 track", which is what a caller predating retention had.
+        if retained_by_all is None:
+            retained_by_all = np.zeros(best_M20_all.shape, dtype=int)
+        else:
+            retained_by_all = np.concatenate(retained_by_all, axis=0)
         # How many candidates survived prune_below_m20 across all ranks. Recorded rather
         # than inferred because the dump keeps only the deduplicated survivors, and the
         # ratio is the only trace left of how hard the M20 >= 5 cut bit for this entry.
@@ -659,6 +714,7 @@ class OptimizerManager(OptimizerBase):
         best_xnn_all = best_xnn_all[good_indices]
         best_n_indexed_all = best_n_indexed_all[good_indices]
         m20_at_prune_all = m20_at_prune_all[good_indices]
+        retained_by_all = retained_by_all[good_indices]
         # best_spacegroup_all is a list and was left unfiltered here, while sort_indices
         # below index the *filtered* arrays -- so a single dropped row slid every later
         # spacegroup onto a different candidate's cell, silently, including onto the
@@ -677,7 +733,7 @@ class OptimizerManager(OptimizerBase):
             self._record_predownsample_dump(
                 best_xnn_all, best_M20_all, best_Minfo_all,
                 best_n_indexed_all, best_spacegroup_all, n_entering,
-                m20_at_prune_all,
+                m20_at_prune_all, retained_by_all,
                 )
 
         # Next remove nearly identical xnn's by selecting the xnn within an arbitrary radius
@@ -697,6 +753,18 @@ class OptimizerManager(OptimizerBase):
         n_chunks = best_xnn_all.shape[0] // chunk_size + 1
 
         downsample_radius = self.opt_params['downsample_radius']
+        # S14 item 2 (F-065, rebuild row R2). The tiebreak keeps the highest-M20 member of
+        # each neighbourhood and deletes the rest, so a wrong tiebreak destroys a correct
+        # cell before ranking ever runs. Each merit named here additionally rescues the
+        # member that maximises it. Validated on the manager rather than inside the chunk
+        # so a typo raises here and not in a worker thread.
+        tiebreak_foms = tuple(self.opt_params.get('dedup_tiebreak_foms', ('M20',)))
+        unknown = [name for name in tiebreak_foms if name not in DEDUP_TIEBREAK_FOMS]
+        if unknown:
+            raise ValueError(
+                'unknown deduplication tiebreak FOM(s) %s; known: %s'
+                % (unknown, list(DEDUP_TIEBREAK_FOMS))
+                )
 
         chunk_args = []
         for chunk_index in range(n_chunks):
@@ -709,6 +777,7 @@ class OptimizerManager(OptimizerBase):
                 best_n_indexed_all[start:end],
                 best_spacegroup_all[start:end],
                 downsample_radius,
+                tiebreak_foms,
             ))
 
         with ThreadPoolExecutor(max_workers=self.n_ranks) as ex:
@@ -756,6 +825,7 @@ class OptimizerManager(OptimizerBase):
         best_n_indexed_all = []
         best_spacegroup_all = []
         m20_at_prune_all = []
+        retained_by_all = []
         for rank_index in range(self.n_ranks):
             if rank_index == self.root:
                 best_M20_all.append(candidates.best_M20)
@@ -763,6 +833,7 @@ class OptimizerManager(OptimizerBase):
                 best_xnn_all.append(candidates.best_xnn)
                 best_n_indexed_all.append(candidates.n_indexed)
                 m20_at_prune_all.append(candidates.m20_at_prune)
+                retained_by_all.append(candidates.retained_by)
                 best_spacegroup_all += candidates.best_spacegroup
             else:
                 best_M20_rank = np.zeros(self.sent_candidates[rank_index])
@@ -770,22 +841,26 @@ class OptimizerManager(OptimizerBase):
                 best_xnn_rank = np.zeros((self.sent_candidates[rank_index], self.unit_cell_length))
                 best_n_indexed_rank = np.zeros(self.sent_candidates[rank_index], dtype=int)
                 m20_at_prune_rank = np.zeros(self.sent_candidates[rank_index])
+                retained_by_rank = np.zeros(self.sent_candidates[rank_index], dtype=int)
                 self.comm.Recv(best_M20_rank, source=rank_index)
                 self.comm.Recv(best_Minfo_rank, source=rank_index)
                 self.comm.Recv(best_xnn_rank, source=rank_index)
                 self.comm.Recv(best_n_indexed_rank, source=rank_index)
                 self.comm.Recv(m20_at_prune_rank, source=rank_index)
+                self.comm.Recv(retained_by_rank, source=rank_index)
                 best_spacegroup_rank = self.comm.recv(source=rank_index)
                 best_M20_all.append(best_M20_rank)
                 best_Minfo_all.append(best_Minfo_rank)
                 best_xnn_all.append(best_xnn_rank)
                 best_n_indexed_all.append(best_n_indexed_rank)
                 m20_at_prune_all.append(m20_at_prune_rank)
+                retained_by_all.append(retained_by_rank)
                 best_spacegroup_all += best_spacegroup_rank
 
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates, m20_at_prune_all)
+                                     n_top_candidates, m20_at_prune_all,
+                                     retained_by_all)
 
     def convergence_testing(self, candidates):
         n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])

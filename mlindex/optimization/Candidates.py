@@ -2,6 +2,7 @@ import numpy as np
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20
+from mlindex.utilities.FigureOfMerits import get_M_rev_sym
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood_from_xnn
 from mlindex.utilities.FigureOfMerits import get_multiplicity_taupin88
@@ -22,6 +23,19 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
+# S14 item 1. The iteration loop keeps, per candidate, the single iterate with the best
+# M20 over 100 iterations, so if the final score is not M20 the retained iterate is the
+# wrong one (PLAN 5). These are the merits an iterate may additionally be retained under.
+# Every one of them is computed on the arrays assign_hkls already holds -- a merit needing
+# a second reference build, a refit, or a learned model is not a candidate for the inner
+# loop at all, whatever it scores offline. Price before wiring one in
+# (artifacts/S14_retention_cost.csv).
+RETENTION_FOMS = ('M20', 'Minfo', 'M_tilde', 'M_rev', 'M_sym')
+
+# The three merits get_M_rev_sym returns together, in its return order.
+_REV_SYM_FOMS = ('M_tilde', 'M_rev', 'M_sym')
+
+
 class Candidates:
     def __init__(self, q2_obs, xnn, hkl_ref, lattice_system, bravais_lattice, opt_params, rng, fom, zero_error, wavelength):
         self.lattice_system = lattice_system
@@ -30,6 +44,29 @@ class Candidates:
         self.maximum_unit_cell = opt_params['maximum_uc']
         self.assignment_threshold = opt_params['assignment_threshold']
         self.figure_of_merit = opt_params['figure_of_merit']
+        # S14 item 1. Defaults to ('M20',) -- the production behaviour -- so a Candidates
+        # built from an opt_params that predates this key is unchanged. 'M20' is the track
+        # every other array in this class is aligned to and cannot be dropped.
+        self.retention_foms = tuple(opt_params.get('retention_foms', ('M20',)))
+        unknown = [name for name in self.retention_foms if name not in RETENTION_FOMS]
+        if unknown:
+            raise ValueError(
+                'unknown retention FOM(s) %s; known: %s'
+                % (unknown, list(RETENTION_FOMS))
+                )
+        if 'M20' not in self.retention_foms:
+            raise ValueError("retention_foms must contain 'M20'")
+        self.retention_extra = tuple(
+            name for name in self.retention_foms if name != 'M20'
+            )
+        if self.retention_extra and zero_error:
+            # The retained merits read self.reciprocal_unit_cell, which correct_zero_error
+            # leaves one Gauss-Newton step stale, and best_zeropoint would have to be
+            # carried per track. Refused rather than silently approximated, following
+            # _record_predownsample_dump.
+            raise NotImplementedError(
+                'multi-FOM iterate retention does not support zero-error refinement'
+                )
         self.rng = rng
         self.fom = fom
         self.zero_error = zero_error
@@ -60,6 +97,25 @@ class Candidates:
         # Filled by prune_below_m20; initialised so a Candidates that is never pruned still
         # satisfies the manager's payload contract.
         self.m20_at_prune = np.full(self.best_M20.shape, np.nan)
+        # Which retention track each row came from: 0 is the M20 track, i.e. the row
+        # production would have had, and k is retention_extra[k-1]. Carried for the same
+        # reason m20_at_prune is -- F-137 showed the post-prune repair RNG diverges with
+        # the row count, so a retention-on run cannot be differenced against a retention-off
+        # one, and the ceiling before/after item 1 asks for has to be a restriction *within*
+        # one run. Without this column that restriction is not expressible.
+        self.retained_by = np.zeros(self.best_M20.shape, dtype=int)
+        # One extra retention track per non-M20 merit, row-aligned with best_xnn: the
+        # iterate that maximises that merit, the merit's value there, and -- so the rest of
+        # the pipeline stays interpretable -- that iterate's own M20. Empty by default, and
+        # every method below short-circuits on the empty case.
+        self.retained = {}
+        for name in self.retention_extra:
+            self.retained[name] = {
+                'fom': self.retention_values[name].copy(),
+                'xnn': self.xnn.copy(),
+                'hkl': self.hkl.copy(),
+                'M20': np.array(self.M20, copy=True),
+                }
 
     def fix_bad_conversions(self):
         bad_conversions = np.sum(np.isnan(self.reciprocal_unit_cell), axis=1) > 0
@@ -102,11 +158,49 @@ class Candidates:
             )
         self.update_unit_cell_from_xnn()
 
+    def _retention_fom_values(self, q2_calc, q2_ref_calc):
+        """The retained merits other than M20, on the arrays assign_hkls already holds.
+
+        Two constraints shape this, and both have already cost this project a wrong number.
+        It must run *before* get_M20, which zeroes the out-of-range entries of q2_ref_calc
+        in place (`np.putmask`, FigureOfMerits.py:475) -- a merit computed after it would
+        see a reference array with holes punched in it. And it is handed the optimiser's
+        own q2_calc and q2_ref_calc rather than rederiving them from the Miller indices,
+        because M20's cut-off is itself one of the reference lines and the two routes to it
+        differ by an ULP that moves a line across its own boundary (F-095).
+
+        Returns {} when nothing beyond M20 is retained, which is the default.
+        """
+        if not self.retention_extra:
+            return {}
+        values = {}
+        if 'Minfo' in self.retention_extra:
+            # reciprocal_unit_cell is current: fix_out_of_range_candidates rebuilds it from
+            # the same xnn immediately before every assign_hkls call.
+            reciprocal_volume = get_unit_cell_volume(
+                self.reciprocal_unit_cell,
+                partial_unit_cell=True,
+                lattice_system=self.lattice_system,
+                )
+            _, _, values['Minfo'] = get_M20_likelihood(
+                self.q2_obs, q2_calc, self.bravais_lattice, reciprocal_volume
+                )
+        if any(name in self.retention_extra for name in _REV_SYM_FOMS):
+            # One call for all three; it does not modify q2_ref_calc. Note its reversed sum
+            # is O(n_candidates x n_ref x n_peaks) in *memory*, not only in time -- see the
+            # cost table before retaining any of these.
+            rev_sym = get_M_rev_sym(self.q2_obs, q2_calc, q2_ref_calc)
+            for name, value in zip(_REV_SYM_FOMS, rev_sym):
+                if name in self.retention_extra:
+                    values[name] = value
+        return values
+
     def assign_hkls(self):
         q2_ref_calc = self.q2_calculator.get_q2(self.xnn)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         self.hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
         q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+        self.retention_values = self._retention_fom_values(q2_calc, q2_ref_calc)
         self.M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
 
     def correct_zero_error(self):
@@ -144,6 +238,72 @@ class Candidates:
         self.best_hkl[improved] = self.hkl[improved]
         if self.zero_error:
             self.best_zeropoint[improved] = self.zeropoint[improved]
+        self._update_retained_iterates()
+
+    def _update_retained_iterates(self):
+        """Per candidate, keep the iterate that maximises each non-M20 retained merit.
+
+        Strict '>' throughout, matching the M20 track above and np.argmax's first-maximum
+        rule, so an equal score never displaces an earlier iterate.
+        """
+        for name, track in self.retained.items():
+            value = self.retention_values[name]
+            improved = value > track['fom']
+            track['fom'][improved] = value[improved]
+            track['xnn'][improved] = self.xnn[improved]
+            track['hkl'][improved] = self.hkl[improved]
+            track['M20'][improved] = self.M20[improved]
+
+    def merge_retained_iterates(self):
+        """Fold the extra retention tracks into best_xnn as additional candidates.
+
+        Called after prune_below_m20, deliberately: a trajectory still has to have cleared
+        the M20 bar to contribute anything, so this mechanism and the prune stay separable
+        and each can be measured on its own (Q31 measures the prune). Appended rows inherit
+        their parent's m20_at_prune, for the same reason correct_off_by_two's do -- had the
+        parent been cut, the row would never have existed.
+
+        A retained iterate bit-identical to the M20 iterate, or to one already appended, is
+        dropped rather than duplicated. That is correct_off_by_two's `best_mf_index != 0`
+        test applied to the cell instead of to the factor, and it is why the row count grows
+        by less than a factor of len(retention_foms) in practice.
+
+        A no-op, including on the array identities, when only M20 is retained.
+        """
+        if not self.retained:
+            return
+        parent_index = np.arange(self.best_xnn.shape[0])
+        new_xnn = []
+        new_hkl = []
+        new_M20 = []
+        new_parent = []
+        new_source = []
+        # Row-aligned comparison: track row i and best row i are the same candidate.
+        already = [self.best_xnn]
+        for track_index, name in enumerate(self.retention_extra, start=1):
+            track = self.retained[name]
+            novel = np.ones(track['xnn'].shape[0], dtype=bool)
+            for previous in already:
+                novel &= np.any(track['xnn'] != previous, axis=1)
+            already.append(track['xnn'])
+            if not np.any(novel):
+                continue
+            new_xnn.append(track['xnn'][novel])
+            new_hkl.append(track['hkl'][novel])
+            new_M20.append(track['M20'][novel])
+            new_parent.append(parent_index[novel])
+            new_source.append(np.full(int(novel.sum()), track_index, dtype=int))
+        if not new_xnn:
+            return
+        parent = np.concatenate(new_parent)
+        self.best_xnn = np.concatenate([self.best_xnn] + new_xnn, axis=0)
+        self.best_hkl = np.concatenate([self.best_hkl] + new_hkl, axis=0)
+        self.best_M20 = np.concatenate([self.best_M20] + new_M20)
+        self.m20_at_prune = np.concatenate(
+            [self.m20_at_prune, self.m20_at_prune[parent]]
+            )
+        self.retained_by = np.concatenate([self.retained_by] + new_source)
+        self.n = self.best_xnn.shape[0]
 
     def deterministic(self, iteration_info):
         target_function = CandidateOptLoss(
@@ -300,11 +460,17 @@ class Candidates:
         # Carrying it lets one threshold-0 run answer what the production threshold would
         # have deleted, instead of needing a second run whose repair RNG has diverged.
         self.m20_at_prune = self.best_M20[keep].copy()
+        self.retained_by = self.retained_by[keep]
         self.best_xnn = self.best_xnn[keep]
         self.best_M20 = self.best_M20[keep]
         self.best_hkl = self.best_hkl[keep]
         if self.zero_error:
             self.best_zeropoint = self.best_zeropoint[keep]
+        # The extra retention tracks are row-aligned with best_xnn and stay that way, so
+        # merge_retained_iterates can attribute each appended row to its parent.
+        for track in self.retained.values():
+            for key in track:
+                track[key] = track[key][keep]
         self.n = self.best_xnn.shape[0]
 
     def standardize_cell(self):
@@ -464,6 +630,9 @@ class Candidates:
             # fate at the prune: had the parent been cut, this row would never have existed.
             self.m20_at_prune = np.concatenate(
                 [self.m20_at_prune, self.m20_at_prune[improved]])
+            # And its parent's retention track, for the same reason.
+            self.retained_by = np.concatenate(
+                [self.retained_by, self.retained_by[improved]])
             self.best_hkl = np.concatenate([self.best_hkl, best_mf_hkl[improved]], axis=0)
             if self.zero_error:
                 self.best_zeropoint = np.concatenate(

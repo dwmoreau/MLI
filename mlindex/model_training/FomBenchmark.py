@@ -92,6 +92,13 @@ PREDOWNSAMPLE_COLUMNS = (
     'Minfo',
     'n_indexed',
     'm20_at_prune',
+    # 0 for the iterate the M20 track kept -- the row production would have had -- and k
+    # for the k-th entry of opt_params['retention_foms'] beyond M20 (S14 item 1). It is
+    # what makes the ceiling before/after multi-FOM retention a restriction *inside* one
+    # run: F-137 established that two arms of the same configuration are not comparable,
+    # and a retention-on run differs from a retention-off one in exactly the way that
+    # finding describes.
+    'retained_by',
     'n_entering',
     'prune_m20_threshold',
     'downsample_radius',
@@ -217,6 +224,7 @@ def predownsample_records_to_frame(records):
         columns['Minfo'].append(record['Minfo'].astype(np.float64))
         columns['n_indexed'].append(record['n_indexed'].astype(np.int64))
         columns['m20_at_prune'].append(record['m20_at_prune'].astype(np.float64))
+        columns['retained_by'].append(record['retained_by'].astype(np.int64))
         columns['n_entering'].append(np.repeat(record['n_entering'], n_candidates))
         columns['prune_m20_threshold'].append(
             np.repeat(record['prune_m20_threshold'], n_candidates))
