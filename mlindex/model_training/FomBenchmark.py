@@ -253,13 +253,13 @@ def _hkl_ref_path(lattice_system, bravais_lattice, models_directory=None):
 _HKL_REF_CACHE = {}
 
 
-def hkl_ref_for(lattice_system, bravais_lattice, spacegroup, models_directory=None):
-    """Reference Miller indices for one extinction group.
+def spacegroup_reference_sets(lattice_system, bravais_lattice, models_directory=None):
+    """Every extinction group's reference Miller indices for one Bravais lattice.
 
-    `Candidates.assign_extinction_group` builds its calculated lines from the model's
-    truncated `hkl_ref` filtered by the winning extinction group, so reproducing its M20
-    means starting from exactly that list. `get_spacegroup_hkl_ref` reaches into cctbx and
-    is far too slow to call per row, hence the cache.
+    The whole dictionary `Candidates.assign_extinction_group` searches over, so a caller that
+    has to reproduce that search -- rather than score one known group -- does not have to
+    rebuild it. `get_spacegroup_hkl_ref` reaches into cctbx and is far too slow to call per
+    row, hence the cache.
     """
     key = (str(models_directory), lattice_system, bravais_lattice)
     if key not in _HKL_REF_CACHE:
@@ -267,7 +267,19 @@ def hkl_ref_for(lattice_system, bravais_lattice, spacegroup, models_directory=No
         _HKL_REF_CACHE[key] = get_spacegroup_hkl_ref(
             np.load(path), bravais_lattice=bravais_lattice
             )
-    return _HKL_REF_CACHE[key][spacegroup]
+    return _HKL_REF_CACHE[key]
+
+
+def hkl_ref_for(lattice_system, bravais_lattice, spacegroup, models_directory=None):
+    """Reference Miller indices for one extinction group.
+
+    `Candidates.assign_extinction_group` builds its calculated lines from the model's
+    truncated `hkl_ref` filtered by the winning extinction group, so reproducing its M20
+    means starting from exactly that list.
+    """
+    return spacegroup_reference_sets(
+        lattice_system, bravais_lattice, models_directory
+        )[spacegroup]
 
 
 def reference_lines(xnn, lattice_system, bravais_lattice, spacegroup,

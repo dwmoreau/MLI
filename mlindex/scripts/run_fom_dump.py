@@ -100,6 +100,15 @@ def _parse_args():
     parser.add_argument('--n-shards', type=int, default=1)
     parser.add_argument('--seed', type=int, default=12345,
                         help='Base seed for entry sampling, per-entry noise and the optimizers')
+    # S06b. The reproducibility floor is the spread of a reported number over runs that differ
+    # only in the search, so the search seed has to move while the entry sample and the peak
+    # lists stay fixed -- and --seed moves all three at once. Defaults to --seed, so an
+    # invocation written before this existed produces the same pool.
+    parser.add_argument('--optimizer-seed', type=int, default=None,
+                        help='Seed for the optimizers alone, leaving entry sampling and the '
+                             'per-entry noise on --seed. Two runs differing only in this are '
+                             'the same patterns indexed under different search conditions, '
+                             'which is what a reproducibility floor is measured over')
     parser.add_argument('--split-manifest', type=str, default=str(MANIFEST_PATH),
                         help='Frozen S02 manifest supplying the fom-train/dev/test split. '
                              'The split is by source entry and must never be re-derived here')
@@ -230,9 +239,10 @@ def run_pool(pool_index, args, entries, split_by_id, out_dir, shard_tag,
     # opt_params is put on the worker queues by _init_workers and never updated again.
     # dump_candidates below is safe to set afterwards only because it is read on the
     # manager alone.
+    optimizer_seed = args.seed if args.optimizer_seed is None else args.optimizer_seed
     optimizers, processes, task_queues = setup_mp_optimizers(
         args.pool_size, mirror.BROADENING_TAG, n_candidates_scale=1,
-        seed=args.seed + pool_index,
+        seed=optimizer_seed + pool_index,
         options={
             'prune_m20_threshold': float(args.prune_threshold),
             'dump_predownsample': bool(args.dump_predownsample),
@@ -446,6 +456,7 @@ def main():
         n_pools=args.n_pools,
         pool_size=args.pool_size,
         seed=args.seed,
+        optimizer_seed=(args.seed if args.optimizer_seed is None else args.optimizer_seed),
         broadening_tag=mirror.BROADENING_TAG,
         n_top_candidates=mirror.N_TOP_CANDIDATES,
         n_entries_per_bl=args.n_entries_per_bl,
