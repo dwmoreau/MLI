@@ -223,6 +223,38 @@ def test_induced_from_differences_agrees_with_the_flip_rate_form():
                       induced_standard_error(0.04, 1000), rtol=0.02)
 
 
+def test_stratified_standard_error_exceeds_the_unweighted_one_when_a_thin_stratum_is_heavy():
+    """CNRS reweighting amplifies a lattice the sample barely covers, and the s.e. must follow.
+
+    The aggregate is a weighted mean over lattices, so a per-entry change in a thin stratum
+    moves it by w/n rather than by 1/N. Treating it as unweighted understated the floor by 1.75x
+    on the real ensemble, which is the difference between "block C's +1.05 pp is 1.8 standard
+    errors" and "it is 1.0".
+    """
+    from run_fom_floor_report import induced_from_differences
+    from run_fom_floor_report import induced_standard_error_stratified
+
+    rng = np.random.default_rng(0)
+    # cF is four entries here and carries 22/599 of the weight; oP is 200 and carries 124/599.
+    lattices = np.array(['cF'] * 4 + ['oP'] * 200)
+    differences = np.concatenate([rng.choice([-1.0, 1.0], size=4),
+                                  np.zeros(200)])
+    stratified = induced_standard_error_stratified(differences, lattices, 1000)
+    plain = induced_from_differences(differences, 1000)
+    assert stratified > plain
+
+
+def test_stratified_standard_error_matches_the_plain_one_for_a_single_stratum():
+    from run_fom_floor_report import induced_from_differences
+    from run_fom_floor_report import induced_standard_error_stratified
+
+    rng = np.random.default_rng(1)
+    differences = rng.choice([-1.0, 0.0, 1.0], size=250, p=[0.02, 0.96, 0.02])
+    lattices = np.array(['oP'] * 250)
+    assert np.isclose(induced_standard_error_stratified(differences, lattices, 1000),
+                      induced_from_differences(differences, 1000), rtol=1e-9)
+
+
 def test_induced_standard_error_scales_with_the_entry_count():
     from run_fom_floor_report import induced_standard_error
 

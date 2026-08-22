@@ -95,6 +95,39 @@ def induced_standard_error(flip_rate, n_entries):
     return float(np.sqrt(flip_rate / n_entries))
 
 
+def induced_standard_error_stratified(differences, lattices, n_entries, weights=None):
+    """The induced standard error of a **CNRS-reweighted** rate, which is not the plain one.
+
+    The project's headline aggregate is `sum_bl w_bl * mean_bl / sum_bl w_bl` (METRICS section
+    5), so a per-entry change contributes in proportion to its lattice's weight divided by that
+    lattice's entry count -- and the weights are draft Table 1's, which give cF 22/599 on four
+    sampled entries. Treating the weighted mean as if it were an unweighted one understates its
+    standard error by **1.75x** on this ensemble, which is large enough to change how a gate
+    reads: `M_sym - M20` moves from 0.59 pp to 1.03 pp.
+
+        Var = sum_bl (w_bl / sum w)^2 * Var(d in bl) / n_bl
+
+    `n_bl` is scaled to `n_entries` by the sample's own composition, which is valid here because
+    `S06b_floor_entries.csv` was drawn proportional to `fom-dev`'s per-lattice shares. A sample
+    drawn any other way would need the reporting split's own counts instead.
+    """
+    weights = dict(FomMetrics.CNRS_WEIGHTS) if weights is None else dict(weights)
+    frame = pd.DataFrame({'difference': np.asarray(differences, dtype=np.float64),
+                          'bravais_lattice': np.asarray(lattices)})
+    present = [name for name in frame['bravais_lattice'].unique() if name in weights]
+    total = sum(weights[name] for name in present)
+    if not total:
+        return float('nan')
+    scale = n_entries / frame.shape[0]
+    variance = 0.0
+    for name in present:
+        values = frame.loc[frame['bravais_lattice'] == name, 'difference'].to_numpy()
+        if values.size < 2:
+            continue
+        variance += (weights[name] / total) ** 2 * np.var(values, ddof=1) / (values.size * scale)
+    return float(np.sqrt(variance))
+
+
 def flip_rate(first, second):
     """Fraction of entries whose boolean outcome differs between two arms."""
     return float(np.mean(np.asarray(first, dtype=bool) != np.asarray(second, dtype=bool)))
@@ -307,7 +340,7 @@ def evaluate_arms(arms, entries_by_arm, merit, threshold, weights='cnrs'):
     return results
 
 
-def metric_floor(results, metrics, reporting_entries):
+def metric_floor(results, metrics, reporting_entries, weighted=True):
     """Per metric: the arms' values, their range, and the induced error at reporting scale."""
     seeds = sorted(results)
     rows = []
@@ -317,21 +350,30 @@ def metric_floor(results, metrics, reporting_entries):
         # range across arms but no flip rate. Reported with the column left empty rather than
         # dropped: the range is still what a gate on them would have to clear.
         has_flags = all(metric in results[seed].per_entry.columns for seed in seeds)
-        pairwise, shared = [], []
+        pairwise, shared, induced = [], [], []
         if has_flags:
             flags = {seed: results[seed].per_entry.set_index('entry_id')[metric]
                      for seed in seeds}
+            lattices = {seed: results[seed].per_entry.set_index('entry_id')['bravais_lattice']
+                        for seed in seeds}
             shared = sorted(set.intersection(*(set(flags[seed].index) for seed in seeds)))
-            pairwise = [flip_rate(flags[a].loc[shared], flags[b].loc[shared])
-                        for index, a in enumerate(seeds) for b in seeds[index + 1:]]
+            for index, a in enumerate(seeds):
+                for b in seeds[index + 1:]:
+                    pairwise.append(flip_rate(flags[a].loc[shared], flags[b].loc[shared]))
+                    difference = (flags[a].loc[shared].astype(float)
+                                  - flags[b].loc[shared].astype(float))
+                    induced.append(
+                        induced_standard_error_stratified(
+                            difference, lattices[a].loc[shared], reporting_entries)
+                        if weighted else
+                        induced_from_differences(difference, reporting_entries))
         row = {'metric': metric,
                'mean': float(np.mean(list(values.values()))),
                'range_pp': 100 * (max(values.values()) - min(values.values())),
                'sd_pp': 100 * float(np.std(list(values.values()), ddof=1)),
                'flip_rate': float(np.mean(pairwise)) if pairwise else np.nan,
                'n_entries_measured': len(shared)}
-        row['induced_se_pp'] = (100 * induced_standard_error(row['flip_rate'], reporting_entries)
-                                if np.isfinite(row['flip_rate']) else np.nan)
+        row['induced_se_pp'] = 100 * float(np.mean(induced)) if induced else np.nan
         row.update({f'arm_{seed}': values[seed] for seed in seeds})
         rows.append(row)
     return pd.DataFrame(rows)
@@ -401,7 +443,13 @@ def floor_by_lattice(results_by_merit, metric, reporting_entries, baseline='M20'
                            .loc[index, metric].astype(float))
                     for seed in seeds
                     }
-                pairs = [induced_from_differences(deltas[a] - deltas[b], reporting_entries)
+                # Scaled to *this lattice's* share of the reporting split, not to the whole
+                # of it: a per-lattice claim is reported on that lattice's entries, and
+                # quoting it at n = 1 197 would understate the floor by the square root of
+                # fourteen. Per-lattice rows are never CNRS-reweighted (METRICS section 5), so
+                # the plain form is the right one here.
+                lattice_reporting = reporting_entries * len(index) / len(shared)
+                pairs = [induced_from_differences(deltas[a] - deltas[b], lattice_reporting)
                          for i, a in enumerate(seeds) for b in seeds[i + 1:]]
                 row['mean_delta_pp'] = 100 * float(np.mean(
                     [deltas[seed].mean() for seed in seeds]))
@@ -413,7 +461,8 @@ def floor_by_lattice(results_by_merit, metric, reporting_entries, baseline='M20'
     return pd.DataFrame(rows)
 
 
-def contrast_floor(results_by_merit, metrics, reporting_entries, baseline='M20'):
+def contrast_floor(results_by_merit, metrics, reporting_entries, baseline='M20',
+                   weighted=True):
     """How far apart the arms put a *difference between two merits* on the same pool.
 
     This is what a gate reads. Both merits are computed on one arm's pool, so the pool's own
@@ -444,7 +493,13 @@ def contrast_floor(results_by_merit, metrics, reporting_entries, baseline='M20')
                            .set_index('entry_id')[metric].astype(float))
                 per_entry[seed] = flags_a - flags_b
             shared = sorted(set.intersection(*(set(per_entry[seed].index) for seed in seeds)))
+            lattices = (results_by_merit[baseline][seeds[0]].per_entry
+                        .set_index('entry_id')['bravais_lattice'].loc[shared])
             induced = [
+                induced_standard_error_stratified(
+                    per_entry[a].loc[shared] - per_entry[b].loc[shared], lattices,
+                    reporting_entries)
+                if weighted else
                 induced_from_differences(
                     per_entry[a].loc[shared] - per_entry[b].loc[shared], reporting_entries)
                 for index, a in enumerate(seeds) for b in seeds[index + 1:]
@@ -689,11 +744,12 @@ def main():
             }
         label = 'cnrs' if weights else 'unweighted'
         metric_frames.append(
-            metric_floor(results_by_merit['M20'], METRICS, args.reporting_entries)
-            .assign(weights=label))
+            metric_floor(results_by_merit['M20'], METRICS, args.reporting_entries,
+                         weighted=weights == 'cnrs').assign(weights=label))
         contrast_frames.append(
             contrast_floor(results_by_merit, ('operating_point', 'top10'),
-                           args.reporting_entries).assign(weights=label))
+                           args.reporting_entries,
+                           weighted=weights == 'cnrs').assign(weights=label))
         if weights == 'cnrs':
             lattice_frame = floor_by_lattice(results_by_merit, 'operating_point',
                                              args.reporting_entries)
