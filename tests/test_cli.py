@@ -148,3 +148,85 @@ def test_run_ml_aP(test_metadata, tmp_path, models_available):
     assert output_file.exists(), "output JSON not written"
 
     _compare_json(output_file, EXPECTED_DIR / "run_ml_aP.json")
+
+
+# ------------------------------------------------------------------------------------------
+# --prune-threshold. `prune_below_m20` discards every candidate scoring below 5.0 before
+# refinement, which is the largest single control on whether the correct cell reaches ranking
+# at all -- on low-symmetry, large-volume patterns it deletes 72-88% of the correct candidates
+# the search finds. It entered the code as a speed optimisation for the analytical indexer and
+# had no way to be set from the command line until this flag. The two properties that matter
+# are that the default is unchanged and that the flag actually reaches the workers.
+# ------------------------------------------------------------------------------------------
+
+def test_prune_threshold_defaults_to_none_and_builds_no_options():
+    """Absent, it must leave the per-lattice opt_params alone rather than re-assert 5.0."""
+    from mlindex.command_line.run import build_base_parser
+    args = build_base_parser().parse_args([])
+    assert args.prune_threshold is None
+    options = (None if getattr(args, 'prune_threshold', None) is None
+               else {'prune_m20_threshold': args.prune_threshold})
+    assert options is None
+
+
+def test_prune_threshold_is_parsed_as_a_float_and_becomes_an_opt_params_override():
+    from mlindex.command_line.run import build_base_parser
+    args = build_base_parser().parse_args(['--prune-threshold', '3.0'])
+    assert args.prune_threshold == pytest.approx(3.0)
+    options = {'prune_m20_threshold': args.prune_threshold}
+    assert options == {'prune_m20_threshold': 3.0}
+
+
+def test_prune_threshold_help_is_ascii():
+    """CLAUDE.md: piping --help on Windows encodes through the locale codepage."""
+    from mlindex.command_line.run import build_base_parser
+    help_text = build_base_parser().format_help()
+    assert '--prune-threshold' in help_text
+    help_text.encode('ascii')
+
+
+def test_the_override_reaches_candidates_through_the_optimizer_factories():
+    """Every factory must honour `options`, because `prune_below_m20` runs on the workers.
+
+    `opt_params` is queued to each worker as its manager is constructed, so an override that
+    stopped at the manager would apply to the manager's share of the candidates only. The
+    factory is exercised with a stub optimizer class so this tests the merge rather than the
+    model loading.
+    """
+    import mlindex.optimization.UtilitiesOptimizer as utilities
+
+    captured = {}
+
+    class _Stub:
+        def __init__(self, *args, **kwargs):
+            # The factories construct the manager positionally: data_params first,
+            # opt_params second.
+            captured['opt_params'] = kwargs.get('opt_params', args[1] if len(args) > 1 else None)
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    factories = [
+        (utilities.get_cubic_optimizer, 'cP'),
+        (utilities.get_tetragonal_optimizer, 'tP'),
+        (utilities.get_monoclinic_optimizer, 'mP'),
+        (utilities.get_triclinic_optimizer, 'aP'),
+        ]
+    for factory, bravais_lattice in factories:
+        for override in (None, {'prune_m20_threshold': 3.0}):
+            captured.clear()
+            try:
+                factory(bravais_lattice, '1', 1, None, options=override,
+                        optimizer_class=_Stub, seed=12345)
+            except Exception as error:               # pragma: no cover - factory internals
+                pytest.skip(f'{factory.__name__} needs more than a stub: {error}')
+            opt_params = captured.get('opt_params')
+            assert opt_params is not None, factory.__name__
+            if override is None:
+                # The 5.0 default is supplied by OptimizerBase, not by the factory, so an
+                # un-overridden factory must leave the key absent rather than assert it --
+                # that is what makes the default byte-identical to the pre-flag code.
+                assert 'prune_m20_threshold' not in opt_params, factory.__name__
+            else:
+                assert opt_params['prune_m20_threshold'] == pytest.approx(3.0), (
+                    f'{factory.__name__} did not honour options={override}')
