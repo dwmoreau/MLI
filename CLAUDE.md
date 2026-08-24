@@ -165,24 +165,42 @@ Wolff M20 figure of merit with a learned one. Its entire working record lives un
 
 **So `docs/` is not in this repository.** A fresh clone has none of it, `git pull` on another
 machine does not deliver it, and `git clean -xdf` deletes it. This section exists because it is
-the only trace of the project that a clone does carry. If `docs/fom/` is missing, the record has
-to be restored from a backup or from NERSC before doing any FOM work:
+the only trace of the project that a clone does carry. If `docs/` is missing, the record has to be
+restored from a backup or from NERSC before doing any FOM work:
 
 ```bash
 rsync -a ~/mli-record-backup/<YYYY-MM-DD>/docs/ docs/       # local dated snapshot
 docs/sync_record.sh snapshot                                # take a new one
 ```
 
-When `docs/` is present, read `docs/fom/PROTOCOL.md` first — it defines how a session is
+**There have been two campaigns, and they are kept separate.**
+
+- `docs/fom_campaign1/` — the first campaign, **closed 2026-08-23**. Read-only. See its
+  `CLOSED.md`. Do not edit anything in it.
+- `docs/fom_campaign2/` — the live campaign, started 2026-08-24.
+
+When `docs/` is present, read `docs/fom_campaign2/PROTOCOL.md` first — it defines how a session is
 conducted and its standing rules override any other instruction in that project — then
-`docs/fom/README.md`, `docs/fom/STATUS.md`, and the relevant handoff under `docs/fom/handoffs/`.
+`INHERITED.md` (what campaign 1 established, and what it left bounded), `README.md`, `STATUS.md`,
+and the relevant handoff under `docs/fom_campaign2/handoffs/`.
 
-Three things about that work that affect ordinary edits here:
+**Do not read campaign 1's `STATUS.md` to find out what carries forward.** It is 7 524 lines and
+much of it is superseded by its own later entries. `INHERITED.md` is the distillation; go to the
+archive only for the evidence behind one specific number.
 
-- **FOM work goes on branch `fom`; general correctness fixes go on `main`** and are merged in. The
-  test is whether the change would matter to someone who never touches figures of merit.
-- **Perlmutter cannot push to `origin`** (`Permission denied (publickey)`), so a fix recorded as
-  done may exist on one machine only. Check with `git log origin/main --oneline -- <path>`.
+Four things about that work that affect ordinary edits here:
+
+- **FOM work goes on branch `fom_campaign2`; general correctness fixes go on `main`** and are
+  merged in. The test is whether the change would matter to someone who never touches figures of
+  merit.
+- **`fom_campaign2` branched from `main`, not from `fom`.** The old `fom` branch is kept for its
+  code, not extended: campaign-2 sessions **cherry-pick** what they need from it and record what
+  they took in `docs/fom_campaign2/CHERRY_PICK.md`. Seventy-one files differ between `main` and
+  `fom`, most of them belonging to work campaign 2 has dropped, so do not merge `fom`.
+- **Pushing to `origin` needs an unlocked SSH key**, and Perlmutter cannot push at all
+  (`Permission denied (publickey)`), so a fix recorded as done may exist on one machine only.
+  Check with `git log origin/main --oneline -- <path>` before relying on it. Two correctness
+  fixes sat on a local `main` unpushed for days because of exactly this.
 - **Never `git add -A`.** `mlindex/models/` is git-lfs and often mid-retrain, and
   `mlindex/characterization/` and `mlindex/data/generated_datasets/` are regenerable run output.
   Stage named paths.
