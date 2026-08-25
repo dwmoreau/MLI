@@ -90,15 +90,6 @@ def build_base_parser(description="Start the display application"):
         default=12345,
         help="Random seed for reproducibility (default: 12345)",
     )
-    parser.add_argument(
-        "--prune-threshold",
-        type=float,
-        default=None,
-        help="Discard candidates scoring below this M20 before refinement and ranking "
-             "(default: 5.0). Lowering it keeps more candidates and finds the correct cell "
-             "for more patterns, at a larger pool and a longer run; raising it is faster and "
-             "loses cells. Try 3.0 for a difficult low-symmetry pattern.",
-    )
     return parser
 
 
@@ -369,17 +360,8 @@ def _run_mpi(args, peak_list, seed=12345):
     bl_string = ' '.join(bravais_lattices)
     logger.info(f'Including Bravais lattices {bl_string}')
     logger.info('Starting loading optimizers')
-    # `prune_below_m20` discards every candidate scoring under this before refinement, and
-    # it is the single largest control on whether the correct cell reaches the ranking stage
-    # at all: at the production default of 5.0 it deletes 72-88% of the correct candidates
-    # the search finds on low-symmetry, large-volume patterns. It entered the code as a
-    # speed optimisation and had no way to be set from here until now. None means "leave the
-    # per-lattice default alone", so the shipped behaviour is unchanged.
-    options = (None if getattr(args, 'prune_threshold', None) is None
-               else {'prune_m20_threshold': args.prune_threshold})
     optimizer = get_optimizers(rank, mpi_organizers, broadening_tag,
-                               n_candidates_scale=1, logger=logger, seed=seed,
-                               options=options)
+                               n_candidates_scale=1, logger=logger, seed=seed)
 
     if rank == 0:
         top_unit_cell = dict.fromkeys(bravais_lattices)
@@ -439,14 +421,8 @@ def _run_mp(args, peak_list, n_procs, seed=12345):
     broadening_tag = '1'
     n_top_candidates = 20
 
-    # See the note in `_run_mpi`: None leaves the per-lattice default of 5.0 in place, so
-    # the shipped behaviour is unchanged. It has to reach `setup_mp_optimizers` rather than
-    # the returned managers, because `prune_below_m20` runs inside `Candidates` on every
-    # worker and `opt_params` is queued as each manager is built.
-    options = (None if getattr(args, 'prune_threshold', None) is None
-               else {'prune_m20_threshold': args.prune_threshold})
     optimizers, processes, task_queues = setup_mp_optimizers(
-        n_procs, broadening_tag, n_candidates_scale=1, seed=seed, options=options
+        n_procs, broadening_tag, n_candidates_scale=1, seed=seed
     )
 
     top_unit_cell = {}
