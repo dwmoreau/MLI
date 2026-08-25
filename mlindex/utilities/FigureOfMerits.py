@@ -1,5 +1,11 @@
 import numpy as np
 
+from mlindex.utilities.numba_functions import bracketing_line_indices
+from mlindex.utilities.numba_functions import nearest_line_distances
+from mlindex.utilities.numba_functions import over_prediction_runs
+from mlindex.utilities.numba_functions import posterior_exponent_terms
+from mlindex.utilities.numba_functions import reversed_line_scores
+from mlindex.utilities.numba_functions import sorted_line_gap_squares
 from mlindex.utilities.UnitCellTools import get_hkl_matrix
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
@@ -371,6 +377,78 @@ def get_N_cal(q2_ref_calc, q_min, q_max, weights=None):
     return (in_range*weights[np.newaxis, :]).sum(axis=1)
 
 
+def _peaks_searchable(q2_obs):
+    """Whether the binary-search kernels may stand in for a scan over the whole peak list.
+
+    They locate the nearest peak by bracketing it in the sorted list, which reproduces the
+    scan's answer exactly for finite floating-point peaks and is undefined for NaN -- numpy
+    sorts NaN to the end, so a search would not bracket anything. Every caller that asks this
+    keeps the array expression it replaced as the other branch, so an unusual peak list is
+    slower rather than wrong.
+    """
+    return q2_obs.dtype.kind == "f" and bool(np.isfinite(q2_obs).all())
+
+
+def _reversed_line_terms(q2_obs, q_max, q2_ref_calc):
+    """The five row-wise quantities get_M_rev_sym builds out of the reference list.
+
+    Returns, per candidate:
+
+      q_min      q_I, the reference line closest to the first observed peak;
+      in_range   whether each reference line lies in [q_min, q_max];
+      counts     how many do -- N_cal when the weights are all 1 (see get_N_cal);
+      q_n        the largest reference line in range, -inf if none is;
+      scored     min_j |q2_ref_calc - q2_obs[j]| where in range and 0.0 where not.
+
+    This used to be five array expressions, one of which materialised the full
+    (n_candidates, n_ref, n_peaks) stack of |reference - peak| just to take a minimum over
+    its last axis and then throw away every entry the mask did not select -- 1.6 GB and 88%
+    of the call at 10,000 candidates against a 1,000-line list. The numba kernel does the
+    same work per row with no intermediate at all, and by binary search over the sorted
+    peaks rather than a scan over all of them. Measured 13.4x at 1,000 candidates, 14.5x at
+    the 6,000 the mP inner loop runs, and 14.0x at 10,000 -- bit-identical at every size, on
+    600 randomised cases, and on all 146 calls of three real runs (tools/repro_msym.py).
+
+    **Bit-identity is the whole constraint here, and two things it turns on are easy to
+    undo by accident.** `scored` and `in_range` are allocated with `empty_like`, so they
+    inherit q2_ref_calc's memory order: `.sum(axis=1)` does not group its additions the same
+    way over a C-ordered array as over an F-ordered one, and the caller's row sums are what
+    consume both. And `scored` keeps its zeros rather than being compacted to the in-range
+    entries, because numpy's pairwise summation groups a full row differently from a short
+    one even though the dropped terms are exact zeros.
+
+    The kernel needs the peaks sorted and finite for the binary search to land on the same
+    two neighbours the full scan would have minimised over, and needs floating-point input
+    for `-inf` to be representable in q_n; anything else falls back to the array expressions
+    this replaced, which are kept below and are still what the fast path is checked against.
+    """
+    kernel_usable = (q2_ref_calc.dtype.kind == "f" and q2_ref_calc.ndim == 2
+                     and _peaks_searchable(q2_obs))
+    if kernel_usable:
+        n_candidates = q2_ref_calc.shape[0]
+        dtype = np.result_type(q2_ref_calc, q2_obs, 0.0)
+        scored = np.empty_like(q2_ref_calc, dtype=dtype)
+        in_range = np.empty_like(q2_ref_calc, dtype=bool)
+        q_n = np.empty(n_candidates, dtype=dtype)
+        q_min = np.empty(n_candidates, dtype=q2_ref_calc.dtype)
+        counts = np.empty(n_candidates, dtype=np.int64)
+        reversed_line_scores(q2_ref_calc, np.ascontiguousarray(q_max), np.sort(q2_obs),
+                             q2_obs[0], scored, in_range, q_n, counts, q_min)
+        return q_min, in_range, counts, q_n, scored
+
+    q_min = np.take_along_axis(
+        q2_ref_calc,
+        np.argmin(np.abs(q2_ref_calc - q2_obs[0]), axis=1)[:, np.newaxis],
+        axis=1,
+    )[:, 0]
+    in_range = (q2_ref_calc >= q_min[:, np.newaxis]) & (q2_ref_calc <= q_max[:, np.newaxis])
+    counts = in_range.sum(axis=1)
+    q_n = np.max(np.where(in_range, q2_ref_calc, -np.inf), axis=1)
+    nearest = np.min(np.abs(q2_ref_calc[:, :, np.newaxis] - q2_obs[np.newaxis, np.newaxis]), axis=2)
+    scored = np.where(in_range, nearest, 0.0)
+    return q_min, in_range, counts, q_n, scored
+
+
 def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
     """Oishi-Tomiyasu 2013 eqs (5), (7), (9)-(11): the restricted, reversed and symmetric FOMs.
 
@@ -404,23 +482,20 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
     # The cut-off is the calculated position of the last assigned line, as in get_M20 -- Audit C
     # measured the alternatives as differing by less than the reproducibility floor.
     q_max = q2_calc[:, -1]
-    # q_I: the computed line closest to the first observed peak.
-    q_min = np.take_along_axis(
-        q2_ref_calc,
-        np.argmin(np.abs(q2_ref_calc - q2_obs[0]), axis=1)[:, np.newaxis],
-        axis=1,
-    )[:, 0]
 
-    in_range = (q2_ref_calc >= q_min[:, np.newaxis]) & (q2_ref_calc <= q_max[:, np.newaxis])
-    row_weights = np.ones(q2_ref_calc.shape[1]) if weights is None else weights
-    n_cal = (in_range*row_weights[np.newaxis, :]).sum(axis=1)
-    q_n = np.max(np.where(in_range, q2_ref_calc, -np.inf), axis=1)
+    # q_I, the in-range mask, N_cal, q_N, and the reversed score of every reference line in
+    # range (eq. 10) -- the reversal being that observed lines no computed line explains cost
+    # nothing, while computed lines no observation explains cost everything.
+    q_min, in_range, counts, q_n, scored = _reversed_line_terms(q2_obs, q_max, q2_ref_calc)
 
-    # Every reference line in range is scored against its nearest observed peak (eq. 10), which is
-    # the reversal: observed lines that no computed line explains cost nothing, computed lines that
-    # no observation explains cost everything.
-    nearest = np.min(np.abs(q2_ref_calc[:, :, np.newaxis] - q2_obs[np.newaxis, np.newaxis]), axis=2)
-    reversed_sum = (np.where(in_range, nearest, 0.0)*row_weights[np.newaxis, :]).sum(axis=1)
+    if weights is None:
+        # `counts` are exact integers below 2**53, so this is the same float the
+        # multiply-by-ones-and-sum below produces, and the same one it always produced.
+        n_cal = counts.astype(float)
+        reversed_sum = scored.sum(axis=1)
+    else:
+        n_cal = (in_range*weights[np.newaxis, :]).sum(axis=1)
+        reversed_sum = (scored*weights[np.newaxis, :]).sum(axis=1)
 
     good = (n_cal > 0) & np.isfinite(q_n) & (discrepancy > 0) & (q2_calc.sum(axis=1) != 0)
     M_tilde = np.zeros(q2_calc.shape[0])
@@ -567,6 +642,178 @@ def get_multiplicity_taupin88(bravais_lattice):
         return 1 * 1.8, 6
 
 
+# ---------------------------------------------------------------------------------------------
+# Per-peak assignment probability -- S11 block B / S01-C
+#
+# The question these answer is not "is this cell right" but "is *this peak* assigned to the right
+# Miller index", one number per observed line. PLAN section 4's assumptions A6 and A7 turn on it,
+# and the S11 handoff asks for two analytic estimators: the repo's rho = 1/(1 + eps*dN) and
+# Taupin 1988's P = 1 - exp(-2*eps*n).
+#
+# **They are the same statistic under two link functions.** get_M20_likelihood already computes
+#
+#     arg = 8 pi q2_obs |sqrt(q2_obs) - sqrt(q2_calc)| / (V* mu)
+#         = 2 eps n(q),    n(q) = dN/dq = 4 pi q^2 / (V* mu)
+#
+# and returns *both* 1/(1 + arg) per peak and -log2 prod(1 - exp(-arg)) as Minfo. So rho and
+# Taupin's P are one number seen through 1/(1+x) and 1 - e^-x; they agree to first order, diverge
+# where coincidence approaches certainty, and are **identically ranked** because both links are
+# monotone. Any comparison between them is a comparison of calibration alone, and the best that
+# any monotone function of arg can do is its isotonic recalibration -- which is why S11 measures
+# that as the bar rather than the two raw forms (STATUS section 6, 2026-08-20).
+#
+# The genuinely different third form is the same link with de Wolff 1961's Delta(Q) in place of
+# Taupin's 4 pi q^2 V / mu, which S01 measured under-counting lines by 30-58% (F-027).
+#
+# **Units differ between the two families, and this is not cosmetic.** The Taupin family's eps is
+# a discrepancy in q, |sqrt(q2_obs) - sqrt(q2_calc)| (FigureOfMerits.py, get_M20_likelihood),
+# while get_M20, get_nll_exponential, get_null_tail_nll and get_M_info_clipped all work in q^2.
+# A per-peak comparison that does not say which is which is not reproducible.
+# ---------------------------------------------------------------------------------------------
+
+
+# Free cell parameters per lattice system -- Taupin's nu, the divisor in the reduced chi-square.
+N_FREE_PARAMETERS = {
+    'cubic': 1, 'tetragonal': 2, 'hexagonal': 2, 'rhombohedral': 2,
+    'orthorhombic': 3, 'monoclinic': 4, 'triclinic': 6,
+    }
+
+
+def get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system, robust=False, chunk=256):
+    """In-sample estimate of the measurement scale, from the candidate's own residuals.
+
+    Taupin 1988's reduced chi-square: sigma^2 = sum(dQ_i^2)/(N - nu), where dQ_i is the distance
+    from each observed peak to the nearest calculated line and nu is the number of free cell
+    parameters. **Estimated per candidate from the data in front of it**, so nothing is assumed
+    known and PROTOCOL section 3 rule 4 is respected -- this is the "in-sample estimation with a
+    validated estimator" the rule allows, and Q7 is the question of which estimator to prefer.
+
+    `robust=True` uses 1.4826 x median|dQ| instead, which mis-assigned peaks cannot inflate.
+    Measured on mP it is *worse* calibrated than the chi-square form (ECE 0.117 against 0.052),
+    which is worth understanding before preferring it.
+
+    Returns (sigma, d1) -- the scale per candidate and the nearest-line distance per peak.
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    n_candidates, n_peaks = q2_ref_calc.shape[0], q2_obs.size
+    d1 = np.empty((n_candidates, n_peaks), dtype=np.float64)
+    # One pass over each reference row carrying n_peaks running minima, in place of n_peaks
+    # passes each building a (chunk, n_ref) temporary. A minimum is a selection, so this is
+    # the same float; `chunk` no longer bounds anything here, since nothing is materialised.
+    nearest_line_distances(q2_obs, q2_ref_calc, d1)
+    # A NaN peak makes every distance to it NaN, which is a whole column rather than something
+    # the row scan can see. `.min()` would have returned NaN there, so it is put back.
+    undefined_peaks = np.isnan(q2_obs)
+    if undefined_peaks.any():
+        d1[:, undefined_peaks] = np.nan
+    n_free = N_FREE_PARAMETERS[lattice_system]
+    if robust:
+        sigma = 1.4826*np.median(d1, axis=1)
+    else:
+        sigma = np.sqrt(np.sum(d1**2, axis=1)/max(n_peaks - n_free, 1))
+    return np.maximum(sigma, 1e-300), d1
+
+
+def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
+                             sigma_multiplier=1.0, robust=False, chunk=256, d1=None):
+    """P(each observed peak is assigned its correct Miller index) -- a posterior, not a null.
+
+        P_i = exp(-d_i^2/2 sigma^2) / sum_j exp(-d_j^2/2 sigma^2),  evaluated at the nearest line
+
+    **This asks a different question from a coincidence probability, and that is the point.**
+    (`get_assignment_probability`, the repo's rho, is not ported to this branch -- it is on
+    `fom` at 7c137c3. See CHERRY_PICK.md.)
+    The repo's rho and Taupin's P both answer "could an arbitrary cell have put a line this close"
+    -- a coincidence probability under a null. A null has to have a base rate bolted onto it
+    afterwards, which is why rho states 0.87 where the truth is 0.04 and why recalibrating it is
+    worth twenty times its raw self (F-125). This answers "given these calculated lines and this
+    peak, which line produced it", which is a posterior over the competing lines and is therefore
+    calibrated by construction when the error model is right. Measured on mP it is calibrated
+    **with nothing fitted**: ECE 0.052 against a recalibrated network's 0.051.
+
+    Two properties worth knowing, both of which fall out rather than being arranged.
+
+    **It reads local crowding, which is what actually causes a mis-assignment.** The competing
+    line's distance enters directly, so a peak whose two nearest lines are 1e-5 apart is scored
+    quite differently from one whose neighbours are 1e-2 away. rho cannot see this at all: its
+    density is the smooth global 4 pi q^2 V/mu, so it inherits only the residual -- and the
+    residual **alone** ranks mis-assignment at AUC 0.445, which is worse than chance, because in a
+    crowded region the wrong line is close too. That is the whole of rho's 0.511.
+
+    **A wrong cell is penalised without being told.** sigma is estimated from the candidate's own
+    residuals, so a cell that fits badly gets a large sigma, a flat posterior and low confidence on
+    every peak. Nothing has to detect that the cell is wrong.
+
+    What it does **not** do, and cannot: be calibrated on a pool that is mostly wrong cells.
+    P(peak right) = P(cell right) x P(peak right | cell right), and this is the second factor. The
+    first is the figure of merit itself, which is the combiner's job. Any per-peak statistic that
+    tries to be unconditionally calibrated is trying to solve indexing, which is how rho came to
+    state 0.87 against a 0.04 base rate.
+
+    `sigma_multiplier` scales the fitted sigma for the sensitivity curve PROTOCOL section 3 rule 4
+    requires of anything that uses one. `sigma` overrides the in-sample estimate entirely, which is
+    for testing and is **not** a licence to assume the generator's own error model.
+
+    `sigma` and `d1` may both be passed straight from a previous `get_assignment_sigma` call, which
+    is how a caller that wants *both* the scale and the posterior -- S11 block C, over ten million
+    candidates -- pays for the nearest-line scan once instead of twice. That scan is the whole cost
+    of this function; passing them halves it and changes no result.
+
+    Returns (n_candidates, n_peaks) in (0, 1].
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    if sigma is None or d1 is None:
+        estimated, distances = get_assignment_sigma(
+            q2_obs, q2_ref_calc, lattice_system, robust=robust, chunk=chunk
+            )
+        sigma = estimated if sigma is None else sigma
+        d1 = distances if d1 is None else d1
+    sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
+                            (q2_ref_calc.shape[0],))
+    d1 = np.asarray(d1, dtype=np.float64)
+    scale = 2*(sigma*sigma_multiplier)**2
+
+    posterior = np.empty(d1.shape, dtype=np.float64)
+    # Subtracting the nearest distance before exponentiating is the standard log-sum-exp shift:
+    # the nearest line's own term becomes exactly 1 and nothing underflows, so the sum is exact
+    # where a direct exp(-d^2/2s^2) would be 0/0 for a well-fitting candidate.
+    #
+    # The kernel builds that argument in one pass and marks the entries whose exponential is
+    # identically zero, which is 98.8% of them on a real pool; `where=` then takes the
+    # exponential of the rest in place, over the zeros the kernel has already written. The
+    # summed array keeps its full width and is still reduced by numpy, because pairwise
+    # summation groups a full row differently from a compacted one. `chunk` still matters:
+    # it keeps the block small enough to sum out of cache.
+    #
+    # The fast path is taken only for a C-contiguous reference array. `np.sum(axis=1)` does not
+    # group its additions the same way over an F-ordered block, and which order the expression
+    # below produces depends on how numpy resolves a binary op between operands of different
+    # orders -- not something to reproduce by construction. Everything this project builds is
+    # C-contiguous, so the other branch is a safety net rather than a path.
+    block_width = max(1, min(chunk, q2_ref_calc.shape[0]))
+    if q2_ref_calc.flags.c_contiguous:
+        terms = np.empty((block_width, q2_ref_calc.shape[1]), dtype=np.float64)
+        computable = np.empty(terms.shape, dtype=bool)
+    for start in range(0, q2_ref_calc.shape[0], chunk):
+        stop = min(start + chunk, q2_ref_calc.shape[0])
+        block = q2_ref_calc[start:stop]
+        block_scale = scale[start:stop][:, np.newaxis]
+        for peak in range(q2_obs.size):
+            if not q2_ref_calc.flags.c_contiguous:
+                excess = np.abs(block - q2_obs[peak])**2 - (d1[start:stop, peak]**2)[:, np.newaxis]
+                posterior[start:stop, peak] = 1.0/np.sum(np.exp(-excess/block_scale), axis=1)
+                continue
+            term_view = terms[:stop - start]
+            computable_view = computable[:stop - start]
+            posterior_exponent_terms(block, q2_obs[peak], d1[start:stop, peak],
+                                     scale[start:stop], term_view, computable_view)
+            np.exp(term_view, out=term_view, where=computable_view)
+            posterior[start:stop, peak] = 1.0/np.sum(term_view, axis=1)
+    return posterior
+
+
 def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
     """SUPERSEDED by get_M_rev_sym. Dead code, kept only so the name still resolves.
 
@@ -670,6 +917,8 @@ SIGMA_TREATMENT.update(
     {
         "M_wu": "free",
         "M_star": "free",
+        "M_star_corrected": "free",
+        "M_werner_max": "free",
         "M_info_clipped": "free",
         "M_1": "free",
         "n_over": "free",
@@ -684,6 +933,24 @@ SIGMA_TREATMENT.update(
         "chi2_entrywise": "in-sample",
         "bic": "in-sample",
         "chi2_fixed": "assumed",
+    }
+)
+
+# S10's hold-out merits. The normalisation of ho_M and ho_tail_nll is the calculated-line spacing
+# of the scored cell, so they are sigma-free in exactly the sense the rest of the classical family
+# is; only the chi2 form, which divides by an estimated residual scale, is not.
+#
+# The cv_* and is_* keys are deliberately absent: the cross-validated and in-sample families were
+# tested in campaign 1 and lost, and campaign 2 does not port them. See CHERRY_PICK.md.
+SIGMA_TREATMENT.update(
+    {
+        "ho_raw": "free",
+        "ho_M": "free",
+        "ho_tail_nll": "free",
+        "ho_n_scored": "free",
+        "ho_M20": "free",
+        "ho_n_predicted": "free",
+        "ho_chi2": "in-sample",
     }
 )
 
@@ -702,7 +969,7 @@ def _sorted_lines_in_range(q2_ref_calc, cutoff, floor=None):
     return np.sort(lines, axis=1), in_range.sum(axis=1)
 
 
-def get_M_wu(q2_obs, q2_calc, q2_ref_calc):
+def get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
     """Wu 1988 eqs (5), (6): the de Wolff FOM with the exact mean arbitrary discrepancy.
 
         g_n  = sum_k (Q_(k) - Q_(k-1))^2 / 4 / Q_(N)
@@ -718,24 +985,28 @@ def get_M_wu(q2_obs, q2_calc, q2_ref_calc):
     Oishi-Tomiyasu found it a worse *ranker* than M_tilde precisely because that continuity lets
     lower-symmetry cells reach the highest values; both properties are worth having measured.
 
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
+    compute_all already built avoids re-sorting the same array. See its note there.
+
     Returns (n_candidates,).
     """
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
     cutoff = q2_calc[:, -1]
-    lines, count = _sorted_lines_in_range(q2_ref_calc, cutoff)
+    lines, count = (_sorted_lines_in_range(q2_ref_calc, cutoff) if sorted_lines is None
+                    else sorted_lines)
 
-    # The k = 1 interval runs from Q = 0, matching Wu's sum starting at k = 1.
-    finite = np.isfinite(lines)
-    previous = np.concatenate(
-        [np.zeros((lines.shape[0], 1)), np.where(finite, lines, 0.0)[:, :-1]], axis=1
-    )
-    gaps = np.where(finite, np.where(finite, lines, 0.0) - previous, 0.0)
-    q_n = np.max(np.where(np.isfinite(lines), lines, 0.0), axis=1)
+    # The k = 1 interval runs from Q = 0, matching Wu's sum starting at k = 1. The kernel
+    # writes (L_k - L_(k-1))^2/4 straight into a full-width array instead of building the
+    # eight (n_candidates, n_ref) temporaries the array form needed to get there; the sum
+    # below stays in numpy, at full width, so its pairwise grouping is unchanged.
+    scaled_gaps = np.empty_like(lines)
+    q_n = np.empty(lines.shape[0], dtype=lines.dtype)
+    sorted_line_gap_squares(lines, count, scaled_gaps, q_n)
 
     good = (count > 0) & (discrepancy > 0) & (q2_calc.sum(axis=1) != 0)
     merit = np.zeros(q2_calc.shape[0])
     with np.errstate(divide="ignore", invalid="ignore"):
-        g_bar = np.sum(gaps**2/4, axis=1)/np.where(q_n > 0, q_n, 1)
+        g_bar = np.sum(scaled_gaps, axis=1)/np.where(q_n > 0, q_n, 1)
         merit[good] = g_bar[good]/discrepancy[good]
     return merit
 
@@ -761,7 +1032,7 @@ def get_M_star(q2_obs, q2_calc, volume, lattice_system, corrected=False):
     return merit
 
 
-def get_M_1(q2_obs, q2_calc, q2_ref_calc):
+def get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
     """Shirley 1980 section 2.2: the de Wolff family with a *per-line local* epsilon.
 
         delta_i = |Q_obs_i - nearest calculated line|
@@ -776,17 +1047,22 @@ def get_M_1(q2_obs, q2_calc, q2_ref_calc):
     It is the empirical counterpart of get_delta_dewolff61, which gives the same local quantity
     analytically. Where both are computable they should agree, and they can be cross-plotted.
 
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
+    compute_all already built avoids re-sorting the same array. See its note there.
+
     Returns (n_candidates,).
     """
     cutoff = q2_calc[:, -1]
-    lines, count = _sorted_lines_in_range(q2_ref_calc, cutoff)
+    lines, count = (_sorted_lines_in_range(q2_ref_calc, cutoff) if sorted_lines is None
+                    else sorted_lines)
 
     # For each observed peak, the bracketing pair of calculated lines. searchsorted on a row-sorted
-    # array with the out-of-range entries at +inf gives the insertion point directly.
+    # array with the out-of-range entries at +inf gives the insertion point directly. The kernel is
+    # that same search, one row at a time in compiled code, instead of a Python loop calling
+    # numpy's searchsorted once per candidate.
     n_candidates, n_peaks = q2_calc.shape
-    upper_index = np.stack(
-        [np.searchsorted(lines[row], q2_obs) for row in range(n_candidates)], axis=0
-    )
+    upper_index = np.empty((n_candidates, n_peaks), dtype=np.int64)
+    bracketing_line_indices(lines, q2_obs, upper_index)
     n_lines = lines.shape[1]
     upper_index = np.clip(upper_index, 1, n_lines - 1)
     upper = np.take_along_axis(lines, upper_index, axis=1)
@@ -847,7 +1123,7 @@ def get_M_info_clipped(
     return -1/np.log(2)*np.sum(np.log(1 - np.exp(-argument) + 1e-100), axis=1)
 
 
-def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5):
+def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5, sorted_lines=None):
     """Calculated lines in range that no observation accounts for, and the longest such run.
 
     The ingredient of M_rev, useful on its own as a cheap over-prediction detector, and -- in the
@@ -858,12 +1134,28 @@ def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5):
     calculated line counts as unaccounted for when the nearest observed peak is further away than
     tolerance_factor times the local gap between calculated lines. Sigma-free by construction.
 
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
+    compute_all already built avoids re-sorting the same array. See its note there.
+
     Returns (n_over, max_gap), each (n_candidates,).
     """
     cutoff = q2_calc[:, -1]
-    lines, count = _sorted_lines_in_range(q2_ref_calc, cutoff)
-    finite = np.isfinite(lines)
+    lines, count = (_sorted_lines_in_range(q2_ref_calc, cutoff) if sorted_lines is None
+                    else sorted_lines)
 
+    # Both outputs are counts, so nothing here has a summation order to preserve: reproducing
+    # the per-line "is this one unaccounted for" decision reproduces both exactly. The kernel
+    # does that in one forward pass, which is the whole of this function -- the array form
+    # materialised an (n_candidates, n_ref, n_peaks) stack for the nearest-peak distance and
+    # then walked the survivors in a Python double loop to find the longest run.
+    if _peaks_searchable(q2_obs) and lines.ndim == 2 and lines.dtype.kind == "f":
+        n_over = np.empty(lines.shape[0], dtype=np.int64)
+        max_gap = np.empty(lines.shape[0], dtype=np.int64)
+        over_prediction_runs(lines, count, np.sort(q2_obs), float(tolerance_factor),
+                             n_over, max_gap)
+        return n_over, max_gap
+
+    finite = np.isfinite(lines)
     previous = np.concatenate(
         [np.zeros((lines.shape[0], 1)), np.where(finite, lines, 0.0)[:, :-1]], axis=1
     )
@@ -1163,6 +1455,202 @@ def get_bic(q2_obs, q2_calc, xnn, lattice_system, bravais_lattice):
     return -2*log_likelihood + N_CELL_PARAMETERS[lattice_system]*np.log(n_peaks) + complexity
 
 
+# ---------------------------------------------------------------------------------------------
+# S10: predictive figures of merit. Every merit above scores a candidate on the peaks it was
+# fitted to; these two score it on peaks it was not. The distinction is the whole point -- a cell
+# with six free parameters and a dense calculated spectrum can absorb any twenty peaks, and the
+# question is whether it can then *predict* one it has not seen.
+# ---------------------------------------------------------------------------------------------
+
+# ln 2, the median of Exp(1). Under de Wolff's idealised null a held-out discrepancy is a free-path
+# draw with mean Delta (de Wolff 1961 section 3), so median(|dQ|/Delta) = ln 2 and cv_M = 1 -- for
+# every lattice, every cell size and every peak count. That is what makes it comparable across
+# candidates without a fitted normalisation. tests/test_fom_cv.py asserts it on a construction that
+# satisfies the null; on the benchmark's refined survivors it does not hold and is not expected to.
+LOG_TWO = float(np.log(2.0))
+
+
+def _dewolff_baseline(q2_ref_calc, cutoff):
+    """Q_N/(2 N_cal): the expected discrepancy an arbitrary cell of this line density would give.
+
+    get_M20's own baseline, lifted out so a held-out score can use it unchanged. `cutoff` is the
+    calculated position of the line assigned to the *last observed* peak, which is what get_M20
+    uses (`q2_calc[:, -1]`) -- taking it from the held-out peaks instead would make the baseline
+    move with the fold. Returns (n_candidates,), zero where the candidate has no lines in range.
+
+    The cut-off is **snapped onto the reference grid before it is used**, and that is what makes
+    this exact rather than approximately right. The cut-off IS one of the reference lines -- the
+    one the last observed peak was assigned -- so a bare `<` turns on whether that line reproduces
+    itself to the last bit. It does not: get_M20 reaches it through `take_along_axis` on a matmul,
+    while a caller holding only the assigned Miller indices reaches it through a sum over them,
+    and the two differ by ~1e-16. Measured on 2.37M real candidates, that flipped N by one line
+    for a handful of monoclinic cells and moved the merit by up to 1.8%. Snapping to the *nearest*
+    reference line recovers the stored line itself -- the last peak's assignment is by definition
+    the nearest line to its own calculated position -- so the comparison is get_M20's.
+    """
+    nearest = np.argmin(np.abs(q2_ref_calc - cutoff[:, np.newaxis]), axis=1)
+    snapped = np.take_along_axis(q2_ref_calc, nearest[:, np.newaxis], axis=1)
+    in_range = q2_ref_calc < snapped
+    count = in_range.sum(axis=1)
+    q_n = np.max(np.where(in_range, q2_ref_calc, 0.0), axis=1)
+    expected = np.zeros(q2_ref_calc.shape[0])
+    good = count > 0
+    expected[good] = q_n[good]/(2*count[good])
+    return expected
+
+
+def _predictive_terms(q2_out, q2_assigned, xnn_used, lattice_system, bravais_lattice,
+                      min_discrepancy=0.0):
+    """|dQ| on the held-out peaks, and its ratio to the local calculated-line spacing there.
+
+    Delta is evaluated at the cell that made the prediction -- the *refit* cell for the
+    cross-validated form -- because that is the spectrum the held-out peak was assigned against.
+
+    `min_discrepancy` floors |dQ| for the same reason it does in get_null_tail_nll: a held-out peak
+    landing exactly on a calculated line sends the ratio to zero and the merit to infinity (F-026).
+    Pass the resolution of the peak positions being scored.
+    """
+    discrepancy = np.maximum(
+        np.abs(np.atleast_2d(q2_out) - q2_assigned), min_discrepancy
+    )
+    delta = get_delta_dewolff61(q2_out, xnn_used, lattice_system, bravais_lattice)
+    return discrepancy, discrepancy/np.maximum(delta, 1e-300)
+
+
+def _reduce_predictive(discrepancy, ratio, sigma_hat, prefix, expected=None):
+    """The three normalisations the S10 handoff asks for, plus the one that transfers.
+
+    Rows are candidates, columns are held-out peaks, NaN where a fold was voided.
+
+      {p}_raw       median |dQ|. No normalisation at all, so it inherits M20's coincidence
+                    problem -- a large cell with a dense spectrum always has a line nearby.
+      {p}_chi2      median |dQ|/sigma_hat, sigma_hat from estimate_sigma_entrywise. **in-sample**.
+      {p}_M         ln(2)/median(|dQ|/Delta). Keeps de Wolff's coincidence baseline while removing
+                    the fitting advantage. Under de Wolff's *idealised* null -- an arbitrary cell
+                    whose calculated lines are a Poisson process -- |dQ|/Delta is Exp(1), whose
+                    median is ln 2, so this is 1 by construction for every lattice and cell size.
+                    Real wrong candidates score above 1, for the two reasons the record already
+                    names: they are refined survivors rather than arbitrary cells (R10, F-075) and
+                    real calculated-Q sequences are more regular than exponential (F-015). How far
+                    above is a measurement, not an assumption.
+      {p}_M20       de Wolff's own statistic, computed on the held-out peaks: his global
+                    Q_N/(2 N_cal) baseline over the *mean* held-out |dQ|. This is the merit the
+                    project's baseline actually is, moved out of sample, and it exists because
+                    {p}_M is not: {p}_M swaps the global baseline for the local Delta(Q) and the
+                    mean for a median at the same time, so a difference against M20 could not be
+                    attributed. With this column the two changes are separable.
+      {p}_tail_nll  -sum log[1 - exp(-|dQ|/Delta)], the held-out counterpart of null_tail_nll.
+                    Gamma(n_scored, 1) under the same null, which is what lets FomNull turn it
+                    into a -log p that is comparable between a cubic candidate scored on ten peaks
+                    and a triclinic one scored on twenty (R5).
+
+    Larger is better for {p}_M and {p}_tail_nll; smaller is better for {p}_raw and {p}_chi2.
+    """
+    # Two masks, and keeping them apart matters. A peak has a *ratio* only where Delta(Q) is
+    # finite, which fails when a refit cell comes out unphysical -- arccos of an out-of-range
+    # argument -- while its *discrepancy* is perfectly well defined there. Sharing one mask made
+    # the de Wolff column average over a different set of peaks from the one get_M20 averages
+    # over, and the round trip came back 1.8e-2 instead of 1e-12.
+    scored = np.isfinite(ratio)
+    predicted = np.isfinite(discrepancy)
+    n_scored = scored.sum(axis=1)
+    n_predicted = predicted.sum(axis=1)
+    good = n_scored > 0
+    has_value = n_predicted > 0
+
+    # A candidate whose every fold was voided has an all-NaN row, and np.nanmedian warns on one.
+    # Fill those rows with zeros before reducing and discard the result afterwards, rather than
+    # silencing the warning -- an all-NaN row that was *not* expected should still be visible.
+    padded_ratio = np.where(scored, ratio, np.nan)
+    padded_discrepancy = np.where(predicted, discrepancy, np.nan)
+    padded_ratio[~good] = 0.0
+    padded_discrepancy[~has_value] = 0.0
+    median_ratio = np.where(good, np.nanmedian(padded_ratio, axis=1), np.nan)
+    median_discrepancy = np.where(has_value, np.nanmedian(padded_discrepancy, axis=1), np.nan)
+    tail = -np.sum(np.where(scored, np.log(1 - np.exp(-ratio) + 1e-100), 0.0), axis=1)
+
+    # A perfect prediction -- every held-out peak exactly on a calculated line -- sends the merit
+    # to infinity, exactly as M20 does when its mean discrepancy is zero (F-054). That is left as
+    # an infinity rather than clipped, so it ranks first (which is correct) and is counted by
+    # FomMetrics' n_non_finite_score diagnostic (which is how it stays visible). Callers with
+    # rounded input pass min_discrepancy instead of relying on this.
+    merit = np.zeros(ratio.shape[0])
+    usable = good & np.isfinite(median_ratio)
+    merit[usable] = np.where(
+        median_ratio[usable] > 0, LOG_TWO/np.maximum(median_ratio[usable], 1e-300), np.inf
+    )
+
+    features = {
+        f"{prefix}_raw": np.where(has_value, median_discrepancy, 0.0),
+        f"{prefix}_M": merit,
+        f"{prefix}_tail_nll": np.where(good, tail, 0.0),
+        f"{prefix}_n_scored": n_scored.astype(float),
+        f"{prefix}_n_predicted": n_predicted.astype(float),
+    }
+    if expected is not None:
+        # get_M20's arithmetic exactly: a mean over the scored peaks, and the guard that returns
+        # zero rather than dividing when a candidate's calculated lines have collapsed.
+        padded_expected = np.where(predicted, expected, np.nan)
+        padded_mean_discrepancy = np.where(predicted, discrepancy, np.nan)
+        padded_expected[~has_value] = 0.0
+        padded_mean_discrepancy[~has_value] = 0.0
+        mean_discrepancy = np.where(has_value, np.nanmean(padded_mean_discrepancy, axis=1), np.nan)
+        mean_expected = np.where(has_value, np.nanmean(padded_expected, axis=1), np.nan)
+        dewolff = np.zeros(ratio.shape[0])
+        usable_dewolff = has_value & np.isfinite(mean_discrepancy) & np.isfinite(mean_expected)
+        dewolff[usable_dewolff] = np.where(
+            mean_discrepancy[usable_dewolff] > 0,
+            mean_expected[usable_dewolff]/np.maximum(mean_discrepancy[usable_dewolff], 1e-300),
+            np.inf,
+        )
+        features[f"{prefix}_M20"] = dewolff
+    if sigma_hat is not None and sigma_hat > 0:
+        features[f"{prefix}_chi2"] = np.where(has_value, median_discrepancy/sigma_hat, 0.0)
+    return features
+
+
+def get_holdout_fom(q2_obs_holdout, xnn, hkl_ref, lattice_system, bravais_lattice,
+                    sigma_entrywise=None, min_discrepancy=0.0):
+    """The literal hold-out: score the fitted cell on peaks beyond the window it was fitted to.
+
+    This is approach 3 as the brief originally proposed it, and it needs no refit -- the cell was
+    already refined against all of the peaks it was given, and these are not among them. Assign
+    each extra peak to its nearest calculated line and score exactly as the cross-validated form
+    does, so the two are directly comparable on the entries where both exist.
+
+    Its limitations are real and were correctly anticipated. The extra peaks do not always exist;
+    where they do they come from the high-q2 region, where peaks are broad, weak and overlapped;
+    and on this benchmark they had to be re-synthesised, because Benchmark A stored only their
+    count (STATUS section 7, R13). Implemented because it is the obvious thing and a referee will
+    ask, not because it is expected to win.
+
+    `q2_obs_holdout` is (n_holdout,), ascending. Returns a dict of (n_candidates,) arrays with the
+    'ho' prefix.
+    """
+    q2_obs_holdout = np.asarray(q2_obs_holdout, dtype=np.float64)
+    xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
+
+    from mlindex.utilities.numba_functions import fast_assign
+
+    hkl2_ref = get_hkl_matrix(np.asarray(hkl_ref), lattice_system)
+    q2_ref_calc = np.matmul(xnn, hkl2_ref.T)
+    assign = fast_assign(q2_obs_holdout, q2_ref_calc)
+    q2_assigned = np.take_along_axis(q2_ref_calc, assign, axis=1)
+
+    discrepancy, ratio = _predictive_terms(
+        q2_obs_holdout, q2_assigned, xnn, lattice_system, bravais_lattice, min_discrepancy
+    )
+    ratio = np.where(np.isfinite(ratio), ratio, np.nan)
+    # The hold-out peaks lie *beyond* the fitted window, so the cut-off is the last of them rather
+    # than the last fitted peak: N is the number of calculated lines the cell predicts out to the
+    # point it is being asked about.
+    expected = np.repeat(
+        _dewolff_baseline(q2_ref_calc, np.full(xnn.shape[0], float(q2_obs_holdout[-1])))
+        [:, np.newaxis], q2_obs_holdout.size, axis=1,
+    )
+    return _reduce_predictive(discrepancy, ratio, sigma_entrywise, "ho", expected=expected)
+
+
 def compute_all(
     q2_obs,
     q2_calc,
@@ -1203,18 +1691,25 @@ def compute_all(
     )
     volume = 1/np.maximum(reciprocal_volume, 1e-300)
 
+    # M_wu, M_1 and n_over each need the in-range reference lines in ascending order, and each
+    # used to sort them itself -- the same array, from the same cut-off, three times. The sort
+    # is the largest single cost left in all three (12.5 of M_wu's 14.4 ms at 1,000 candidates),
+    # so it is done once here and handed to them. They still sort for themselves when called
+    # directly, which is how run_fom_zoo_eval.py prices them.
+    sorted_lines = _sorted_lines_in_range(q2_ref_calc, q2_calc[:, -1])
+
     features = {}
     M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc)
     features["M_tilde"] = M_tilde
     features["M_rev"] = M_rev
     features["M_sym"] = M_sym
     features["X_N"] = get_X_N(q2_obs, q2_calc, q2_ref_calc).astype(float)
-    features["M_wu"] = get_M_wu(q2_obs, q2_calc, q2_ref_calc)
+    features["M_wu"] = get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
     features["M_star"] = get_M_star(q2_obs, q2_calc, volume, lattice_system)
     features["M_star_corrected"] = get_M_star(
         q2_obs, q2_calc, volume, lattice_system, corrected=True
     )
-    features["M_1"] = get_M_1(q2_obs, q2_calc, q2_ref_calc)
+    features["M_1"] = get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
     features["M_nn"] = get_M_nn(q2_obs, q2_calc, q2_ref_calc)
     features["M_info_clipped"] = get_M_info_clipped(
         q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=min_discrepancy
@@ -1226,7 +1721,7 @@ def compute_all(
         q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=min_discrepancy
     )
     features["bic"] = get_bic(q2_obs, q2_calc, xnn, lattice_system, bravais_lattice)
-    n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc)
+    n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
     features["n_over"] = n_over.astype(float)
     features["max_gap"] = max_gap.astype(float)
     features["zone_dominance"] = get_zone_dominance(xnn, lattice_system)

@@ -254,3 +254,290 @@ def gauss_newton_solve(hkl2, q2_obs, sigma, xnn, pivot_tolerance):
         ok[candidate] = True
 
     return delta_gn, ok
+
+
+# ---------------------------------------------------------------------------------------
+# Shared by every kernel below that has to score a calculated line against the peak list.
+# ---------------------------------------------------------------------------------------
+
+@jit
+def nearest_peak_distance(q2_obs_sorted, value):
+    """min_j |value - q2_obs_sorted[j]|, by binary search rather than by a scan.
+
+    |value - peak| is a V over a sorted peak list, so the minimum is attained at one of the
+    two peaks bracketing `value` and the other n_peaks - 2 need never be touched. Both
+    candidate distances are formed by the same subtract-and-abs a full scan would use, so
+    what comes back is the same float and not merely the same number -- which is what lets
+    the callers claim bit-identity with the array expressions they replaced.
+
+    The search is branchless: its trip count depends only on n_peaks, so the predictor has
+    nothing to miss. The textbook `while left < right` form mispredicts about half its
+    compares and measured 65.8 ms against this one's 41.2 ms inside `reversed_line_scores`
+    on a 10,000-candidate capture.
+
+    `q2_obs_sorted` must be sorted ascending and finite; callers check and fall back to the
+    array expression when it is not.
+    """
+    n_peaks = q2_obs_sorted.size
+    left = 0
+    width = n_peaks
+    while width > 1:
+        half = width >> 1
+        left += half*(q2_obs_sorted[left + half - 1] < value)
+        width -= half
+    left += q2_obs_sorted[left] < value
+
+    below = left - 1
+    if below < 0:
+        below = 0
+    above = left
+    if above > n_peaks - 1:
+        above = n_peaks - 1
+    distance_below = abs(value - q2_obs_sorted[below])
+    distance_above = abs(value - q2_obs_sorted[above])
+    # One value selected by a conditional expression, not two stores in two branches:
+    # which of the pair is nearer is a coin flip, so the branch form mispredicts half the
+    # time and measured 2x slower.
+    return distance_above if distance_above < distance_below else distance_below
+
+
+# Same no-fastmath rule as fast_assign, and for the same reason: q2_ref is xnn @ hkl2.T,
+# NaN rows are routine, and the whole point of this kernel is that it agrees with the
+# array expression it replaced to the last bit.
+@jit
+def reversed_line_scores(q2_ref, q_max, q2_obs_sorted, first_peak,
+                         scored, in_range, q_n, counts, q_min):
+    """Everything get_M_rev_sym's reversed term needs, in one row-local pass.
+
+    Fills, per candidate row of ``q2_ref``:
+
+      q_min      the reference line closest to the first observed peak (de Wolff's q_I);
+      in_range   whether each reference line lies in [q_min, q_max];
+      counts     how many do, which is N_cal when the weights are all 1;
+      q_n        the largest reference line in range, or -inf if none is;
+      scored     min_j |q2_ref - q2_obs[j]| where in range and 0.0 where not.
+
+    The row is read twice -- once to locate q_min, once to score against it -- but a row
+    is n_ref*8 bytes, so the second read comes out of cache rather than out of memory.
+    Nothing here reassociates a float addition: every value written is produced by the
+    same subtract-and-abs as the array expression, and the row sums stay in numpy, so
+    the result is bit-identical rather than merely close. See tools/repro_msym.py.
+    """
+    n_candidates, n_ref = q2_ref.shape
+    n_peaks = q2_obs_sorted.size
+    for candidate in range(n_candidates):
+        # np.argmin returns the first occurrence of the minimum, so this scans forwards
+        # and updates on a strict '<'.
+        best_index = 0
+        best_deviation = np.inf
+        for reference in range(n_ref):
+            deviation = abs(q2_ref[candidate, reference] - first_peak)
+            if deviation < best_deviation:
+                best_deviation = deviation
+                best_index = reference
+        lower_bound = q2_ref[candidate, best_index]
+        q_min[candidate] = lower_bound
+        upper_bound = q_max[candidate]
+
+        count = 0
+        highest = -np.inf
+        for reference in range(n_ref):
+            value = q2_ref[candidate, reference]
+            # NaN fails both comparisons, which is what the array expression does too.
+            if value >= lower_bound and value <= upper_bound:
+                in_range[candidate, reference] = True
+                count += 1
+                if value > highest:
+                    highest = value
+
+                scored[candidate, reference] = nearest_peak_distance(q2_obs_sorted, value)
+            else:
+                in_range[candidate, reference] = False
+                scored[candidate, reference] = 0.0
+        counts[candidate] = count
+        q_n[candidate] = highest
+
+
+@jit
+def sorted_line_gap_squares(lines, counts, scaled_gaps, q_n):
+    """Wu 1988's g_n term: the squared spacing between consecutive calculated lines.
+
+    `lines` is one row per candidate, the in-range calculated lines sorted ascending with
+    the rest at +inf, and `counts` how many are in range -- what `_sorted_lines_in_range`
+    returns. Fills `scaled_gaps` with (L_k - L_(k-1))^2 / 4, the k = 1 interval running
+    from 0, and 0.0 past the end of the row; and `q_n` with the largest in-range line.
+
+    `scaled_gaps` is filled at full row width and summed by numpy rather than accumulated
+    here, because numpy's pairwise summation groups a full row differently from a short one
+    even though every entry past `counts` is an exact zero. The zeros are load-bearing.
+    """
+    n_candidates, n_ref = lines.shape
+    for candidate in range(n_candidates):
+        count = counts[candidate]
+        previous = 0.0
+        highest = -np.inf
+        for line in range(count):
+            value = lines[candidate, line]
+            gap = value - previous
+            previous = value
+            scaled_gaps[candidate, line] = gap*gap/4
+            if value > highest:
+                highest = value
+        for line in range(count, n_ref):
+            scaled_gaps[candidate, line] = 0.0
+        # The out-of-range entries the array expression maxed over were zeros, so they
+        # raise the maximum whenever every in-range line is negative -- or there are none.
+        if count < n_ref and highest < 0.0:
+            highest = 0.0
+        q_n[candidate] = highest
+
+
+@jit
+def over_prediction_runs(lines, counts, q2_obs_sorted, tolerance_factor, n_over, max_gap):
+    """Calculated lines no observation accounts for, and the longest consecutive run of them.
+
+    Same inputs as `sorted_line_gap_squares`. A line counts as unaccounted for when the
+    nearest observed peak is further away than `tolerance_factor` times the gap to the
+    previous line -- so the whole test is local, and one forward pass over the sorted row
+    computes the gap, the nearest peak, the count and the run length together.
+
+    Both outputs are integers, so unlike the merits that sum floats there is no grouping to
+    preserve here: reproducing the boolean `unaccounted` per line reproduces both exactly.
+    """
+    n_candidates = lines.shape[0]
+    for candidate in range(n_candidates):
+        count = counts[candidate]
+        previous = 0.0
+        unaccounted = 0
+        run = 0
+        longest = 0
+        for line in range(count):
+            value = lines[candidate, line]
+            local_gap = value - previous
+            previous = value
+            if nearest_peak_distance(q2_obs_sorted, value) > tolerance_factor*local_gap:
+                unaccounted += 1
+                run += 1
+                if run > longest:
+                    longest = run
+            else:
+                run = 0
+        n_over[candidate] = unaccounted
+        max_gap[candidate] = longest
+
+
+@jit
+def bracketing_line_indices(lines, q2_obs, upper_index):
+    """Per candidate row, `np.searchsorted(lines[row], q2_obs)` for every observed peak.
+
+    Replaces a Python loop that called numpy's searchsorted once per candidate row. `lines`
+    is row-sorted with +inf padding, so the insertion point is the index of the first line
+    at or above the peak, which is exactly what Shirley's bracketing pair needs.
+
+    `q2_obs` is *not* required to be sorted -- each peak is searched on its own, as in the
+    expression this replaces. The search is a plain lower_bound, matching side='left': it
+    steps on a strict `<`, so an exact hit returns the index of the line itself.
+    """
+    n_candidates, n_lines = lines.shape
+    n_peaks = q2_obs.size
+    for candidate in range(n_candidates):
+        for peak in range(n_peaks):
+            value = q2_obs[peak]
+            left = 0
+            right = n_lines
+            while left < right:
+                middle = (left + right)//2
+                if lines[candidate, middle] < value:
+                    left = middle + 1
+                else:
+                    right = middle
+            upper_index[candidate, peak] = left
+
+
+@jit
+def nearest_line_distances(q2_obs, q2_ref, d1):
+    """d1[i, p] = min_j |q2_ref[i, j] - q2_obs[p]|, the nearest calculated line to each peak.
+
+    Taupin's reduced chi-square and the assignment posterior are both built on this, and it
+    was n_peaks separate passes over the reference array -- one per peak, each materialising
+    a (chunk, n_ref) temporary. One pass carrying n_peaks running minima reads the row once
+    instead of twenty times, which is the whole difference: the row is 8 KB and the second
+    read would have come out of memory.
+
+    A minimum is a selection, not an accumulation, so scan order cannot change the answer:
+    the value written is the same float either way, and `abs(line - peak)` is formed in the
+    same order the array expression used.
+
+    **NaN has to be propagated deliberately**, which a running minimum does not do on its own:
+    `NaN < running` is false, so a naive scan silently skips it and returns the minimum of the
+    rest, where `.min()` returns NaN. A NaN reference line makes every peak's distance NaN, so
+    one test per reference entry catches it -- n_peaks times cheaper than testing the distance
+    -- and a NaN *peak* is a whole column, which the caller fills in. Cost of the test, measured
+    on a 1,000-candidate pool capture: under 5%.
+    """
+    n_candidates, n_ref = q2_ref.shape
+    n_peaks = q2_obs.size
+    running = np.empty(n_peaks, dtype=np.float64)
+    for candidate in range(n_candidates):
+        for peak in range(n_peaks):
+            running[peak] = np.inf
+        undefined = False
+        for reference in range(n_ref):
+            value = q2_ref[candidate, reference]
+            if value != value:
+                undefined = True
+            else:
+                for peak in range(n_peaks):
+                    distance = abs(value - q2_obs[peak])
+                    if distance < running[peak]:
+                        running[peak] = distance
+        for peak in range(n_peaks):
+            d1[candidate, peak] = np.nan if undefined else running[peak]
+
+
+# np.exp returns exactly 0.0 for arguments at or below -745.1332191019412 -- the first
+# nonzero result is the smallest subnormal, 5e-324. Anything below this bound therefore
+# contributes an exact zero to the sum, so it can be filled in rather than computed. The
+# bound is deliberately a little under the true one: it has to be safe, not tight, and no
+# term between the two is skipped.
+EXP_UNDERFLOW_BOUND = -746.0
+
+
+@jit
+def posterior_exponent_terms(q2_ref_block, q2_obs_peak, d1_peak, block_scale, terms, computable):
+    """The log-sum-exp arguments for one peak, with the terms that underflow already zeroed.
+
+    Fills, for every calculated line of every candidate in the block:
+
+      terms       -(|line - peak|^2 - d1^2)/scale where np.exp of that is not identically
+                  zero, and 0.0 where it is -- so the caller runs `np.exp(terms, out=terms,
+                  where=computable)` and the zeros are already in place;
+      computable  which entries the exponential still has to be taken of.
+
+    On a real pool 98.8% of the entries fall below the bound: sigma is estimated from the
+    candidate's own residuals, so for anything that fits at all the competing lines are many
+    sigma away. The exponential is *not* what dominates, though -- fusing the four array
+    passes that built its argument is worth more than skipping it (120.7 ms -> 19.0 ms on a
+    1,000-candidate pool capture, of which skipping the exponential is 3.7 ms).
+
+    Only multiplies, subtracts, divides and compares here, all exact under IEEE and all
+    performed in the same order as the array expression, so the argument handed to numpy's
+    exp is the same float it was handed before. The exponential itself stays in numpy: numba
+    would call a different libm and the last bit is not guaranteed to agree.
+    """
+    n_candidates, n_ref = q2_ref_block.shape
+    for candidate in range(n_candidates):
+        scale = block_scale[candidate]
+        nearest_squared = d1_peak[candidate]*d1_peak[candidate]
+        for reference in range(n_ref):
+            distance = abs(q2_ref_block[candidate, reference] - q2_obs_peak)
+            value = -(distance*distance - nearest_squared)/scale
+            # Written as `<=` rather than `>` so that NaN falls through to the branch that
+            # keeps it: numpy's exp turns it into a NaN term and the sum propagates it, which
+            # is what the expression this replaces did with a NaN peak or reference line.
+            if value <= EXP_UNDERFLOW_BOUND:
+                terms[candidate, reference] = 0.0
+                computable[candidate, reference] = False
+            else:
+                terms[candidate, reference] = value
+                computable[candidate, reference] = True
