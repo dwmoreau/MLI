@@ -1025,7 +1025,8 @@ def entry_totals(arm):
     way to read a *cut*, but the absolute rate is what an end-to-end claim is made against.
     """
     totals = {}
-    root = Path(BASE) / ARMS[arm]['root']
+    # A re-run reuses the archived arm's entry tables, so the denominators come from there.
+    root = Path(BASE) / ARMS[arm].get('entries_root', ARMS[arm]['root'])
     for bundle, bundle_dir in bundle_directories(root).items():
         totals[bundle] = int(load_entries(bundle_dir)['entry_id'].nunique())
     return totals
@@ -1099,7 +1100,8 @@ def run_retention(args):
 def _print_retention_headline(summary):
     """The one comparison the stage exists to make, at the pool size production actually uses."""
     aggregate = summary[summary['bravais_lattice'] == 'ALL']
-    target = 0.028 if aggregate['arm'].iloc[0] == 'general' else 0.004
+    # The share of the threshold-0 pool the production cut of 5.0 actually keeps on this arm.
+    target = 0.028 if aggregate['arm'].iloc[0].endswith('general') else 0.004
     at_production = aggregate[aggregate['target_fraction'] == target]
     if at_production.empty:
         return
@@ -1581,7 +1583,7 @@ def figure_retention(artifact_dir):
                        low=('reachability_ci_low', 'mean'),
                        high=('reachability_ci_high', 'mean'),
                        estimated_seconds=('estimated_seconds', 'sum')))
-        production = 0.028 if arm == 'general' else 0.004
+        production = 0.028 if arm.endswith('general') else 0.004
         cells = ARM_CELLS[arm]
 
         for row, (xcolumn, xlabel) in enumerate(
@@ -1649,7 +1651,7 @@ ABSOLUTE_CUTS = (0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0)
 # Entry-bundle cells per arm: the denominator for an absolute reachability rate. Entries are
 # balanced across lattices in both arms, so an unweighted rate over cells is already unweighted
 # across lattices (PROTOCOL section 3 rule 6).
-ARM_CELLS = {'general': 210, 'hard': 972}
+ARM_CELLS = {'general': 210, 'hard': 972, 'rerun-general': 210, 'rerun-hard': 972}
 
 
 def _absolute_worker(job):
