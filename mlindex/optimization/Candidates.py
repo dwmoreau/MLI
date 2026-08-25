@@ -2,6 +2,9 @@ import numpy as np
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20
+from mlindex.utilities.FigureOfMerits import get_M_rev_sym
+from mlindex.utilities.FigureOfMerits import get_X_N
+from mlindex.utilities.FigureOfMerits import get_n_over
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood_from_xnn
 from mlindex.utilities.FigureOfMerits import get_multiplicity_taupin88
@@ -20,6 +23,14 @@ from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
+
+
+# The merits a research run can capture at the prune site. The cut reads a merit once per
+# candidate, so this is one extra evaluation of each -- but it is off by default and the shipped
+# path never touches it: `prune_criterion_capture` is not a CLI option and never will be
+# (C2-F-008). It exists because campaign 1 stored only M20 at the cut, which is the one question
+# its 57-million-row threshold-0 dump cannot answer (C2-R-001).
+PRUNE_CAPTURE_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
 
 
 class Candidates:
@@ -51,6 +62,11 @@ class Candidates:
             tensorflow=False,
             representation='xnn'
             )
+        # Research capture at the prune site, off unless opt_params asks for it.
+        self.prune_criterion_capture = bool(opt_params.get('prune_criterion_capture', False))
+        self.m20_at_prune = None
+        self.merit_at_prune = None
+
         self.assign_hkls()
         if self.zero_error:
             self.correct_zero_error()
@@ -287,15 +303,86 @@ class Candidates:
             self.best_zeropoint[improved] = refined_zeropoint[improved]
 
     def prune_below_m20(self, threshold=5.0):
+        """Drop every candidate below the bar, keeping the best one if nothing clears it.
+
+        `threshold` may be a scalar or a mapping keyed by Bravais lattice. The mapping form is
+        what a per-lattice cut needs: one M20 value means a different surviving fraction on every
+        lattice -- 1.3 % on oF against 6.1 % on cI at the same 5.0 -- so a single scalar is
+        already a per-lattice policy, just an unchosen one (C2-F-023). Whether the values should
+        differ is not settled; the shape is here so that settling it does not need a redesign.
+
+        The bar is applied to `best_M20`, the running maximum over the search's iterates, computed
+        against the lattice's full reference list. That is NOT the M20 the candidate goes on to
+        report: `refine_cell` runs after this, and `assign_extinction_group` then replaces the
+        stored value with the maximum over the lattice's extinction groups, which can only raise
+        it. A correct cell deleted here at 3.5 is not a cell that would have reported 3.5 -- it is
+        one that had not finished being fitted (C2-F-002, C2-F-020).
+        """
+        if isinstance(threshold, dict):
+            threshold = threshold[self.bravais_lattice]
         keep = self.best_M20 >= threshold
         if not np.any(keep):
             keep[np.argmax(self.best_M20)] = True
+
+        if self.prune_criterion_capture:
+            # The value the rule tested, and the same for every candidate criterion, recorded
+            # BEFORE the mask is applied so the survivors carry what decided their survival.
+            # Keeping it is what lets one run answer every higher threshold by restriction
+            # instead of needing a second run whose repair RNG has diverged.
+            self.merit_at_prune = {name: values[keep] for name, values
+                                   in self._capture_merits_at_prune().items()}
+            self.m20_at_prune = self.best_M20[keep].copy()
+
         self.best_xnn = self.best_xnn[keep]
         self.best_M20 = self.best_M20[keep]
         self.best_hkl = self.best_hkl[keep]
         if self.zero_error:
             self.best_zeropoint = self.best_zeropoint[keep]
         self.n = self.best_xnn.shape[0]
+
+    def _capture_merits_at_prune(self):
+        """Every candidate criterion on the cells as they stand at the cut.
+
+        Deliberately a one-shot recompute here rather than a running maximum beside `best_M20`:
+        the inner loop is out of scope (DWMM, 2026-08-24), so the iterate this scores is the one
+        M20 selected, which is exactly what a drop-in replacement cut would see.
+
+        Route matters to the last bit. `q2_ref_calc` comes from the optimiser's own calculator on
+        `best_xnn` and the assignment is redone with `fast_assign`, so the recomputed M20 must
+        equal `best_M20` exactly -- that identity is the gate on this whole capture. Rebuilding
+        q2_calc from the stored Miller indices instead would differ by an ULP that moves a line
+        across M20's own cut-off (F-095).
+
+        `get_M20` is called LAST because it is the only one of the four that modifies
+        `q2_ref_calc`, via np.putmask.
+
+        ONE KNOWN DISAGREEMENT, and it is not this routine's. The recomputed M20 equals
+        `best_M20` on every candidate except those `fix_unphysical` repaired at construction and
+        that never improved afterwards: `__init__` copies `best_xnn` *before*
+        `fix_out_of_range_candidates` replaces `self.xnn`, then computes `best_M20` from the
+        repaired array -- so for those rows the two describe different cells (C2-F-026). Measured
+        at 4 of 8 062 triclinic candidates and 0 of 10 292 monoclinic and cubic ones. The
+        difference is a diagnostic, not a defect in the capture, and it heals before anything is
+        reported because `assign_extinction_group` recomputes M20 from `best_xnn` at the end.
+        """
+        if self.zero_error:
+            raise NotImplementedError(
+                'prune_criterion_capture does not support zero-error refinement: the per-'
+                'candidate zeropoint would have to be applied to q2_ref_calc here, and the '
+                'captured merits would not reproduce the pipeline value without it.'
+                )
+        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
+        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
+        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+
+        M_tilde, M_rev, M_sym = get_M_rev_sym(self.q2_obs, q2_calc, q2_ref_calc)
+        n_over, max_gap = get_n_over(self.q2_obs, q2_calc, q2_ref_calc)
+        X_N = get_X_N(self.q2_obs, q2_calc, q2_ref_calc)
+        M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+
+        return {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
+                'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
+                'max_gap': max_gap.astype(np.float64)}
 
     def standardize_cell(self):
         # These do a quick standardization of monoclinic and triclinic candidates. It is just a
@@ -454,6 +541,16 @@ class Candidates:
             if self.zero_error:
                 self.best_zeropoint = np.concatenate(
                     [self.best_zeropoint, best_mf_zeropoint[improved]])
+            if self.m20_at_prune is not None:
+                # An appended row is a rescaling of its parent, and the parent is what the cut
+                # tested. Giving the child its parent's at-prune values is what makes a
+                # restriction of this run reproduce the cut exactly: a child whose parent the cut
+                # would have deleted disappears with it.
+                self.m20_at_prune = np.concatenate(
+                    [self.m20_at_prune, self.m20_at_prune[improved]])
+                self.merit_at_prune = {
+                    name: np.concatenate([values, values[improved]])
+                    for name, values in self.merit_at_prune.items()}
             self.n = self.best_xnn.shape[0]
 
         # do quick reindexing to enforce constraints

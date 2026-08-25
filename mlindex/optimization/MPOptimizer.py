@@ -2,6 +2,7 @@ import numpy as np
 from multiprocessing import Process, Queue
 
 from mlindex.optimization.MPIOptimizer import OptimizerManager, OptimizerWorker
+from mlindex.optimization.MPIOptimizer import _collect_at_prune, _worker_payload
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 
 
@@ -96,10 +97,12 @@ class MPOptimizerManager(OptimizerManager):
         best_xnn_all = [candidates.best_xnn]
         best_n_indexed_all = [candidates.n_indexed]
         best_spacegroup_all = list(candidates.best_spacegroup)
+        results = []
         for r in range(1, self.n_ranks):
             result = self._result_queues[r].get()
             if isinstance(result, Exception):
                 raise RuntimeError(f"Worker {r} failed: {result}") from result
+            results.append(result)
             best_M20_all.append(result['M20'])
             best_Minfo_all.append(result['Minfo'])
             best_xnn_all.append(result['xnn'])
@@ -107,7 +110,8 @@ class MPOptimizerManager(OptimizerManager):
             best_spacegroup_all += result['spacegroup']
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates)
+                                     n_top_candidates,
+                                     at_prune=_collect_at_prune(candidates, results))
 
     def convergence_testing(self, candidates):
         n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])
@@ -153,14 +157,7 @@ class MPOptimizerWorker(OptimizerWorker):
         return self.generate_candidates_common(self._data_q.get())
 
     def downsample_candidates(self, candidates, n_top_candidates):
-        result = {
-            'M20': candidates.best_M20,
-            'Minfo': candidates.best_Minfo,
-            'xnn': candidates.best_xnn,
-            'n_indexed': candidates.n_indexed,
-            'spacegroup': list(candidates.best_spacegroup),
-        }
-        self._result_q.put(result)
+        self._result_q.put(_worker_payload(candidates))
 
     def convergence_testing(self, candidates):
         self._result_q.put({'M20': candidates.best_M20, 'xnn': candidates.best_xnn})
@@ -183,18 +180,32 @@ def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None,
             msg = task_queue.get()
             if msg == 'shutdown':
                 break
-            bl, n_top, zero_error, wavelength = msg
+            bl, n_top, zero_error, wavelength, run_seed = msg
+            if run_seed is not None:
+                # Reseed per task, so a run can be seeded per (entry, Bravais lattice) rather
+                # than once per pool. Campaign 1 seeded once and advanced with every entry, which
+                # meant no subset of a run could be regenerated comparably and forced a
+                # within-run restriction on every result in its final phase (PROTOCOL section 6).
+                # `+ rank` keeps the ranks on distinct streams, as at construction.
+                workers[bl].rng = np.random.default_rng(run_seed + rank)
             workers[bl].run(zero_error=zero_error, wavelength=wavelength,
                             n_top_candidates=n_top)
     except Exception as e:
         result_queue.put(e)
 
 
-def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345):
+def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345,
+                        options=None):
     """Spawn worker processes and construct manager optimizers for all 14 BLs.
 
     Returns (optimizers, processes, task_queues).
     Call shutdown_mp_workers(processes, task_queues) when done.
+
+    `options` is merged into every lattice system's opt_params by the factories, and
+    `_init_workers` then ships the merged dict to each worker -- so a research setting reaches
+    the whole pool without a second channel. Default None leaves every parameter exactly as
+    shipped. This is the opt_params route, not a user-facing one: the prune threshold in
+    particular is deliberately not a CLI option (C2-F-008).
     """
     from mlindex.optimization.UtilitiesOptimizer import get_optimizers
     import mlindex
@@ -226,7 +237,8 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
                      for bl in bravais_lattices}
 
     optimizers = get_optimizers(0, mp_organizers, broadening_tag, n_candidates_scale,
-                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed)
+                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed,
+                                options=options)
 
     # Clean up class-level injection
     MPOptimizerManager._mp_data_queues   = None
@@ -236,10 +248,16 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
     return optimizers, processes, task_queues
 
 
-def run_mp_bl(optimizer, bl, task_queues, q2, zero_error, wavelength, n_top):
-    """Signal workers to start BL run, then run manager's share."""
+def run_mp_bl(optimizer, bl, task_queues, q2, zero_error, wavelength, n_top, run_seed=None):
+    """Signal workers to start BL run, then run manager's share.
+
+    `run_seed` reseeds every rank for this one task. Default None leaves the streams exactly
+    where the previous task left them, which is the shipped behaviour.
+    """
     for r in range(1, len(task_queues)):
-        task_queues[r].put((bl, n_top, zero_error, wavelength))
+        task_queues[r].put((bl, n_top, zero_error, wavelength, run_seed))
+    if run_seed is not None:
+        optimizer.rng = np.random.default_rng(run_seed)
     optimizer.run(q2=q2, zero_error=zero_error,
                   wavelength=wavelength, n_top_candidates=n_top)
 
@@ -263,7 +281,14 @@ def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue,
             msg = task_queue.get()
             if msg == 'shutdown':
                 break
-            bl, n_top, zero_error, wavelength = msg
+            bl, n_top, zero_error, wavelength, run_seed = msg
+            if run_seed is not None:
+                # Reseed per task, so a run can be seeded per (entry, Bravais lattice) rather
+                # than once per pool. Campaign 1 seeded once and advanced with every entry, which
+                # meant no subset of a run could be regenerated comparably and forced a
+                # within-run restriction on every result in its final phase (PROTOCOL section 6).
+                # `+ rank` keeps the ranks on distinct streams, as at construction.
+                workers[bl].rng = np.random.default_rng(run_seed + rank)
             workers[bl].run(zero_error=zero_error, wavelength=wavelength,
                             n_top_candidates=n_top)
     except Exception as e:
@@ -275,6 +300,12 @@ def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_latt
 
     Returns (optimizers, processes, task_queues).
     Call shutdown_mp_workers(processes, task_queues) when done.
+
+    `options` is merged into every lattice system's opt_params by the factories, and
+    `_init_workers` then ships the merged dict to each worker -- so a research setting reaches
+    the whole pool without a second channel. Default None leaves every parameter exactly as
+    shipped. This is the opt_params route, not a user-facing one: the prune threshold in
+    particular is deliberately not a CLI option (C2-F-008).
     """
     from mlindex.optimization.AnalyticOptimizer import MPAnalyticOptimizer
 

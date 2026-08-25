@@ -67,6 +67,47 @@ def _downsample_chunk(args):
             n_indexed_chunk[order], [spacegroup_chunk[i] for i in order])
 
 
+def _worker_payload(candidates):
+    """What a rank hands back after the post-cut block.
+
+    One dict rather than typed sends: a typed Recv needs its buffer sized before the message
+    arrives, and the manager's only estimate is how many candidates it *sent* -- which is not what
+    comes back, since prune_below_m20 drops rows and correct_off_by_two appends them.
+
+    The at-prune columns ride along only when the research capture is on, so the shipped payload
+    is unchanged.
+    """
+    payload = {
+        'M20': candidates.best_M20,
+        'Minfo': candidates.best_Minfo,
+        'xnn': candidates.best_xnn,
+        'n_indexed': candidates.n_indexed,
+        'spacegroup': list(candidates.best_spacegroup),
+        }
+    if candidates.m20_at_prune is not None:
+        payload['m20_at_prune'] = candidates.m20_at_prune
+        payload['merit_at_prune'] = candidates.merit_at_prune
+    return payload
+
+
+def _collect_at_prune(candidates, results):
+    """Assemble the at-prune columns across the manager's own candidates and every rank's.
+
+    Returns None when the capture is off, which is what keeps `_downsample_computation` on its
+    original path for every shipped run.
+    """
+    if candidates.m20_at_prune is None:
+        return None
+    columns = {'m20_at_prune': [candidates.m20_at_prune]}
+    for name, values in candidates.merit_at_prune.items():
+        columns[f'merit_at_prune_{name}'] = [values]
+    for result in results:
+        columns['m20_at_prune'].append(result['m20_at_prune'])
+        for name, values in result['merit_at_prune'].items():
+            columns[f'merit_at_prune_{name}'].append(values)
+    return {name: np.concatenate(pieces) for name, pieces in columns.items()}
+
+
 class OptimizerBase:
     def __init__(self, comm, fom):
         self.comm = comm
@@ -137,7 +178,13 @@ class OptimizerBase:
         # measurement, so skip both rather than trying to track the permutation.
         convergence = self.opt_params['convergence_testing']
         if not convergence:
-            candidates.prune_below_m20()
+            # `.get` with the shipped default, so an opt_params dict that does not carry the key
+            # behaves exactly as before. This is the research route the decisions log blesses --
+            # campaign 2 varies the cut through opt_params on its own branch and never through
+            # the CLI, which is a settled question (C2-F-008). A per-lattice mapping is accepted
+            # here too; see Candidates.prune_below_m20.
+            candidates.prune_below_m20(
+                threshold=self.opt_params.get('prune_m20_threshold', 5.0))
         candidates.refine_cell()
         candidates.standardize_cell()
         if not convergence:
@@ -185,13 +232,7 @@ class OptimizerWorker(OptimizerBase):
         # disagree about the count, which is the failure this replaces. MPOptimizer has
         # always worked this way; the two paths now match.
         self.comm.send(
-            {
-                'M20': candidates.best_M20,
-                'Minfo': candidates.best_Minfo,
-                'xnn': candidates.best_xnn,
-                'n_indexed': candidates.n_indexed,
-                'spacegroup': list(candidates.best_spacegroup),
-                },
+            _worker_payload(candidates),
             dest=self.root,
             )
 
@@ -523,7 +564,7 @@ class OptimizerManager(OptimizerBase):
 
     def _downsample_computation(self, best_M20_all, best_Minfo_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
-                                n_top_candidates):
+                                n_top_candidates, at_prune=None):
         best_M20_all = np.concatenate(best_M20_all, axis=0)
         best_Minfo_all = np.concatenate(best_Minfo_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
@@ -557,6 +598,22 @@ class OptimizerManager(OptimizerBase):
         best_spacegroup_all = [
             spacegroup for spacegroup, keep in zip(best_spacegroup_all, good_indices) if keep
             ]
+
+        # Every candidate that reaches deduplication, before it removes any of them, and before
+        # the reciprocal-volume sort reorders them. Only populated under the research capture;
+        # the driver drains it after each lattice. Copied, because the caller goes on to sort and
+        # collapse these same arrays.
+        if at_prune is not None:
+            self.predownsample = dict(
+                {'xnn': best_xnn_all.copy(), 'M20': best_M20_all.copy(),
+                 'Minfo': best_Minfo_all.copy(), 'n_indexed': best_n_indexed_all.copy(),
+                 'spacegroup': list(best_spacegroup_all),
+                 'bravais_lattice': self.bravais_lattice,
+                 'lattice_system': self.lattice_system,
+                 'n_peaks': int(self.n_peaks),
+                 'hkl_ref_length': int(self.hkl_ref_length),
+                 'downsample_radius': float(self.opt_params['downsample_radius'])},
+                **{name: values[good_indices] for name, values in at_prune.items()})
 
         # Next remove nearly identical xnn's by selecting the xnn within an arbitrary radius
         # with the highest M20 score. The candidates are sorted by reciprocal volume so the
@@ -626,6 +683,7 @@ class OptimizerManager(OptimizerBase):
         best_xnn_all = []
         best_n_indexed_all = []
         best_spacegroup_all = []
+        results = []
         for rank_index in range(self.n_ranks):
             if rank_index == self.root:
                 best_M20_all.append(candidates.best_M20)
@@ -641,6 +699,7 @@ class OptimizerManager(OptimizerBase):
                 # list arrived at its true, shorter length, and the two then disagreed in
                 # `_downsample_computation`.
                 result = self.comm.recv(source=rank_index)
+                results.append(result)
                 best_M20_all.append(result['M20'])
                 best_Minfo_all.append(result['Minfo'])
                 best_xnn_all.append(result['xnn'])
@@ -649,7 +708,8 @@ class OptimizerManager(OptimizerBase):
 
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates)
+                                     n_top_candidates,
+                                     at_prune=_collect_at_prune(candidates, results))
 
     def convergence_testing(self, candidates):
         n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])
