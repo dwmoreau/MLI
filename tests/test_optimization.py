@@ -290,3 +290,45 @@ def test_a_dropped_nan_cell_does_not_shift_the_spacegroups():
     assert 'BAD' not in manager.top_spacegroup
     assert manager.top_M20.tolist() == [30.0, 20.0, 10.0]
     assert manager.top_spacegroup == ['D', 'B', 'A']
+
+
+def test_a_short_return_does_not_desynchronise_the_pool():
+    """The MPI manager used to size its receive buffers from the number of candidates it
+    *sent* a rank. The rank prunes before returning, so the four numeric arrays arrived
+    zero-padded up to the outgoing count while `best_spacegroup` -- sent by pickle, which
+    carries its own length -- arrived at the true, shorter one. The two then disagreed:
+    the `zip` against the NaN filter silently truncated to the list, and the
+    reciprocal-volume sort indexed the full-length arrays, so the last candidates ran off
+    the end of the list.
+
+    Reproduced end to end before the fix: `mpiexec -n 6 ... --mpi --bravais-lattices aP`
+    raised `IndexError: list index out of range` on the manager rank, which never reached
+    the global barrier, so the other five ranks blocked there forever and the whole job
+    hung with every rank spinning at 100% CPU. This pins the arithmetic underneath it."""
+    manager = _downsample_manager()
+    # Four rows of numbers against three spacegroups: what a padded receive looked like.
+    xnn = [np.array([[1.0], [2.0], [3.0], [0.0]])]
+    M20 = [np.array([10.0, 20.0, 30.0, 0.0])]
+    Minfo = [np.array([1.0, 2.0, 3.0, 0.0])]
+    n_indexed = [np.array([5, 6, 7, 0])]
+    spacegroup = ['A', 'B', 'C']
+
+    with pytest.raises(ValueError, match='spacegroup'):
+        manager._downsample_computation(M20, Minfo, xnn, n_indexed, spacegroup,
+                                        n_top_candidates=10)
+
+
+def test_a_matched_return_still_downsamples():
+    """The guard above must not fire on the ordinary case."""
+    manager = _downsample_manager()
+    xnn = [np.array([[1.0], [2.0], [3.0]])]
+    M20 = [np.array([10.0, 20.0, 30.0])]
+    Minfo = [np.array([1.0, 2.0, 3.0])]
+    n_indexed = [np.array([5, 6, 7])]
+    spacegroup = ['A', 'B', 'C']
+
+    manager._downsample_computation(M20, Minfo, xnn, n_indexed, spacegroup,
+                                    n_top_candidates=10)
+
+    assert manager.top_M20.tolist() == [30.0, 20.0, 10.0]
+    assert manager.top_spacegroup == ['C', 'B', 'A']
