@@ -61,6 +61,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, BASE)
@@ -80,12 +81,36 @@ ARMS = {
     'hard': {
         'root': os.path.join('mlindex', 'characterization', 'fom', 'retention', 't0'),
         'labels': os.path.join('mlindex', 'data', 'fom_prune_labels'),
+        'layout': 'archived',
         'note': '243 entries (183 train / 60 dev), true lattices mC/mP/aP only, 4 hard bundles',
         },
     'general': {
         'root': os.path.join('mlindex', 'characterization', 'fom', 'allstrata', 't0'),
         'labels': os.path.join('mlindex', 'data', 'fom_prune_labels_allstrata'),
+        'layout': 'archived',
         'note': '210 entries (163 train / 47 dev), all 14 lattices, 15 each, nominal conditions',
+        },
+    # The Phase 2 re-run (`run_fom_prune_rerun.py`). Same entries and the same peak lists, but a
+    # pool of its own -- and it carries `merit_at_prune_*`, which campaign 1's dumps do not. That
+    # is the whole reason it exists: it is the only pool on which a criterion can be swept AT the
+    # cut rather than after it (C2-R-001). Labels are written inline, so no labels directory.
+    'rerun-general': {
+        'root': os.path.join('mlindex', 'characterization', 'fom', 'prune_capture', 'general'),
+        'labels': None,
+        'layout': 'rerun',
+        # The re-run reuses the archived peak lists rather than regenerating them, so the entry
+        # tables it was driven from are the ones the recompute must read too.
+        'entries_root': os.path.join('mlindex', 'characterization', 'fom', 'allstrata', 't0'),
+        'note': 'Phase 2 re-run of the general arm: 210 entries, all 14 lattices, threshold 0, '
+                'seeded per (entry, Bravais lattice), merits captured at the cut',
+        },
+    'rerun-hard': {
+        'root': os.path.join('mlindex', 'characterization', 'fom', 'prune_capture', 'hard'),
+        'labels': None,
+        'layout': 'rerun',
+        'entries_root': os.path.join('mlindex', 'characterization', 'fom', 'retention', 't0'),
+        'note': 'Phase 2 re-run of the hard arm: 243 entries x 4 bundles, threshold 0, '
+                'seeded per (entry, Bravais lattice), merits captured at the cut',
         },
     }
 
@@ -237,10 +262,24 @@ def join_labels(frame, labels):
 
 
 def recompute_shard(shard_path, bundle, entries, labels_dir):
-    """Points B and C for every candidate in one shard, plus the identity and label columns."""
-    frame = pd.read_parquet(shard_path, columns=list(PREDOWNSAMPLE_COLUMNS))
-    frame['is_correct'] = join_labels(frame, pd.read_parquet(label_path(labels_dir, bundle,
-                                                                       shard_path)))
+    """Points B and C for every candidate in one shard, plus the identity and label columns.
+
+    Two layouts. Campaign 1's archived dumps keep `is_correct` in a parallel labels directory,
+    row-aligned; the Phase 2 re-run writes it inline along with `merit_at_prune_*`, the point-A
+    columns that make a criterion sweep at the cut possible at all. Anything matching
+    `m20_at_prune` or `merit_at_prune_*` is carried through untouched.
+    """
+    stored = pq.ParquetFile(shard_path).schema_arrow.names
+    wanted = [column for column in PREDOWNSAMPLE_COLUMNS if column in stored]
+    carried = [column for column in stored
+               if column == 'm20_at_prune' or column.startswith('merit_at_prune_')]
+    inline = [column for column in ('is_correct', 'split', 'condition_bundle')
+              if column in stored]
+    frame = pd.read_parquet(shard_path,
+                            columns=sorted(set(wanted + carried + inline), key=stored.index))
+    if 'is_correct' not in frame:
+        frame['is_correct'] = join_labels(frame, pd.read_parquet(
+            label_path(labels_dir, bundle, shard_path)))
     truth = entries.set_index('entry_id')
 
     columns = {f'{merit}_{point}': np.full(frame.shape[0], np.nan)
@@ -272,11 +311,13 @@ def recompute_shard(shard_path, bundle, entries, labels_dir):
                 for name, values in block.items():
                     columns[f'{name}_C'][rows[local]] = values
 
-    out = frame[['entry_id', 'bravais_lattice', 'lattice_system', 'candidate_id', 'n_peaks',
-                 'm20_at_prune', 'M20', 'Minfo', 'n_indexed', 'downsample_radius',
-                 'is_correct']].copy()
-    out['split'] = out['entry_id'].map(truth['split'])
-    out['condition_bundle'] = bundle
+    keep = ['entry_id', 'bravais_lattice', 'lattice_system', 'candidate_id', 'n_peaks',
+            'M20', 'Minfo', 'n_indexed', 'downsample_radius', 'is_correct'] + carried
+    out = frame[keep].copy()
+    if 'split' not in out:
+        out['split'] = out['entry_id'].map(truth['split'])
+    if 'condition_bundle' not in out:
+        out['condition_bundle'] = bundle
     for name, values in columns.items():
         out[name] = values
     return out
@@ -284,6 +325,12 @@ def recompute_shard(shard_path, bundle, entries, labels_dir):
 
 def _merits_worker(job):
     shard_path, bundle_dir, bundle, labels_dir, out_dir = job
+    if bundle is None:
+        # Re-run layout: the shard carries its own bundle, and the entry table lives with the
+        # archived arm the re-run was driven from.
+        bundle = pd.read_parquet(shard_path, columns=['condition_bundle'])[
+            'condition_bundle'].iloc[0]
+        bundle_dir = os.path.join(bundle_dir, bundle)
     entries = load_entries(bundle_dir)
     frame = recompute_shard(shard_path, bundle, entries, labels_dir)
     destination = Path(out_dir) / f'merits_{Path(shard_path).stem.split("_", 1)[1]}.parquet'
@@ -312,10 +359,16 @@ def run_merits(args):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     jobs = []
-    for bundle, bundle_dir in bundle_directories(os.path.join(BASE, arm['root'])).items():
-        for shard in sorted(bundle_dir.glob('predownsample_*.parquet')):
-            jobs.append((str(shard), str(bundle_dir), bundle,
-                         os.path.join(BASE, arm['labels']), str(out_dir)))
+    if arm.get('layout') == 'rerun':
+        # Flat directory, labels inline, entry tables borrowed from the archived arm.
+        entries_root = os.path.join(BASE, arm['entries_root'])
+        for shard in sorted((Path(BASE) / arm['root']).glob('predownsample_*.parquet')):
+            jobs.append((str(shard), entries_root, None, None, str(out_dir)))
+    else:
+        for bundle, bundle_dir in bundle_directories(os.path.join(BASE, arm['root'])).items():
+            for shard in sorted(bundle_dir.glob('predownsample_*.parquet')):
+                jobs.append((str(shard), str(bundle_dir), bundle,
+                             os.path.join(BASE, arm['labels']), str(out_dir)))
     if args.limit_shards:
         jobs = jobs[:args.limit_shards]
         print(f'SMOKE TEST: {len(jobs)} shards only -- not a result')
@@ -602,9 +655,23 @@ def calibrate_cost_model(fits, artifact_dir):
 COMPOSITE_VETO = 2
 
 
-def criteria_list():
-    """[(label, point, base column, veto column or None)] -- every cut this stage sweeps."""
+def criteria_list(available=None):
+    """[(label, point, base column, veto column or None)] -- every cut this stage sweeps.
+
+    Point A is data-driven. On campaign 1's dumps it is `m20_at_prune` and nothing else, because
+    that is all that was stored. On a Phase 2 re-run every merit has a `merit_at_prune_*` column
+    and point A grows to match -- which is the only configuration in which "would a different
+    merit make a better cut *at the cut*?" is a question this script can answer (C2-Q-008).
+    """
     criteria = [('m20_at_prune', 'A', 'm20_at_prune', None)]
+    if available is not None:
+        for merit in MERITS:
+            column = f'merit_at_prune_{merit}'
+            if column in available and merit != 'M20':
+                criteria.append((f'{merit}_A', 'A', column, None))
+        if all(f'merit_at_prune_{merit}' in available for merit in ('M_sym', 'X_N')):
+            criteria.append(('M_sym_A+X_N_veto', 'A', 'merit_at_prune_M_sym',
+                             'merit_at_prune_X_N'))
     for point in ('B', 'C'):
         for merit in MERITS:
             criteria.append((f'{merit}_{point}', point, f'{merit}_{point}', None))
@@ -631,7 +698,12 @@ def criterion_scores(frame, base, veto):
     A veto column expresses the composite cut as a score rather than as a second rule, by sending
     the vetoed candidates to -inf. They then fall out at every threshold, which is what a veto is.
     """
-    merit = base[:-2] if base.endswith(('_B', '_C')) else 'M20'
+    if base.startswith('merit_at_prune_'):
+        merit = base[len('merit_at_prune_'):]
+    elif base.endswith(('_B', '_C')):
+        merit = base[:-2]
+    else:
+        merit = 'M20'
     values = frame[base].to_numpy(dtype=np.float64)
     scores = -values if merit in HIGHER_IS_WORSE else values.copy()
     if veto is not None:
@@ -961,7 +1033,7 @@ def entry_totals(arm):
 
 def run_retention(args):
     shards = merit_shards(args.merit_root, args.arm)
-    criteria = criteria_list()
+    criteria = criteria_list(available=set(pq.ParquetFile(shards[0]).schema_arrow.names))
 
     print(f'placing thresholds over {len(shards)} shards, {len(criteria)} criteria...',
           flush=True)

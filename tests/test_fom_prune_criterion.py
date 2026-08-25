@@ -187,12 +187,41 @@ def test_downstream_costs_shrink_as_the_cut_moves_later():
     assert 'assign_extinction_group' not in PRUNE.DOWNSTREAM_OF['C']
 
 
-def test_criteria_list_carries_no_stage_A_merit_other_than_M20():
-    """`best_xnn` at the cut was never stored, so no other merit HAS a stage-A value.
+def test_criteria_list_carries_no_stage_A_merit_other_than_M20_on_the_archived_dump():
+    """`best_xnn` at the cut was never stored, so no other merit HAS a stage-A value there.
 
-    The absence is a finding, not an omission; a criterion list that grew one would be reporting
-    a number the dump cannot support.
+    The absence is a finding, not an omission; a criterion list that grew one on campaign 1's
+    dumps would be reporting a number the data cannot support.
     """
     stage_a = [label for label, point, _, _ in PRUNE.criteria_list() if point == 'A']
 
     assert stage_a == ['m20_at_prune']
+
+
+def test_criteria_list_grows_stage_A_when_the_re_run_captured_it():
+    """On a Phase 2 pool every merit has a value at the cut, and the sweep must use them.
+
+    This is the configuration that answers C2-Q-008. Driving it off the columns actually present
+    means one script serves both pools and neither can silently report the other's coverage.
+    """
+    available = {f'merit_at_prune_{merit}' for merit in PRUNE.MERITS} | {'m20_at_prune'}
+
+    criteria = PRUNE.criteria_list(available=available)
+    stage_a = {label for label, point, _, _ in criteria if point == 'A'}
+
+    # M20 at the cut keeps its stored name rather than appearing twice under two labels.
+    assert 'm20_at_prune' in stage_a
+    assert 'M20_A' not in stage_a
+    assert {'M_sym_A', 'M_rev_A', 'X_N_A', 'n_over_A'} <= stage_a
+    assert 'M_sym_A+X_N_veto' in stage_a
+
+
+def test_stage_A_scores_keep_the_sign_convention_of_their_merit():
+    """A captured `n_over` still counts things that should not be there, whatever it is named."""
+    frame = pd.DataFrame({'merit_at_prune_n_over': [4.0, 1.0],
+                          'merit_at_prune_M_sym': [1.0, 2.0]})
+
+    assert np.array_equal(
+        PRUNE.criterion_scores(frame, 'merit_at_prune_n_over', None), [-4.0, -1.0])
+    assert np.array_equal(
+        PRUNE.criterion_scores(frame, 'merit_at_prune_M_sym', None), [1.0, 2.0])
