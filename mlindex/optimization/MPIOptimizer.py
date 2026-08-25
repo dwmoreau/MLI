@@ -128,13 +128,23 @@ class OptimizerBase:
         # each axis. This also performs a quick reindexing.
         # Check which spacegroup gives the best M20 score.
         # Then calculate the number of assigned peaks (probability > 50%)
-        candidates.prune_below_m20()
+        # These two are the only steps here that change the candidate count:
+        # prune_below_m20 drops rows, and correct_off_by_two appends an off-by-two
+        # corrected copy beside the original rather than replacing it. Convergence
+        # testing measures how far each perturbed starting cell travels, so it needs the
+        # one-to-one correspondence with the cells it generated -- and it reassembles by
+        # stride, which silently misaligns if the count moves. Neither step serves that
+        # measurement, so skip both rather than trying to track the permutation.
+        convergence = self.opt_params['convergence_testing']
+        if not convergence:
+            candidates.prune_below_m20()
         candidates.refine_cell()
         candidates.standardize_cell()
-        candidates.correct_off_by_two()
+        if not convergence:
+            candidates.correct_off_by_two()
         candidates.assign_extinction_group()
         candidates.calculate_peaks_indexed()
-        if self.opt_params['convergence_testing']:
+        if convergence:
             self.convergence_testing(candidates)
         else:
             self.downsample_candidates(candidates, n_top_candidates)
@@ -167,15 +177,28 @@ class OptimizerWorker(OptimizerBase):
         return self.generate_candidates_common(candidate_xnn_rank)
 
     def downsample_candidates(self, candidates, n_top_candidates):
-        self.comm.Send(candidates.best_M20, dest=self.root)
-        self.comm.Send(candidates.best_Minfo, dest=self.root)
-        self.comm.Send(candidates.best_xnn, dest=self.root)
-        self.comm.Send(candidates.n_indexed, dest=self.root)
-        self.comm.send(candidates.best_spacegroup, dest=self.root)
+        # One pickled message rather than four typed Sends plus a pickled list. A typed
+        # Recv needs its buffer sized before the message arrives, and the manager's only
+        # estimate is how many candidates it *sent* -- which is not what comes back:
+        # prune_below_m20 drops rows and correct_off_by_two appends them. Sending
+        # everything in one object means the arrays and the spacegroup list cannot
+        # disagree about the count, which is the failure this replaces. MPOptimizer has
+        # always worked this way; the two paths now match.
+        self.comm.send(
+            {
+                'M20': candidates.best_M20,
+                'Minfo': candidates.best_Minfo,
+                'xnn': candidates.best_xnn,
+                'n_indexed': candidates.n_indexed,
+                'spacegroup': list(candidates.best_spacegroup),
+                },
+            dest=self.root,
+            )
 
     def convergence_testing(self, candidates):
-        self.comm.Send(candidates.best_M20, dest=self.root)
-        self.comm.Send(candidates.best_xnn, dest=self.root)
+        self.comm.send(
+            {'M20': candidates.best_M20, 'xnn': candidates.best_xnn}, dest=self.root
+            )
 
 
 class OptimizerManager(OptimizerBase):
@@ -506,6 +529,19 @@ class OptimizerManager(OptimizerBase):
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
 
+        # The arrays and the spacegroup list index the same candidates, and the sort below
+        # indexes the list with positions taken from the arrays. If they ever disagree the
+        # symptom is not a clean failure here: the NaN filter's `zip` truncates to the
+        # shorter one and the sort then runs off the end of the list, several steps later
+        # and in a way that reads like a sorting bug. Under MPI that killed the manager
+        # rank and left every other rank blocked on the next barrier, hanging the job.
+        if len(best_spacegroup_all) != best_M20_all.shape[0]:
+            raise ValueError(
+                f'got {best_M20_all.shape[0]} candidates but '
+                f'{len(best_spacegroup_all)} spacegroups; they index the same candidates '
+                'and must be the same length'
+                )
+
         # Remove any candidates with np.nan as a unit cell.
         # I believe these are caused by numerical issues with triclinic unit cells during the
         # Selling reduction
@@ -598,20 +634,18 @@ class OptimizerManager(OptimizerBase):
                 best_n_indexed_all.append(candidates.n_indexed)
                 best_spacegroup_all += candidates.best_spacegroup
             else:
-                best_M20_rank = np.zeros(self.sent_candidates[rank_index])
-                best_Minfo_rank = np.zeros(self.sent_candidates[rank_index])
-                best_xnn_rank = np.zeros((self.sent_candidates[rank_index], self.unit_cell_length))
-                best_n_indexed_rank = np.zeros(self.sent_candidates[rank_index], dtype=int)
-                self.comm.Recv(best_M20_rank, source=rank_index)
-                self.comm.Recv(best_Minfo_rank, source=rank_index)
-                self.comm.Recv(best_xnn_rank, source=rank_index)
-                self.comm.Recv(best_n_indexed_rank, source=rank_index)
-                best_spacegroup_rank = self.comm.recv(source=rank_index)
-                best_M20_all.append(best_M20_rank)
-                best_Minfo_all.append(best_Minfo_rank)
-                best_xnn_all.append(best_xnn_rank)
-                best_n_indexed_all.append(best_n_indexed_rank)
-                best_spacegroup_all += best_spacegroup_rank
+                # `recv` returns the arrays at the length the rank actually produced, so
+                # nothing has to be sized in advance. Sizing these from
+                # `self.sent_candidates` is what used to hang the run: the typed Recv
+                # zero-padded the arrays up to the outgoing count while the spacegroup
+                # list arrived at its true, shorter length, and the two then disagreed in
+                # `_downsample_computation`.
+                result = self.comm.recv(source=rank_index)
+                best_M20_all.append(result['M20'])
+                best_Minfo_all.append(result['Minfo'])
+                best_xnn_all.append(result['xnn'])
+                best_n_indexed_all.append(result['n_indexed'])
+                best_spacegroup_all += result['spacegroup']
 
         self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
@@ -626,10 +660,20 @@ class OptimizerManager(OptimizerBase):
                 self.top_M20[rank_index::self.n_ranks] = candidates.best_M20
                 self.top_xnn[rank_index::self.n_ranks] = candidates.best_xnn
             else:
-                best_M20_rank = np.zeros(self.sent_candidates[rank_index])
-                best_xnn_rank = np.zeros((self.sent_candidates[rank_index], self.unit_cell_length))
-                self.comm.Recv(best_M20_rank, source=rank_index)
-                self.comm.Recv(best_xnn_rank, source=rank_index)
+                result = self.comm.recv(source=rank_index)
+                best_M20_rank = result['M20']
+                best_xnn_rank = result['xnn']
+                # Unlike the downsample path, this one scatters back into a strided view,
+                # so it needs exactly the rows it sent -- a returned count that differs
+                # would misalign every candidate with its starting perturbation rather
+                # than merely shortening the pool. `_run_loop` skips the two steps that
+                # change the count under convergence testing; this checks that it did.
+                if best_M20_rank.shape[0] != self.sent_candidates[rank_index]:
+                    raise RuntimeError(
+                        f'rank {rank_index} returned {best_M20_rank.shape[0]} candidates '
+                        f'for convergence testing against {self.sent_candidates[rank_index]} '
+                        'sent; the strided reassembly below requires them to match'
+                        )
                 self.top_M20[rank_index::self.n_ranks] = best_M20_rank
                 self.top_xnn[rank_index::self.n_ranks] = best_xnn_rank
         self.top_unit_cell = get_unit_cell_from_xnn(
