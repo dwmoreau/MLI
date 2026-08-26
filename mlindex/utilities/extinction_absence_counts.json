@@ -1,0 +1,294 @@
+{
+  "commit": "45fc5b2a6330a1e5f56c6176760347c7d7350c1d",
+  "counts": {
+    "aP": {
+      "P - e.g. P 1": 0
+    },
+    "cF": {
+      "F - - - e.g. F 2 3": 0,
+      "F - - c e.g. F -4 3 c": 18,
+      "F 41 - - e.g. F 41 3 2": 4,
+      "F d - - e.g. F d -3": 14,
+      "F d - c e.g. F d -3 c": 32
+    },
+    "cI": {
+      "I - - - e.g. I 2 3": 0,
+      "I - - d e.g. I -4 3 d": 16,
+      "I 41 - - e.g. I 41 3 2": 4,
+      "I a - - e.g. I a -3": 14,
+      "I a - d e.g. I a -3 d": 29
+    },
+    "cP": {
+      "P - - - e.g. P 2 3": 0,
+      "P - - n e.g. P -43 n": 17,
+      "P 21 - - e.g. P 21 3": 5,
+      "P 41 - - e.g. P 43 3 2": 8,
+      "P a - - e.g. P a -3": 23,
+      "P n - - e.g. P n -3": 19,
+      "P n - n e.g. P n -3 n": 31
+    },
+    "hP": {
+      "P - - - e.g. P 3": 0,
+      "P - - c e.g. P 3 1 c": 54,
+      "P - c - e.g. P 3 c 1": 79,
+      "P - c c e.g. P 6 c c": 125,
+      "P 31 - - e.g. P 31": 10,
+      "P 61 - - e.g. P 61": 13,
+      "P 62 - - e.g. P 62": 10,
+      "P 63 - - e.g. P 63": 8
+    },
+    "hR": {
+      "R - - - e.g. R 3": 0,
+      "R - - c e.g. R 3 c": 107
+    },
+    "mC": {
+      "I 1 - 1 e.g. I 1 2 1": 0,
+      "I 1 a 1 e.g. I 1 a 1": 66
+    },
+    "mP": {
+      "P 1 - 1 e.g. P 1 2 1": 0,
+      "P 1 21 1 e.g. P 1 21 1": 5,
+      "P 1 21/a 1 e.g. P 1 21/a 1": 78,
+      "P 1 21/c 1 e.g. P 1 21/c 1": 78,
+      "P 1 21/n 1 e.g. P 1 21/n 1": 77,
+      "P 1 a 1 e.g. P 1 a 1": 73,
+      "P 1 c 1 e.g. P 1 c 1": 73,
+      "P 1 n 1 e.g. P 1 n 1": 72
+    },
+    "oC": {
+      "C - - - e.g. C 2 2 2": 0,
+      "C - - 21 e.g. C 2 2 21": 6,
+      "C - - a e.g. C m 2 a": 37,
+      "C - c - e.g. C 2 c m": 29,
+      "C - c b e.g. C 2 c b": 66,
+      "C c - - e.g. C c 2 m": 47,
+      "C c - a e.g. C c 2 a": 84,
+      "C c c - e.g. C c c 2": 70,
+      "C c c a e.g. C c c a": 107
+    },
+    "oF": {
+      "F - - - e.g. F 2 2 2": 0,
+      "F - d d e.g. F 2 d d": 47,
+      "F d - d e.g. F d 2 d": 70,
+      "F d d - e.g. F d d 2": 73,
+      "F d d d e.g. F d d d": 89
+    },
+    "oI": {
+      "I - - - e.g. I m m m": 0,
+      "I - - a e.g. I m 2 a": 25,
+      "I - a - e.g. I m a 2": 34,
+      "I - c b e.g. I 2 c b": 59,
+      "I b a - e.g. I b a 2": 83,
+      "I b c a e.g. I b c a": 108,
+      "I b m - e.g. I b m 2": 49,
+      "I c - a e.g. I c 2 a": 74
+    },
+    "oP": {
+      "P - - - e.g. P 2 2 2": 0,
+      "P - - 21 e.g. P 2 2 21": 7,
+      "P - - a e.g. P 21 m a": 32,
+      "P - - b e.g. P m 21 b": 32,
+      "P - - n e.g. P m 21 n": 34,
+      "P - 21 - e.g. P 2 21 2": 5,
+      "P - 21 21 e.g. P 2 21 21": 12,
+      "P - a - e.g. P 21 a m": 44,
+      "P - a a e.g. P 2 a a": 72,
+      "P - a b e.g. P 21 a b": 76,
+      "P - a n e.g. P 2 a n": 74,
+      "P - c - e.g. P m c 21": 46,
+      "P - c a e.g. P 21 c a": 78,
+      "P - c b e.g. P 2 c b": 78,
+      "P - c n e.g. P 21 c n": 80,
+      "P - n - e.g. P 21 n m": 46,
+      "P - n a e.g. P 2 n a": 74,
+      "P - n b e.g. P 21 n b": 78,
+      "P - n n e.g. P 2 n n": 76,
+      "P 21 - - e.g. P 21 2 2": 4,
+      "P 21 - 21 e.g. P 21 2 21": 11,
+      "P 21 21 - e.g. P 21 21 2": 9,
+      "P 21 21 21 e.g. P 21 21 21": 16,
+      "P b - - e.g. P b 21 m": 62,
+      "P b - a e.g. P b 21 a": 94,
+      "P b - b e.g. P b 2 b": 89,
+      "P b - n e.g. P b 2 n": 91,
+      "P b a - e.g. P b a 2": 106,
+      "P b a a e.g. P b a a": 134,
+      "P b a b e.g. P b a b": 133,
+      "P b a n e.g. P b a n": 131,
+      "P b c - e.g. P b c 21": 108,
+      "P b c a e.g. P b c a": 140,
+      "P b c b e.g. P b c b": 135,
+      "P b c n e.g. P b c n": 137,
+      "P b n - e.g. P b n 21": 108,
+      "P b n a e.g. P b n a": 136,
+      "P b n b e.g. P b n b": 135,
+      "P c - - e.g. P c m 21": 64,
+      "P c - a e.g. P c 2 a": 96,
+      "P c - b e.g. P c 21 b": 96,
+      "P c - n e.g. P c 21 n": 98,
+      "P c a - e.g. P c a 21": 108,
+      "P c a a e.g. P c a a": 136,
+      "P c a b e.g. P c a b": 140,
+      "P c a n e.g. P c a n": 138,
+      "P c c - e.g. P c c 2": 103,
+      "P c c a e.g. P c c a": 135,
+      "P c c b e.g. P c c b": 135,
+      "P c c n e.g. P c c n": 137,
+      "P c n - e.g. P c n 2": 103,
+      "P c n a e.g. P c n a": 131,
+      "P c n b e.g. P c n b": 135,
+      "P n - - e.g. P n m 21": 66,
+      "P n - a e.g. P n 21 a": 98,
+      "P n - b e.g. P n 2 b": 93,
+      "P n - n e.g. P n 2 n": 95,
+      "P n a - e.g. P n a 21": 110,
+      "P n a a e.g. P n a a": 138,
+      "P n a b e.g. P n a b": 137,
+      "P n c - e.g. P n c 2": 105,
+      "P n c a e.g. P n c a": 137,
+      "P n c b e.g. P n c b": 132,
+      "P n c n e.g. P n c n": 134,
+      "P n n - e.g. P n n 2": 105,
+      "P n n a e.g. P n n a": 133,
+      "P n n b e.g. P n n b": 132,
+      "P n n n e.g. P n n n": 130
+    },
+    "tI": {
+      "I - - - e.g. I 4": 0,
+      "I - - d e.g. I 41 m d": 30,
+      "I - c - e.g. I 4 c m": 42,
+      "I - c d e.g. I 41 c d": 72,
+      "I 41/a - - e.g. I 41/a": 28,
+      "I a - d e.g. I 41/a m d": 50,
+      "I a c d e.g. I 41/a c d": 92,
+      "I41 - - e.g. I 41": 3
+    },
+    "tP": {
+      "P - - - e.g. P 4": 0,
+      "P - - c e.g. P 42 m c": 37,
+      "P - 21 2 e.g. P 4 21 2": 6,
+      "P - b - e.g. P 4 b m": 57,
+      "P - b c e.g. P 42 b c": 94,
+      "P - c - e.g. P 42 c m": 58,
+      "P - c c e.g. P 4 c c": 89,
+      "P - c1 c e.g. P -4 21 c": 43,
+      "P - n - e.g. P 42 n m": 59,
+      "P - n c e.g. P 4 n c": 90,
+      "P 41 - - e.g. P 41": 9,
+      "P 41 21 - e.g. P 41 21 2": 15,
+      "P 42 - - e.g. P 42": 6,
+      "P 42 21 2 e.g. P 42 21 2": 12,
+      "P 42/n - - e.g. P 42/n": 31,
+      "P n - - e.g. P 4/n": 25,
+      "P n - c e.g. P 42/n m c": 62,
+      "P n b - e.g. P 4/n b m": 76,
+      "P n b c e.g. P 42/n b c": 113,
+      "P n c - e.g. P 42/n c m": 83,
+      "P n c c e.g. P 4/n c c": 114,
+      "P n n - e.g. P 42/n n m": 78,
+      "P n n c e.g. P 4/n n c": 109
+    }
+  },
+  "note": "Lines each extinction group removes from its Bravais lattice generic reference list. Built by run_fom_symmetry_count.py --stage lookup; read at inference by ExtinctionCounts.get_absence_counts, which does not import cctbx.",
+  "provenance": {
+    "aP": {
+      "generic_group": "P - e.g. P 1",
+      "lattice_system": "triclinic",
+      "max_absent_extra": 0,
+      "n_groups": 1,
+      "n_reference_lines": 500
+    },
+    "cF": {
+      "generic_group": "F - - - e.g. F 2 3",
+      "lattice_system": "cubic",
+      "max_absent_extra": 32,
+      "n_groups": 5,
+      "n_reference_lines": 100
+    },
+    "cI": {
+      "generic_group": "I - - - e.g. I 2 3",
+      "lattice_system": "cubic",
+      "max_absent_extra": 29,
+      "n_groups": 5,
+      "n_reference_lines": 100
+    },
+    "cP": {
+      "generic_group": "P - - - e.g. P 2 3",
+      "lattice_system": "cubic",
+      "max_absent_extra": 31,
+      "n_groups": 7,
+      "n_reference_lines": 100
+    },
+    "hP": {
+      "generic_group": "P - - - e.g. P 3",
+      "lattice_system": "hexagonal",
+      "max_absent_extra": 125,
+      "n_groups": 8,
+      "n_reference_lines": 750
+    },
+    "hR": {
+      "generic_group": "R - - - e.g. R 3",
+      "lattice_system": "rhombohedral",
+      "max_absent_extra": 107,
+      "n_groups": 2,
+      "n_reference_lines": 1000
+    },
+    "mC": {
+      "generic_group": "I 1 - 1 e.g. I 1 2 1",
+      "lattice_system": "monoclinic",
+      "max_absent_extra": 66,
+      "n_groups": 2,
+      "n_reference_lines": 1000
+    },
+    "mP": {
+      "generic_group": "P 1 - 1 e.g. P 1 2 1",
+      "lattice_system": "monoclinic",
+      "max_absent_extra": 78,
+      "n_groups": 8,
+      "n_reference_lines": 1000
+    },
+    "oC": {
+      "generic_group": "C - - - e.g. C 2 2 2",
+      "lattice_system": "orthorhombic",
+      "max_absent_extra": 107,
+      "n_groups": 9,
+      "n_reference_lines": 750
+    },
+    "oF": {
+      "generic_group": "F - - - e.g. F 2 2 2",
+      "lattice_system": "orthorhombic",
+      "max_absent_extra": 89,
+      "n_groups": 5,
+      "n_reference_lines": 750
+    },
+    "oI": {
+      "generic_group": "I - - - e.g. I m m m",
+      "lattice_system": "orthorhombic",
+      "max_absent_extra": 108,
+      "n_groups": 8,
+      "n_reference_lines": 750
+    },
+    "oP": {
+      "generic_group": "P - - - e.g. P 2 2 2",
+      "lattice_system": "orthorhombic",
+      "max_absent_extra": 140,
+      "n_groups": 68,
+      "n_reference_lines": 750
+    },
+    "tI": {
+      "generic_group": "I - - - e.g. I 4",
+      "lattice_system": "tetragonal",
+      "max_absent_extra": 92,
+      "n_groups": 8,
+      "n_reference_lines": 500
+    },
+    "tP": {
+      "generic_group": "P - - - e.g. P 4",
+      "lattice_system": "tetragonal",
+      "max_absent_extra": 114,
+      "n_groups": 23,
+      "n_reference_lines": 500
+    }
+  },
+  "reference_lists": "mlindex/models/{system}_1/data/hkl_ref_{lattice}.npy"
+}
