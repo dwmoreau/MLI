@@ -52,9 +52,15 @@ class Candidates:
         self.n_peaks = self.q2_obs.size
         self.xnn = xnn
         self.n = self.xnn.shape[0]
-        self.best_xnn = self.xnn.copy()
         self.candidate_index = np.arange(self.n)
         self.fix_out_of_range_candidates()
+        # Copied AFTER the repair, not before. fix_out_of_range_candidates replaces self.xnn
+        # for any candidate outside the allowed cell range, and assign_hkls below scores the
+        # repaired array -- so a copy taken first pairs the pre-repair cell with the post-repair
+        # M20, and the two then describe different candidates for as long as that candidate goes
+        # unimproved. Measured at 4 of 8 062 triclinic candidates on one pattern; the repair is
+        # where the Selling reduction is fragile, so triclinic is where it bites.
+        self.best_xnn = self.xnn.copy()
 
         self.q2_calculator = Q2Calculator(
             lattice_system=self.lattice_system,

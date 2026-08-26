@@ -332,3 +332,78 @@ def test_a_matched_return_still_downsamples():
 
     assert manager.top_M20.tolist() == [30.0, 20.0, 10.0]
     assert manager.top_spacegroup == ['C', 'B', 'A']
+
+
+def _triclinic_candidates(xnn_values, seed=7):
+    """A triclinic Candidates over a synthetic peak list, built straight from given cells.
+
+    Triclinic because it is the only lattice system whose repair actually fires here:
+    `fix_unphysical` dispatches the box systems -- cubic, orthorhombic, tetragonal, hexagonal --
+    to `fix_unphysical_box`, which leaves an out-of-range cell alone. Writing this test on cubic
+    would pass whether or not the bug is present.
+    """
+    import numpy as np
+    from mlindex.optimization.Candidates import Candidates
+    from mlindex.utilities.Q2Calculator import Q2Calculator
+
+    hkl_ref = np.load(_TEST_DATA_DIR.parent / "hkl_ref_aP.npy")
+    xnn_true = np.array([[0.02, 0.015, 0.01, 0.001, 0.002, 0.0015]])
+    q2_ref = Q2Calculator(
+        lattice_system="triclinic", hkl=hkl_ref, tensorflow=False, representation="xnn"
+    ).get_q2(xnn_true)[0]
+    q2_obs = np.sort(q2_ref[q2_ref > 0])[:20]
+
+    opt_params = {
+        "minimum_uc": 2.0,
+        "maximum_uc": 60.0,
+        "assignment_threshold": 0.95,
+        "figure_of_merit": "M20",
+    }
+    return q2_obs, Candidates(
+        q2_obs=q2_obs,
+        xnn=np.asarray(xnn_values, dtype=float),
+        hkl_ref=hkl_ref,
+        lattice_system="triclinic",
+        bravais_lattice="aP",
+        opt_params=opt_params,
+        rng=np.random.default_rng(seed),
+        fom=None,
+        zero_error=False,
+        wavelength=None,
+    )
+
+
+def test_best_cell_and_best_score_describe_the_same_candidate_after_repair():
+    """`best_M20` must be the score OF `best_xnn`, including for cells the constructor repaired.
+
+    `fix_out_of_range_candidates` replaces any cell it considers unphysical. If `best_xnn` were
+    copied before that ran while `best_M20` were computed after it, the two would describe
+    different candidates -- silently, and only for the repaired ones, which are also the ones most
+    likely to go unimproved by the search and so to carry the mismatched pair all the way to the
+    prune, where it decides survival.
+
+    Recomputing the score from the stored cell through the optimizer's own route is the check:
+    same q2_calculator, same fast_assign, same get_M20, so anything but exact equality means the
+    cell and its score have come apart.
+    """
+    import numpy as np
+    from mlindex.utilities.FigureOfMerits import get_M20
+    from mlindex.utilities.numba_functions import fast_assign
+
+    rng = np.random.default_rng(11)
+    xnn = np.concatenate([
+        np.array([[0.02, 0.015, 0.01, 0.001, 0.002, 0.0015]]),
+        rng.normal(0.01, 0.02, size=(32, 6)),        # many of these are unphysical
+    ])
+    q2_obs, candidates = _triclinic_candidates(xnn)
+
+    q2_ref_calc = candidates.q2_calculator.get_q2(candidates.best_xnn)
+    hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+    q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+    recomputed = get_M20(q2_obs, q2_calc, q2_ref_calc)
+
+    differing = int(np.sum(~((np.isnan(recomputed) & np.isnan(candidates.best_M20))
+                             | (recomputed == candidates.best_M20))))
+    assert differing == 0, f"{differing} candidates whose stored cell does not give their score"
+
+
