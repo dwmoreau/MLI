@@ -181,6 +181,10 @@ def _parse_args():
     parser.add_argument('--n-top-candidates', type=int, default=20)
     parser.add_argument('--limit-entries', type=int, default=None,
                         help='smoke test only; never for a result')
+    parser.add_argument('--shard-stride', type=int, default=1,
+                        help='run every Nth shard, so N copies of this script can share the arm')
+    parser.add_argument('--shard-offset', type=int, default=0,
+                        help='which residue class of shards this copy takes')
     return parser.parse_args()
 
 
@@ -196,45 +200,60 @@ def main():
     optimizers, processes, task_queues = setup_mp_optimizers(
         args.processes, BROADENING_TAG, n_candidates_scale=1, seed=BASE_SEED, options=options)
 
+    # One work unit per archived entry table. Striding lets several copies of this script share
+    # the arm, which is the only parallelism that helps: the manager process is the bottleneck --
+    # everything after the cut, and all of deduplication, runs there while its workers idle -- so
+    # more workers inside one run buys little and more runs side by side buys a lot.
+    jobs = [(bundle, shard)
+            for bundle, bundle_dir in bundle_directories(root).items()
+            for shard in sorted(bundle_dir.glob('entries_*.parquet'))]
+    jobs = jobs[args.shard_offset::args.shard_stride]
+    print(f'{len(jobs)} shards for offset {args.shard_offset} of stride {args.shard_stride}',
+          flush=True)
+
     started = time.time()
     summary = []
     try:
-        for bundle, bundle_dir in bundle_directories(root).items():
-            for shard in sorted(bundle_dir.glob('entries_*.parquet')):
-                tag = shard.stem.split('_', 1)[1]
-                destination = out_root / f'predownsample_{tag}.parquet'
-                if destination.exists():
-                    print(f'  {bundle}/{tag}: already done, skipping', flush=True)
-                    continue
-                entries = pd.read_parquet(shard)
-                if args.limit_entries:
-                    entries = entries.head(args.limit_entries)
-                frames = []
-                for _, entry in entries.iterrows():
-                    frames.append(run_entry(optimizers, task_queues, entry,
-                                            args.n_top_candidates))
-                frame = label(pd.concat(frames, ignore_index=True), entries)
-                frame['condition_bundle'] = bundle
-                frame['split'] = frame['entry_id'].map(entries.set_index('entry_id')['split'])
-                frame.to_parquet(destination, index=False)
-                mismatches = capture_gate(frame)
-                summary.append({'bundle': bundle, 'shard': tag, 'entries': int(entries.shape[0]),
-                                'rows': int(frame.shape[0]),
-                                'correct_rows': int(frame['is_correct'].sum()),
-                                'capture_mismatches': mismatches})
-                print(f'  {bundle}/{tag}: {frame.shape[0]:,} rows, '
-                      f'{int(frame["is_correct"].sum())} correct, '
-                      f'{mismatches} capture mismatches ({mismatches / frame.shape[0]:.2%}), '
-                      f'{time.time() - started:.0f}s', flush=True)
+        for bundle, shard in jobs:
+            tag = shard.stem.split('_', 1)[1]
+            destination = out_root / f'predownsample_{tag}.parquet'
+            if destination.exists():
+                print(f'  {bundle}/{tag}: already done, skipping', flush=True)
+                continue
+            entries = pd.read_parquet(shard)
+            if args.limit_entries:
+                entries = entries.head(args.limit_entries)
+            frames = []
+            for _, entry in entries.iterrows():
+                frames.append(run_entry(optimizers, task_queues, entry,
+                                        args.n_top_candidates))
+            frame = label(pd.concat(frames, ignore_index=True), entries)
+            frame['condition_bundle'] = bundle
+            frame['split'] = frame['entry_id'].map(entries.set_index('entry_id')['split'])
+            frame.to_parquet(destination, index=False)
+            mismatches = capture_gate(frame)
+            summary.append({'bundle': bundle, 'shard': tag, 'entries': int(entries.shape[0]),
+                            'rows': int(frame.shape[0]),
+                            'correct_rows': int(frame['is_correct'].sum()),
+                            'capture_mismatches': mismatches})
+            print(f'  {bundle}/{tag}: {frame.shape[0]:,} rows, '
+                  f'{int(frame["is_correct"].sum())} correct, '
+                  f'{mismatches} capture mismatches ({mismatches / frame.shape[0]:.2%}), '
+                  f'{time.time() - started:.0f}s', flush=True)
     finally:
         shutdown_mp_workers(processes, task_queues)
 
-    with open(out_root / 'manifest.json', 'w', encoding='utf-8') as handle:
+    # One manifest per striding copy, so concurrent runs cannot overwrite each other's record of
+    # what they produced. A reader concatenates them.
+    name = ('manifest.json' if args.shard_stride == 1
+            else f'manifest_{args.shard_offset}of{args.shard_stride}.json')
+    with open(out_root / name, 'w', encoding='utf-8') as handle:
         json.dump({'arm': args.arm, 'source': ARMS[args.arm],
                    'prune_threshold': 0.0, 'prune_criterion_capture': True,
                    'seeding': 'sha256(base_seed:entry_id:bravais_lattice), per PROTOCOL section 6',
                    'base_seed': BASE_SEED, 'processes': args.processes,
                    'broadening_tag': BROADENING_TAG,
+                   'shard_stride': args.shard_stride, 'shard_offset': args.shard_offset,
                    'seconds': round(time.time() - started, 1),
                    'shards': summary}, handle, indent=2)
     rows = sum(record['rows'] for record in summary)
