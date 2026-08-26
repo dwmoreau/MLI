@@ -87,18 +87,32 @@ def ranked_pool(optimizers, task_queues, entry, threshold):
 
     M20 = np.concatenate(M20)
     correct = np.concatenate(correct)
-    # Descending M20, ties broken by the lattice order run.py assembles in -- the same
-    # first-maximum convention, so rank 0 is the cell run.py would print first.
-    order = np.argsort(-M20, kind='stable')
-    ranked_correct = correct[order]
-    best = int(np.argmax(ranked_correct)) if ranked_correct.any() else -1
     return {'pool_size': int(M20.size), 'n_correct': int(correct.sum()),
-            'best_correct_rank': best}
+            'best_correct_rank': best_correct_rank(M20, correct)}
+
+
+def best_correct_rank(M20, correct):
+    """Where the best correct candidate sits in the list `run.py` prints, or -1 if absent.
+
+    `run.py` sorts the pooled candidates by M20 descending and prints from the top, so rank 0 is
+    the cell it names first. A **stable** sort is what reproduces it: ties then keep the order the
+    lattices were assembled in, which is the same first-maximum convention `_collect_results` and
+    `sort_values` produce. An unstable sort would reorder ties arbitrarily and make the rank of a
+    tied correct candidate depend on the sort implementation.
+
+    Returning the rank rather than a top-N flag means every top-N figure is a restriction of one
+    stored number, so top-1, top-10 and top-20 cannot disagree with each other.
+    """
+    correct = np.asarray(correct, dtype=bool)
+    if not correct.any():
+        return -1
+    order = np.argsort(-np.asarray(M20, dtype=np.float64), kind='stable')
+    return int(np.argmax(correct[order]))
 
 
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    parser.add_argument('--stage', choices=['run', 'report'], default='run')
+    parser.add_argument('--stage', choices=['run', 'report', 'figure'], default='run')
     parser.add_argument('--threshold', type=float, default=5.0)
     parser.add_argument('--thresholds', default='5.0,3.0', help='report stage: the two arms')
     parser.add_argument('--arm', default='general', choices=sorted(ARMS))
@@ -203,9 +217,79 @@ def run_report(args):
     print(f'\nwrote {artifact_dir}/S03_confirm_topn_{args.arm}.csv')
 
 
+def run_figure(args):
+    """The campaign's central picture: what the cut delivers, and what the ranking loses.
+
+    Two bars per cut. The lower one is what a user gets; the upper is what was available for them
+    to get. The gap between them is the prize a better merit is competing for, and the point of
+    the figure is that lowering the cut grows the gap rather than the outcome.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({'font.size': 8, 'axes.labelsize': 8, 'axes.titlesize': 8.5,
+                         'xtick.labelsize': 7.5, 'ytick.labelsize': 7, 'legend.fontsize': 7,
+                         'axes.spines.top': False, 'axes.spines.right': False,
+                         'axes.grid': True, 'axes.axisbelow': True, 'grid.alpha': 0.25,
+                         'grid.linewidth': 0.5, 'savefig.dpi': 300, 'savefig.bbox': 'tight',
+                         'axes.linewidth': 0.7})
+
+    thresholds = sorted((float(v) for v in args.thresholds.split(',')), reverse=True)
+    arms = [a for a in ('general', 'hard')
+            if (Path(BASE) / args.out_root / a / f't{thresholds[0]:g}').exists()]
+    figure, axes = plt.subplots(1, len(arms), figsize=(3.3 * len(arms), 3.2), squeeze=False)
+
+    for column, arm in enumerate(arms):
+        axis = axes[0][column]
+        available, ranked, labels = [], [], []
+        for threshold in thresholds:
+            directory = Path(BASE) / args.out_root / arm / f't{threshold:g}'
+            frame = pd.concat([pd.read_parquet(s) for s in sorted(directory.glob('ranked_*.parquet'))],
+                              ignore_index=True)
+            available.append(int((frame['best_correct_rank'] >= 0).sum()))
+            ranked.append(int(frame['best_correct_rank'].between(0, 9).sum()))
+            labels.append(f'cut {threshold:g}')
+            total = frame.shape[0]
+
+        position = np.arange(len(thresholds))
+        axis.bar(position, available, 0.52, color='#CFE3F2', edgecolor='#0B5D91', linewidth=0.7,
+                 label='correct cell anywhere in the printed list', zorder=2)
+        axis.bar(position, ranked, 0.52, color='#0B5D91', edgecolor='#0B5D91', linewidth=0.7,
+                 label='correct cell in the top 10 (what the user gets)', zorder=3)
+        for x, (a, r) in enumerate(zip(available, ranked)):
+            axis.annotate(f'{a}', (x, a), textcoords='offset points', xytext=(0, 3),
+                          ha='center', fontsize=7, color='#0B5D91')
+            axis.annotate(f'{r}', (x, r), textcoords='offset points', xytext=(0, 3),
+                          ha='center', fontsize=7, color='white' if r > 0.08 * max(available)
+                          else '#0B5D91')
+            if a > r:
+                axis.annotate('', xy=(x + 0.33, r), xytext=(x + 0.33, a),
+                              arrowprops=dict(arrowstyle='<->', color='#C1571A', lw=0.8))
+                axis.annotate(f'{a - r} unranked', (x + 0.36, (a + r) / 2), fontsize=6.5,
+                              color='#C1571A', va='center', ha='left')
+        axis.set_xticks(position)
+        axis.set_xticklabels(labels)
+        axis.set_xlim(-0.5, len(thresholds) + 0.15)
+        axis.set_ylim(0, max(available) * 1.16)
+        # Per panel: the two arms have different denominators (210 and 972), so one shared
+        # label would misstate one of them.
+        axis.set_ylabel(f'pattern-conditions (of {total})')
+        axis.set_title('general population' if arm == 'general'
+                       else 'hard stratum', fontsize=8.5, pad=6)
+    axes[0][0].legend(loc='upper left', frameon=False, bbox_to_anchor=(0.0, -0.12), ncol=1)
+    figure.suptitle('Lowering the cut delivers the answer; the merit fails to rank it',
+                    fontsize=9.5, y=1.02)
+    artifact_dir = Path(BASE) / args.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    destination = artifact_dir / 'S03_confirm_available_vs_ranked.png'
+    figure.savefig(destination)
+    plt.close(figure)
+    print(f'wrote {destination}')
+
+
 def main():
     args = _parse_args()
-    (run_report if args.stage == 'report' else run_arm)(args)
+    {'report': run_report, 'figure': run_figure}.get(args.stage, run_arm)(args)
 
 
 if __name__ == '__main__':
