@@ -16,6 +16,35 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 
 
+def _scaled_iterations(iteration_info, scale):
+    """How many passes of one `iteration_info` block to run at a given schedule scale.
+
+    The shipped schedule is per lattice system -- cubic runs 1 deterministic pass plus 5 random
+    subsampling passes on ten peaks, triclinic 1 plus 60 on twenty -- so a reduced schedule is a
+    multiplier on those counts, not a single number applied everywhere.
+
+    Two properties this rounding has to keep:
+
+    * `scale == 1.0` returns the stored count unchanged, so the shipped search is untouched and
+      byte-identical. It is compared exactly rather than approximately: 1.0 is the default and
+      arrives as a literal, never as the result of arithmetic.
+    * A block never scales to zero. `random_subsampling` is what makes the search stochastic at
+      all, and a lattice system whose only random block vanished would silently become a
+      one-shot deterministic solve rather than a cheaper search.
+
+    Rounding is `round`, so cubic's 5 goes to 2 at a half schedule (banker's rounding on 2.5) and
+    to 1 at a quarter. Cubic is excluded from the pilot's per-lattice comparison for exactly this
+    reason -- with five passes it has too little resolution for a scale factor to mean the same
+    thing it means for triclinic's sixty.
+    """
+    n_iterations = int(iteration_info['n_iterations'])
+    if scale == 1.0:
+        return n_iterations
+    if scale <= 0.0:
+        raise ValueError(f'iteration_scale must be positive, got {scale}')
+    return max(1, int(round(n_iterations * scale)))
+
+
 def _downsample_chunk(args):
     """Collapse each dense neighbourhood in a chunk to its highest-M20 member.
 
@@ -153,8 +182,19 @@ class OptimizerBase:
         if self.opt_params['redistribution_testing']:
             return None
 
+        # DWMM's compute lever: run the search for half, or a quarter, of the iterations. The
+        # schedule is already tuned per lattice system -- triclinic gets twelve times cubic's --
+        # so the knob is a scale factor on the existing counts rather than a flat number, and the
+        # deterministic pass is never scaled away. Default 1.0, which is exactly the shipped
+        # schedule; S06's pilot is what decides whether anything else is used.
+        #
+        # It is applied HERE, in the one place all three optimizer classes share. A scale placed
+        # in `run_common` would be inert in multiprocessing mode, because MPOptimizerManager and
+        # MPOptimizerWorker both override it -- which is precisely how the search's reseeding came
+        # to look implemented while never firing at all (C2-F-042).
+        iteration_scale = float(self.opt_params.get('iteration_scale', 1.0))
         for iteration_info in self.opt_params['iteration_info']:
-            for iter_index in range(iteration_info['n_iterations']):
+            for iter_index in range(_scaled_iterations(iteration_info, iteration_scale)):
                 if iteration_info['worker'] == 'random_subsampling':
                     candidates.random_subsampling(iteration_info)
                 elif iteration_info['worker'] == 'random_subsampling_power':
@@ -233,7 +273,16 @@ class OptimizerBase:
             return
         from mlindex.model_training.FomBenchmark import q2_digest
         base_seed = self.opt_params.get('search_base_seed', 12345)
-        key = f'search:{q2_digest(self.q2_obs)}:{self.bravais_lattice}:{self.comm.Get_rank()}'
+        # `self.rank`, not `self.comm.Get_rank()`. Every class here carries `rank` --
+        # `OptimizerBase.__init__` sets it from the communicator, and `MPOptimizerWorker` sets it
+        # directly because it never calls that constructor -- but only the MPI classes and the MP
+        # *manager* carry a `comm` at all. A worker in multiprocessing mode has none, so the
+        # attribute lookup raised `AttributeError`, the pool reported `Worker N failed`, and the
+        # scheme was unusable at any pool size above one. It went unseen because S05's gates ran
+        # at `--pool-size 1`, where the manager is the only rank -- and multiprocessing is the
+        # mode the benchmark generates in, which is the same blind spot C2-F-042 itself records.
+        # The seeds are unchanged: rank 0 is rank 0 either way, so S05's gate results stand.
+        key = f'search:{q2_digest(self.q2_obs)}:{self.bravais_lattice}:{self.rank}'
         self.rng = np.random.default_rng(_derived_seed(key, base_seed))
 
         # Reseeding the optimizer's own generator is NOT enough, and finding that out is what

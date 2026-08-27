@@ -843,6 +843,113 @@ def label_frame(candidates, entries, rtol=1e-2, n_processes=1):
     return result
 
 
+# The group a candidate pool is defined over, and the group every rank in this schema is taken
+# within. `final_rank` is "over all survivors of this (entry, lattice)", and the condition belongs
+# in the key because one crystal appears once per bundle (R8).
+POOL_KEY_COLUMNS = ('entry_id', 'condition_bundle', 'bravais_lattice')
+
+
+def subsample_negatives(candidates, merit_columns=('M20',), top_k=200, negative_rate=0.05,
+                        base_seed=12345, correct_column='is_correct'):
+    """Thin the pool without changing what it measures.
+
+    Three classes of row survive, in this precedence:
+
+    * **`correct`** -- every correct candidate, unconditionally. The base rate is under 1 %, they
+      are the entire signal, and no sampling rule may touch them. This is why the order of
+      operations is forced: label, THEN subsample, then consolidate.
+    * **`top_k`** -- every candidate inside the top *K* by *each* reported merit, unioned. Ranking
+      metrics are then exact to depth *K* for every one of those merits, which is what makes a
+      subsampled pool usable for the campaign's headline numbers rather than only for fitting.
+    * **`sampled`** -- a Bernoulli sample of everything else, carrying `1 / negative_rate` as its
+      weight so any fit or aggregate over the thinned pool is unbiased for the full one.
+
+    `sampling_weight` is 1.0 for the first two classes because they are retained with certainty,
+    and every fit must use the column -- without it the negatives are silently reweighted by
+    whatever the retention rate happened to be.
+
+    The RNG is keyed on the pool, not on the run: the same (entry, condition, lattice) thins the
+    same way whichever shard it lands in and however many shards there are. Campaign 1 seeded once
+    per pool and advanced with every entry, which is why no subset of its benchmark could be
+    regenerated comparably (R17, PROTOCOL section 6).
+
+    `negative_rate` of 1.0 keeps everything and is not a no-op: it still writes the bookkeeping
+    columns, so a pool generated whole is readable by exactly the same loader as a thinned one.
+    """
+    if candidates.empty:
+        return candidates
+    missing = [column for column in merit_columns if column not in candidates.columns]
+    if missing:
+        raise ValueError(f'subsample_negatives cannot rank on absent columns: {missing}')
+    if not 0.0 < negative_rate <= 1.0:
+        raise ValueError(f'negative_rate must be in (0, 1], got {negative_rate}')
+
+    result = candidates.copy()
+    keys = [column for column in POOL_KEY_COLUMNS if column in result.columns]
+    reason = np.full(result.shape[0], 'sampled', dtype=object)
+    weight = np.full(result.shape[0], 1.0 / negative_rate)
+
+    # Top-K by each merit, unioned. `rank` rather than `nlargest` so ties are resolved the same
+    # way for every merit and a tie at the K-th place cannot silently drop a row.
+    in_top_k = np.zeros(result.shape[0], dtype=bool)
+    if keys:
+        grouped = result.groupby(keys, sort=False)
+        for column in merit_columns:
+            ranks = grouped[column].rank(method='first', ascending=False)
+            in_top_k |= (ranks <= top_k).to_numpy()
+    else:
+        for column in merit_columns:
+            ranks = result[column].rank(method='first', ascending=False)
+            in_top_k |= (ranks <= top_k).to_numpy()
+    reason[in_top_k] = 'top_k'
+    weight[in_top_k] = 1.0
+
+    # And a Bernoulli draw over the rest, keyed per pool AND indexed by `candidate_id`.
+    #
+    # Indexing the draws by the candidate's own id rather than by its position in the frame is
+    # what makes retention a property of the row instead of a property of the row ORDER. A
+    # positional draw gives a different answer when the same pool arrives sorted differently,
+    # concatenated from a different number of shards, or filtered upstream -- and the difference
+    # is invisible, because either answer is a valid sample. Campaign 1's R17 is the same defect
+    # one level up: a pool that cannot be regenerated row for row cannot be checked at all.
+    keep = in_top_k.copy()
+    if negative_rate >= 1.0:
+        keep[:] = True
+    elif keys and 'candidate_id' in result.columns:
+        candidate_id = result['candidate_id'].to_numpy(dtype=np.int64)
+        for key, group in result.groupby(keys, sort=False):
+            positions = result.index.get_indexer(group.index)
+            to_draw = ~in_top_k[positions]
+            if not to_draw.any():
+                continue
+            ids = candidate_id[positions]
+            rng = np.random.default_rng(
+                _derived_pool_seed(key if isinstance(key, tuple) else (key,), base_seed))
+            draws = rng.random(int(ids.max()) + 1)
+            keep[positions[to_draw]] = draws[ids[to_draw]] < negative_rate
+    else:
+        raise ValueError(
+            'subsample_negatives needs candidate_id and the pool key columns '
+            f'{POOL_KEY_COLUMNS} to draw reproducibly; got {sorted(result.columns)}')
+
+    # Correctness last, so it overrides both the reason and the weight of anything it touches.
+    if correct_column in result.columns:
+        correct = result[correct_column].to_numpy(dtype=bool)
+        keep |= correct
+        reason[correct] = 'correct'
+        weight[correct] = 1.0
+
+    result['retained_reason'] = reason
+    result['sampling_weight'] = weight
+    return result.loc[keep].reset_index(drop=True)
+
+
+def _derived_pool_seed(key, base_seed):
+    """A stable seed for one candidate pool. `hash()` is salted per process and cannot be used."""
+    digest = hashlib.sha256(f"{base_seed}:{':'.join(str(part) for part in key)}".encode('utf-8'))
+    return int.from_bytes(digest.digest()[:8], 'big')
+
+
 def write_candidate_shard(frame, out_dir, shard_tag):
     path = Path(out_dir) / f'candidates_{shard_tag}.parquet'
     _to_parquet(frame, path)

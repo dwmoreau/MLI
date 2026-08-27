@@ -572,6 +572,10 @@ def entry_context(entries, hard_min_decile=HARD_MIN_DECILE):
     `fom-train` and `fom-dev` share bins by construction and no edges have to be threaded
     between calls.
 
+    **The decile is joined from the entry table when it is there, and only recomputed when it is
+    not** -- see the comment at the assignment. That is the R14 fix and it is why `entries` is
+    allowed to carry a `volume_decile` column at all.
+
     `hard_min_decile` widens the hard stratum's volume cut, and exists for one reason: at the
     literal cut of 8 the stratum holds 16 reachable source entries on `fom-dev`, where every merit
     scores exactly 0.0000 and McNemar finds no discordant pairs, so its *threshold* metrics cannot
@@ -596,7 +600,33 @@ def entry_context(entries, hard_min_decile=HARD_MIN_DECILE):
         'volume_true': entries['volume_true'].to_numpy(dtype=np.float64),
         })
     context['condition_label'] = context['condition_bundle'].map(BUNDLE_LABELS).fillna('?')
-    context['volume_decile'] = volume_decile(context)
+    # JOINED, never recomputed, whenever the entry table carries it -- which schema v3 does, by
+    # reading it from the frozen split manifest at generation time (SCHEMA.md, R14).
+    #
+    # This is the one-line change S06 exists to make. `volume_decile` below is a *within-lattice
+    # percentile rank*, so it is a property of the row set it is computed over rather than of the
+    # entry. Campaign 1 recomputed it from whatever row set a caller happened to hand in, so once
+    # 33 entries were lost to unplaceable second-phase lines and the bundles were aligned by
+    # intersection, 114 of 5 922 entries disagreed with the manifest, and the hard stratum with
+    # them -- from the 286 entries the split was balanced over to the 298 the pipeline used. No
+    # number was wrong; "the hard stratum" simply denoted two different sets of entries in two
+    # different documents.
+    #
+    # Note the mechanism is NOT the one the inherited record states. F-108 and the S06 handoff
+    # both say dropping rows "can only raise" a survivor's rank; a survivor only rises when the
+    # dropped rows sat above it, so attrition uncorrelated with volume perturbs the decile in
+    # BOTH directions (measured in tests/test_split_manifest.py). Campaign 1's 114 entries all
+    # moving up says its attrition was correlated with volume. The fix is the same either way,
+    # but a stratum on a recomputed decile can lose entries as well as gain them.
+    #
+    # The fallback is not laziness: Benchmark A has no such column and S03 and S04 still read it,
+    # so a pool without the column keeps campaign 1's behaviour and says which it used.
+    if 'volume_decile' in entries.columns:
+        context['volume_decile'] = np.asarray(entries['volume_decile'], dtype=np.int64)
+        context.attrs['volume_decile_source'] = 'stored'
+    else:
+        context['volume_decile'] = volume_decile(context)
+        context.attrs['volume_decile_source'] = 'recomputed'
     for optional in ('n_peaks_available', 'n_dropout_achieved', 'second_phase_lines'):
         if optional in entries.columns:
             context[optional] = entries[optional].to_numpy()

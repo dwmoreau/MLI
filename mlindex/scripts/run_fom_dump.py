@@ -60,12 +60,25 @@ def _parse_args(argv=None):
                              'The benchmark generates at 1.5: the largest cut that loses no '
                              'reachable pattern-condition, so every higher cut is reconstructable '
                              'by restriction. Production ships 5.0 and that is unchanged')
-    parser.add_argument('--top-k', type=int, default=500,
+    parser.add_argument('--top-k', type=int, default=200,
                         help='Negative subsampling depth. Every candidate inside the top K by '
                              'each reported merit is kept, which makes rank metrics exact at any '
-                             'depth <= K. S06 sizes this against real pool sizes')
+                             'depth <= K. Sized by S06 against real pool sizes; the old default '
+                             'of 500 was an assumption and is close to a no-op at measured pool '
+                             'sizes')
+    parser.add_argument('--negative-rate', type=float, default=0.05,
+                        help='Retention probability for a candidate that is neither correct nor '
+                             'in the top-K union. Its inverse becomes the row sampling_weight')
     parser.add_argument('--no-subsample', action='store_true',
                         help='Keep every candidate. What the gates run with')
+    parser.add_argument('--predownsample-entries', type=int, default=None,
+                        help='Write the pre-deduplication stream for this many entries rather '
+                             'than for all of them. It is far larger than the survivor stream '
+                             'and SCHEMA.md specifies it as a stratified subsample; without this '
+                             'the driver wrote it for every entry. Omit to write it for all')
+    parser.add_argument('--arm', type=str, default=None,
+                        help='Restrict to entries whose manifest arm contains this string, e.g. '
+                             'mechanism. Requires --split-manifest')
     parser.add_argument('--split-manifest', type=str, default=None,
                         help='Frozen manifest supplying the fom-train/dev/test split. The split '
                              'is by source entry and must never be re-derived here. S06 produces '
@@ -74,15 +87,19 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def load_split(manifest_path):
-    """entry identifier -> split, from the frozen manifest.
+def load_manifest(manifest_path):
+    """The frozen split manifest, or None.
 
     PROTOCOL §3 rule 5: splits are by source entry, never by candidate, and the same crystal must
     never appear in two splits under different noise. Re-deriving the split here would break that
     silently across condition bundles.
+
+    It carries the frozen `volume_decile` too, which is the other half of R14: recomputing a
+    within-lattice percentile rank downstream moved 114 of campaign 1's 5 922 entries and took
+    the hard stratum with them. Read here, written onto every entry row, joined thereafter.
     """
     if manifest_path is None:
-        return {}
+        return None
     path = Path(manifest_path)
     if not path.exists():
         raise SystemExit(f'Frozen split manifest not found at {path}. The split must not be '
@@ -92,7 +109,11 @@ def load_split(manifest_path):
     split_column = 'split' if 'split' in manifest.columns else 'fom_split'
     if split_column not in manifest.columns:
         raise SystemExit(f'{path} has no split column; found {sorted(manifest.columns)}.')
-    return dict(zip(manifest[id_column], manifest[split_column]))
+    manifest = manifest.rename(columns={id_column: 'identifier', split_column: 'split'})
+    if 'volume_decile' not in manifest.columns:
+        raise SystemExit(f'{path} has no volume_decile column. It is frozen at split time and '
+                         'must never be recomputed downstream (R14).')
+    return manifest.set_index('identifier')
 
 
 def entry_record(entry, condition, pattern, split, volume_decile, degeneracy):
@@ -140,6 +161,32 @@ def entry_record(entry, condition, pattern, split, volume_decile, degeneracy):
         }
 
 
+def subsample_or_refuse(candidate_frames, args):
+    """Thin the pool, or say why it will not be thinned. Returns (frames, subsampled).
+
+    THE ORDER IS FORCED AND IT IS EASY TO GET WRONG. The retention rule keeps every *correct*
+    candidate, so correctness has to be known before anything is dropped -- label, then subsample,
+    then consolidate. Labels are not written by this driver yet, so rather than subsample blind,
+    which would delete the entire signal at a base rate under 1 % and leave a pool that looks like
+    a generation failure rather than a thinned one, it refuses and names the order.
+
+    Campaign 1's most expensive repeated mistake was labelling on *load*; subsampling before
+    labelling would be the same mistake with the data gone.
+    """
+    if args.no_subsample or not candidate_frames:
+        return candidate_frames, False
+    merged = pd.concat(candidate_frames, ignore_index=True)
+    if 'is_correct' not in merged.columns or merged['is_correct'].isna().all():
+        raise SystemExit(
+            'Refusing to subsample an unlabelled pool. Negative subsampling keeps every correct '
+            'candidate, so labelling must happen first (SCHEMA.md; S07 handoff, "Labelling, '
+            'subsampling and consolidation -- in that order"). Re-run with --no-subsample, or '
+            'label at generation before enabling it.')
+    return [FomBenchmark.subsample_negatives(
+        merged, merit_columns=('M20',), top_k=int(args.top_k),
+        negative_rate=float(args.negative_rate), base_seed=int(args.seed))], True
+
+
 def optimizer_options(args):
     """The opt_params overrides one invocation asks for.
 
@@ -177,7 +224,7 @@ def run(args):
     if unknown:
         raise SystemExit(f"Unknown Bravais lattices: {', '.join(unknown)}")
 
-    split_by_id = load_split(args.split_manifest)
+    manifest = load_manifest(args.split_manifest)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,6 +233,29 @@ def run(args):
                                     columns=FomPatterns.DUMP_READ_COLUMNS)
          for bl in bravais_lattices],
         ignore_index=True)
+
+    if manifest is not None:
+        # The manifest is the entry list, not merely a lookup. Re-deriving the population from a
+        # sampling parameter is how the arms come apart: `sample_entries` draws
+        # `rng.choice(size=n)`, so a run at a different `--n-entries-per-bl` selects a different
+        # set and the core and mechanism arms stop being paired. Pre-flighting it here also turns
+        # the usual cause -- a sampling parameter that has drifted -- into an abort rather than an
+        # invented split (S07's handoff asks for exactly this).
+        wanted = manifest
+        if args.arm:
+            if 'arm' not in manifest.columns:
+                raise SystemExit(f'--arm given but {args.split_manifest} has no arm column')
+            wanted = manifest[manifest['arm'].astype(str).str.contains(args.arm)]
+        keep = entries['identifier'].isin(wanted.index)
+        missing = int((~keep).sum())
+        entries = entries[keep].reset_index(drop=True)
+        unsampled = len(set(wanted.index) - set(entries['identifier']))
+        print(f'manifest: {len(wanted)} entries wanted, {entries.shape[0]} sampled, '
+              f'{missing} sampled entries not in the manifest, {unsampled} manifest entries '
+              f'not reached by this sampling', flush=True)
+        if entries.empty:
+            raise SystemExit('the sampling and the manifest do not overlap at all; check '
+                             '--n-entries-per-bl and --seed against the frozen manifest')
 
     if args.entry_ids_file:
         wanted = pd.read_csv(args.entry_ids_file)
@@ -242,13 +312,26 @@ def run(args):
             merit_at_prune_names = candidates.attrs.get('merit_at_prune_names',
                                                         merit_at_prune_names)
             candidate_frames.append(candidates)
-            predownsample_frames.append(
-                FomBenchmark.predownsample_records_to_frame(predownsample_records))
+            # SCHEMA.md specifies the pre-deduplication stream as a stratified subsample of
+            # entries, and it is the expensive one -- ~59 000 rows per cell at threshold 0
+            # against ~1 500 for the survivors. The driver wrote it for every entry, which is
+            # most of the projected disk. Entries are taken in sampling order, and the sampling
+            # is already lattice-stratified, so a prefix is a stratified subsample.
+            if (args.predownsample_entries is None
+                    or len(predownsample_frames) < args.predownsample_entries):
+                predownsample_frames.append(
+                    FomBenchmark.predownsample_records_to_frame(predownsample_records))
 
+            frozen = (manifest.loc[entry['identifier']]
+                      if manifest is not None and entry['identifier'] in manifest.index
+                      else None)
             row = entry_record(
                 entry, condition, pattern,
-                split_by_id.get(entry['identifier'], 'unassigned'),
-                volume_decile=-1, degeneracy=is_degenerate(
+                'unassigned' if frozen is None else str(frozen['split']),
+                # READ, never recomputed (R14). -1 marks a run with no frozen manifest, which is
+                # a run whose numbers cannot be stratified by volume -- not a default value.
+                volume_decile=-1 if frozen is None else int(frozen['volume_decile']),
+                degeneracy=is_degenerate(
                     np.asarray(entry['reindexed_unit_cell'], dtype=float),
                     entry['bravais_lattice']))
             row['pool_size_full'] = int(candidates.shape[0])
@@ -257,6 +340,8 @@ def run(args):
         shutdown_mp_workers(processes, task_queues)
 
     tag = condition.tag
+    candidate_frames, subsampled = subsample_or_refuse(candidate_frames, args)
+
     if entry_rows:
         FomBenchmark.write_entry_table(
             pd.DataFrame(entry_rows, columns=list(FomBenchmark.ENTRY_COLUMNS)), out_dir, tag)
@@ -293,8 +378,15 @@ def run(args):
         n_entries_per_bl=args.n_entries_per_bl,
         bravais_lattices=bravais_lattices,
         prune_threshold=float(args.prune_threshold),
-        top_k=None if args.no_subsample else int(args.top_k),
-        subsampled=not args.no_subsample,
+        # What the run ACTUALLY did, not what it was asked to do. The previous version wrote
+        # `subsampled: true` whenever the flag was absent, while the subsampler did not exist --
+        # a manifest that misdescribes its own pool is worse than one that omits the field.
+        top_k=int(args.top_k) if subsampled else None,
+        negative_rate=float(args.negative_rate) if subsampled else None,
+        subsample_rule=('correct + top_k union + bernoulli(negative_rate), '
+                        'weight = 1/rate on the sampled class' if subsampled else None),
+        subsampled=subsampled,
+        predownsample_entries=args.predownsample_entries,
         split_manifest=args.split_manifest,
         n_entries=len(entry_rows),
         n_failures=len(failures),
