@@ -271,3 +271,22 @@ mlindex/data/test_data/**/*.npy filter=lfs diff=lfs merge=lfs -text
 mlindex/data/test_data/**/*.pkslst filter=lfs diff=lfs merge=lfs -text
 mlindex/data/test_data/**/*.csv filter=lfs diff=lfs merge=lfs -text
 mlindex/data/test_data/*.csv filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------------------------
+# Campaign-2 FOM output is NOT git-lfs. (DWMM, 2026-08-27)
+#
+# The four repo-wide globs above -- *.xlsx, *_trees.npz, *_pitf_weights_*_quantized.onnx and
+# *_calibration_weights_*_quantized.onnx -- exist for the SHIPPED model set under
+# mlindex/models/<system>_1/, which is the 545 MB of weights the wheel ships and which belongs in
+# lfs. They are globs, so they also catch anything a research step happens to name the same way,
+# and the campaign's own outputs would collide: S12's combiner is a tree model, and campaign 1
+# named its random forests `*_random_forest_regressor_trees.npz` exactly.
+#
+# Verified before adding these rules: none of campaign 1's 97 FOM model files (~165 MB across
+# mlindex/models/fom_*) matched a glob, so nothing is being removed from lfs here -- this stops a
+# future file being added to it by accident.
+#
+# Later rules win, so these come last on purpose.
+mlindex/models/fom_*/** !filter !diff !merge text=auto
+mlindex/data/fom_*/** !filter !diff !merge text=auto
+mlindex/characterization/** !filter !diff !merge text=auto
