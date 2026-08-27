@@ -28,7 +28,6 @@ from mlindex.utilities.FigureOfMerits import compute_all  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M20  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M_nn  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M_rev_sym  # noqa: E402
-from mlindex.utilities.FigureOfMerits import M_REV_MIN_N_CAL  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_delta_dewolff61  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_F_N  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_g_min_werner  # noqa: E402
@@ -536,16 +535,20 @@ def _m_rev_blowup_case():
     return np.load(path)
 
 
-def test_M_rev_blows_up_on_a_saturated_fit():
+def test_M_rev_blows_up_on_a_saturated_fit_when_the_floor_is_lifted():
     """The defect itself, so it cannot silently stop happening (C2-F-059).
 
     Three reference lines in a window that has to support a three-parameter orthorhombic cell:
     the refinement interpolates them exactly, M_rev's denominator goes to float rounding, and a
     cell M20 scores at 1.85 comes out at 6.2e11. M_tilde is unharmed, which is what says the
     defect is in the reversed term and not in the candidate.
+
+    `min_n_cal=None` is what a caller asking for the unfloored value passes, and it is how every
+    column stored before 2026-08-27 was computed.
     """
     case = _m_rev_blowup_case()
-    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"])
+    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
+                                          min_n_cal=None)
     assert case["n_cal"] == 3
     assert M_rev[0] == pytest.approx(620579830241.0692, rel=1e-12)
     assert M_rev[0] == case["M_rev_raw"]
@@ -555,27 +558,25 @@ def test_M_rev_blows_up_on_a_saturated_fit():
     assert M_sym[0] == pytest.approx(M_tilde[0]*M_rev[0], rel=1e-12)
 
 
-def test_M_rev_support_floor_voids_the_saturated_fit_and_leaves_M_tilde_alone():
-    """What the floor does, and what it deliberately does not do."""
+def test_M_rev_support_floor_is_on_by_default():
+    """The default floors the saturated fit, and does not touch M_tilde.
+
+    This is the behaviour change of 2026-08-27 (C2-F-062) and this test is what holds it: a caller
+    who passes nothing must get the floored value, because a floor every caller has to remember is
+    a floor the next caller forgets.
+    """
     case = _m_rev_blowup_case()
-    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
-                                          min_n_cal=M_REV_MIN_N_CAL)
+    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"])
     # Undefined is signalled the way the pre-existing N_cal == 0 guard signals it.
     assert M_rev[0] == 0.0
     assert M_sym[0] == 0.0
     # Only the reversed term is floored: M_tilde divides by the residual over all twenty assigned
     # lines and is well conditioned however few reference lines the window holds.
     assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-12)
-
-
-def test_M_rev_support_floor_is_off_by_default():
-    """Every merit value on disk was computed with no floor; the default must keep it that way."""
-    case = _m_rev_blowup_case()
-    default = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"])
-    explicit = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"], min_n_cal=None)
-    for left, right in zip(default, explicit):
-        assert np.array_equal(left, right)
-    assert default[1][0] > 1e11
+    # And the default is ten, not merely "some floor" -- N_cal is 3 here, so a floor of 3 would
+    # let it through and this test would pass for the wrong reason.
+    assert get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
+                         min_n_cal=3)[1][0] > 1e11
 
 
 def test_M_rev_support_floor_spares_a_well_supported_candidate():
@@ -589,10 +590,10 @@ def test_M_rev_support_floor_spares_a_well_supported_candidate():
     q2_calc = np.take_along_axis(
         q2_ref, np.abs(q2_ref[0][np.newaxis] - q2_obs[:, np.newaxis]).argmin(axis=1)[np.newaxis],
         axis=1)
-    without = get_M_rev_sym(q2_obs, q2_calc, q2_ref)[1]
-    with_floor = get_M_rev_sym(q2_obs, q2_calc, q2_ref, min_n_cal=M_REV_MIN_N_CAL)[1]
-    assert without[0] > 0.0
-    assert with_floor[0] == without[0]
+    unfloored = get_M_rev_sym(q2_obs, q2_calc, q2_ref, min_n_cal=None)[1]
+    default = get_M_rev_sym(q2_obs, q2_calc, q2_ref)[1]
+    assert unfloored[0] > 0.0
+    assert default[0] == unfloored[0]
 
 
 def test_the_correct_candidate_wins_on_the_position_only_merits():

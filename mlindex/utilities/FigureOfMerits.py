@@ -449,16 +449,7 @@ def _reversed_line_terms(q2_obs, q_max, q2_ref_calc):
     return q_min, in_range, counts, q_n, scored
 
 
-# The support floor campaign 2's analysis passes as `min_n_cal`, defined once so the consumers of
-# M_rev share a number rather than each choosing one. Ten reference lines in the window is half the
-# twenty observed peaks M20 counts over, which makes the two sides of the reversed construction
-# comparable; empirically it also clears every blow-up, which reach a window of seven at most, and
-# takes the merit's realised maximum from 6.9e14 to 626.7 (C2-F-059). It is a recommendation, not a
-# default: get_M_rev_sym applies no floor unless one is passed.
-M_REV_MIN_N_CAL = 10
-
-
-def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=None):
+def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10):
     """Oishi-Tomiyasu 2013 eqs (5), (7), (9)-(11): the restricted, reversed and symmetric FOMs.
 
     Replaces the dead `get_M20_sym_reversed`, which called an undefined `get_multiplicity` and
@@ -483,9 +474,9 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=None):
     `weights` is 1/m per reference entry and defaults to 1 -- see get_N_cal for why that is right
     here. Returns (M_tilde, M_rev, M_sym), each (n_candidates,).
 
-    `min_n_cal` is the support floor on N_cal below which M_rev is not defined, and it defaults
-    to None -- no floor, the behaviour every stored value was computed with. See the note below
-    for what it guards and why it is not on by default.
+    `min_n_cal` is the support floor on N_cal below which M_rev is not defined. **It is on**, at
+    ten reference lines in the window. Pass `min_n_cal=None` for the unfloored value, which is what
+    every column stored before 2026-08-27 was computed with. See the note below for what it guards.
 
     Unlike get_M20 this does not modify q2_ref_calc.
 
@@ -518,12 +509,23 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=None):
     -- so a floor extends that guard rather than introducing a second convention. The cost of the
     conflation with "worst" is measured, not assumed: across the 2 835 074 rows whose window
     exceeds the cell's free parameters by four or less -- which is where all 140 blow-ups live --
-    zero are correct.
+    zero are correct. Pool-wide the floor costs one correct candidate in 34 553 and takes the
+    realised maximum from 6.9e14 to 626.7.
 
-    Off by default because the value is not wrong everywhere and turning it on would change every
-    merit already on disk. The campaign analysis path sets it (M_REV_MIN_N_CAL above);
-    the shipped indexer never calls this function at all -- `Candidates._capture_merits_at_prune`
-    is its only in-package caller and runs only under the `prune_criterion_capture` research flag.
+    WHY TEN, and why it is a literal here rather than a module constant. Ten is half the twenty
+    observed peaks get_M20 counts over, which makes the two sides of the reversed construction
+    comparable; empirically every blow-up has a window of seven at most, so ten clears them with
+    margin. It is not delicate: eight clears them at the same cost of one correct candidate, and
+    fifteen costs 1 973. Ten sits in the middle of that flat region, and one literal is one place to
+    change rather than a constant and a default that can drift apart.
+
+    WHY IT IS ON. The value below the floor is not a measurement, so returning it is worse than
+    returning nothing -- and a floor every caller must remember is a floor the next caller forgets.
+    Nothing shipped is affected: command_line/run.py ranks on M20 and never calls this, and
+    Candidates._capture_merits_at_prune is the only in-package caller, itself reached only under the
+    prune_criterion_capture research flag (C2-F-060). What DOES change is any column recomputed from
+    now on, so a stored column and a fresh computation of the same candidate can disagree -- see
+    C2-F-062 for what that costs.
     """
     n_peaks = q2_obs.shape[0]
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
@@ -726,6 +728,75 @@ def get_multiplicity_taupin88(bravais_lattice):
 # ---------------------------------------------------------------------------------------------
 
 
+def get_assignment_argument(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
+    """Taupin's 2*eps*n: the expected number of lines of a random cell within eps of this peak.
+
+    Lifted verbatim out of get_M20_likelihood so the two probability forms below cannot drift
+    from the shipped merit. get_assignment_probability(form='rho') reproduces
+    get_M20_likelihood(...)[1] exactly, and a test asserts it.
+
+    Returns (n_candidates, n_peaks), larger meaning the match is easier to get by chance.
+    """
+    mu, _ = get_multiplicity_taupin88(bravais_lattice)
+    eps = np.abs(np.sqrt(np.atleast_1d(q2_obs))[np.newaxis] - np.sqrt(q2_calc))
+    return (
+        8*np.pi*q2_obs*eps/(np.atleast_1d(reciprocal_volume)[:, np.newaxis]*mu + 1e-100)
+        )
+
+
+def get_assignment_probability(q2_obs, q2_calc, bravais_lattice, reciprocal_volume, form='rho'):
+    """Per-peak P(this peak is assigned its correct Miller index), from the Taupin density.
+
+    `form` selects the link on the shared argument (see the note above):
+
+      - 'rho'    -> 1/(1 + arg), the repo's own expression, what get_M20_likelihood returns and
+                    what feeds refine_cell's peak selection and the assignment threshold.
+      - 'taupin' -> exp(-arg), the complement of Taupin 1988 eq. (10)'s coincidence probability
+                    1 - exp(-2 eps n). Note the orientation: Taupin's published P is the chance a
+                    *random* line falls this close, so the probability the assignment is right is
+                    one minus it. The handoff quotes the coincidence form; calibrating that
+                    against a correctness label would report a reliability curve upside down.
+      - 'arg'    -> the raw statistic, for fitting a recalibration to.
+
+    Returns (n_candidates, n_peaks) in [0, 1] for the two probability forms.
+    """
+    argument = get_assignment_argument(q2_obs, q2_calc, bravais_lattice, reciprocal_volume)
+    if form == 'arg':
+        return argument
+    if form == 'rho':
+        return 1/(1 + argument)
+    if form == 'taupin':
+        return np.exp(-argument)
+    raise ValueError(f"form must be 'rho', 'taupin' or 'arg', not {form!r}")
+
+
+def get_assignment_probability_dewolff(
+    q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=0.0
+):
+    """The same question with de Wolff 1961's line density instead of Taupin's.
+
+        P(correct) = exp(-|dQ| / Delta(Q))
+
+    Under de Wolff's exponential interval statistics the chance that an arbitrary cell puts a line
+    at least this close is 1 - exp(-|dQ|/Delta), so the complement is the probability the match is
+    not a coincidence. Summing -log2(1 - P) over the peaks returns get_M_info_clipped with the
+    neighbour clipping inactive, and -log(1 - P) returns get_null_tail_nll; a test asserts both,
+    so this is the same family and not a fourth convention.
+
+    S01-C names this the front-runner: it is parameter-free, sigma-free, local in Q, and F-027
+    measured its density model beating the 4 pi q^2 V / mu form by 30-58% on exactly the count
+    these probabilities are built from. Unlike the Taupin forms its discrepancy is in q^2.
+
+    `min_discrepancy` floors |dQ| the way get_null_tail_nll's does (F-026); it does not bind on a
+    probability the way it does on a log, but it is kept so the two agree term by term.
+
+    Returns (n_candidates, n_peaks) in [0, 1].
+    """
+    delta = get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)
+    discrepancy = np.maximum(np.abs(np.atleast_2d(q2_obs) - q2_calc), min_discrepancy)
+    return np.exp(-discrepancy/delta)
+
+
 # Free cell parameters per lattice system -- Taupin's nu, the divisor in the reduced chi-square.
 N_FREE_PARAMETERS = {
     'cubic': 1, 'tetragonal': 2, 'hexagonal': 2, 'rhombohedral': 2,
@@ -866,6 +937,78 @@ def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
             np.exp(term_view, out=term_view, where=computable_view)
             posterior[start:stop, peak] = 1.0/np.sum(term_view, axis=1)
     return posterior
+
+
+def get_assignment_distribution(q2_obs, q2_ref_calc, lattice_system, sigma=None,
+                                sigma_multiplier=1.0, robust=False, chunk=256, d1=None,
+                                normalise=True):
+    """The whole posterior over the reference list, not just its value at the nearest line.
+
+        P_ij = exp(-d_ij^2/2 sigma_i^2) / sum_k exp(-d_ik^2/2 sigma_i^2)
+
+    `get_assignment_posterior` answers "was peak i assigned correctly" and returns one number per
+    (candidate, peak) -- P_ij evaluated at the argmin over j. It builds the full row to do it and
+    then discards everything but the sum, so this function is the same arithmetic with the row
+    kept. **S13's handoff describes the posterior as a drop-in for the calibration network's
+    softmax; it is not, because that softmax is a distribution over the reference list and the
+    ported function returns a scalar per peak.** This is the entry point that actually matches.
+
+    The consumer is `MillerIndexAssignment.vectorized_resampling`, which samples a Miller index
+    per peak and masks the drawn line out of every other peak's row -- so it needs the competing
+    lines, not the winner. It takes `(n_entries, n_peaks, n_ref)` and rescales its draws by each
+    row's own cumulative total, so `normalise=False` is exactly as correct there and one array
+    pass cheaper; the default normalises because a probability that does not sum to one is a trap
+    for every other reader.
+
+    **Memory is the reason this is not the default form.** The result is
+    `n_candidates x n_peaks x n_ref` float64 -- 24 MB at the 150 cells x 20 peaks x 1 000 lines
+    `IntegralFilter.generate` asks for, and quadratic in nothing but linear in all three. Call it
+    on a generator's predicted cells, never on a candidate pool.
+
+    Returns (n_candidates, n_peaks, n_ref); each `[:, peak, :]` row sums to 1 when `normalise`.
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    if sigma is None or d1 is None:
+        estimated, distances = get_assignment_sigma(
+            q2_obs, q2_ref_calc, lattice_system, robust=robust, chunk=chunk
+            )
+        sigma = estimated if sigma is None else sigma
+        d1 = distances if d1 is None else d1
+    sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
+                            (q2_ref_calc.shape[0],))
+    d1 = np.asarray(d1, dtype=np.float64)
+    scale = 2*(sigma*sigma_multiplier)**2
+
+    n_candidates, n_ref = q2_ref_calc.shape
+    distribution = np.empty((n_candidates, q2_obs.size, n_ref), dtype=np.float64)
+    # The same block structure, the same kernel and the same `where=` exponential as
+    # get_assignment_posterior, so a column of this and that function's scalar are the same
+    # float by construction rather than by agreement. A test asserts it bit for bit.
+    block_width = max(1, min(chunk, n_candidates))
+    if q2_ref_calc.flags.c_contiguous:
+        terms = np.empty((block_width, n_ref), dtype=np.float64)
+        computable = np.empty(terms.shape, dtype=bool)
+    for start in range(0, n_candidates, chunk):
+        stop = min(start + chunk, n_candidates)
+        block = q2_ref_calc[start:stop]
+        block_scale = scale[start:stop][:, np.newaxis]
+        for peak in range(q2_obs.size):
+            if not q2_ref_calc.flags.c_contiguous:
+                excess = np.abs(block - q2_obs[peak])**2 - (d1[start:stop, peak]**2)[:, np.newaxis]
+                row = np.exp(-excess/block_scale)
+            else:
+                term_view = terms[:stop - start]
+                computable_view = computable[:stop - start]
+                posterior_exponent_terms(block, q2_obs[peak], d1[start:stop, peak],
+                                         scale[start:stop], term_view, computable_view)
+                np.exp(term_view, out=term_view, where=computable_view)
+                row = term_view
+            if normalise:
+                distribution[start:stop, peak] = row/np.sum(row, axis=1)[:, np.newaxis]
+            else:
+                distribution[start:stop, peak] = row
+    return distribution
 
 
 def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):

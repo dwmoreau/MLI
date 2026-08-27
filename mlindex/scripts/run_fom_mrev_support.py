@@ -35,6 +35,7 @@ Run it with the laptop env:
 """
 import argparse
 import glob
+import inspect
 import os
 import sys
 
@@ -441,8 +442,9 @@ def run_figure(args):
     blowup = value > BLOWUP
     axes.scatter(window[blowup], value[blowup], s=26, color='#D55E00', zorder=3,
                  label=f'M_rev > {BLOWUP:g}  ({int(blowup.sum())} rows, none correct)')
-    axes.axvline(fom.M_REV_MIN_N_CAL, color='#333333', linestyle='--', linewidth=1.1,
-                 label=f'support floor, min_n_cal = {fom.M_REV_MIN_N_CAL}\n'
+    floor = inspect.signature(fom.get_M_rev_sym).parameters['min_n_cal'].default
+    axes.axvline(floor, color='#333333', linestyle='--', linewidth=1.1,
+                 label=f'support floor, get_M_rev_sym min_n_cal = {floor} (the default)\n'
                        '(applied to N_cal, which this axis overstates by a median of 1)')
     axes.set_yscale('log')
     axes.set_xscale('log')
