@@ -420,8 +420,15 @@ RTOL_LADDER = (0.02, 0.01, 0.005, 0.002, 0.001)
 REPLAY_GRID = (0.0, 0.5, 0.9, 0.95, 0.99, 0.999, 0.9999)
 
 
+# The floor a soft weight is clipped at before it is inverted. `CandidateOptLoss` weights peak i
+# by 1/sigma_i^2, so a weight of p is `sigma_reduction = 1/sqrt(p)` -- and an unclipped p of 1e-300
+# overflows that. 1e-6 is four orders below the smallest posterior that still contributes anything
+# to a twenty-peak normal equation, so the clip changes no result and removes the overflow.
+WEIGHT_FLOOR = 1e-6
+
+
 def replay_refine_cell(q2_obs, xnn, hkl, best_M20, indexed, hkl_ref, q2_calculator,
-                       lattice_system, rng):
+                       lattice_system, rng, weights=None):
     """`Candidates.refine_cell`'s arithmetic, on an arbitrary peak mask.
 
     Line for line what `refine_cell` does (Candidates.py): group the candidates by how many peaks
@@ -440,16 +447,29 @@ def replay_refine_cell(q2_obs, xnn, hkl, best_M20, indexed, hkl_ref, q2_calculat
     from mlindex.utilities.UnitCellTools import fix_unphysical
     from mlindex.utilities.numba_functions import fast_assign
 
-    n_indexed = np.sum(indexed, axis=1)
     refined_xnn = xnn.copy()
-    for n in np.unique(n_indexed):
-        selected = n_indexed == n
-        subsampled = np.argwhere(indexed[selected])[:, 1].reshape((int(selected.sum()), int(n)))
-        hkl_subsampled = np.take_along_axis(hkl[selected], subsampled[:, :, np.newaxis], axis=1)
-        q2_subsampled = np.take(q2_obs, subsampled)
-        target = CandidateOptLoss(q2_subsampled, lattice_system=lattice_system)
-        target.update(hkl_subsampled, refined_xnn[selected])
-        refined_xnn[selected] += target.gauss_newton_step(refined_xnn[selected])
+    if weights is not None:
+        # Every peak enters, weighted by its assignment probability instead of being admitted or
+        # excluded. `CandidateOptLoss` weights peak i by 1/sigma_i^2 and `sigma_reduction` scales
+        # sigma, so 1/sqrt(p) is a weight of p -- no new machinery, and no threshold at all, which
+        # is the parameter C2-Q-018 says is population-dependent.
+        target = CandidateOptLoss(np.repeat(q2_obs[np.newaxis], xnn.shape[0], axis=0),
+                                  lattice_system=lattice_system)
+        target.update(hkl, refined_xnn,
+                      sigma_reduction=1.0/np.sqrt(np.maximum(weights, WEIGHT_FLOOR)))
+        refined_xnn += target.gauss_newton_step(refined_xnn)
+    else:
+        n_indexed = np.sum(indexed, axis=1)
+        for n in np.unique(n_indexed):
+            selected = n_indexed == n
+            subsampled = np.argwhere(indexed[selected])[:, 1].reshape(
+                (int(selected.sum()), int(n)))
+            hkl_subsampled = np.take_along_axis(hkl[selected], subsampled[:, :, np.newaxis],
+                                                axis=1)
+            q2_subsampled = np.take(q2_obs, subsampled)
+            target = CandidateOptLoss(q2_subsampled, lattice_system=lattice_system)
+            target.update(hkl_subsampled, refined_xnn[selected])
+            refined_xnn[selected] += target.gauss_newton_step(refined_xnn[selected])
     refined_xnn = fix_unphysical(xnn=refined_xnn, rng=rng, lattice_system=lattice_system)
 
     q2_ref_calc = q2_calculator.get_q2(refined_xnn)
@@ -556,10 +576,13 @@ def run_replay(args):
                                        lattice_system=lattice_system),
                 lattice_system)
             for form, probability in statistics.items():
-                for threshold in grid:
+                # threshold -1 is the soft-weighted arm: no cut, every peak in at weight p.
+                for threshold in ((-1.0,) + tuple(grid) if args.replay_weighted else tuple(grid)):
+                    weights = probability if threshold < 0 else None
                     accepted, kept_M20, improved = replay_refine_cell(
                         q2_obs, xnn, hkl, best_M20, probability > threshold, hkl_ref,
-                        q2_calculator, lattice_system, np.random.default_rng(args.seed))
+                        q2_calculator, lattice_system, np.random.default_rng(args.seed),
+                        weights=weights)
                     ladder = correctness_ladder(
                         entry['unit_cell_true'],
                         get_unit_cell_from_xnn(accepted, partial_unit_cell=True,
@@ -569,6 +592,7 @@ def run_replay(args):
                         entry_id=entry_id, condition_bundle=bundle, split=split,
                         bravais_lattice=bravais_lattice, form=form, threshold=float(threshold),
                         n_candidates=int(len(group)),
+                        mode='weight' if threshold < 0 else 'mask',
                         mean_admitted=float(np.mean(np.sum(probability > threshold, axis=1))),
                         accepted_rate=float(improved.mean()),
                         delta_M20=float(np.mean(kept_M20 - best_M20)),

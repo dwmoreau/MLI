@@ -430,6 +430,9 @@ def main():
                         help='comma-separated thresholds; default REPLAY_GRID')
     parser.add_argument('--replay-forms', default=None,
                         help='comma-separated statistics; default all three')
+    parser.add_argument('--replay-weighted', action='store_true',
+                        help='add a soft-weighted arm per statistic: no cut, every\n'
+                             'peak in at weight p through sigma_reduction')
     parser.add_argument('--replay-suffix', default='',
                         help='distinguishes a focused rerun from the main sweep')
     parser.add_argument('--overwrite', action='store_true')
