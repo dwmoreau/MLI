@@ -12,3 +12,18 @@ docs/
 
 # profiler output (tools/profile_run.py)
 indexing_profile/
+
+# Generated data and research output. CLAUDE.md has said "Never commit generated data. Never
+# `git add -A`" since 2026-08, and until now that was enforced by discipline alone: 46 GB sat one
+# stray `git add -A` away from the pack, where it could not be removed without rewriting history.
+# Nothing under these paths has ever been tracked, so ignoring them takes nothing away -- and the
+# scripts that regenerate all of it are committed, which is what makes the data disposable.
+#
+# The FOM campaign branch additionally unsets git-lfs for these paths in .gitattributes, because
+# the repo-wide globs there exist for the shipped model set under mlindex/models/<system>_1/ and
+# also catch research output named the same way. The two changes belong together: a large file
+# that is NOT an lfs pointer is a large file in the pack.
+mlindex/characterization/
+mlindex/data/fom_*/
+mlindex/data/generated_datasets/
+mlindex/models/fom_*/
