@@ -78,6 +78,12 @@ class MPOptimizerManager(OptimizerManager):
     def run_common(self, n_top_candidates):
         for r in range(1, self.n_ranks):
             self._data_queues[r].put(self.q2_obs.copy())
+        # Both MP subclasses override run_common to replace the MPI broadcast, so the base
+        # class's per-pattern reseeding has to be re-issued here or it never fires in
+        # multiprocessing mode -- which is the mode the benchmark dump runs in. Left out, the
+        # reseeding silently does nothing and the pool looks non-reproducible for reasons that
+        # have nothing to do with the seeding scheme.
+        self._reseed_for_pattern()
         self._run_loop(n_top_candidates)
 
     def generate_candidates_rank(self):
@@ -151,6 +157,7 @@ class MPOptimizerWorker(OptimizerWorker):
 
     def run_common(self, n_top_candidates):
         self.q2_obs[:] = self._data_q.get()
+        self._reseed_for_pattern()
         self._run_loop(n_top_candidates)
 
     def generate_candidates_rank(self):

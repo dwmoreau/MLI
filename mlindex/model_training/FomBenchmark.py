@@ -47,7 +47,12 @@ from mlindex.utilities.Q2Calculator import Q2Calculator
 from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 
 
-SCHEMA_VERSION = '2'
+SCHEMA_VERSION = '3'
+# Version 3 is Benchmark B and is deliberately not backward compatible with campaign 1's
+# Benchmark A. Every added column exists because campaign 1 could not answer a question without
+# it; `docs/fom_campaign2/SCHEMA.md` is the specification and its "What changed from Benchmark A"
+# table is the rationale, row by row. **Bump this whenever the column set changes** -- campaign 1
+# shipped two different column sets under version '2', which is why a loader cannot trust it.
 
 # Written by the dump hook, one row per surviving candidate.
 CANDIDATE_COLUMNS = (
@@ -71,6 +76,41 @@ CANDIDATE_COLUMNS = (
     'n_entering',
     'assignment_threshold',
     'downsample_radius',
+    # --- schema v3 -------------------------------------------------------------------------
+    # On the candidate row, so the join key is complete without the filename. Campaign 1's dump
+    # hook ran per (entry, lattice) and never saw the condition, so it survived only in the path
+    # -- and `(entry_id, q2_digest)` is not a substitute, because two sparse bundles leave 157
+    # entries with identical peak lists (R8).
+    'condition_bundle',
+    # The pre-extinction-group, pre-refinement value the prune rule actually tested. Nothing
+    # downstream can reconstruct it, and keeping it is what lets one run answer every higher
+    # threshold by restriction -- the single best piece of design campaign 1 produced.
+    'm20_at_prune',
+    # The same for every rival cut criterion. C2-R-001: campaign 1 stored only M20 at the cut, so
+    # S03 could not ask whether a different merit makes a better cut *at the cut*. Storing it now
+    # means S07's own run answers it and no session has to re-run for it.
+    'merit_at_prune',
+    # The merit of a randomly chosen iterate rather than the arg-max over ~100 stochastic ones,
+    # so the selection bias is measurable rather than inferred (R19, R1).
+    'merit_preselection',
+    'retained_by',
+    'prune_threshold',
+    # S04's absence counts, which replace the 158-level extinction-group categorical
+    # (C2-F-041: +0.522 pp of operating point, p <= 0.004 at every fit seed).
+    'n_absent_extra',
+    # NOT written by the dump: it needs the candidate's own reference lines, and it is
+    # recomputable offline from `xnn`, the peak list and the extinction group. Kept in the schema
+    # so the analysis stage has a defined home for it. See STATUS C2-R-009.
+    'n_absent_extra_in_range',
+    'n_groups_searched',
+    # The candidate as generated, before Gauss-Newton refinement. Present on a stratified
+    # subsample. Every dumped candidate had been refined against the very peaks it was then
+    # scored on, so only the null of a *refined survivor* was measurable -- not the null of an
+    # arbitrary cell, which is what every published null is derived for (R10).
+    'xnn_pregen',
+    # Negative subsampling bookkeeping. Without the weight every fit on this pool is biased.
+    'sampling_weight',
+    'retained_reason',
 )
 
 # Written by the pre-deduplication dump hook (S14), one row per candidate *entering*
@@ -102,6 +142,14 @@ PREDOWNSAMPLE_COLUMNS = (
     'n_entering',
     'prune_m20_threshold',
     'downsample_radius',
+    # --- schema v3 -------------------------------------------------------------------------
+    'condition_bundle',
+    'merit_at_prune',
+    # Labels on THIS stream too. Campaign 1 wrote them into its consolidated shards but not onto
+    # the 57.4 M-row pre-deduplication dump, so every re-analysis of its most valuable dataset
+    # repeated a multi-hour labelling pass (R24).
+    'is_correct',
+    'sampling_weight',
 )
 
 # Written by the driver, one row per indexed pattern.
@@ -129,6 +177,40 @@ ENTRY_COLUMNS = (
     'spacegroup_true',
     'extinction_group_true',
     'hkl_true',
+    # --- schema v3 -------------------------------------------------------------------------
+    # The surplus peaks, beyond the fitted window, drawn from the SAME noise stream as the window
+    # and carrying the same contaminants, second phase and dropout. Campaign 1 stored only
+    # `n_peaks_available`, so its hold-out merit had to be reconstructed by replaying the
+    # generator against the true structure alone -- lines carrying no contaminants while the
+    # fitted window does, and a second noise draw rather than part of the same pattern. Its
+    # +7.11 pp is optimistic by an unmeasured amount (R13).
+    'q2_holdout',
+    'hkl_holdout',
+    # Read from the frozen split manifest, NEVER recomputed. A within-lattice rank rises when
+    # rows are dropped, so recomputing moved 114 campaign-1 entries, all upward, and shifted the
+    # hard stratum from 286 to 298 (R14).
+    'volume_decile',
+    # Survivors before subsampling, so a percentile has its true denominator rather than a count
+    # of surviving rows.
+    'pool_size_full',
+    # The error model actually used. `error_law` is the constant 'gaussian' by decision (DWMM,
+    # 2026-08-26) and `error_law_params` is [intercept, slope] of sigma(q2) -- the severity axis
+    # is the multiplier and the shape axis is the intercept. Recorded rather than assumed so a
+    # bundle's provenance is readable from the data. C2-R-008 bounds what is NOT varied here.
+    'error_law',
+    'error_law_params',
+    'intercept_scale',
+    # One instrument, recorded regardless. Tag '1' throughout; `sa` is not used (DWMM: "it is
+    # unrealistic") and only the `*_1` model set exists on disk in any case.
+    'broadening_tag',
+    # Mighell-Santoro degeneracy, resolving C2-Q-002. **An entry-level property, not a
+    # candidate-level one**, which is a deliberate departure from SCHEMA.md's placement: the
+    # definition that resolves the question is a statement about the true lattice's Niggli
+    # reduced cell, so it takes one value per pattern rather than one per candidate. Joining it
+    # onto candidates is a join, not a recompute. See `mlindex/utilities/LatticeDegeneracy.py`.
+    'is_degenerate',
+    'degeneracy_conditions',
+    'degeneracy_systematic',
 )
 
 
@@ -140,8 +222,16 @@ LABEL_COLUMNS = (
     'is_off_by_two',
     'xnn_distance_to_truth',
     'volume_ratio_to_truth',
-    'is_degenerate',
+    # schema v3. Without it "the correct Miller index" is a statement about a cell setting: a
+    # monoclinic lattice admits many equivalent cells, and pooling without the setting cut moved
+    # campaign 1's base rate from 0.83 to 0.38 (R15).
+    'hkl_true_in_basis',
+    # The per-candidate prior label, so a learned prior can be tested as a re-RANKER and not only
+    # as a re-scorer -- the question campaign 1 could not answer (R16). DWMM's explicit call.
+    'prior_target',
 )
+# `is_degenerate` is NOT here. It was in campaign 1's label set and shipped null; campaign 2
+# defines it on the true lattice alone, which makes it an entry column (see ENTRY_COLUMNS).
 
 
 def q2_digest(q2_obs):
@@ -170,6 +260,8 @@ def records_to_frame(records):
             continue
         context = record.get('context') or {}
         entry_id = context.get('entry_id')
+        merit_names, merit_values = _merit_at_prune(record, n_candidates)
+        pregen = record.get('xnn_pregen')
         for candidate_index in range(n_candidates):
             rows.append({
                 'entry_id': entry_id,
@@ -192,9 +284,62 @@ def records_to_frame(records):
                 'n_entering': record['n_entering'],
                 'assignment_threshold': record['assignment_threshold'],
                 'downsample_radius': record['downsample_radius'],
+                'condition_bundle': context.get('condition_bundle'),
+                'm20_at_prune': _scalar_at(record.get('m20_at_prune'), candidate_index),
+                # A list per candidate rather than one column per criterion, with the order
+                # recorded once in the manifest as `merit_at_prune_names`. C2-R-001 asks for
+                # *every* rival cut criterion at the cut site, and a fixed column count keeps a
+                # loader from having to discover the merit set from the schema.
+                'merit_at_prune': (None if merit_values is None
+                                   else merit_values[candidate_index].astype(np.float64)),
+                'merit_preselection': _scalar_at(record.get('merit_preselection'),
+                                                 candidate_index),
+                'retained_by': int(_scalar_at(record.get('retained_by'), candidate_index) or 0),
+                'prune_threshold': record.get('prune_m20_threshold'),
+                'n_absent_extra': _scalar_at(record.get('n_absent_extra'), candidate_index),
+                'n_absent_extra_in_range': _scalar_at(record.get('n_absent_extra_in_range'),
+                                                      candidate_index),
+                'n_groups_searched': _scalar_at(record.get('n_groups_searched'), candidate_index),
+                'xnn_pregen': (None if pregen is None
+                               else pregen[candidate_index].astype(np.float64)),
+                # Overwritten by the subsampler. Defaulting to a kept row with unit weight means
+                # a pool written without subsampling is still correct to fit on.
+                'sampling_weight': 1.0,
+                'retained_reason': 'all',
                 })
     frame = pd.DataFrame(rows, columns=list(CANDIDATE_COLUMNS))
+    if merit_names:
+        frame.attrs['merit_at_prune_names'] = merit_names
     return frame
+
+
+def _scalar_at(values, index):
+    """One element of a per-candidate array, or None when the producer did not supply it.
+
+    The dump hook's optional columns are absent rather than null when a capture is off, so a
+    frame builder that indexed them unconditionally would fail on a production-shaped record.
+    """
+    if values is None:
+        return None
+    return values[index]
+
+
+def _merit_at_prune(record, n_candidates):
+    """(names, values) for the rival cut criteria captured at the prune site.
+
+    The dump hook emits one array per criterion under `merit_at_prune_<name>`. They are collapsed
+    into a single list-valued column here, in a fixed, sorted order that the manifest records --
+    so the column set does not change when the merit set does, and a loader can always say what
+    the k-th entry means. C2-R-001 is the reason any of this is stored: campaign 1 kept only M20
+    at the cut, so the question of whether a different merit makes a better cut could not be
+    asked where the cut actually is.
+    """
+    names = sorted(name[len('merit_at_prune_'):] for name in record
+                   if name.startswith('merit_at_prune_'))
+    if not names:
+        return (), None
+    values = np.stack([record[f'merit_at_prune_{name}'] for name in names], axis=1)
+    return tuple(names), values
 
 
 def predownsample_records_to_frame(records):
@@ -224,8 +369,24 @@ def predownsample_records_to_frame(records):
         columns['Minfo'].append(record['Minfo'].astype(np.float64))
         columns['n_indexed'].append(record['n_indexed'].astype(np.int64))
         columns['m20_at_prune'].append(record['m20_at_prune'].astype(np.float64))
-        columns['retained_by'].append(record['retained_by'].astype(np.int64))
+        # `retained_by` is 0 for every row here: multi-merit iterate retention is not ported to
+        # campaign 2 (it bought four entries of 972 for 57 % more rows -- F-155), so every row is
+        # the one the M20 track kept, which is the production population. The column stays so a
+        # loader written against campaign 1's shards still reads these.
+        columns['retained_by'].append(
+            record.get('retained_by', np.zeros(n_candidates)).astype(np.int64))
         columns['n_entering'].append(np.repeat(record['n_entering'], n_candidates))
+        context = record.get('context') or {}
+        columns['condition_bundle'].append(
+            np.repeat(context.get('condition_bundle'), n_candidates))
+        merit_names, merit_values = _merit_at_prune(record, n_candidates)
+        columns['merit_at_prune'].append(
+            [np.zeros(0)] * n_candidates if merit_values is None
+            else list(merit_values.astype(np.float64)))
+        columns['is_correct'].append(
+            record.get('is_correct', np.zeros(n_candidates, dtype=bool)).astype(bool))
+        columns['sampling_weight'].append(
+            record.get('sampling_weight', np.ones(n_candidates)).astype(np.float64))
         columns['prune_m20_threshold'].append(
             np.repeat(record['prune_m20_threshold'], n_candidates))
         columns['downsample_radius'].append(
@@ -236,7 +397,7 @@ def predownsample_records_to_frame(records):
 
     data = {}
     for name, chunks in columns.items():
-        if name == 'xnn':
+        if name in ('xnn', 'merit_at_prune'):
             data[name] = [row for chunk in chunks for row in chunk]
         else:
             data[name] = np.concatenate(chunks)

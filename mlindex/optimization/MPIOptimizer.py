@@ -1,4 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+
 import numpy as np
 import scipy.spatial
 
@@ -65,6 +67,12 @@ def _downsample_chunk(args):
 
     return (xnn_chunk[order], M20_chunk[order], Minfo_chunk[order],
             n_indexed_chunk[order], [spacegroup_chunk[i] for i in order])
+
+
+def _derived_seed(key, base_seed):
+    """A stable seed for `key`. `hash()` will not do: it is salted per process."""
+    digest = hashlib.sha256(f'{base_seed}:{key}'.encode()).digest()
+    return int.from_bytes(digest[:8], 'big')
 
 
 def _worker_payload(candidates):
@@ -198,7 +206,56 @@ class OptimizerBase:
 
     def run_common(self, n_top_candidates):
         self.comm.Bcast(self.q2_obs, root=self.root)
+        self._reseed_for_pattern()
         self._run_loop(n_top_candidates)
+
+    def _reseed_for_pattern(self):
+        """Re-key the search RNG to this pattern, if the driver asked for it.
+
+        **Off unless `opt_params['search_seed_scheme'] == 'per_entry_bravais'`.** It changes which
+        candidates the search generates, so the shipped behaviour has to stay reproducible and the
+        default is campaign 1's: one generator per pool, advanced by every entry.
+
+        Why the benchmark needs it (PROTOCOL §6, R17). With one generator per pool, a 243-entry
+        run stripes across pools differently from a 5 955-entry one, every entry meets the
+        generators at a different state, and **no subset of the benchmark can be regenerated
+        comparably**. That single fact forced a within-run restriction on every result in campaign
+        1's final phase.
+
+        The key is the observed peak list, the Bravais lattice and the rank -- not the entry
+        identifier. That matters for a practical reason: `q2_obs` has just been broadcast, so
+        every rank can derive the same key from what it already holds, and no worker protocol
+        changes. It is also the more honest key, being a function of the entry *and* the condition
+        rather than of the entry alone, so two bundles of one crystal are separate draws while the
+        same bundle regenerates identically anywhere.
+        """
+        if self.opt_params.get('search_seed_scheme') != 'per_entry_bravais':
+            return
+        from mlindex.model_training.FomBenchmark import q2_digest
+        base_seed = self.opt_params.get('search_base_seed', 12345)
+        key = f'search:{q2_digest(self.q2_obs)}:{self.bravais_lattice}:{self.comm.Get_rank()}'
+        self.rng = np.random.default_rng(_derived_seed(key, base_seed))
+
+        # Reseeding the optimizer's own generator is NOT enough, and finding that out is what
+        # gate 2 is for. `MITemplates` and `IntegralFilter` each construct their own
+        # `default_rng` at setup and advance it on every call, so they carry state from one entry
+        # to the next entirely outside `self.rng`. Left alone, the first entry of a run
+        # reproduces and every later one drifts -- measured at 119 of 7 503 candidate rows over
+        # three entries, with the first entry exact and cubic exact throughout, because cubic
+        # draws from them least.
+        wrapper = getattr(self, 'wrapper', None)
+        if wrapper is None:
+            return
+        for attribute in ('random_forest_generator', 'integral_filter_generator',
+                          'miller_index_templator', 'random_unit_cell_generator'):
+            components = getattr(wrapper, attribute, None)
+            if not isinstance(components, dict):
+                continue
+            for name, component in sorted(components.items(),
+                                          key=lambda item: str(item[0])):
+                if component is not None and hasattr(component, 'rng'):
+                    component.rng = np.random.default_rng(
+                        _derived_seed(f'{key}:{attribute}:{name}', base_seed))
 
 
 class OptimizerWorker(OptimizerBase):
@@ -255,9 +312,18 @@ class OptimizerManager(OptimizerBase):
         self.bravais_lattice = bravais_lattice
         self.rng = np.random.default_rng(seed)
 
+        # Research capture, off unless a driver asks for it. `dump_context` carries the entry
+        # identity down to the recorder: the hook fires per (entry, Bravais lattice) and would
+        # otherwise have no idea which pattern it is looking at, which is how campaign 1's dump
+        # came to leave `condition_bundle` in a filename and nowhere else (R8).
+        self._dump_records = []
+        self.dump_context = None
+        self.predownsample = None
+
         opt_params_defaults = {
             'minimum_uc': 2,
             'maximum_uc': 500,
+            'dump_candidates': False,
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
@@ -562,6 +628,109 @@ class OptimizerManager(OptimizerBase):
             )
         return xnn
 
+    def _record_candidate_dump(self, xnn, M20, Minfo, n_indexed, spacegroup, n_entering,
+                               n_top_candidates, at_prune=None):
+        """Buffer every candidate that survived deduplication, for the benchmark dump.
+
+        Read-only with respect to the optimizer: the caller goes on to sort and truncate the same
+        arrays, so everything stored here is copied.
+
+        `final_rank` is the rank by descending M20 over ALL survivors, not over the printed
+        twenty. That is what lets the truncation be expressed as a boolean rather than as a
+        missing row, and it is computed here rather than on load because a within-lattice rank
+        recomputed from surviving rows drifts whenever rows are dropped -- campaign 1 recomputed
+        its volume decile that way and moved 114 entries, all upward (R14).
+
+        The at-prune merits ride along keyed to the survivors, which is only possible because the
+        deduplication carried row identity through. Without them `merit_at_prune` would again be
+        unavailable at the one place it is needed (C2-R-001).
+        """
+        if self.zero_error:
+            raise NotImplementedError(
+                'Candidate dumping does not support zero-error refinement: the per-candidate '
+                'zeropoint stays in the worker and never reaches the manager, so the dumped '
+                'columns would not reproduce the pipeline M20.'
+                )
+        context = dict(self.dump_context or {})
+
+        order = np.argsort(M20)[::-1]
+        final_rank = np.empty(M20.shape[0], dtype=int)
+        final_rank[order] = np.arange(M20.shape[0])
+
+        unit_cell = get_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system)
+        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=self.lattice_system)
+
+        from mlindex.model_training.FomBenchmark import q2_digest
+
+        record = {
+            'bravais_lattice': self.bravais_lattice,
+            'lattice_system': self.lattice_system,
+            'context': context,
+            # The join-integrity check. Falls back to computing it here so the hook is usable
+            # without a driver-supplied context; a mis-joined shard is otherwise silent, since
+            # every column still parses and the numbers simply attach to the wrong pattern.
+            'q2_digest': context.get('q2_digest') or q2_digest(self.q2_obs),
+            'n_peaks': int(self.n_peaks),
+            'hkl_ref_length': int(self.hkl_ref_length),
+            'n_entering': int(n_entering),
+            'assignment_threshold': float(self.opt_params['assignment_threshold']),
+            'downsample_radius': float(self.opt_params['downsample_radius']),
+            'prune_m20_threshold': float(self.opt_params.get('prune_m20_threshold', 5.0)),
+            'xnn': np.array(xnn, dtype=np.float64, copy=True),
+            'unit_cell': np.array(unit_cell, dtype=np.float64, copy=True),
+            'volume': get_unit_cell_volume(
+                unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system),
+            'reciprocal_volume': get_unit_cell_volume(
+                reciprocal_unit_cell, partial_unit_cell=True,
+                lattice_system=self.lattice_system),
+            'M20': np.array(M20, dtype=np.float64, copy=True),
+            'Minfo': np.array(Minfo, dtype=np.float64, copy=True),
+            'n_indexed': np.array(n_indexed, dtype=int, copy=True),
+            'spacegroup': list(spacegroup),
+            'final_rank': final_rank,
+            'in_top_n': final_rank < n_top_candidates,
+            }
+
+        # S04's absence counts, which replace the 158-level extinction-group categorical as S12's
+        # symmetry feature (C2-F-041). Both are table lookups keyed on (lattice, group), so they
+        # cost nothing here. `n_absent_extra_in_range` is deliberately NOT stored: it needs the
+        # candidate's own reference lines, and it is recomputable offline from `xnn`, the peak
+        # list and the group -- which is the whole design of this dump. A column earns its place
+        # by being expensive to recompute or by recording a value that no longer exists later.
+        try:
+            from mlindex.utilities.ExtinctionCounts import get_absence_counts
+            from mlindex.utilities.ExtinctionCounts import get_n_groups_searched
+            counts = get_absence_counts(self.bravais_lattice)
+            record['n_absent_extra'] = np.array(
+                [counts.get(group, 0) for group in spacegroup], dtype=np.int64)
+            record['n_groups_searched'] = np.full(
+                len(spacegroup), get_n_groups_searched(self.bravais_lattice), dtype=np.int64)
+        except Exception:
+            # A missing lookup table must not cost the whole dump; the columns are recoverable
+            # from `spacegroup`, which is stored either way.
+            pass
+        for name, values in (at_prune or {}).items():
+            record[name] = np.array(values, dtype=np.float64, copy=True)
+        self._dump_records.append(record)
+
+    def drain_candidate_dump(self):
+        """Hand the buffered records to the driver and reset, so memory stays bounded."""
+        records = self._dump_records
+        self._dump_records = []
+        return records
+
+    def drain_predownsample_dump(self):
+        """As drain_candidate_dump, for the pre-deduplication stream.
+
+        Returns a list so the two streams have the same shape for the frame builders, even though
+        the capture itself is one dict per (entry, Bravais lattice).
+        """
+        records = self.predownsample
+        self.predownsample = None
+        return [] if records is None else [records]
+
     def _downsample_computation(self, best_M20_all, best_Minfo_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
                                 n_top_candidates, at_prune=None):
@@ -612,8 +781,23 @@ class OptimizerManager(OptimizerBase):
                  'lattice_system': self.lattice_system,
                  'n_peaks': int(self.n_peaks),
                  'hkl_ref_length': int(self.hkl_ref_length),
-                 'downsample_radius': float(self.opt_params['downsample_radius'])},
+                 'downsample_radius': float(self.opt_params['downsample_radius']),
+                 # Schema v3 needs these on the pre-deduplication stream too, so it joins on the
+                 # same keys as the survivors and carries the condition on the row rather than in
+                 # a filename (R8). `n_entering` is this stream's own row count by construction.
+                 'context': dict(self.dump_context or {}),
+                 'n_entering': int(best_M20_all.shape[0]),
+                 'prune_m20_threshold': float(self.opt_params.get('prune_m20_threshold', 5.0)),
+                 'q2_digest': (self.dump_context or {}).get('q2_digest')},
                 **{name: values[good_indices] for name, values in at_prune.items()})
+
+        # How many candidates reached deduplication. `n_entering` is a benchmark column in its
+        # own right -- it is what makes the tie-break's cost measurable rather than inferred --
+        # so it is taken here, after the NaN filter and before anything is collapsed.
+        n_entering = int(best_M20_all.shape[0])
+        at_prune_filtered = (None if at_prune is None
+                             else {name: values[good_indices]
+                                   for name, values in at_prune.items()})
 
         # Next remove nearly identical xnn's by selecting the xnn within an arbitrary radius
         # with the highest M20 score. The candidates are sorted by reciprocal volume so the
@@ -628,10 +812,21 @@ class OptimizerManager(OptimizerBase):
         best_Minfo_all = best_Minfo_all[sort_indices]
         best_n_indexed_all = best_n_indexed_all[sort_indices]
         best_spacegroup_all = [best_spacegroup_all[i] for i in sort_indices]
+        if at_prune_filtered is not None:
+            at_prune_filtered = {name: values[sort_indices]
+                                 for name, values in at_prune_filtered.items()}
         chunk_size = 1000
         n_chunks = best_xnn_all.shape[0] // chunk_size + 1
 
         downsample_radius = self.opt_params['downsample_radius']
+
+        # The identity of each row, carried through `_downsample_chunk`'s spacegroup slot. That
+        # function never reads the slot -- its only use is `[spacegroup_chunk[i] for i in order]`
+        # -- so substituting row indices is bit-identical and hands back the survivor mapping for
+        # free. Without it there is no way to attach a survivor to the at-prune merits it was cut
+        # on, short of running the deduplication twice or matching cells by value. (This is the
+        # same trick S03's deduplication emulator uses, for the same reason.)
+        row_indices = list(range(best_M20_all.shape[0]))
 
         chunk_args = []
         for chunk_index in range(n_chunks):
@@ -642,7 +837,7 @@ class OptimizerManager(OptimizerBase):
                 best_M20_all[start:end],
                 best_Minfo_all[start:end],
                 best_n_indexed_all[start:end],
-                best_spacegroup_all[start:end],
+                row_indices[start:end],
                 downsample_radius,
             ))
 
@@ -653,17 +848,29 @@ class OptimizerManager(OptimizerBase):
         M20_downsampled = []
         Minfo_downsampled = []
         n_indexed_downsampled = []
-        spacegroup_downsampled = []
-        for (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk) in chunk_results:
+        survivor_indices = []
+        for (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, index_chunk) in chunk_results:
             xnn_downsampled.append(xnn_chunk)
             M20_downsampled.append(M20_chunk)
             Minfo_downsampled.append(Minfo_chunk)
             n_indexed_downsampled.append(n_indexed_chunk)
-            spacegroup_downsampled += spacegroup_chunk
+            survivor_indices += index_chunk
         xnn_downsampled = np.vstack(xnn_downsampled)
         M20_downsampled = np.concatenate(M20_downsampled)
         Minfo_downsampled = np.concatenate(Minfo_downsampled)
         n_indexed_downsampled = np.concatenate(n_indexed_downsampled)
+        spacegroup_downsampled = [best_spacegroup_all[i] for i in survivor_indices]
+
+        # Every candidate that survived deduplication, with the rank it would be given over ALL
+        # survivors rather than only the printed twenty. Off unless the driver asks for it.
+        if self.opt_params.get('dump_candidates'):
+            self._record_candidate_dump(
+                xnn_downsampled, M20_downsampled, Minfo_downsampled, n_indexed_downsampled,
+                spacegroup_downsampled, n_entering, n_top_candidates,
+                None if at_prune_filtered is None
+                else {name: values[survivor_indices]
+                      for name, values in at_prune_filtered.items()},
+                )
 
         sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
