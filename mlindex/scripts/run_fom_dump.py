@@ -302,6 +302,22 @@ def preflight(args):
             '--no-subsample and subsample after a separate labelling pass.')
     if args.arm and not args.split_manifest:
         raise SystemExit('--arm selects on a manifest column and needs --split-manifest')
+
+    # cctbx, checked in two seconds rather than discovered after the queue wait. Two independent
+    # entry points need it and BOTH run in the batch job: `SpaceGroups.get_spacegroup_hkl_ref`,
+    # which `Candidates.assign_extinction_group` calls on every pattern (so campaign 1's array
+    # already proved this one), and `LatticeDegeneracy.reduced_cell`, which is new in campaign 2
+    # and runs once per entry. It is an OPTIONAL dependency of this package -- the end-user path
+    # must not acquire it -- so an inference-only environment can legitimately lack it.
+    try:
+        from cctbx import crystal  # noqa: F401
+        from cctbx import sgtbx    # noqa: F401
+    except ImportError as error:
+        raise SystemExit(
+            f'cctbx is not importable in this interpreter ({error}). The generation run needs it '
+            'twice per pattern: for the extinction-group reference sets and for the Niggli '
+            'reduction behind `is_degenerate`. Use the environment campaign 1 generated in '
+            '(envs/onnx on NERSC), or install cctbx-base.')
     if not 1 <= args.n_shards or not 0 <= args.shard < args.n_shards:
         raise SystemExit(f'--shard must be in [0, {args.n_shards}); got {args.shard}')
 
@@ -450,6 +466,15 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
                     records += optimizer.drain_candidate_dump()
                     if want_predownsample:
                         predownsample_records += optimizer.drain_predownsample_dump()
+                # `is_degenerate` is cctbx-backed (Niggli reduction of the primitive setting)
+                # and runs once per entry, so it is INSIDE this guard rather than after it. A
+                # single cell cctbx refuses would otherwise abort the whole pool at that entry --
+                # and cctbx raising on real cells is documented in this codebase, not
+                # hypothetical: `_conventional_cell` did it for ~4.8 % of entries before the
+                # guard now on `main` existed.
+                degeneracy = is_degenerate(
+                    np.asarray(entry['reindexed_unit_cell'], dtype=float),
+                    entry['bravais_lattice'])
             except Exception as error:
                 # An isolated entry failure is tolerable; a systematic one is not, and an
                 # unattended run must not spend hours writing a mostly-failed shard.
@@ -487,9 +512,7 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
                 # READ, never recomputed (R14). -1 marks a run with no frozen manifest, which is
                 # a run whose numbers cannot be stratified by volume -- not a default value.
                 volume_decile=-1 if frozen is None else int(frozen['volume_decile']),
-                degeneracy=is_degenerate(
-                    np.asarray(entry['reindexed_unit_cell'], dtype=float),
-                    entry['bravais_lattice']))
+                degeneracy=degeneracy)
             row['pool_size_full'] = int(candidates.shape[0])
             entry_rows.append(row)
 
