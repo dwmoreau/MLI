@@ -230,10 +230,14 @@ LABEL_COLUMNS = (
     # monoclinic lattice admits many equivalent cells, and pooling without the setting cut moved
     # campaign 1's base rate from 0.83 to 0.38 (R15).
     'hkl_true_in_basis',
-    # The per-candidate prior label, so a learned prior can be tested as a re-RANKER and not only
-    # as a re-scorer -- the question campaign 1 could not answer (R16). DWMM's explicit call.
-    'prior_target',
 )
+# `prior_target` was here and is NOT produced. R16 asks for a per-candidate prior label so a
+# learned prior can be tested as a re-RANKER and not only as a re-scorer, and DWMM asked for it
+# explicitly -- but nothing in the record says what the label IS, and inventing one mid-session is
+# what C2-Q-002 shows the cost of. Open as C2-Q-015. It is left out rather than shipped null
+# (C2-F-046), and every plausible definition is a function of columns this pool already stores --
+# `volume`, `bravais_lattice`, `xnn`, and the truth beside them -- so it can be added offline once
+# defined, with no regeneration.
 # `is_degenerate` is NOT here. It was in campaign 1's label set and shipped null; campaign 2
 # defines it on the true lattice alone, which makes it an entry column (see ENTRY_COLUMNS).
 
@@ -542,6 +546,75 @@ def recompute_frame(candidates, entries, models_directory=None):
     return result
 
 
+# The merits the negative subsampler ranks on, and the merit set S09 reports. Four calls, six
+# derived columns, plus the stored `M20` -- the campaign-2 reduced core settled by DWMM on
+# 2026-08-25 and priced at 6.0x `get_M20` in `artifacts/S02_zoo_cost.csv`.
+#
+# `subsample_negatives` MUST rank on all seven. K = 200 was measured as the size of the UNION over
+# exactly this set, which is ~3.3x K rather than K (C2-F-051); ranking on M20 alone would retain a
+# third of what the sizing assumed and would silently stop rank metrics on the other six being
+# exact to depth K -- which is the property the whole retention rule exists to preserve.
+REDUCED_MERIT_COLUMNS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
+
+
+def reduced_merits(candidates, entries, models_directory=None):
+    """The six recomputable merits of the reduced core, for a whole candidate frame.
+
+    Returns a frame aligned to `candidates`' index carrying `M_tilde`, `M_rev`, `M_sym`, `X_N`,
+    `n_over` and `max_gap`. `M20` is not recomputed: it is already a stored column, and it is the
+    one merit whose stored value is the *reported* one by construction.
+
+    These are **not stored** in the pool. Every one is recomputable offline from `xnn`, the peak
+    list and the extinction group, which is this schema's own rule for what does not earn a column
+    (SCHEMA.md). They are computed here because the subsampler has to rank on them before the rows
+    it would rank are thrown away.
+
+    Grouped exactly as `recompute_frame` groups, so the cctbx-backed reference list is built once
+    per extinction group rather than once per row, and the assignment is redone with `fast_assign`
+    on the optimiser's own calculator output -- the route matters to the last bit, since rebuilding
+    q2_calc from stored Miller indices differs by an ULP that can move a line across M20's cut-off
+    (F-095).
+
+    `get_M20` is deliberately NOT called here. It is the only one of the family that mutates
+    `q2_ref_calc`, via `np.putmask`, so calling it would change what the other three see --
+    `Candidates._capture_merits_at_prune` orders its calls for the same reason.
+    """
+    from mlindex.utilities.FigureOfMerits import get_M_rev_sym
+    from mlindex.utilities.FigureOfMerits import get_n_over
+    from mlindex.utilities.FigureOfMerits import get_X_N
+
+    names = ['M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap']
+    out = pd.DataFrame(index=candidates.index, columns=names, dtype=float)
+    if candidates.empty:
+        return out
+
+    join_keys = _join_keys(candidates, entries)
+    peaks = entries.set_index(join_keys)['q2_obs']
+    group_keys = list(join_keys) + ['lattice_system', 'bravais_lattice', 'spacegroup', 'n_peaks']
+    for key, group in candidates.groupby(group_keys, sort=False):
+        peak_key = key[0] if len(join_keys) == 1 else key[:len(join_keys)]
+        lattice_system, bravais_lattice, spacegroup, n_peaks = key[len(join_keys):]
+        # Cubic models take ten peaks and everything else twenty; the optimizer truncates with a
+        # plain prefix slice, so the entry's list is cut the same way here.
+        q2_obs = np.asarray(peaks.loc[peak_key], dtype=np.float64)[:int(n_peaks)]
+        xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
+        q2_ref_calc, _, _, q2_calc = assign_lines(
+            q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory)
+
+        M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc)
+        n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc)
+        X_N = get_X_N(q2_obs, q2_calc, q2_ref_calc)
+        for name, values in zip(names, (M_tilde, M_rev, M_sym, X_N, n_over, max_gap)):
+            out.loc[group.index, name] = np.asarray(values, dtype=float)
+    return out
+
+
+def with_reduced_merits(candidates, entries, models_directory=None):
+    """`candidates` plus the six ranking merits, for the subsampler. Not written to disk."""
+    merits = reduced_merits(candidates, entries, models_directory=models_directory)
+    return pd.concat([candidates, merits], axis=1)
+
+
 # The keys a feature row is identified by. candidate_id is only meaningful within its own
 # (entry, lattice), so all four are needed to join a feature matrix back to the pool.
 ZOO_KEY_COLUMNS = ('entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id')
@@ -752,95 +825,115 @@ def cv_features(candidates, entries, schemes=('random', 'contiguous', 'high_q'),
 # multiplier and permutation space. That is ~9 ms/candidate, which over a full S04 grid of ~20M
 # candidates is ~50 h and makes consolidation impossible in one job.
 #
-# The work is per-candidate and independent, so it parallelises exactly rather than being rewritten.
-# That is the right trade here: validate_candidate_known_bl is production comparison logic that S02's
-# labelling also depends on, and a node has 128 cores idle while this runs.
-def _label_chunk(payload):
-    """Module-level and picklable, so this survives the spawn start method."""
-    candidates, truth, rtol = payload
-    return label_frame(candidates, truth, rtol=rtol, n_processes=1)
-
-
-def label_frame_parallel(candidates, entries, rtol=1e-2, n_processes=1, chunk_size=20000):
-    """label_frame over a process pool. Identical output; only the wall-clock differs."""
-    if n_processes <= 1 or candidates.shape[0] <= chunk_size:
-        return label_frame(candidates, entries, rtol=rtol)
-    from multiprocessing import Pool
-
-    # Only the columns label_frame reads, so each chunk pickles a few hundred kB of ground truth
-    # rather than the entry table's q2_obs and hkl_true arrays.
-    truth = entries[['entry_id', 'unit_cell_true', 'volume_true', 'bravais_lattice_true']]
-    chunks = [candidates.iloc[start:start + chunk_size].reset_index(drop=True)
-              for start in range(0, candidates.shape[0], chunk_size)]
-    with Pool(processes=n_processes) as pool:
-        labelled = pool.map(_label_chunk, [(chunk, truth, rtol) for chunk in chunks])
-    return pd.concat(labelled, ignore_index=True)
-
-
 def label_frame(candidates, entries, rtol=1e-2, n_processes=1):
     """Attach correctness labels, which need ground truth the dump hook cannot see.
 
-    `is_correct` and `is_off_by_two` come from `validate_candidate_known_bl`, which takes
-    the *partial* unit cell for the candidate's own Bravais lattice -- the representation
-    the optimizer produces. `xnn_distance_to_truth` is only defined when the candidate's
-    lattice matches the true one, because the xnn vectors have different lengths and
-    meanings otherwise.
+    **Batched, per (entry, lattice system).** The scalar `validate_candidate_known_bl` costs
+    ~9 ms a candidate; `label_known_bl_batch` answers the same question for a whole block and was
+    measured at 1 584x with zero disagreements over 57.4 M rows (F-166), extended in campaign 2 to
+    return `is_off_by_two` as well and gated against the scalar routine on all seven lattice
+    systems in `tests/test_candidate_validation_batch.py`. At Benchmark B's ~2.5 billion survivor
+    rows the scalar form is not an option, and the process pool that used to wrap it is gone with
+    it -- 128 processes multiplying a 1 584x speedup is not a trade anyone needs to make.
 
-    Note the two xnn representations do not match as stored: `xnn_true` comes from the
-    dataset's `reindexed_xnn`, which is always the full six components, while a candidate's
-    `xnn` is the partial form for its lattice system (one component for cubic, two for
-    tetragonal, ...). The true cell is therefore converted to the candidate's partial form
-    before the distance is taken. Comparing them directly would leave the distance null for
-    every lattice except triclinic, silently.
+    `n_processes` is accepted and ignored, so callers written against the old signature still run.
+
+    Four columns are per-candidate arithmetic:
+
+    * `is_correct` / `is_off_by_two` from the batch labeller, which takes the *partial* truth for
+      the candidate's own lattice system -- `TRUTH_SLICE` is an index list and not a range, since
+      monoclinic takes beta and not alpha.
+    * `xnn_distance_to_truth`, defined only when the candidate's lattice matches the true one,
+      because the xnn vectors have different lengths and meanings otherwise. The true cell is
+      converted to the candidate's partial form first: `xnn_true` is always the full six
+      components while a candidate's `xnn` is partial, and comparing them as stored leaves the
+      distance null for every lattice except triclinic, silently.
+    * `hkl_true_in_basis`, the truth's reflections in **this candidate's** basis. Null for a
+      candidate that is not correct -- not because it was not computed, but because no basis
+      change relates a wrong cell to the truth and the quantity does not exist there (R15).
+
+    `is_degenerate` is NOT set here. Campaign 1 shipped it null on the candidate table; campaign 2
+    defines it on the true lattice's Niggli reduced cell, which makes it one value per pattern and
+    therefore an entry column (C2-F-043, `mlindex/utilities/LatticeDegeneracy.py`).
+
+    `prior_target` is not set here either, and it is not in `LABEL_COLUMNS`: it has no operational
+    definition anywhere in the record -- see C2-Q-015. Every plausible definition is a function of
+    columns this pool already stores, so it can be added offline once defined, without
+    regenerating. Shipping it null in every row is the one option that is ruled out (C2-F-046).
     """
-    if n_processes > 1:
-        return label_frame_parallel(candidates, entries, rtol=rtol, n_processes=n_processes)
-
-    from mlindex.optimization.CandidateValidation import validate_candidate_known_bl
+    from mlindex.optimization.CandidateValidation import basis_change_known_bl_batch
+    from mlindex.optimization.CandidateValidation import hkl_in_candidate_basis
+    from mlindex.optimization.CandidateValidation import label_known_bl_batch
+    from mlindex.optimization.CandidateValidation import TRUTH_SLICE
     from mlindex.utilities.UnitCellTools import get_partial_unit_cell
     from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 
-    truth = entries.set_index('entry_id')
-    is_correct = np.zeros(candidates.shape[0], dtype=bool)
-    is_off_by_two = np.zeros(candidates.shape[0], dtype=bool)
-    xnn_distance = np.full(candidates.shape[0], np.nan)
-    volume_ratio = np.full(candidates.shape[0], np.nan)
+    result = candidates.copy()
+    n_rows = result.shape[0]
+    is_correct = np.zeros(n_rows, dtype=bool)
+    is_off_by_two = np.zeros(n_rows, dtype=bool)
+    xnn_distance = np.full(n_rows, np.nan)
+    volume_ratio = np.full(n_rows, np.nan)
+    hkl_in_basis = np.empty(n_rows, dtype=object)
+    hkl_in_basis[:] = None
+    if n_rows == 0:
+        return _with_label_columns(result, is_correct, is_off_by_two, xnn_distance,
+                                   volume_ratio, hkl_in_basis)
 
-    for position, (_, row) in enumerate(candidates.iterrows()):
-        entry = truth.loc[row['entry_id']]
-        correct, off_by_two = validate_candidate_known_bl(
-            unit_cell_true=np.asarray(entry['unit_cell_true'], dtype=np.float64),
-            unit_cell_pred=np.asarray(row['unit_cell'], dtype=np.float64),
-            bravais_lattice_pred=row['bravais_lattice'],
-            rtol=rtol,
-            )
-        # validate_candidate_known_bl falls off the end of several branches, returning
-        # None rather than False when nothing matches.
-        is_correct[position] = bool(correct)
-        is_off_by_two[position] = bool(off_by_two)
-        volume_ratio[position] = row['volume'] / entry['volume_true']
-        if row['bravais_lattice'] == entry['bravais_lattice_true']:
-            partial_true = get_partial_unit_cell(
-                np.asarray(entry['unit_cell_true'], dtype=np.float64),
-                lattice_system=row['lattice_system'],
-                )
+    truth = entries.set_index('entry_id')
+    has_hkl_true = 'hkl_true' in truth.columns
+
+    for (entry_id, lattice_system), group in result.groupby(
+            ['entry_id', 'lattice_system'], sort=False):
+        entry = truth.loc[entry_id]
+        positions = result.index.get_indexer(group.index)
+        unit_cell_true = np.asarray(entry['unit_cell_true'], dtype=np.float64)
+        # Stacked per group, never across the frame: `unit_cell` is the PARTIAL cell for the
+        # candidate's own lattice system, so it is one number for cubic and six for triclinic and
+        # a pool holds all fourteen lattices. Stacking the column whole raises, and a pool that
+        # happened to hold one system would have hidden that until the first real run.
+        predicted = np.stack([np.asarray(cell, dtype=np.float64)
+                              for cell in group['unit_cell']])
+        predicted = predicted[:, :len(TRUTH_SLICE[lattice_system])]
+
+        correct, off_by_two = label_known_bl_batch(
+            unit_cell_true[TRUTH_SLICE[lattice_system]], predicted, lattice_system, rtol=rtol)
+        is_correct[positions] = correct
+        is_off_by_two[positions] = off_by_two
+        volume_ratio[positions] = (group['volume'].to_numpy(dtype=np.float64)
+                                   / float(entry['volume_true']))
+
+        if group['bravais_lattice'].iloc[0] == entry['bravais_lattice_true']:
+            partial_true = get_partial_unit_cell(unit_cell_true, lattice_system=lattice_system)
             xnn_true = get_xnn_from_unit_cell(
                 partial_true[np.newaxis], partial_unit_cell=True,
-                lattice_system=row['lattice_system'],
-                )[0]
-            xnn_pred = np.asarray(row['xnn'], dtype=np.float64)
-            xnn_distance[position] = np.linalg.norm(xnn_pred - xnn_true)
+                lattice_system=lattice_system)[0]
+            xnn_pred = np.stack([np.asarray(xnn, dtype=np.float64) for xnn in group['xnn']])
+            xnn_distance[positions] = np.linalg.norm(xnn_pred - xnn_true, axis=1)
 
-    result = candidates.copy()
-    result['is_correct'] = is_correct
-    result['is_off_by_two'] = is_off_by_two
-    result['xnn_distance_to_truth'] = xnn_distance
-    result['volume_ratio_to_truth'] = volume_ratio
-    # PLAN 6.5 defines is_degenerate against the true cell's calculated lines "within
-    # sigma(q2)", but PROTOCOL 3 forbids assuming sigma is known and the true cell's
-    # Bravais lattice generally implies a different reference list. Left null pending Q27.
-    result['is_degenerate'] = pd.NA
-    return result
+        if has_hkl_true and correct.any():
+            # Only the correct rows, which are under 1 % of the pool, so the per-candidate 3x3
+            # inverse this needs costs nothing against the labelling itself.
+            changes = basis_change_known_bl_batch(
+                unit_cell_true[TRUTH_SLICE[lattice_system]], predicted, lattice_system, rtol=rtol)
+            hkl_true = np.asarray(entry['hkl_true'], dtype=np.float64).reshape(-1, 3)
+            for offset in np.flatnonzero(correct):
+                reexpressed = hkl_in_candidate_basis(hkl_true, changes[offset])
+                if reexpressed is not None:
+                    hkl_in_basis[positions[offset]] = reexpressed.reshape(-1)
+
+    return _with_label_columns(result, is_correct, is_off_by_two, xnn_distance,
+                               volume_ratio, hkl_in_basis)
+
+
+def _with_label_columns(frame, is_correct, is_off_by_two, xnn_distance, volume_ratio,
+                        hkl_in_basis):
+    frame['is_correct'] = is_correct
+    frame['is_off_by_two'] = is_off_by_two
+    frame['xnn_distance_to_truth'] = xnn_distance
+    frame['volume_ratio_to_truth'] = volume_ratio
+    frame['hkl_true_in_basis'] = hkl_in_basis
+    return frame
 
 
 # The group a candidate pool is defined over, and the group every rank in this schema is taken
@@ -1108,11 +1201,17 @@ def load_benchmark(root, split=None, bravais_lattices=None, rtol=1e-2, label=Tru
 def has_labels(frame):
     """Does this frame already carry usable correctness labels?
 
-    `is_degenerate` is deliberately excluded: it ships null (SCHEMA.md, Q28), so requiring it
-    to be populated would call every pool unlabelled.
+    Every column of `LABEL_COLUMNS` has to be present, and `is_correct` has to be populated.
+    Campaign 1's version filtered `is_degenerate` out of the check because that column shipped
+    null and would otherwise have called every pool unlabelled; campaign 2 does not have that
+    problem, because it does not ship a column it cannot fill -- `is_degenerate` is an entry
+    column (C2-F-043) and `prior_target` is not produced at all (C2-Q-015).
+
+    `hkl_true_in_basis` is null on most rows and that is correct: no basis change relates a wrong
+    cell to the truth, so the quantity does not exist there. Only `is_correct` is checked for
+    nulls, because it is the only one that is null exactly when the labelling did not run.
     """
-    required = [column for column in LABEL_COLUMNS if column != 'is_degenerate']
-    if any(column not in frame.columns for column in required):
+    if any(column not in frame.columns for column in LABEL_COLUMNS):
         return False
     return not frame['is_correct'].isna().any()
 

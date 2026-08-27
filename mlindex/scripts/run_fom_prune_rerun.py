@@ -49,6 +49,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, BASE)
 
 from mlindex.optimization.CandidateValidation import is_correct_known_bl_batch
+from mlindex.optimization.CandidateValidation import TRUTH_SLICE as _TRUTH_SLICE
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 
 BRAVAIS_LATTICES = ('cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP',
@@ -56,20 +57,11 @@ BRAVAIS_LATTICES = ('cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 
 BROADENING_TAG = '1'
 BASE_SEED = 12345
 
-# Which columns of `unit_cell_true` the labeller compares, per lattice system. The truth table
-# stores a full six-parameter cell (a, b, c, alpha, beta, gamma); the batch labeller wants the
-# free parameters only, in the order `get_unit_cell_from_xnn(partial_unit_cell=True)` returns
-# them. These are INDEX LISTS, not ranges -- monoclinic takes beta and not alpha, and rhombohedral
-# takes alpha and not c, so a contiguous slice silently compares the wrong angle.
-TRUTH_SLICE = {
-    'cubic': [0],
-    'tetragonal': [0, 2],
-    'hexagonal': [0, 2],
-    'rhombohedral': [0, 3],
-    'orthorhombic': [0, 1, 2],
-    'monoclinic': [0, 1, 2, 4],
-    'triclinic': [0, 1, 2, 3, 4, 5],
-    }
+# Which columns of `unit_cell_true` the labeller compares, per lattice system. Defined beside the
+# labeller whose input contract it describes, and re-exported here because three scripts import it
+# from this module by name. One definition: campaign 1 kept its condition-tag rule in four places
+# and they drifted, which is the trap `FomConditions` was written to close.
+TRUTH_SLICE = _TRUTH_SLICE
 
 ARMS = {
     'hard': os.path.join('mlindex', 'characterization', 'fom', 'retention', 't0'),
