@@ -20,7 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mlindex.scripts.run_fom_dump import _parse_args, load_manifest, subsample_or_refuse
+from mlindex.scripts.run_fom_dump import (_parse_args, load_manifest,
+                                          preflight_subsampling, subsample_or_refuse)
 
 
 def _manifest_frame():
@@ -107,3 +108,13 @@ def test_no_subsample_reports_that_it_did_not():
     frames, subsampled = subsample_or_refuse([_pool(labelled=True)], args)
     assert subsampled is False
     assert frames[0].shape[0] == 200
+
+
+def test_the_refusal_happens_before_the_search_not_after():
+    # A guard that fires at the end costs the whole bundle. Campaign 1 added abort-safety after
+    # losing a run near the end of a 2.5 h bundle; a late refusal reintroduces the same loss.
+    with pytest.raises(SystemExit, match='unlabelled'):
+        preflight_subsampling(_parse_args(['--out-dir', '/tmp/unused']))
+    # And it is silent when the configuration is possible.
+    assert preflight_subsampling(_parse_args(['--out-dir', '/tmp/unused',
+                                              '--no-subsample'])) is None

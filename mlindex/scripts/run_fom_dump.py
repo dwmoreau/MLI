@@ -161,6 +161,21 @@ def entry_record(entry, condition, pattern, split, volume_decile, degeneracy):
         }
 
 
+def preflight_subsampling(args):
+    """Refuse an impossible configuration BEFORE the search runs, not after.
+
+    The retention rule needs `is_correct`, and this driver does not label. Discovering that at the
+    end costs the whole bundle -- campaign 1 added abort-safety after losing an abort near the end
+    of a 2.5 h run, and a guard that fires after the work is done reintroduces exactly that.
+    """
+    if not args.no_subsample:
+        raise SystemExit(
+            'Refusing to subsample an unlabelled pool. Negative subsampling keeps every correct '
+            'candidate, so labelling must happen first (SCHEMA.md; S07 handoff, "Labelling, '
+            'subsampling and consolidation -- in that order"). This driver does not label, so '
+            'pass --no-subsample and subsample after the labelling pass.')
+
+
 def subsample_or_refuse(candidate_frames, args):
     """Thin the pool, or say why it will not be thinned. Returns (frames, subsampled).
 
@@ -224,6 +239,7 @@ def run(args):
     if unknown:
         raise SystemExit(f"Unknown Bravais lattices: {', '.join(unknown)}")
 
+    preflight_subsampling(args)
     manifest = load_manifest(args.split_manifest)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
