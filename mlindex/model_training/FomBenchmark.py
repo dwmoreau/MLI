@@ -90,24 +90,28 @@ CANDIDATE_COLUMNS = (
     # S03 could not ask whether a different merit makes a better cut *at the cut*. Storing it now
     # means S07's own run answers it and no session has to re-run for it.
     'merit_at_prune',
-    # The merit of a randomly chosen iterate rather than the arg-max over ~100 stochastic ones,
-    # so the selection bias is measurable rather than inferred (R19, R1).
-    'merit_preselection',
+    # `merit_preselection` was here and is deliberately NOT stored (DWMM, 2026-08-27). It would
+    # measure how optimistic the stored merit is, given it is the best of ~100 stochastic
+    # iterates -- but that bias applies to every candidate equally, it is fixed by an inner loop
+    # campaign 2 does not change, and it runs in the conservative direction for the campaign's
+    # own claim: every candidate sits at its M20-best, so a rival merit beating M20 here beats it
+    # on M20's home ground. Nothing would be done differently for knowing it. See C2-F-046.
     'retained_by',
     'prune_threshold',
     # S04's absence counts, which replace the 158-level extinction-group categorical
     # (C2-F-041: +0.522 pp of operating point, p <= 0.004 at every fit seed).
     'n_absent_extra',
-    # NOT written by the dump: it needs the candidate's own reference lines, and it is
-    # recomputable offline from `xnn`, the peak list and the extinction group. Kept in the schema
-    # so the analysis stage has a defined home for it. See STATUS C2-R-009.
-    'n_absent_extra_in_range',
+    # `n_absent_extra_in_range` is NOT a column here. It needs the candidate's own reference lines
+    # and is recomputable offline from `xnn`, the peak list and the extinction group, so by this
+    # schema's own rule it does not earn storage. It was briefly kept as "a defined home for the
+    # analysis stage", which would have meant shipping a column that is null in every row of every
+    # pool -- exactly what made campaign 1 exclude Mighell-Santoro degenerates at a *measured*
+    # zero rather than a known one. It belongs in the analysis output that computes it.
     'n_groups_searched',
-    # The candidate as generated, before Gauss-Newton refinement. Present on a stratified
-    # subsample. Every dumped candidate had been refined against the very peaks it was then
-    # scored on, so only the null of a *refined survivor* was measurable -- not the null of an
-    # arbitrary cell, which is what every published null is derived for (R10).
-    'xnn_pregen',
+    # `xnn_pregen` was here and is deliberately NOT stored (DWMM, 2026-08-27). It existed to give
+    # the null distribution of an *arbitrary* cell rather than of a refined survivor (campaign 1's
+    # R10) -- which serves null calibration, a family campaign 2 dropped as a designed negative.
+    # No campaign-2 step consumes it. See C2-F-046.
     # Negative subsampling bookkeeping. Without the weight every fit on this pool is biased.
     'sampling_weight',
     'retained_reason',
@@ -261,7 +265,6 @@ def records_to_frame(records):
         context = record.get('context') or {}
         entry_id = context.get('entry_id')
         merit_names, merit_values = _merit_at_prune(record, n_candidates)
-        pregen = record.get('xnn_pregen')
         for candidate_index in range(n_candidates):
             rows.append({
                 'entry_id': entry_id,
@@ -292,16 +295,12 @@ def records_to_frame(records):
                 # loader from having to discover the merit set from the schema.
                 'merit_at_prune': (None if merit_values is None
                                    else merit_values[candidate_index].astype(np.float64)),
-                'merit_preselection': _scalar_at(record.get('merit_preselection'),
-                                                 candidate_index),
                 'retained_by': int(_scalar_at(record.get('retained_by'), candidate_index) or 0),
                 'prune_threshold': record.get('prune_m20_threshold'),
                 'n_absent_extra': _scalar_at(record.get('n_absent_extra'), candidate_index),
                 'n_absent_extra_in_range': _scalar_at(record.get('n_absent_extra_in_range'),
                                                       candidate_index),
                 'n_groups_searched': _scalar_at(record.get('n_groups_searched'), candidate_index),
-                'xnn_pregen': (None if pregen is None
-                               else pregen[candidate_index].astype(np.float64)),
                 # Overwritten by the subsampler. Defaulting to a kept row with unit weight means
                 # a pool written without subsampling is still correct to fit on.
                 'sampling_weight': 1.0,
