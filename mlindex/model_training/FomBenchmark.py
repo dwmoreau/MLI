@@ -521,16 +521,23 @@ def recompute_frame(candidates, entries, models_directory=None):
     (Bravais lattice, extinction group) so the cctbx-backed reference list is built once
     per group rather than once per row.
     """
-    peaks = entries.set_index('entry_id')['q2_obs']
+    # Keyed through `_join_keys`, NOT on `entry_id` alone. After consolidation `entries.parquet`
+    # holds one row per (entry, bundle), so `entry_id` is not a key there: `peaks.loc[entry_id]`
+    # returns one array per bundle and the recompute raises -- or, worse, would silently score a
+    # candidate against another bundle's peak list if the shapes happened to line up. That is R8,
+    # and `zoo_features` already reads the keys this way.
+    join_keys = _join_keys(candidates, entries)
+    peaks = entries.set_index(join_keys)['q2_obs']
     columns = ['M20_recomputed', 'Minfo_recomputed', 'n_indexed_recomputed']
     out = pd.DataFrame(index=candidates.index, columns=columns, dtype=float)
 
-    group_keys = ['entry_id', 'lattice_system', 'bravais_lattice', 'spacegroup', 'n_peaks']
-    for (entry_id, lattice_system, bravais_lattice, spacegroup, n_peaks), group in \
-            candidates.groupby(group_keys, sort=False):
+    group_keys = list(join_keys) + ['lattice_system', 'bravais_lattice', 'spacegroup', 'n_peaks']
+    for key, group in candidates.groupby(group_keys, sort=False):
+        peak_key = key[0] if len(join_keys) == 1 else key[:len(join_keys)]
+        lattice_system, bravais_lattice, spacegroup, n_peaks = key[len(join_keys):]
         # Cubic models take ten peaks and everything else twenty; the optimizer truncates
         # with a plain prefix slice, so the entry's list is cut the same way here.
-        q2_obs = np.asarray(peaks.loc[entry_id], dtype=np.float64)[:n_peaks]
+        q2_obs = np.asarray(peaks.loc[peak_key], dtype=np.float64)[:n_peaks]
         xnn = np.vstack([np.asarray(v, dtype=np.float64) for v in group['xnn']])
         M20, Minfo, n_indexed, _ = recompute_scores(
             q2_obs, xnn, lattice_system, bravais_lattice, spacegroup,

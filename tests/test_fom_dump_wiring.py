@@ -230,3 +230,83 @@ def test_resume_skips_a_complete_pool_and_regenerates_a_truncated_one(tmp_path):
 
 def test_a_missing_pool_is_not_complete(tmp_path):
     assert not _pool_complete(tmp_path, 'absent_pool00', want_predownsample=False)
+
+
+# ------------------------------------------------------------------------------------------
+# The submit script's task table.
+#
+# It is bash, so nothing else checks it, and a bundle silently missing from the array is a hole in
+# the benchmark that only shows up at consolidation -- after the node-hours are spent. Campaign 1
+# kept a partial copy of the tag rule in bash which omitted two components; this pins the one
+# thing bash still owns, which is the list of what runs.
+# ------------------------------------------------------------------------------------------
+
+SUBMIT_PATH = os.path.join('mlindex', 'scripts', 'submit_fom_dump.sh')
+
+
+def _submit_tasks():
+    import re
+    with open(SUBMIT_PATH, encoding='utf-8') as handle:
+        text = handle.read()
+    body = re.search(r'TASKS=\((.*?)\n\)', text, re.S).group(1)
+    return [row.split() for row in re.findall(r'"([^"]+)"', body)], text
+
+
+@pytest.mark.skipif(not os.path.exists(SUBMIT_PATH), reason='submit script not present')
+def test_the_array_covers_every_condition_bundle_exactly_once_per_shard():
+    from mlindex.model_training import FomConditions
+
+    tasks, text = _submit_tasks()
+    conditions = {task[0] for task in tasks}
+    assert conditions == {condition.key for condition in FomConditions.CONDITIONS}, (
+        'the array does not run every condition bundle; a missing one is a hole in the '
+        'benchmark that shows up only at consolidation')
+
+    # Each bundle's shards must be the complete 0..n-1, or the bundle is generated with a gap.
+    by_condition = {}
+    for condition, _arm, shard, n_shards in tasks:
+        by_condition.setdefault(condition, []).append((int(shard), int(n_shards)))
+    for condition, shards in by_condition.items():
+        n_shards = {n for _, n in shards}
+        assert len(n_shards) == 1, f'{condition} mixes shard counts: {n_shards}'
+        total = n_shards.pop()
+        assert sorted(s for s, _ in shards) == list(range(total)), (
+            f'{condition} does not cover shards 0..{total - 1}')
+
+
+@pytest.mark.skipif(not os.path.exists(SUBMIT_PATH), reason='submit script not present')
+def test_the_array_directive_matches_the_task_table():
+    import re
+
+    tasks, text = _submit_tasks()
+    directive = re.search(r'#SBATCH --array=(\d+)-(\d+)', text)
+    assert directive, 'no --array directive'
+    low, high = int(directive.group(1)), int(directive.group(2))
+    assert (low, high) == (0, len(tasks) - 1), (
+        f'--array={low}-{high} but the table has {len(tasks)} tasks. A task index past the end '
+        'reads an empty entry and runs the driver with no condition')
+
+
+@pytest.mark.skipif(not os.path.exists(SUBMIT_PATH), reason='submit script not present')
+def test_the_mechanism_arm_is_selected_by_flag_and_the_core_arm_is_not():
+    from mlindex.model_training import FomConditions
+
+    tasks, _ = _submit_tasks()
+    for condition, arm, _shard, _n in tasks:
+        axis = FomConditions.BY_KEY[condition].axis
+        expected = 'mechanism' if axis in ('sparsity', 'error_shape') else 'core'
+        assert arm == expected, (
+            f'{condition} is on the {axis} axis but the array runs it as the {arm} arm; the arms '
+            'nest, and running a mechanism bundle over the core entry set costs 5x the cells')
+
+
+@pytest.mark.skipif(not os.path.exists(SUBMIT_PATH), reason='submit script not present')
+def test_the_submit_script_does_not_wrap_the_driver_in_srun():
+    # A bare `srun -n 1` pins CPU affinity to one core and strangles the 128 processes. Campaign 1
+    # hit this and its calibration script says so in a header comment.
+    with open(SUBMIT_PATH, encoding='utf-8') as handle:
+        text = handle.read()
+    driver_lines = [line for line in text.splitlines()
+                    if 'run_fom_dump.py' in line and not line.strip().startswith('#')]
+    assert driver_lines, 'the submit script never invokes the driver'
+    assert not any('srun' in line for line in driver_lines), driver_lines
