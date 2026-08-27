@@ -19,6 +19,23 @@ from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
+# Where `generate` gets the per-peak distribution over reference lines that `vectorized_resampling`
+# samples Miller-index assignments from.
+#
+#   'network'    the calibration model -- a separate keras.Model of three 1000-wide dense layers
+#                plus a linear head, softmaxed along the reference axis. 43 quantized ONNX files,
+#                100 MB of the 545 MB shipped model tree, run once per predicted cell rather than
+#                batched, and 70.7 % of this method's own wall clock.
+#   'posterior'  FigureOfMerits.get_assignment_distribution, which returns the same object
+#                analytically from lines this method has already computed, estimating its own
+#                scale per cell instead of the network's hand-tuned epsilon_pds = 0.1.
+#
+# The network ships and stays the default (PROTOCOL section 5: anything on the inference path is
+# behind a flag, default off). S13 measures the swap end to end.
+HKL_SOURCES = ('network', 'posterior')
+HKL_SOURCE_DEFAULT = 'network'
+
+
 class IntegralFilter:
     def __init__(self, split_group, data_params, model_params, save_to, seed, hkl_ref):
         self.split_group = split_group
@@ -950,7 +967,8 @@ class IntegralFilter:
                     hkl_softmax[start: start + batch_size] = outputs
         return hkl_softmax
 
-    def generate(self, n_unit_cells, rng, q2_obs, top_n=None, batch_size=None):
+    def generate(self, n_unit_cells, rng, q2_obs, top_n=None, batch_size=None,
+                 hkl_source=HKL_SOURCE_DEFAULT):
         from mlindex.utilities.Q2Calculator import Q2Calculator
         from mlindex.utilities.numba_functions import fast_assign
         if top_n is None:
@@ -985,11 +1003,27 @@ class IntegralFilter:
 
             # Resampling needs to generate n_unit_cells_per_pred - 1 unit cells from each prediction
             # hkl_softmax: top_n, n_peaks, hkl_ref_length
-            hkl_softmax = self.predict_hkl(
-                np.repeat(q2_obs[np.newaxis], repeats=top_n, axis=0),
-                xnn_pred,
-                batch_size=batch_size
-                )
+            if hkl_source == 'network':
+                hkl_softmax = self.predict_hkl(
+                    np.repeat(q2_obs[np.newaxis], repeats=top_n, axis=0),
+                    xnn_pred,
+                    batch_size=batch_size
+                    )
+            elif hkl_source == 'posterior':
+                # The analytic stand-in for the calibration network (S13). Same object -- a
+                # distribution over this cell's reference lines for each peak -- and the same
+                # reference lines, since `q2_ref_calc` above is `self.hkl_ref` evaluated on
+                # exactly these cells. `vectorized_resampling` rescales its draws by each row's
+                # own cumulative total, so the unnormalised form is what it wants and is one
+                # array pass cheaper.
+                from mlindex.utilities.FigureOfMerits import get_assignment_distribution
+                hkl_softmax = get_assignment_distribution(
+                    q2_obs, q2_ref_calc, self.lattice_system, normalise=False
+                    )
+            else:
+                raise ValueError(
+                    f'hkl_source must be one of {HKL_SOURCES}, not {hkl_source!r}'
+                    )
             start = top_n
             for gen_index in range(n_unit_cells_per_pred - 1):
                 # This generates top_n unit cells per iteration

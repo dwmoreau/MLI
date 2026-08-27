@@ -4,6 +4,7 @@ import hashlib
 import numpy as np
 import scipy.spatial
 
+from mlindex.model_training.IntegralFilter import HKL_SOURCE_DEFAULT
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
 from mlindex.utilities.ErrorAdder import perturb_xnn
@@ -492,9 +493,15 @@ class OptimizerManager(OptimizerBase):
                 elif generator_info['generator'] == 'integral_filter':
                     # We only do one inference, so batch_size=total_size=1 makes sense
                     # but batch size of 2 is faster than one ....
+                    # `hkl_source` decides whether the resampling distribution comes from the
+                    # calibration network or from the analytic posterior (S13). Read with `.get`
+                    # and the shipped default, so an opt_params dict that does not carry the key
+                    # behaves exactly as before -- the same research route as the prune threshold
+                    # and never a CLI option (C2-F-008).
                     generator_unit_cells = self.wrapper.integral_filter_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         batch_size=2,
+                        hkl_source=self.opt_params.get('hkl_source', HKL_SOURCE_DEFAULT),
                         )
                 elif generator_info['generator'] in ['random', 'predicted_volume']:
                     generator_unit_cells = self.wrapper.random_unit_cell_generator[self.bravais_lattice].generate(

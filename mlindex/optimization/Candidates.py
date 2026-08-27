@@ -5,6 +5,7 @@ from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_M_rev_sym
 from mlindex.utilities.FigureOfMerits import get_X_N
 from mlindex.utilities.FigureOfMerits import get_n_over
+from mlindex.utilities.FigureOfMerits import get_assignment_posterior
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood_from_xnn
 from mlindex.utilities.FigureOfMerits import get_multiplicity_taupin88
@@ -32,6 +33,19 @@ from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 # its 57-million-row threshold-0 dump cannot answer (C2-R-001).
 PRUNE_CAPTURE_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
 
+# The per-peak assignment statistics `refine_cell`'s mask and the reported `n_indexed` may read.
+#
+#   'rho'        1/(1 + arg) out of get_M20_likelihood -- what ships, and what the 0.95 threshold
+#                in all seven parameter dictionaries was chosen against.
+#   'posterior'  get_assignment_posterior: P(this line produced this peak) normalised over the
+#                competing calculated lines, with the scale estimated from the candidate's own
+#                residuals rather than assumed.
+#
+# The two are not on a common scale and 0.95 does not transfer between them -- `rho` states 0.871
+# at a 0.038 base rate, so its threshold is not doing what its name suggests. A run that changes
+# the statistic must set `assignment_threshold` too.
+ASSIGNMENT_STATISTICS = ('rho', 'posterior')
+
 
 class Candidates:
     def __init__(self, q2_obs, xnn, hkl_ref, lattice_system, bravais_lattice, opt_params, rng, fom, zero_error, wavelength):
@@ -40,6 +54,16 @@ class Candidates:
         self.minimum_unit_cell = opt_params['minimum_uc']
         self.maximum_unit_cell = opt_params['maximum_uc']
         self.assignment_threshold = opt_params['assignment_threshold']
+        # Which statistic answers "was this peak given its correct Miller index". 'rho' is
+        # the shipped one and stays the default, so the M20-era behaviour is reproducible
+        # (PROTOCOL section 5). Set through opt_params only -- never a CLI option, for the
+        # reason the prune threshold is not one (C2-F-008, decisions log 2026-08-24).
+        self.assignment_statistic = opt_params.get('assignment_statistic', 'rho')
+        if self.assignment_statistic not in ASSIGNMENT_STATISTICS:
+            raise ValueError(
+                f'assignment_statistic must be one of {ASSIGNMENT_STATISTICS}, '
+                f'not {self.assignment_statistic!r}'
+                )
         self.figure_of_merit = opt_params['figure_of_merit']
         self.rng = rng
         self.fom = fom
@@ -231,15 +255,58 @@ class Candidates:
         target_function.update(self.hkl, self.xnn, power)
         self.iteration_worker_common(target_function)
 
+    def assignment_probability(self, xnn, hkl, zeropoint_function=None, zeropoint=None):
+        """Per-peak P(this peak carries its correct Miller index), under `assignment_statistic`.
+
+        One definition for the two places production reads it -- `refine_cell`'s peak mask and the
+        reported `n_indexed` -- so they cannot come apart. `rho` is byte-for-byte the call each
+        site made before the statistic became configurable.
+
+        The posterior needs the whole reference list rather than the assigned lines, because it
+        normalises over the lines that compete for the peak; that is the point of it and it is
+        also its cost, one nearest-line scan of (n_candidates x n_ref).
+        """
+        if self.assignment_statistic == 'rho':
+            hkl2 = get_hkl_matrix(hkl, self.lattice_system)
+            q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
+            if zeropoint_function is not None:
+                q2_calc = zeropoint_function.apply_zeropoint(zeropoint, self.wavelength, q2_calc)
+            reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+                xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            reciprocal_volume = get_unit_cell_volume(
+                reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
+                )
+            _, probability, Minfo = get_M20_likelihood(
+                self.q2_obs, q2_calc, self.bravais_lattice, reciprocal_volume
+                )
+            return probability, Minfo
+
+        q2_ref_calc = self.q2_calculator.get_q2(xnn)
+        if zeropoint_function is not None:
+            q2_ref_calc = zeropoint_function.apply_zeropoint(
+                zeropoint, self.wavelength, q2_ref_calc
+                )
+        probability = get_assignment_posterior(
+            self.q2_obs, q2_ref_calc, self.lattice_system
+            )
+        # Minfo is a link function of `rho`'s own argument and is reported and tie-broken on
+        # independently of the mask, so it is never taken from the posterior. Swapping the
+        # statistic must not silently redefine a second column (S13).
+        return probability, None
+
     def refine_cell(self):
         # This updates the unit cell only with the peaks assigned at > threshold probability.
-        _, probability, _ = get_M20_likelihood_from_xnn(
-            q2_obs=self.q2_obs,
-            xnn=self.best_xnn,
-            hkl=self.best_hkl,
-            lattice_system=self.lattice_system,
-            bravais_lattice=self.bravais_lattice,
-            )
+        if self.assignment_statistic == 'rho':
+            _, probability, _ = get_M20_likelihood_from_xnn(
+                q2_obs=self.q2_obs,
+                xnn=self.best_xnn,
+                hkl=self.best_hkl,
+                lattice_system=self.lattice_system,
+                bravais_lattice=self.bravais_lattice,
+                )
+        else:
+            probability, _ = self.assignment_probability(self.best_xnn, self.best_hkl)
         indexed_peaks = probability > self.assignment_threshold
         n_indexed_peaks = np.sum(indexed_peaks, axis=1)
         unique_n_indexed_peaks = np.unique(n_indexed_peaks)
@@ -665,8 +732,18 @@ class Candidates:
                 bravais_lattice=self.bravais_lattice,
                 )
 
+        if self.assignment_statistic != 'rho':
+            # `probability` above is only ever `rho`; Minfo comes from the same call and stays on
+            # it whatever the mask reads (see assignment_probability). The zero-point path hands
+            # over its own target function so the reference lines are shifted the same way the
+            # assigned ones were.
+            probability, _ = self.assignment_probability(
+                self.best_xnn, self.best_hkl,
+                zeropoint_function=target_function_zp if self.zero_error else None,
+                zeropoint=self.best_zeropoint if self.zero_error else None,
+                )
+
         self.n_indexed = np.sum(
             probability > self.assignment_threshold,
             axis=1, dtype=int
             )
-        probability_ = probability.copy()

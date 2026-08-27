@@ -840,6 +840,28 @@ def get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system, robust=False, chun
     return np.maximum(sigma, 1e-300), d1
 
 
+def _posterior_scale(sigma, sigma_multiplier):
+    """2 sigma^2, floored so that a candidate which fits exactly does not divide by zero.
+
+    `get_assignment_sigma` already clamps sigma at 1e-300, which looks like it has handled the
+    degenerate case and has not: the consumer **squares** it, and 1e-600 underflows to exactly
+    0.0. The kernel then divides by it -- in numba that is a `ZeroDivisionError` rather than an
+    inf, so a perfectly-fitting candidate raises instead of scoring.
+
+    It is not hypothetical. A candidate whose residuals are all exactly zero is what a synthetic
+    peak list generated from the cell being tested produces, and it is what campaign 1's
+    zero-error bundle is made of. The right answer there is a posterior of 1 -- an exact fit
+    assigns with certainty -- and flooring the scale at the smallest positive normal float gives
+    exactly that: every competing line's exponent underflows and the nearest line's term is 1.
+
+    The floor binds only where the unfloored scale would be zero or subnormal, so no
+    non-degenerate value moves. This is the one place `get_assignment_posterior` diverges from the
+    `fom` original S02 ported bit-identically (CHERRY_PICK.md).
+    """
+    return np.maximum(2*(np.asarray(sigma, dtype=np.float64)*sigma_multiplier)**2,
+                      np.finfo(np.float64).tiny)
+
+
 def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
                              sigma_multiplier=1.0, robust=False, chunk=256, d1=None):
     """P(each observed peak is assigned its correct Miller index) -- a posterior, not a null.
@@ -898,7 +920,7 @@ def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
     sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
                             (q2_ref_calc.shape[0],))
     d1 = np.asarray(d1, dtype=np.float64)
-    scale = 2*(sigma*sigma_multiplier)**2
+    scale = _posterior_scale(sigma, sigma_multiplier)
 
     posterior = np.empty(d1.shape, dtype=np.float64)
     # Subtracting the nearest distance before exponentiating is the standard log-sum-exp shift:
@@ -978,7 +1000,7 @@ def get_assignment_distribution(q2_obs, q2_ref_calc, lattice_system, sigma=None,
     sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
                             (q2_ref_calc.shape[0],))
     d1 = np.asarray(d1, dtype=np.float64)
-    scale = 2*(sigma*sigma_multiplier)**2
+    scale = _posterior_scale(sigma, sigma_multiplier)
 
     n_candidates, n_ref = q2_ref_calc.shape
     distribution = np.empty((n_candidates, q2_obs.size, n_ref), dtype=np.float64)

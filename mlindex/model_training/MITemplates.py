@@ -7,6 +7,7 @@ import sklearn.ensemble
 from sklearn.model_selection import GridSearchCV
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+from mlindex.utilities.FigureOfMerits import get_assignment_posterior
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
 from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
@@ -55,6 +56,14 @@ class MITemplates:
             'max_distance': 0.05,
             'grid_search': None,
             'load_training_data': False,
+            # Which per-peak assignment statistic becomes the template ranker's feature
+            # vector. 'rho' is what the shipped regressors were fitted on and stays the
+            # default; 'posterior' is available for the refit S13 could not run on the
+            # laptop -- the calibrator's training target, the ROC file named in
+            # `roc_file_name`, is a NERSC path that does not exist here, so swapping the
+            # feature without refitting would feed a regressor inputs from a distribution
+            # it was never fitted on. See the S13 handoff.
+            'assignment_statistic': 'rho',
             }
         for key in template_params_defaults.keys():
             if key not in self.template_params.keys():
@@ -537,12 +546,21 @@ class MITemplates:
         q2_ref_calc = q2_calculator.get_q2(xnn)
         q2_calc_max = q2_calc.max(axis=1)
         N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
-        _, probability, _ = get_M20_likelihood(
-            q2_obs=q2_obs_calibration,
-            q2_calc=q2_calc,
-            bravais_lattice=self.bravais_lattice,
-            reciprocal_volume=reciprocal_volume
-            )
+        # `.get`, not `[...]`: `load_from_tag` REPLACES template_params with
+        # `dict.fromkeys(params_keys)` built from the saved CSV, so every default set in
+        # the constructor is gone by the time a shipped model runs. Indexing here would
+        # raise KeyError on the inference path for every trained lattice.
+        if self.template_params.get('assignment_statistic', 'rho') == 'rho':
+            _, probability, _ = get_M20_likelihood(
+                q2_obs=q2_obs_calibration,
+                q2_calc=q2_calc,
+                bravais_lattice=self.bravais_lattice,
+                reciprocal_volume=reciprocal_volume
+                )
+        else:
+            probability = get_assignment_posterior(
+                q2_obs_calibration, q2_ref_calc, self.lattice_system
+                )
         return xnn, probability, N_pred, q2_calc_max
 
     def generate(self, n_templates, rng, q2_obs):
