@@ -506,6 +506,14 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=None):
     answer is to declare the merit undefined there rather than to clip a value that is not a
     measurement.
 
+    This is NOT the zero-error trap of PROTOCOL section 3 rule 11, and the distinction matters
+    because it decides whether the case is realistic. That trap is a property of the DATA -- with
+    noiseless peaks a correct cell has no residual -- and adding noise removes it. This is a
+    property of the CANDIDATE: the fit is exactly determined, so it places its lines on the observed
+    peaks INCLUDING their noise and no residual survives however noisy the data was. Measured
+    accordingly: no zero-error bundle is in the pool, and the rate rises with noise -- 0.16 blow-ups
+    per million at nominal sigma against 1.96 at twice sigma and 4.42 with contaminant lines.
+
     Undefined is signalled as 0.0, which is what the pre-existing N_cal == 0 guard already returns
     -- so a floor extends that guard rather than introducing a second convention. The cost of the
     conflation with "worst" is measured, not assumed: across the 2 835 074 rows whose window

@@ -8,7 +8,8 @@ every step from S09 on inherits whatever this turns out to be. Nothing anywhere 
 WHAT THIS SCRIPT ESTABLISHES, in four stages:
 
     mechanism   reproduce one blow-up from the pool that measured it, and show what it is made of
-    support     M_rev against the size of its own counting window, over all 69 876 033 candidates
+    support     M_rev against the size of its own counting window, and against the noise level,
+                over all 69 876 033 candidates
     blast       how far one blow-up reaches once an entry-relative feature is computed from it
     floor       what a support floor voids, on exact N_cal over a random sample of pools
 
@@ -252,6 +253,23 @@ def run_support(args):
             'n_correct': int(correct[keep].sum()),
             })
     _write(pd.DataFrame(rows), 'INTERIM_mrev_saturation.csv', args)
+
+    # Per bundle, because the first question anyone asks is whether this is the zero-error trap
+    # (PROTOCOL section 3 rule 11) wearing a different hat. It is not, and the rate rising with
+    # error and contamination is what says so: the fit ABSORBS measurement error rather than being
+    # caught out by it, because a window with no more lines than the cell has parameters is exactly
+    # determined. Noise is not a defence.
+    bundles = []
+    for arm, path in shards():
+        frame = pd.read_parquet(path, columns=['condition_bundle', 'M_rev_B', 'M_rev_C'])
+        local = np.maximum(frame['M_rev_B'].to_numpy(), frame['M_rev_C'].to_numpy())
+        frame = frame.assign(blowup=local > BLOWUP)
+        bundles.append(frame.groupby('condition_bundle')['blowup'].agg(['size', 'sum']))
+    per_bundle = pd.concat(bundles).groupby(level=0).sum()
+    per_bundle = per_bundle.rename(columns={'size': 'n', 'sum': 'n_above_1e3'})
+    per_bundle['per_million'] = per_bundle['n_above_1e3']/per_bundle['n']*1e6
+    _write(per_bundle.sort_values('per_million', ascending=False).reset_index(),
+           'INTERIM_mrev_by_bundle.csv', args)
 
     blowup = value > BLOWUP
     n_pool, n_blowup = len(value), int(blowup.sum())
