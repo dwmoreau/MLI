@@ -403,7 +403,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--stage',
                         choices=['table', 'analytic', 'threshold', 'replay', 'n_indexed',
-                                 'choose', 'figure'],
+                                 'choose', 'figure', 'consumers'],
                         default='table')
     parser.add_argument('--population', default='general', choices=sorted(POPULATIONS))
     parser.add_argument('--max-candidates', type=int, default=25,

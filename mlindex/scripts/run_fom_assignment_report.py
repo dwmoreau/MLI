@@ -807,3 +807,98 @@ def run_figure(args):
     figure.savefig(destination)
     plt.close(figure)
     print(f'wrote {destination}')
+
+
+def run_consumers(args):
+    """One row per production consumer, before and after, each on its own metric.
+
+    The step's summary table. Every number here is read out of an artefact another stage wrote, so
+    this is a join rather than a computation -- which is the point: a summary that recomputes its
+    inputs can disagree with the tables it summarises, and campaign 1's record has five numbers
+    that do exactly that (C2-F-006).
+    """
+    artifact_dir = Path(BASE)/args.artifact_dir
+    replay = {population: pd.read_csv(artifact_dir/f'S13_replay_{population}.csv')
+              for population in ('general', 'hard')}
+    metric = f'delta_pp_rtol{args.mask_metric_rtol:g}'
+
+    def at(population, form, threshold):
+        frame = replay[population]
+        row = frame.loc[(frame['split'] == 'fom-train') & (frame['form'] == form)
+                        & np.isclose(frame['threshold'], threshold)]
+        return float(row[metric].iloc[0])
+
+    rows = []
+    for population in ('general', 'hard'):
+        rows.append(dict(
+            consumer='refine_cell peak mask', population=population,
+            metric=f'refined cells correct at rtol {args.mask_metric_rtol:g}, pp gained '
+                   '(fom-train, unweighted over lattices)',
+            before=at(population, 'rho', SHIPPED_THRESHOLD),
+            after=at(population, 'posterior', args.posterior_threshold),
+            no_mask_control=at(population, 'rho', 0.0),
+            before_setting=f'rho > {SHIPPED_THRESHOLD}',
+            after_setting=f'posterior > {args.posterior_threshold:g}',
+            artefact=f'S13_replay_{population}.csv'))
+    for population in ('general', 'hard'):
+        counts = pd.read_csv(artifact_dir/f'S13_n_indexed_{population}.csv')
+        dev = counts.loc[(counts['split'] == 'fom-dev')
+                         & (counts['bravais_lattice'] != 'ALL_pooled')]
+        for label, column in (('mean absolute error', 'mae'), ('AUC for is_correct', 'auc')):
+            rows.append(dict(
+                consumer=f'reported n_indexed ({label})', population=population,
+                metric=f'{label} of the reported count (fom-dev, unweighted over lattices)',
+                before=float(dev[f'{column}_rho'].mean()),
+                after=float(dev[f'{column}_posterior'].mean()), no_mask_control=np.nan,
+                before_setting=f'rho > {SHIPPED_THRESHOLD}',
+                after_setting=f'posterior > {args.posterior_threshold:g}',
+                artefact=f'S13_n_indexed_{population}.csv'))
+        aggregate = pd.read_csv(artifact_dir/f'S13_assignment_aggregate_{population}.csv')
+        well_posed = aggregate.loc[aggregate['stratum'] == 'well_posed']
+        rows.append(dict(
+            consumer='the statistic itself (per-peak AUC, well-posed)', population=population,
+            metric='AUC for "this peak carries its correct Miller index" (fom-dev, unweighted)',
+            before=float(well_posed.loc[well_posed['form'] == 'rho', 'auc'].iloc[0]),
+            after=float(well_posed.loc[well_posed['form'] == 'posterior', 'auc'].iloc[0]),
+            no_mask_control=np.nan, before_setting='rho', after_setting='posterior',
+            artefact=f'S13_assignment_aggregate_{population}.csv'))
+
+    diagnostic_path = artifact_dir/'S13_assigner_diagnostic_general.csv'
+    if diagnostic_path.exists():
+        diagnostic = pd.read_csv(diagnostic_path)
+        per_lattice = diagnostic.groupby('bravais_lattice').mean(numeric_only=True)
+        rows.append(dict(
+            consumer='IntegralFilter peak-assigner (per call, ms)', population='general',
+            metric='wall clock per call on the same predicted cells, after a numba warm-up',
+            before=float(per_lattice['network_seconds'].mean()*1000),
+            after=float(per_lattice['posterior_seconds'].mean()*1000), no_mask_control=np.nan,
+            before_setting='calibration network', after_setting='get_assignment_distribution',
+            artefact=diagnostic_path.name))
+        well_posed = diagnostic.dropna(subset=['network_top1_true_cell']).groupby(
+            'bravais_lattice')[['network_top1_true_cell', 'posterior_top1_true_cell']].mean()
+        rows.append(dict(
+            consumer='IntegralFilter peak-assigner (per-peak top-1)', population='general',
+            metric="top-1 on the truth's own cell, unweighted -- DIAGNOSTIC, not the verdict",
+            before=float(well_posed['network_top1_true_cell'].mean()),
+            after=float(well_posed['posterior_top1_true_cell'].mean()), no_mask_control=np.nan,
+            before_setting='calibration network', after_setting='get_assignment_distribution',
+            artefact=diagnostic_path.name))
+
+    rows.append(dict(
+        consumer='MITemplates template ranker', population='-',
+        metric='NOT MEASURED -- the calibrator refit its swap requires needs a ROC target file at '
+               'a /global/cfs path with no local copy (C2-F-068, C2-R-012)',
+        before=np.nan, after=np.nan, no_mask_control=np.nan, before_setting='rho',
+        after_setting='flag in place, unrun', artefact='-'))
+    rows.append(dict(
+        consumer='Minfo', population='-',
+        metric="unchanged by design -- it is rho's own argument under a third link and is never "
+               'taken from the posterior',
+        before=np.nan, after=np.nan, no_mask_control=np.nan, before_setting='rho argument',
+        after_setting='rho argument', artefact='tests/test_fom_assignment.py'))
+
+    table = pd.DataFrame(rows)
+    table.to_csv(artifact_dir/'S13_rho_consumers.csv', index=False)
+    print(table[['consumer', 'population', 'before', 'after', 'no_mask_control']]
+          .to_string(index=False))
+    print(f'\nwrote {artifact_dir}/S13_rho_consumers.csv')
