@@ -55,9 +55,13 @@ MERIT_COLUMNS = ('M20_C', 'M_tilde_C', 'M_rev_C', 'M_sym_C', 'X_N_C', 'n_over_C'
 
 K_GRID = (50, 100, 200, 500)
 
-# Measured on the schema-v3 shards S05's gate run wrote: total parquet bytes over total rows.
-# Used only to turn a row count into a disk figure, and stated rather than assumed.
-DEFAULT_BYTES_PER_ROW = 148.0
+# MEASURED on a real schema-v3 shard (S06, 2026-08-27): 1 514 candidate rows in 210 026 bytes.
+# Used only to turn a row count into a disk figure, and stated rather than assumed. The shard is
+# small, so parquet's per-file and per-column-chunk overhead is amortised over fewer rows than it
+# will be at scale -- this is therefore an upper bound and the projection is conservative. The
+# pre-deduplication stream measures 81.8 B/row on the same run, being narrower.
+DEFAULT_BYTES_PER_ROW = 138.7
+PREDOWNSAMPLE_BYTES_PER_ROW = 81.8
 
 ARM_DIRECTORIES = {
     'general': os.path.join('mlindex', 'data', 'fom_prune_criterion', 'general'),
@@ -174,6 +178,16 @@ def project(args):
     if union_path.exists():
         union = pd.read_csv(union_path).set_index('bravais_lattice')
 
+    # EVERY pattern is indexed against ALL FOURTEEN lattices -- that is what `run.py` does and
+    # what the benchmark stores -- so a lattice's pool contributes to every cell in the run, not
+    # only to the cells whose *true* lattice it is. Getting this wrong understates the pool by
+    # about the number of lattices; the entry counts below are per true lattice and are what set
+    # the number of CELLS, and the pool sizes are per candidate lattice and are what set the rows
+    # inside each cell. They multiply across, not elementwise.
+    n_cells = int(sum(int(entries_per_lattice.get(lattice, 0)) * args.core_bundles
+                      + int(mechanism.get(lattice, 0)) * args.mechanism_bundles
+                      for lattice in entries_per_lattice.index))
+
     rows = []
     for lattice, pool in pools.iterrows():
         n_core = int(entries_per_lattice.get(lattice, 0))
@@ -189,34 +203,39 @@ def project(args):
         # rather than waved away.
         sampled = max(0.0, pool_mean - kept) * args.negative_rate
         retained = kept + sampled
-        cells_core = n_core * args.core_bundles
-        cells_mechanism = n_mechanism * args.mechanism_bundles
-        cells = cells_core + cells_mechanism
         rows.append({
             'bravais_lattice': lattice,
             'n_core_entries': n_core,
             'n_mechanism_entries': n_mechanism,
-            'cells': cells,
+            # This lattice's share of every cell in the run, not of its own entries' cells.
             'pool_mean': pool_mean,
             'retained_per_cell': retained,
             'retention': retained / pool_mean if pool_mean else float('nan'),
-            'rows_full': cells * pool_mean,
-            'rows_retained': cells * retained,
-            'gb_full': cells * pool_mean * args.bytes_per_row / 1e9,
-            'gb_retained': cells * retained * args.bytes_per_row / 1e9,
+            'rows_full': n_cells * pool_mean,
+            'rows_retained': n_cells * retained,
+            'gb_full': n_cells * pool_mean * args.bytes_per_row / 1e9,
+            'gb_retained': n_cells * retained * args.bytes_per_row / 1e9,
             })
     projection = pd.DataFrame(rows)
-    total = projection[['cells', 'rows_full', 'rows_retained', 'gb_full', 'gb_retained']].sum()
+    total = projection[['pool_mean', 'retained_per_cell', 'rows_full', 'rows_retained',
+                        'gb_full', 'gb_retained']].sum()
     total['bravais_lattice'] = 'TOTAL'
+    total['n_core_entries'] = projection['n_core_entries'].sum()
+    total['n_mechanism_entries'] = projection['n_mechanism_entries'].sum()
+    total['retention'] = total['retained_per_cell'] / total['pool_mean']
     projection = pd.concat([projection, pd.DataFrame([total])], ignore_index=True)
+    projection.attrs['n_cells'] = n_cells
 
     artifact_dir = Path(BASE) / args.artifact_dir
     projection.to_csv(artifact_dir / 'S06_pool_projection.csv', index=False)
     with pd.option_context('display.width', 220, 'display.max_columns', 40):
         print(projection.to_string(index=False))
-    print(f'\nK={args.top_k}, negative rate {args.negative_rate}, '
+    print(f'\n{n_cells} cells (entry x bundle patterns), each indexed against all 14 lattices')
+    print(f'K={args.top_k}, negative rate {args.negative_rate}, '
           f'{args.bytes_per_row:g} B/row, core bundles {args.core_bundles}, '
           f'mechanism bundles {args.mechanism_bundles}')
+    print(f"survivors per cell: {total['pool_mean']:.0f} whole, "
+          f"{total['retained_per_cell']:.0f} retained ({total['retention']:.1%})")
     print(f"survivor stream: {total['gb_full']:.0f} GB whole, "
           f"{total['gb_retained']:.0f} GB subsampled")
     return projection

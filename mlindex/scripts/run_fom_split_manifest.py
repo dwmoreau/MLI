@@ -232,6 +232,27 @@ def freeze(args):
     manifest.to_parquet(path, index=False)
     counts.to_csv(artifact_dir / 'S06_split_census.csv', index=False)
 
+    # And a copy beside the data, outside `docs/`.
+    #
+    # The requirement is that the training-time leakage guard must not depend on a git-ignored
+    # `docs/` artefact that a fresh clone does not carry -- campaign 1's did. The handoff asks for
+    # the split to be written INTO `generated_datasets/`, and this writes a sidecar table beside
+    # them instead, for two reasons worth recording rather than doing quietly:
+    #
+    #   * those parquets already carry a column called `split`, float-valued, that means something
+    #     else entirely, so the campaign's split is `fom_split` and cannot be added under its own
+    #     name without a collision;
+    #   * rewriting 3.2 GB of source data in place, to add three columns, risks the one asset here
+    #     that is genuinely expensive to regenerate -- it needs cctbx and an MPI job on NERSC --
+    #     and it cannot be done safely while anything else is reading it.
+    #
+    # A sidecar satisfies the requirement exactly: it lives with the data, it is joined on
+    # `identifier`, and it is idempotent to rewrite.
+    sidecar = FomPatterns.DATASET_DIRECTORY / 'fom_split_c2.parquet'
+    manifest[['identifier', 'bravais_lattice', 'volume_decile', 'split', 'arm']].rename(
+        columns={'split': 'fom_split'}).to_parquet(sidecar, index=False)
+    print(f'sidecar {sidecar}')
+
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     print(manifest.groupby(['bravais_lattice', 'split']).size().unstack(fill_value=0)
           .to_string())

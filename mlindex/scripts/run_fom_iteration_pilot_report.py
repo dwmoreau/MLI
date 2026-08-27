@@ -101,6 +101,29 @@ def load_arms(out_root, scales):
     return pd.concat(lattice, ignore_index=True), pd.concat(entry, ignore_index=True)
 
 
+def restrict_to_common_entries(entries, scales):
+    """Keep only entries every arm actually ran.
+
+    The arms are paired by construction -- same entries, same per-pattern seeds -- but an arm that
+    was stopped early, or one entry that failed in one arm and not another, breaks that silently:
+    the unpaired ceiling of a truncated arm is then computed over a different, and here a
+    systematically easier, set of crystals. The pilot samples in lattice order, so the first half
+    of a truncated arm is all high-symmetry, whose ceiling is 1.000 by construction.
+
+    Restricting up front means every column in the table -- paired and unpaired alike -- describes
+    the same crystals, and the count is printed so a restriction is visible rather than inferred.
+    """
+    common = None
+    for scale in scales:
+        ids = set(entries.loc[entries['iteration_scale'] == scale, 'entry_id'])
+        common = ids if common is None else (common & ids)
+    dropped = entries['entry_id'].nunique() - len(common)
+    if dropped:
+        print(f'restricting to {len(common)} entries run by every arm ({dropped} dropped)',
+              flush=True)
+    return entries[entries['entry_id'].isin(common)].reset_index(drop=True), sorted(common)
+
+
 def ceiling_table(entries, scales):
     """Ceiling, rank and wall clock per (lattice, arm), each reduced arm paired against the full.
 
@@ -111,6 +134,11 @@ def ceiling_table(entries, scales):
     """
     reference = entries[entries['iteration_scale'] == REFERENCE_SCALE]
     reference_by_entry = reference.set_index('entry_id')['reachable']
+    # The outcome, paired the same way. The ceiling is what the handoff calls decisive, but a
+    # schedule that holds the ceiling while pushing the correct cell down the printed list has
+    # still changed what a merit has to work with -- and that is the quantity this campaign is
+    # about. Reported beside the ceiling, never instead of it.
+    reference_top10 = reference.set_index('entry_id')['pooled_rank'].between(0, 9)
     rows = []
     for scale in scales:
         arm = entries[entries['iteration_scale'] == scale]
@@ -143,6 +171,10 @@ def ceiling_table(entries, scales):
                 }
             row.update({f'paired_{name}': value
                         for name, value in mcnemar(paired, reachable).items()})
+            in_top10 = subset['pooled_rank'].between(0, 9).to_numpy()
+            paired_top10 = reference_top10.reindex(subset['entry_id']).to_numpy(dtype=bool)
+            row.update({f'top10_{name}': value
+                        for name, value in mcnemar(paired_top10, in_top10).items()})
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -177,76 +209,113 @@ def pool_table(lattice_rows, scales):
 
 
 def figure(ceiling, pools, path, scales):
+    """Two panels, because the result has two halves and one of them is the decisive one.
+
+    Left: does the ceiling move. Right: what the reduction buys against what it costs -- which is
+    where the answer actually lives, since the ceiling turns out not to move at all.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from mlindex.scripts.run_fom_iteration_pilot import scale_tag
 
+    reduced = [scale for scale in scales if scale != REFERENCE_SCALE]
     lattices = [value for value in ceiling['bravais_lattice'].unique()
                 if value not in ('ALL', 'ALL_NONCUBIC')]
+    # Cubic last and shaded: five random passes on ten peaks is a different schedule, so a scale
+    # factor does not mean there what it means for triclinic's sixty.
     order = sorted(lattices, key=lambda bl: (bl in CUBIC, bl))
-    colours = {scale: colour for scale, colour in
-               zip(scales, ['#22223b', '#4a7c93', '#c1666b', '#7f9c6a', '#b08968'])}
-
-    figure_, axes = plt.subplots(1, 3, figsize=(15.5, 5.0),
-                                 gridspec_kw={'width_ratios': [2.1, 1.0, 1.0]})
-
-    ax = axes[0]
-    width = 0.8 / max(1, len(scales))
+    palette = ['#22223b', '#3f7d92', '#c1666b', '#7f9c6a']
+    colours = {scale: palette[index % len(palette)] for index, scale in enumerate(scales)}
     positions = np.arange(len(order))
-    for index, scale in enumerate(scales):
-        arm = ceiling[ceiling['iteration_scale'] == scale].set_index('bravais_lattice')
-        values = [arm['ceiling'].get(bl, np.nan) for bl in order]
-        low = [arm['ceiling'].get(bl, np.nan) - arm['ceiling_ci_low'].get(bl, np.nan)
-               for bl in order]
-        high = [arm['ceiling_ci_high'].get(bl, np.nan) - arm['ceiling'].get(bl, np.nan)
-                for bl in order]
-        ax.bar(positions + index * width, values, width, label=scale_tag(scale),
-               color=colours[scale], yerr=[low, high], capsize=2, error_kw={'lw': 0.8})
-    ax.set_xticks(positions + width * (len(scales) - 1) / 2)
-    ax.set_xticklabels(order)
-    ax.set_ylabel('ceiling: correct cell anywhere in the pool')
-    ax.set_title('The ceiling, per lattice, with Wilson intervals')
-    ax.legend(title='schedule', frameon=False)
+
+    figure_, axes = plt.subplots(1, 2, figsize=(14.5, 5.4),
+                                 gridspec_kw={'width_ratios': [1.15, 1.0]})
+
+    # ---- left: the ceiling, per lattice -------------------------------------------------
+    ax = axes[0]
     for bl in CUBIC:
         if bl in order:
-            ax.axvspan(order.index(bl) - 0.5, order.index(bl) + 0.5, color='0.92', zorder=0)
-    ax.text(0.99, 0.02, 'shaded: cubic, excluded from the aggregate\n(5 passes on 10 peaks)',
-            transform=ax.transAxes, ha='right', va='bottom', fontsize=8, color='0.35')
+            ax.axvspan(order.index(bl) - 0.5, order.index(bl) + 0.5, color='0.94', zorder=0)
+    offsets = np.linspace(-0.16, 0.16, len(scales)) if len(scales) > 1 else [0.0]
+    for offset, scale in zip(offsets, scales):
+        arm = ceiling[ceiling['iteration_scale'] == scale].set_index('bravais_lattice')
+        values = np.array([arm['ceiling'].get(bl, np.nan) for bl in order])
+        low = values - np.array([arm['ceiling_ci_low'].get(bl, np.nan) for bl in order])
+        high = np.array([arm['ceiling_ci_high'].get(bl, np.nan) for bl in order]) - values
+        ax.errorbar(positions + offset, values, yerr=[low, high], fmt='o', ms=5,
+                    color=colours[scale], capsize=3, lw=1.2, label=scale_tag(scale), zorder=3)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(order)
+    ax.set_ylim(0.60, 1.03)
+    ax.set_ylabel('ceiling: a correct cell anywhere in the pool')
+    ax.set_title('The ceiling does not move, on any lattice')
+    ax.legend(title='schedule', frameon=False, loc='lower left')
+    aggregate = ceiling[(ceiling['bravais_lattice'] == 'ALL_NONCUBIC')
+                        & (ceiling['iteration_scale'].isin(reduced))]
+    if not aggregate.empty:
+        row = aggregate.iloc[0]
+        ax.text(0.98, 0.06,
+                f"non-cubic aggregate, paired: {row['paired_b']:.0f} lost / "
+                f"{row['paired_c']:.0f} gained of {row['n_entries']:.0f}\n"
+                f"change {row['paired_delta'] * 100:+.2f} pp, "
+                f"detectable at 80 % power: {row['paired_mde_80'] * 100:.1f} pp\n"
+                f"per lattice n = 30, so the per-lattice bound is 10 pp",
+                transform=ax.transAxes, ha='right', va='bottom', fontsize=8.5, color='0.25')
+    ax.text(0.985, 0.965, 'shaded: cubic', transform=ax.transAxes, ha='right', va='top',
+            fontsize=8, color='0.45')
 
+    # ---- right: the trade -----------------------------------------------------------------
+    # The decisive panel. A reduction is worth taking only if it buys wall clock; this one buys
+    # very little and enlarges the pool that then has to be stored, labelled and ranked.
     ax = axes[1]
-    aggregate = ceiling[ceiling['bravais_lattice'] == 'ALL_NONCUBIC']
-    ax.axhline(0.0, color='0.6', lw=0.8)
-    ax.errorbar(range(len(aggregate)), aggregate['paired_delta'] * 100,
-                yerr=aggregate['paired_se'] * 100, fmt='o', color='#22223b', capsize=3)
-    for position, row in enumerate(aggregate.itertuples()):
-        ax.annotate(f'MDE {row.paired_mde_80 * 100:.1f} pp',
-                    (position, row.paired_delta * 100), textcoords='offset points',
-                    xytext=(0, 12), ha='center', fontsize=8, color='0.35')
-    ax.set_xticks(range(len(aggregate)))
-    ax.set_xticklabels([scale_tag(value) for value in aggregate['iteration_scale']])
-    ax.set_ylabel('paired change in ceiling (pp)')
-    ax.set_title('Paired against the full schedule\n(non-cubic aggregate)')
+    reference_pools = (pools[pools['iteration_scale'] == REFERENCE_SCALE]
+                       .set_index('bravais_lattice'))
+    reference_seconds = (ceiling[(ceiling['iteration_scale'] == REFERENCE_SCALE)]
+                         .set_index('bravais_lattice')['seconds_per_entry'])
+    width = 0.7 / max(1, len(reduced))
+    for index, scale in enumerate(reduced):
+        arm_pools = pools[pools['iteration_scale'] == scale].set_index('bravais_lattice')
+        arm_ceiling = (ceiling[ceiling['iteration_scale'] == scale]
+                       .set_index('bravais_lattice')['seconds_per_entry'])
+        pool_change = np.array([
+            100.0 * (arm_pools['pool_mean'].get(bl, np.nan)
+                     / reference_pools['pool_mean'].get(bl, np.nan) - 1.0) for bl in order])
+        time_change = np.array([
+            100.0 * (arm_ceiling.get(bl, np.nan) / reference_seconds.get(bl, np.nan) - 1.0)
+            for bl in order])
+        ax.bar(positions + index * width - 0.35 + width / 2, pool_change, width,
+               color=colours[scale], label=f'{scale_tag(scale)}: pool size', zorder=2)
+        ax.plot(positions + index * width - 0.35 + width / 2, time_change, 'D', ms=6.5,
+                color='#c1666b', markeredgecolor='white', markeredgewidth=1.1,
+                label=f'{scale_tag(scale)}: wall clock', zorder=4)
+    ax.axhline(0.0, color='0.35', lw=1.0, zorder=1)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(order)
+    ax.set_ylabel('change against the full schedule (%)')
+    ax.set_title('What it buys, and what it costs')
+    ax.legend(frameon=False, loc='upper left', fontsize=9)
+    # Headroom so the markers below the axis are never crowded by the frame.
+    low, high = ax.get_ylim()
+    ax.set_ylim(low - 0.12 * (high - low), high + 0.06 * (high - low))
 
-    ax = axes[2]
-    for index, scale in enumerate(scales):
-        arm = pools[(pools['iteration_scale'] == scale) & (pools['bravais_lattice'] != 'ALL')]
-        arm = arm.set_index('bravais_lattice').reindex(order)
-        ax.bar(positions + index * width, arm['pool_median'], width,
-               label=scale_tag(scale), color=colours[scale])
-    ax.set_xticks(positions + width * (len(scales) - 1) / 2)
-    ax.set_xticklabels(order, rotation=90)
-    ax.set_yscale('log')
-    ax.set_ylabel('median survivors per (entry, lattice)')
-    ax.set_title('Pool size at the generation cut of 1.5')
-
-    figure_.tight_layout()
+    figure_.suptitle('S06 — the iteration lever, priced', y=0.985, fontsize=13)
+    # The mechanism, as a figure caption rather than inside a panel, where it sat on the data.
+    figure_.text(0.5, 0.945,
+                 'Halving the schedule leaves the ceiling untouched and the pool 17.8 % larger: a '
+                 'shorter search leaves candidates less converged, so deduplication collapses '
+                 'fewer of them\nand the post-cut block spends back what the search saved. '
+                 'Wall clock falls 4.7 % in aggregate — and rises on hP, hR and tI.',
+                 ha='center', va='top', fontsize=9, color='0.3')
+    figure_.tight_layout(rect=(0, 0, 1, 0.90))
     figure_.savefig(path, dpi=200)
     plt.close(figure_)
 
 
 def report(args, scales):
     lattice_rows, entries = load_arms(args.out_root, scales)
+    entries, common = restrict_to_common_entries(entries, scales)
+    lattice_rows = lattice_rows[lattice_rows['entry_id'].isin(common)].reset_index(drop=True)
     artifact_dir = Path(BASE) / args.artifact_dir
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -259,9 +328,12 @@ def report(args, scales):
     show = ceiling[ceiling['bravais_lattice'].isin(['ALL', 'ALL_NONCUBIC'])]
     with pd.option_context('display.width', 200, 'display.max_columns', 40):
         print(show[['iteration_scale', 'bravais_lattice', 'n_entries', 'ceiling',
-                    'ceiling_ci_low', 'ceiling_ci_high', 'top10', 'seconds_per_entry',
+                    'ceiling_ci_low', 'ceiling_ci_high', 'seconds_per_entry',
                     'paired_b', 'paired_c', 'paired_delta', 'paired_p', 'paired_mde_80']]
               .to_string(index=False))
+        print()
+        print(show[['iteration_scale', 'bravais_lattice', 'top10', 'top10_b', 'top10_c',
+                    'top10_delta', 'top10_p', 'top10_mde_80']].to_string(index=False))
     print()
     print(pools[pools['bravais_lattice'] == 'ALL'].to_string(index=False))
     print(f'\nwrote {artifact_dir}/S06_iteration_pilot.{{csv,png}} '
