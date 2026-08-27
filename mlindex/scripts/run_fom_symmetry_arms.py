@@ -12,7 +12,7 @@ It also settles S04's original question, which Phase 1 could only answer indirec
 COUNT a better encoding than the categorical? Phase 1 refuted the mechanism the count was supposed
 to work by (C2-F-034) but never put it in a model.
 
-SIX ARMS, ALL RETRAINED AND PAIRED -- never an importance table (PROTOCOL section 8):
+NINE ARMS, ALL RETRAINED AND PAIRED -- never an importance table (PROTOCOL section 8):
 
     full             raw + structural + context, 46 features. The incumbent.
     drop_spacegroup  full minus the extinction group ALONE.            <- C2-Q-013
@@ -20,6 +20,17 @@ SIX ARMS, ALL RETRAINED AND PAIRED -- never an importance table (PROTOCOL sectio
     drop_structural  raw + context. Campaign 1's arm, 30 features.     <- harness validation
     counts           full minus `spacegroup`, plus the absence counts. <- DWMM's proposal
     delta            full minus `spacegroup`, plus the merit movement. <- what Phase 1 found
+
+The last three split `counts` in half, which is C2-Q-014: the arm won by +0.522 pp but carries
+four features, and only two of them re-encode what `spacegroup` already said.
+
+    counts_static    the two that re-encode the group.        <- gain here => better ENCODING
+    counts_inrange   the two that depend on the cell.         <- gain here => NEW INFORMATION
+    counts_shuffled  counts_static, count relabelled within lattice.   <- the control
+
+Read them together. The control is what makes the other two interpretable: `n_absent_extra` lumps
+158 groups into 129 levels (C2-F-037), so an arm can win on the coarser partition alone without
+the ordering meaning anything. If `counts_shuffled` recovers the gain, neither story holds.
 
 WHAT IS REPORTED, AND WHY MORE THAN ONE COLUMN. Top-10, operating point, and the hard stratum, on
 every arm. Reading one column is precisely the error that produced C2-F-039.
@@ -31,7 +42,8 @@ being measured. `fom-test` is sealed until S15 and is structurally unreachable h
 matrix was never computed for it, and `combiner_frames` inner-joins on it.
 
     python mlindex/scripts/run_fom_symmetry_arms.py --stage features
-    python mlindex/scripts/run_fom_symmetry_arms.py --stage arms
+    python mlindex/scripts/run_fom_symmetry_arms.py --stage arms          # once per --fit-seed
+    python mlindex/scripts/run_fom_symmetry_arms.py --stage combine       # stack the three seeds
 
 Run it with the laptop env:
     /Users/DWMoreau/miniforge3/envs/mli/bin/python
@@ -68,6 +80,13 @@ ARTIFACT_DIR = os.path.join('docs', 'fom_campaign2', 'artifacts')
 
 BASE_GROUPS = ('raw', 'structural', 'context')
 
+# The two halves of the counts group, which is what C2-Q-014 turns on. `n_absent_extra` and
+# `n_groups_searched` are pure functions of (lattice, group) and say nothing `spacegroup` did not
+# already say; `n_absent_extra_in_range` and `f_absent_extra` depend on the candidate's own cell
+# and are information the categorical never carried (C2-F-041).
+COUNTS_STATIC = ('n_absent_extra', 'n_groups_searched')
+COUNTS_INRANGE = ('n_absent_extra_in_range', 'f_absent_extra')
+
 # (label, extra groups, dropped columns, one-line purpose)
 ARMS = (
     ('full', (), (), 'the incumbent: raw + structural + context'),
@@ -76,7 +95,22 @@ ARMS = (
     ('drop_structural', None, (), "campaign 1's 16-feature family drop -- validation"),
     ('counts', ('counts',), ('spacegroup',), "DWMM's absence-count encoding"),
     ('delta', ('delta',), ('spacegroup',), 'the merit movement Phase 1 found carries signal'),
+
+    # C2-Q-014. The `counts` arm carries four features and only two of them re-encode the group,
+    # so its +0.522 pp is either a better ENCODING of what `spacegroup` already said or NEW
+    # information about the candidate's own cell. Splitting the group answers it, and the third
+    # arm is the control that makes the answer readable: if a permuted count recovers the gain,
+    # neither story holds and what the tree is using is the cardinality of the partition.
+    ('counts_static', ('counts',), ('spacegroup',) + COUNTS_INRANGE,
+     're-encodes the group only -- recovers the gain => better encoding'),
+    ('counts_inrange', ('counts',), ('spacegroup',) + COUNTS_STATIC,
+     "cell-dependent only -- recovers the gain => new information"),
+    ('counts_shuffled', ('counts',), ('spacegroup',) + COUNTS_INRANGE,
+     'counts_static with the count relabelled within lattice -- the cardinality control'),
     )
+
+# Arms whose frames need a transform before they are fitted, beyond dropping columns.
+ARM_TRANSFORMS = {'counts_shuffled': 'shuffle_absence_counts'}
 
 # Campaign 1's own values, from `../fom_campaign1/artifacts/S08_combiner_meta.json`. Reused rather
 # than rechosen so these arms sit on its split, its subsample and its false-positive budget, and
@@ -313,6 +347,45 @@ def load_split(bundles, covariates, groups, keep, n_negatives=None, seed=SEED):
     return frames
 
 
+def shuffle_absence_counts(frames, seed):
+    """`n_absent_extra` relabelled across the extinction groups of each Bravais lattice.
+
+    The control for C2-Q-014, and what it has to hold fixed is the point. `n_absent_extra` is a
+    map (lattice, group) -> count, so the tree can be using either of two things: the ORDER, that
+    a group removing more lines is a different kind of evidence than one removing fewer; or merely
+    the PARTITION, that the map lumps 158 groups into 129 levels and a coarser categorical is
+    easier to split on (C2-F-037).
+
+    So the permutation is over the distinct groups within a lattice, not over the rows. Every row
+    keeps a count its own lattice really has, two rows sharing a group still share a value, and the
+    number of levels is unchanged -- which is the property the control has to hold fixed. The only
+    thing destroyed is which group carries which count.
+
+    What this does NOT preserve is the row-level multiset: groups differ in how many candidates
+    they carry, so relabelling moves the frequencies with the labels. That is unavoidable if the
+    partition is to survive, and it is the right trade -- permuting values across rows instead
+    would preserve the multiset while destroying the partition, and could then no longer separate
+    ordering from cardinality, which is the only thing this arm exists to do.
+    """
+    rng = np.random.default_rng(seed)
+    shuffled = []
+    for frame in frames:
+        frame = frame.copy()
+        counts = frame['n_absent_extra'].to_numpy().copy()
+        lattices = frame['bravais_lattice'].to_numpy()
+        groups = frame['spacegroup'].to_numpy()
+        for lattice in np.unique(lattices):
+            rows = np.flatnonzero(lattices == lattice)
+            names, first = np.unique(groups[rows], return_index=True)
+            # The count each group carries, in `names` order, then dealt back out permuted.
+            values = counts[rows][first]
+            relabelled = dict(zip(names, values[rng.permutation(values.size)]))
+            counts[rows] = [relabelled[name] for name in groups[rows]]
+        frame['n_absent_extra'] = counts
+        shuffled.append(frame)
+    return shuffled
+
+
 def _headline(result):
     """The reported metrics, aggregate and hard stratum. Unweighted -- there is no other option."""
     out = {metric: float(result.metric(metric))
@@ -363,7 +436,18 @@ def run_arms(args):
     for label, extra, drop, purpose in ARMS:
         started = time.time()
         groups = arm_groups(extra)
-        combiner = FomCombiner.FomCombiner.fit(fit_frames, groups=groups, scalers=(),
+        # A transformed arm gets its own copies of all three splits: the control has to be applied
+        # to the frames the threshold is chosen on and reported on as well, or the model would be
+        # fitted on a permuted column and scored on the real one.
+        transform = ARM_TRANSFORMS.get(label)
+        if transform is None:
+            arm_fit, arm_cal, arm_dev = fit_frames, cal_frames, dev_frames
+        else:
+            apply = globals()[transform]
+            arm_fit = apply(fit_frames, args.fit_seed)
+            arm_cal = apply(cal_frames, args.fit_seed)
+            arm_dev = apply(dev_frames, args.fit_seed)
+        combiner = FomCombiner.FomCombiner.fit(arm_fit, groups=groups, scalers=(),
                                                objective='pointwise', seed=args.fit_seed,
                                                drop=drop, **MODEL_PARAMS)
         # The threshold is chosen on held-out `fom-train` and never on the split it is reported
@@ -372,14 +456,14 @@ def run_arms(args):
         # `evaluate` applies the score callable itself, so the frames go in raw -- the same call
         # campaign 1's `evaluate_score` makes.
         selection = FomMetrics.evaluate(
-            cal_frames, score=combiner.score,
+            arm_cal, score=combiner.score,
             score_columns=list(combiner.score_columns),
             higher_is_better=True, threshold=0.0, entries=entries, split='fom-train',
             n_bootstrap=0)
         choice = FomMetrics.select_threshold(selection, objective='operating_point',
                                              max_false_positive_rate=MATCHED_FPR_BUDGET)
         result = FomMetrics.evaluate(
-            dev_frames, score=combiner.score,
+            arm_dev, score=combiner.score,
             score_columns=list(combiner.score_columns),
             higher_is_better=True, threshold=float(choice.threshold), entries=entries,
             split='fom-dev', n_bootstrap=args.n_bootstrap, seed=SEED)
@@ -460,10 +544,67 @@ def _print_contrasts(table, results, artifact_dir, suffix='', fit_seed=SEED):
           'about 0.4 pp\n   and one entry flipping is the whole difference -- INHERITED section 2.)')
 
 
+SEED_SUFFIXES = ('', '_seed777', '_seed20260826')
+
+
+def run_combine(args):
+    """The three per-seed tables stacked, and the per-arm summary read off them.
+
+    `S04_symmetry_arms_allseeds.csv` and `S04_symmetry_arms_seed_summary.csv` were assembled by
+    hand the first time, which PROTOCOL section 5 does not allow -- every table in a results
+    document has to come from a committed script. This is that script. It reads whatever
+    `--stage arms` left behind rather than refitting anything, so it is cheap and cannot disagree
+    with the per-seed files.
+
+    `same_sign_all_seeds` and `p<0.05_all_seeds` are the two columns the gate is read off, and both
+    are deliberately unforgiving: an arm that changes sign between seeds has not been measured, and
+    the maximum p over the three is the only one worth quoting.
+    """
+    arms, contrasts = [], []
+    for suffix in SEED_SUFFIXES:
+        arm_path = Path(args.artifact_dir) / f'S04_symmetry_arms{suffix}.csv'
+        contrast_path = Path(args.artifact_dir) / f'S04_symmetry_arms_contrasts{suffix}.csv'
+        if not arm_path.exists() or not contrast_path.exists():
+            raise SystemExit(f'{arm_path} or {contrast_path} is missing; run --stage arms at each '
+                             'of the three fit seeds first')
+        arms.append(pd.read_csv(arm_path))
+        contrasts.append(pd.read_csv(contrast_path))
+    every_arm = pd.concat(arms, ignore_index=True)
+    every_contrast = pd.concat(contrasts, ignore_index=True)
+
+    seeds = sorted(every_arm['fit_seed'].unique())
+    missing = [(arm, seed) for arm in every_arm['arm'].unique() for seed in seeds
+               if not ((every_arm['arm'] == arm) & (every_arm['fit_seed'] == seed)).any()]
+    if missing:
+        raise SystemExit(f'{len(missing)} (arm, seed) cells absent, e.g. {missing[:3]}; the '
+                         'summary would compare arms measured at different numbers of seeds')
+
+    rows = []
+    for arm, part in every_contrast.groupby('arm', sort=False):
+        operating = part['delta_operating_point_pp'].to_numpy()
+        rows.append({
+            'arm': arm, 'n_seeds': int(part.shape[0]),
+            'op_min': float(operating.min()), 'op_mean': float(operating.mean()),
+            'op_max': float(operating.max()),
+            'top10_mean': float(part['delta_top10_pp'].mean()),
+            'p_max': float(part['mcnemar_operating_point_p'].max()),
+            'same_sign_all_seeds': bool(np.all(operating > 0) or np.all(operating < 0)),
+            'p<0.05_all_seeds': bool((part['mcnemar_operating_point_p'] < 0.05).all()),
+            })
+    summary = pd.DataFrame(rows).sort_values('op_mean')
+
+    every_arm.to_csv(Path(args.artifact_dir)/'S04_symmetry_arms_allseeds.csv', index=False)
+    every_contrast.to_csv(
+        Path(args.artifact_dir)/'S04_symmetry_arms_contrasts_allseeds.csv', index=False)
+    summary.to_csv(Path(args.artifact_dir)/'S04_symmetry_arms_seed_summary.csv', index=False)
+    print(f'{len(seeds)} fit seeds {seeds}, {every_arm["arm"].nunique()} arms\n')
+    print(summary.to_string(index=False))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='S04 Phase 2 -- what the symmetry prior is worth, by retrained paired arms.')
-    parser.add_argument('--stage', required=True, choices=('features', 'arms'))
+    parser.add_argument('--stage', required=True, choices=('features', 'arms', 'combine'))
     parser.add_argument('--processes', type=int, default=max(1, (os.cpu_count() or 2) - 2))
     parser.add_argument('--fit-seed', type=int, default=SEED,
                         help='seed for the negative subsample and the model fit. The entry '
@@ -473,7 +614,7 @@ def main():
     parser.add_argument('--artifact-dir', default=ARTIFACT_DIR)
     args = parser.parse_args()
     os.makedirs(args.artifact_dir, exist_ok=True)
-    {'features': run_features, 'arms': run_arms}[args.stage](args)
+    {'features': run_features, 'arms': run_arms, 'combine': run_combine}[args.stage](args)
 
 
 if __name__ == '__main__':

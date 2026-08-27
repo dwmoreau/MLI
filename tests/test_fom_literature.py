@@ -27,6 +27,8 @@ from mlindex.utilities.FigureOfMerits import WU88_SYMMETRY_FACTOR_CORRECTED  # n
 from mlindex.utilities.FigureOfMerits import compute_all  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M20  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M_nn  # noqa: E402
+from mlindex.utilities.FigureOfMerits import get_M_rev_sym  # noqa: E402
+from mlindex.utilities.FigureOfMerits import M_REV_MIN_N_CAL  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_delta_dewolff61  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_F_N  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_g_min_werner  # noqa: E402
@@ -520,6 +522,77 @@ def test_get_M20_degenerate_guard_preserved():
     q2_calc = np.zeros((1, 20))
     q2_ref = np.linspace(0.01, 2.0, 50)[np.newaxis]
     assert get_M20(q2_obs, q2_calc, q2_ref.copy())[0] == 0.0
+
+
+def _m_rev_blowup_case():
+    """The real 6.2e11 candidate, frozen from the pool that measured it.
+
+    JAVDOA / oI / `error1_cont0`, candidate 1467 of S03's threshold-0 general arm -- the row
+    C2-Q-012 was opened over. Kept as arrays rather than as a recipe because the pool it came
+    from is regenerable run output and is not in the repository.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expected",
+                        "m_rev_blowup_saturated_fit.npz")
+    return np.load(path)
+
+
+def test_M_rev_blows_up_on_a_saturated_fit():
+    """The defect itself, so it cannot silently stop happening (C2-F-059).
+
+    Three reference lines in a window that has to support a three-parameter orthorhombic cell:
+    the refinement interpolates them exactly, M_rev's denominator goes to float rounding, and a
+    cell M20 scores at 1.85 comes out at 6.2e11. M_tilde is unharmed, which is what says the
+    defect is in the reversed term and not in the candidate.
+    """
+    case = _m_rev_blowup_case()
+    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"])
+    assert case["n_cal"] == 3
+    assert M_rev[0] == pytest.approx(620579830241.0692, rel=1e-12)
+    assert M_rev[0] == case["M_rev_raw"]
+    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-12)
+    assert get_M20(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"].copy())[0] < 2.0
+    # M_sym is the product, so it carries the blow-up into the leading classical merit.
+    assert M_sym[0] == pytest.approx(M_tilde[0]*M_rev[0], rel=1e-12)
+
+
+def test_M_rev_support_floor_voids_the_saturated_fit_and_leaves_M_tilde_alone():
+    """What the floor does, and what it deliberately does not do."""
+    case = _m_rev_blowup_case()
+    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
+                                          min_n_cal=M_REV_MIN_N_CAL)
+    # Undefined is signalled the way the pre-existing N_cal == 0 guard signals it.
+    assert M_rev[0] == 0.0
+    assert M_sym[0] == 0.0
+    # Only the reversed term is floored: M_tilde divides by the residual over all twenty assigned
+    # lines and is well conditioned however few reference lines the window holds.
+    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-12)
+
+
+def test_M_rev_support_floor_is_off_by_default():
+    """Every merit value on disk was computed with no floor; the default must keep it that way."""
+    case = _m_rev_blowup_case()
+    default = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"])
+    explicit = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"], min_n_cal=None)
+    for left, right in zip(default, explicit):
+        assert np.array_equal(left, right)
+    assert default[1][0] > 1e11
+
+
+def test_M_rev_support_floor_spares_a_well_supported_candidate():
+    """The floor must not be a blanket clip: a candidate with real support is untouched.
+
+    Built by widening the window rather than by changing the cell, so the only thing that differs
+    between this and the case above is N_cal.
+    """
+    q2_obs = np.linspace(0.1, 2.0, 20)
+    q2_ref = np.linspace(0.1, 2.0, 200)[np.newaxis]
+    q2_calc = np.take_along_axis(
+        q2_ref, np.abs(q2_ref[0][np.newaxis] - q2_obs[:, np.newaxis]).argmin(axis=1)[np.newaxis],
+        axis=1)
+    without = get_M_rev_sym(q2_obs, q2_calc, q2_ref)[1]
+    with_floor = get_M_rev_sym(q2_obs, q2_calc, q2_ref, min_n_cal=M_REV_MIN_N_CAL)[1]
+    assert without[0] > 0.0
+    assert with_floor[0] == without[0]
 
 
 def test_the_correct_candidate_wins_on_the_position_only_merits():

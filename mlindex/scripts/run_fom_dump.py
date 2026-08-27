@@ -81,7 +81,15 @@ def _parse_args(argv=None):
                              'partition the bundle and each is independently recoverable')
     parser.add_argument('--n-shards', type=int, default=1)
     parser.add_argument('--seed', type=int, default=12345,
-                        help='Base seed for entry sampling, the per-entry noise and the search')
+                        help='Base seed for entry sampling and the per-entry noise. Also seeds '
+                             'the search unless --optimizer-seed overrides it')
+    parser.add_argument('--optimizer-seed', type=int, default=None,
+                        help='Base seed for the candidate SEARCH alone, leaving the entry sample '
+                             'and the peak-list noise on --seed. Defaults to --seed, so an '
+                             'invocation written before this flag existed produces the same pool. '
+                             'This is what S08 measures the reproducibility floor with: four runs '
+                             'differing only here differ only in the search, so the spread is '
+                             'search noise and not generation noise')
     parser.add_argument('--entry-ids-file', type=str, default=None,
                         help='CSV holding an identifier column. Restricts the run to those '
                              'entries. Unlike campaign 1, a restricted run DOES reproduce a full '
@@ -379,8 +387,23 @@ def optimizer_options(args):
         'prune_criterion_capture': True,
         'dump_candidates': True,
         'search_seed_scheme': 'per_entry_bravais',
-        'search_base_seed': int(args.seed),
+        'search_base_seed': int(search_seed(args)),
         }
+
+
+def search_seed(args):
+    """The base seed for the candidate search, which is `--seed` unless `--optimizer-seed` is set.
+
+    THE POINT OF SEPARATING THEM. The reproducibility floor is the spread of a reported number
+    over runs differing **only in the search**. `--seed` moves three things at once -- which
+    entries are drawn, what noise is added to each peak list, and where the search starts -- so
+    four runs at four `--seed` values measure generation noise and scoring noise together, which
+    is exactly the conflation `METRICS.md` section 8 splits into three separate floors.
+
+    Defaulting to `args.seed` rather than to a constant is deliberate: every invocation written
+    before this flag existed keeps producing the pool it produced.
+    """
+    return int(args.seed if args.optimizer_seed is None else args.optimizer_seed)
 
 
 def _pool_complete(out_dir, pool_tag, want_predownsample):
@@ -427,7 +450,7 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
 
     optimizers, processes, task_queues = setup_mp_optimizers(
         args.pool_size, FomPatterns.BROADENING_TAG, n_candidates_scale=1,
-        seed=args.seed + pool_index, options=optimizer_options(args))
+        seed=search_seed(args) + pool_index, options=optimizer_options(args))
 
     entry_rows, candidate_frames, predownsample_frames, failures = [], [], [], []
     merit_at_prune_names = ()
@@ -676,6 +699,10 @@ def run(args):
         python_version=platform.python_version(),
         model_revision=_model_revision(),
         seed=args.seed,
+        # Both, always. They are equal on almost every run, and a manifest recording one number
+        # cannot say whether two pools differ in their patterns or only in their search -- which
+        # is the single distinction the reproducibility floor is made of.
+        optimizer_seed=search_seed(args),
         search_seed_scheme='per_entry_bravais',
         # The shipped schedule, unchanged. Halving it leaves the ceiling at 0.00 pp but buys only
         # 4.7 % of wall clock for a 17.8 % larger pool (C2-F-053, C2-F-054), so it is refused on

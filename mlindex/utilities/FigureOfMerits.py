@@ -449,7 +449,16 @@ def _reversed_line_terms(q2_obs, q_max, q2_ref_calc):
     return q_min, in_range, counts, q_n, scored
 
 
-def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
+# The support floor campaign 2's analysis passes as `min_n_cal`, defined once so the consumers of
+# M_rev share a number rather than each choosing one. Ten reference lines in the window is half the
+# twenty observed peaks M20 counts over, which makes the two sides of the reversed construction
+# comparable; empirically it also clears every blow-up, which reach a window of seven at most, and
+# takes the merit's realised maximum from 6.9e14 to 626.7 (C2-F-059). It is a recommendation, not a
+# default: get_M_rev_sym applies no floor unless one is passed.
+M_REV_MIN_N_CAL = 10
+
+
+def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=None):
     """Oishi-Tomiyasu 2013 eqs (5), (7), (9)-(11): the restricted, reversed and symmetric FOMs.
 
     Replaces the dead `get_M20_sym_reversed`, which called an undefined `get_multiplicity` and
@@ -474,7 +483,39 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
     `weights` is 1/m per reference entry and defaults to 1 -- see get_N_cal for why that is right
     here. Returns (M_tilde, M_rev, M_sym), each (n_candidates,).
 
+    `min_n_cal` is the support floor on N_cal below which M_rev is not defined, and it defaults
+    to None -- no floor, the behaviour every stored value was computed with. See the note below
+    for what it guards and why it is not on by default.
+
     Unlike get_M20 this does not modify q2_ref_calc.
+
+    THE SUPPORT FLOOR, AND WHY M_rev NEEDS ONE (C2-F-059, C2-Q-012)
+    --------------------------------------------------------------
+    M_rev's denominator is the mean over the N_cal reference lines in [q_I, q_N] of the distance
+    from each to the nearest observed peak. Its numerator does not depend on N_cal at all -- it is
+    the observed line density, fixed by the peak list. So when N_cal is small the ratio is a fixed
+    number over a mean of a handful of terms, and there is a regime where every one of those terms
+    is zero by construction rather than by luck: if the window holds no more lines than the cell
+    has free parameters, the refinement interpolates them exactly. The denominator is then zero to
+    float rounding and M_rev runs to 1e11-1e14 for a cell M20 correctly scores at 1.5.
+
+    Measured on the 69 876 033 candidates of S03's threshold-0 arms: every one of the 140 rows with
+    M_rev > 1e3 has between three and seven reference lines in the window, against a pool median of
+    36; the realised maximum over the 65.7 M rows with ten or more is 626.7; and not one of the 140
+    is a correct cell. So this is an artefact of a saturated fit, not a legitimate extreme, and the
+    answer is to declare the merit undefined there rather than to clip a value that is not a
+    measurement.
+
+    Undefined is signalled as 0.0, which is what the pre-existing N_cal == 0 guard already returns
+    -- so a floor extends that guard rather than introducing a second convention. The cost of the
+    conflation with "worst" is measured, not assumed: across the 2 835 074 rows whose window
+    exceeds the cell's free parameters by four or less -- which is where all 140 blow-ups live --
+    zero are correct.
+
+    Off by default because the value is not wrong everywhere and turning it on would change every
+    merit already on disk. The campaign analysis path sets it (M_REV_MIN_N_CAL above);
+    the shipped indexer never calls this function at all -- `Candidates._capture_merits_at_prune`
+    is its only in-package caller and runs only under the `prune_criterion_capture` research flag.
     """
     n_peaks = q2_obs.shape[0]
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
@@ -506,6 +547,11 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
         discrepancy_reversed = reversed_sum/np.where(n_cal > 0, n_cal, 1)
         epsilon_reversed = (q2_obs[-1] - q2_obs[0])/(2*n_peaks)
         usable = good & (discrepancy_reversed > 0)
+        if min_n_cal is not None:
+            # Only M_rev is floored. M_tilde divides by the mean residual over all n_peaks
+            # assigned lines, which is well conditioned however few reference lines the window
+            # holds; M_sym inherits the floor through the product, which is the intent.
+            usable &= n_cal >= min_n_cal
         M_rev[usable] = epsilon_reversed/discrepancy_reversed[usable]
     return M_tilde, M_rev, M_tilde*M_rev
 

@@ -46,7 +46,7 @@ def _entry_ids(n):
     return sorted(manifest.loc[manifest['bravais_lattice'] == 'cP', 'identifier'])[:n]
 
 
-def _generate(out_dir, entry_ids, n_pools, pool_size, tmp_path):
+def _generate(out_dir, entry_ids, n_pools, pool_size, tmp_path, extra=()):
     """One pool, written to `out_dir`. cP only: its pools are small, so this stays a test."""
     from mlindex.scripts.run_fom_dump import main
 
@@ -58,12 +58,20 @@ def _generate(out_dir, entry_ids, n_pools, pool_size, tmp_path):
           '--entry-ids-file', str(ids_path),
           '--n-pools', str(n_pools), '--pool-size', str(pool_size),
           '--predownsample-entries', '0',
-          '--out-dir', str(out_dir)])
+          '--out-dir', str(out_dir)] + list(extra))
     import glob
     frames = [pd.read_parquet(p) for p in sorted(glob.glob(f'{out_dir}/candidates_*.parquet'))]
     frame = pd.concat(frames, ignore_index=True)
     return frame.sort_values(['entry_id', 'bravais_lattice', 'candidate_id'],
                              kind='stable', ignore_index=True)
+
+
+def _entries(out_dir):
+    """The entry table of a generated pool, keyed and ordered so two runs are comparable."""
+    import glob
+    frames = [pd.read_parquet(p) for p in sorted(glob.glob(f'{out_dir}/entries_*.parquet'))]
+    return pd.concat(frames, ignore_index=True).sort_values(
+        'entry_id', kind='stable', ignore_index=True)
 
 
 def _differing_columns(left, right):
@@ -105,3 +113,38 @@ def test_the_pool_topology_does_not_change_the_pool(tmp_path):
     two_pools = _generate(tmp_path / 'two', ids, 2, 2, tmp_path)
     assert one_pool.shape == two_pools.shape
     assert not _differing_columns(one_pool, two_pools)
+
+
+def test_optimizer_seed_moves_the_search_and_nothing_else(tmp_path):
+    """`--optimizer-seed` is what S08 measures the reproducibility floor with.
+
+    The floor is the spread of a reported number over runs differing ONLY in the search, so the
+    flag has to do exactly one thing. Both halves are asserted, and the first is the half that is
+    easy to omit: if the seed leaked into `prepare_peak_list` or `sample_entries` the runs would
+    also differ in their patterns, and the spread would be generation noise wearing the floor's
+    name (METRICS.md section 8).
+    """
+    ids = _entry_ids(2)
+    base = _generate(tmp_path / 'base', ids, 1, 2, tmp_path)
+    moved = _generate(tmp_path / 'moved', ids, 1, 2, tmp_path,
+                      extra=['--optimizer-seed', '777'])
+
+    # Same patterns. `q2_digest` is the peak list's own checksum, so this is the strong form.
+    left, right = _entries(tmp_path / 'base'), _entries(tmp_path / 'moved')
+    assert list(left['entry_id']) == list(right['entry_id'])
+    assert list(left['q2_digest']) == list(right['q2_digest'])
+
+    # A different search. Comparing `xnn` rather than the row count: the candidate count can
+    # coincide, but the cells the search reaches cannot.
+    assert base.shape[0] > 0 and moved.shape[0] > 0
+    assert 'xnn' in _differing_columns(base, moved) or base.shape != moved.shape
+
+
+def test_optimizer_seed_defaults_to_seed(tmp_path):
+    """An invocation written before the flag existed must still produce the pool it produced."""
+    ids = _entry_ids(2)
+    implicit = _generate(tmp_path / 'implicit', ids, 1, 2, tmp_path)
+    explicit = _generate(tmp_path / 'explicit', ids, 1, 2, tmp_path,
+                         extra=['--optimizer-seed', '12345'])
+    assert implicit.shape == explicit.shape
+    assert not _differing_columns(implicit, explicit)
