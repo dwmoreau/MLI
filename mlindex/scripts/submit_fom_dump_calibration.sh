@@ -84,8 +84,13 @@ PHYSICAL=$((CPUS / 2))
 echo "SLURM_CPUS_ON_NODE=$CPUS -> $PHYSICAL physical cores (nproc says $(nproc), which is wrong "
 echo "under salloc: the login shell inherits a narrow affinity mask and has reported 2)"
 
-# Enough entries per pool that the ~111 s startup amortises rather than dominating.
-NPERPOOL=6
+# Enough entries per pool that the ~111 s startup amortises rather than dominating. aP carries
+# 3 000 manifest entries and the run takes shard 0 of NSHARDS of them, so the entry count is
+# DERIVED from NSHARDS rather than the other way round. Computing NSHARDS from a target count
+# and then reporting the target is how a projection gets built on a number the job did not run.
+AP_ENTRIES=3000
+NSHARDS=15
+N_ENTRIES=$((AP_ENTRIES / NSHARDS))
 
 # aP is the arm that matters: two thirds of every pattern's pool is aP, mP and mC (C2-F-052), and
 # the pre-deduplication ratio has never been measured on any of them.
@@ -95,9 +100,8 @@ for TOPOLOGY in "32 4" "16 8" "64 2"; do
         echo "skipping ${NPOOLS}x${POOLSIZE}: does not fill $PHYSICAL physical cores"
         continue
     fi
-    N_ENTRIES=$((NPOOLS * NPERPOOL))
     echo ""
-    echo "=== ${NPOOLS} pools x ${POOLSIZE} processes, $N_ENTRIES aP entries ==="
+    echo "=== ${NPOOLS} pools x ${POOLSIZE} processes, $N_ENTRIES aP entries ($((N_ENTRIES / NPOOLS)) per pool) ==="
     # NOT wrapped in srun. A bare `srun -n 1` pins CPU affinity to one core and strangles the 128
     # processes -- campaign 1's batch driver invokes the interpreter directly for this reason.
     /usr/bin/time -v $PYTHON run_fom_dump.py \
@@ -105,7 +109,7 @@ for TOPOLOGY in "32 4" "16 8" "64 2"; do
         --split-manifest "$MANIFEST" \
         --bravais-lattices aP \
         --n-pools "$NPOOLS" --pool-size "$POOLSIZE" \
-        --shard 0 --n-shards $((3000 / N_ENTRIES)) \
+        --shard 0 --n-shards "$NSHARDS" \
         --predownsample-entries 2 \
         --out-dir "$OUTROOT/topology_${NPOOLS}x${POOLSIZE}" 2>&1 | \
         grep -E "s/entry|done:|labelled|subsampled|Elapsed|Maximum resident"
