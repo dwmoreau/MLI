@@ -112,9 +112,22 @@ def best_correct_rank(M20, correct):
 
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    parser.add_argument('--stage', choices=['run', 'report', 'figure'], default='run')
+    parser.add_argument('--stage', choices=['run', 'cuts', 'report', 'figure'], default='run')
     parser.add_argument('--threshold', type=float, default=5.0)
+    parser.add_argument('--threshold-map', default=None,
+                        choices=['equal_share', 'lower_only'],
+                        help='run stage: use the per-lattice mapping of this policy instead of '
+                             '--threshold. Requires --stage cuts to have been run for this arm')
     parser.add_argument('--thresholds', default='5.0,3.0', help='report stage: the two arms')
+    parser.add_argument('--cuts-from', default=None, choices=sorted(ARMS),
+                        help='run stage: take the per-lattice cuts from this arm instead of the '
+                             'one being run. The hard arm carries only three true Bravais '
+                             'lattices (C2-R-002), so a policy derived there is fitted to its own '
+                             'answer; deriving on `general` and applying to `hard` is the '
+                             'out-of-sample form and is what the result should be read from')
+    parser.add_argument('--arms', default=None,
+                        help='report stage: comma-separated directory tags to compare, e.g. '
+                             't5,t3,map-equal_share. Overrides --thresholds when given')
     parser.add_argument('--arm', default='general', choices=sorted(ARMS))
     parser.add_argument('--processes', type=int, default=2)
     parser.add_argument('--out-root', default=OUT_ROOT)
@@ -122,17 +135,144 @@ def _parse_args():
     parser.add_argument('--shard-stride', type=int, default=1)
     parser.add_argument('--shard-offset', type=int, default=0)
     parser.add_argument('--limit-entries', type=int, default=None)
+    parser.add_argument('--split', default=None,
+                        help='run stage: restrict to one split, e.g. fom-dev. On the hard arm '
+                             'fom-train is 8.1 of 10.8 search-hours and no reported number comes '
+                             'from it. Output goes to a split-tagged directory so a later full '
+                             'run does not collide with it')
     return parser.parse_args()
+
+
+MERIT_ROOT = os.path.join('mlindex', 'data', 'fom_prune_criterion')
+
+# The production cut every arm here is measured against, and the value the equal-share policy
+# matches its pooled surviving fraction to. Not a flag: 5.0 is what ships (decisions log,
+# 2026-08-26) and the point of these arms is to be read against it.
+BASELINE_CUT = 5.0
+
+
+def derive_cuts(arm, policy, baseline=BASELINE_CUT, split='fom-train'):
+    """Per-lattice M20 cuts from one rule with one free parameter, fitted on `fom-train` only.
+
+    C2-F-033 found that a single global threshold is not a neutral quality filter: it is also an
+    accidental CROSS-LATTICE filter, because M20's scale differs by lattice. At 5.0 the surviving
+    share runs oF 1.3 % to cI 6.1 %, a 4.6x spread (C2-F-023), and lowering the cut globally
+    switches that second function off faster than it delivers the first -- wrong-lattice pools
+    regrow 171x against 31x for the right ones.
+
+    Two policies, both one-parameter, neither fitted per lattice. Fourteen fitted cuts do not
+    survive a train/dev split at these entry counts (C2-F-023, C2-R-002, C2-R-003), which is why
+    neither of these is a fit:
+
+      equal_share  every lattice keeps the same FRACTION of its own threshold-0 pool that the
+                   global cut keeps overall. This is the direct undoing of the accidental filter:
+                   it LOWERS the cut on the lattices the global value treats harshly and RAISES
+                   it on the ones it treats leniently, so the pooled surviving count -- and
+                   therefore the wall clock, which is the other half of the trade -- is matched to
+                   the baseline by construction. The one parameter is the target share, and it is
+                   not free either: it is read off the baseline.
+
+      lower_only   the literal form the work order proposes -- hold the baseline everywhere and
+                   lower it only where the cut is harsher than the pooled share. Strictly more
+                   permissive than the baseline, so it is NOT cost-matched, and any gain it shows
+                   is confounded with simply having a bigger pool. Run as the companion to
+                   equal_share, not instead of it.
+
+    **Selected on `fom-train` and never on the split the arms are reported on** (PROTOCOL section
+    8). Uses no correctness label: the quantile is of the unlabelled candidate pool, so this is a
+    rule that could be applied at inference on a pattern whose answer is unknown.
+    """
+    shards = sorted(Path(BASE).joinpath(MERIT_ROOT, arm).glob('merits_*.parquet'))
+    if not shards:
+        raise SystemExit(f'no merit shards under {MERIT_ROOT}/{arm}')
+    columns = ['bravais_lattice', 'm20_at_prune', 'split']
+    per_lattice = {}
+    for shard in shards:
+        frame = pd.read_parquet(shard, columns=columns)
+        frame = frame.loc[frame['split'] == split]
+        for lattice, part in frame.groupby('bravais_lattice', sort=False):
+            per_lattice.setdefault(lattice, []).append(
+                part['m20_at_prune'].to_numpy(dtype=np.float64))
+    per_lattice = {k: np.concatenate(v) for k, v in per_lattice.items()}
+    if not per_lattice:
+        raise SystemExit(f'no {split} rows in {MERIT_ROOT}/{arm}')
+
+    total = sum(v.size for v in per_lattice.values())
+    kept = sum(int((v >= baseline).sum()) for v in per_lattice.values())
+    target = kept/total
+
+    rows, cuts = [], {}
+    for lattice in sorted(per_lattice):
+        values = per_lattice[lattice]
+        share = float((values >= baseline).mean())
+        # The cut that keeps exactly `target` of this lattice's own pool. `1 - target` because
+        # the quantile is taken from below and the cut keeps the upper tail.
+        equal = float(np.quantile(values, 1.0 - target))
+        cut = equal if policy == 'equal_share' else min(equal, baseline)
+        cuts[lattice] = round(cut, 4)
+        rows.append({'arm': arm, 'policy': policy, 'bravais_lattice': lattice,
+                     'n_train_candidates': int(values.size),
+                     'share_at_baseline': share, 'target_share': target,
+                     'cut': cuts[lattice], 'cut_moves': cuts[lattice] - baseline})
+    return cuts, pd.DataFrame(rows), target
+
+
+def run_cuts(args):
+    """Derive both policies' cuts and write them where the run stage can read them."""
+    artifact_dir = Path(BASE) / args.artifact_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    tables, payload = [], {}
+    for policy in ('equal_share', 'lower_only'):
+        cuts, table, target = derive_cuts(args.arm, policy)
+        payload[policy] = {'arm': args.arm, 'baseline': BASELINE_CUT, 'target_share': target,
+                           'split': 'fom-train', 'cuts': cuts}
+        tables.append(table)
+        print(f'\n=== {policy}: target share {target:.5f} of each lattice own pool')
+        print(table[['bravais_lattice', 'share_at_baseline', 'cut', 'cut_moves']]
+              .to_string(index=False))
+    pd.concat(tables, ignore_index=True).to_csv(
+        artifact_dir / f'INTERIM_per_lattice_cuts_{args.arm}.csv', index=False)
+    destination = artifact_dir / f'INTERIM_per_lattice_cuts_{args.arm}.json'
+    with open(destination, 'w', encoding='utf-8') as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    print(f'\nwrote {destination}')
+
+
+def threshold_option(args):
+    """What goes into `opt_params['prune_m20_threshold']`: a float, or a per-lattice mapping.
+
+    `Candidates.prune_below_m20` takes either. Two other sites coerce the same option with
+    `float()` -- `_record_candidate_dump` and the `at_prune` branch of `_downsample_computation`
+    -- so a mapping would raise there; both are dump-only paths this harness does not enable.
+    See C2-F-063 and C2-Q-022.
+    """
+    if not args.threshold_map:
+        return float(args.threshold), f't{args.threshold:g}'
+    source = args.cuts_from or args.arm
+    path = Path(BASE) / args.artifact_dir / f'INTERIM_per_lattice_cuts_{source}.json'
+    if not path.exists():
+        raise SystemExit(f'{path} missing; run --stage cuts --arm {source} first')
+    with open(path, encoding='utf-8') as handle:
+        payload = json.load(handle)
+    if args.threshold_map not in payload:
+        raise SystemExit(f'{args.threshold_map} not in {path}: {sorted(payload)}')
+    tag = f'map-{args.threshold_map}'
+    if source != args.arm:
+        tag += f'-from-{source}'
+    return dict(payload[args.threshold_map]['cuts']), tag
 
 
 def run_arm(args):
     from mlindex.optimization.MPOptimizer import setup_mp_optimizers, shutdown_mp_workers
 
     root = Path(BASE) / ARMS[args.arm]
-    out_dir = Path(BASE) / args.out_root / args.arm / f't{args.threshold:g}'
+    threshold, tag = threshold_option(args)
+    if args.split:
+        tag += f'-{args.split}'
+    out_dir = Path(BASE) / args.out_root / args.arm / tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    options = {'prune_m20_threshold': args.threshold}
+    options = {'prune_m20_threshold': threshold}
     optimizers, processes, task_queues = setup_mp_optimizers(
         args.processes, BROADENING_TAG, n_candidates_scale=1, seed=12345, options=options)
 
@@ -140,8 +280,11 @@ def run_arm(args):
             for bundle, bundle_dir in bundle_directories(root).items()
             for shard in sorted(bundle_dir.glob('entries_*.parquet'))]
     jobs = jobs[args.shard_offset::args.shard_stride]
-    print(f'threshold {args.threshold:g}: {len(jobs)} shards for offset {args.shard_offset} '
+    print(f'{tag}: {len(jobs)} shards for offset {args.shard_offset} '
           f'of stride {args.shard_stride}', flush=True)
+    if isinstance(threshold, dict):
+        print('  per-lattice cuts: '
+              + ', '.join(f'{k} {v:g}' for k, v in sorted(threshold.items())), flush=True)
 
     started = time.time()
     try:
@@ -152,16 +295,27 @@ def run_arm(args):
                 print(f'  {bundle}/{tag}: already done, skipping', flush=True)
                 continue
             entries = pd.read_parquet(shard)
+            if args.split:
+                # The reported contrast is read on `fom-dev` (PROTOCOL section 8), and on the hard
+                # arm `fom-train` is 8.1 of the 10.8 search-hours for patterns no number comes
+                # from. Restricting is a cost decision, not a validity one -- the cuts were derived
+                # on the GENERAL arm's train split, so nothing here is contaminated either way --
+                # and it can be lifted by re-running without the flag, which resumes rather than
+                # repeats because finished shards are skipped.
+                entries = entries.loc[entries['split'] == args.split]
             if args.limit_entries:
                 entries = entries.head(args.limit_entries)
+            if not entries.shape[0]:
+                print(f'  {bundle}/{tag}: no rows after filters, skipping', flush=True)
+                continue
             rows = []
             for _, entry in entries.iterrows():
                 # Per-pattern wall clock, which is the cost half of the trade the cut makes.
                 # Timed around the whole fourteen-lattice pass, as a user experiences it.
                 at = time.perf_counter()
-                record = ranked_pool(optimizers, task_queues, entry, args.threshold)
+                record = ranked_pool(optimizers, task_queues, entry, threshold)
                 rows.append(dict(record, entry_id=entry['entry_id'], condition_bundle=bundle,
-                                 split=entry['split'], threshold=args.threshold,
+                                 split=entry['split'], threshold=tag,
                                  seconds=time.perf_counter() - at))
             pd.DataFrame(rows).to_parquet(destination, index=False)
             print(f'  {bundle}/{tag}: {len(rows)} patterns, '
@@ -172,49 +326,109 @@ def run_arm(args):
     print(f'wrote {out_dir}')
 
 
+def _arm_tags(args):
+    """The directory tags to compare, baseline first.
+
+    `--thresholds` keeps S03's two-scalar form working unchanged; `--arms` is the general form and
+    is what a per-lattice arm needs, because its directory is named for a policy rather than a
+    number. Baseline first in both cases: every contrast is read against the shipped cut.
+    """
+    if args.arms:
+        return [tag.strip() for tag in args.arms.split(',') if tag.strip()]
+    thresholds = sorted((float(v) for v in args.thresholds.split(',')), reverse=True)
+    return [f't{t:g}' for t in thresholds]
+
+
+def _load_arm(args, tag):
+    directory = Path(BASE) / args.out_root / args.arm / tag
+    shards = sorted(directory.glob('ranked_*.parquet'))
+    if not shards:
+        raise SystemExit(f'no output under {directory}')
+    return pd.concat([pd.read_parquet(s) for s in shards], ignore_index=True)
+
+
 def run_report(args):
+    """Every arm against the first one, paired over the patterns both ran.
+
+    PAIRED, and the pairing is the whole point: both arms saw the same generated candidates for
+    the same (entry, Bravais lattice) seed, so McNemar over the discordant patterns is testing the
+    cut and nothing else. An unpaired comparison here would be comparing two searches.
+    """
     from scipy.stats import binomtest
 
-    thresholds = [float(value) for value in args.thresholds.split(',')]
-    frames = {}
-    for threshold in thresholds:
-        directory = Path(BASE) / args.out_root / args.arm / f't{threshold:g}'
-        shards = sorted(directory.glob('ranked_*.parquet'))
-        if not shards:
-            raise SystemExit(f'no output under {directory}')
-        frames[threshold] = pd.concat([pd.read_parquet(s) for s in shards], ignore_index=True)
-
-    high, low = max(thresholds), min(thresholds)
+    tags = _arm_tags(args)
+    if len(tags) < 2:
+        raise SystemExit(f'need at least two arms to compare, got {tags}')
+    frames = {tag: _load_arm(args, tag) for tag in tags}
+    baseline = tags[0]
     key = ['condition_bundle', 'entry_id']
-    joined = frames[high].merge(frames[low], on=key, suffixes=('_high', '_low'))
-    print(f'{joined.shape[0]} patterns run at both thresholds ({high:g} and {low:g})\n')
 
     rows = []
-    for top_n in (1, 5, 10, 20):
-        a = (joined['best_correct_rank_high'].between(0, top_n - 1)).to_numpy()
-        b = (joined['best_correct_rank_low'].between(0, top_n - 1)).to_numpy()
-        gained, lost = int((~a & b).sum()), int((a & ~b).sum())
-        p = binomtest(gained, gained + lost, 0.5).pvalue if gained + lost else 1.0
-        rows.append({'top_n': top_n, f'threshold_{high:g}': a.mean(),
-                     f'threshold_{low:g}': b.mean(), 'delta_pp': (b.mean() - a.mean()) * 100,
-                     'gained': gained, 'lost': lost, 'p_mcnemar': p})
-    table = pd.DataFrame(rows)
+    for tag in tags[1:]:
+        joined = frames[baseline].merge(frames[tag], on=key, suffixes=('_base', '_arm'))
+        print(f'{tag} vs {baseline}: {joined.shape[0]} patterns run at both')
+        for top_n in (1, 5, 10, 20):
+            a = joined['best_correct_rank_base'].between(0, top_n - 1).to_numpy()
+            b = joined['best_correct_rank_arm'].between(0, top_n - 1).to_numpy()
+            gained, lost = int((~a & b).sum()), int((a & ~b).sum())
+            p = binomtest(gained, gained + lost, 0.5).pvalue if gained + lost else 1.0
+            rows.append({'arm': tag, 'baseline': baseline, 'top_n': top_n,
+                         'baseline_rate': a.mean(), 'arm_rate': b.mean(),
+                         'delta_pp': (b.mean() - a.mean())*100,
+                         'gained': gained, 'lost': lost, 'p_mcnemar': p,
+                         'n_patterns': int(joined.shape[0])})
+        # Availability separately from ranking: "no correct candidate in the pool" is a generation
+        # failure and "it was there and ranked below N" is a ranking failure, and PROTOCOL section 8
+        # says to keep the buckets apart. A cut acts on the first; only the first is its own doing.
+        avail_base = (joined['best_correct_rank_base'] >= 0).to_numpy()
+        avail_arm = (joined['best_correct_rank_arm'] >= 0).to_numpy()
+        gained, lost = int((~avail_base & avail_arm).sum()), int((avail_base & ~avail_arm).sum())
+        rows.append({'arm': tag, 'baseline': baseline, 'top_n': -1,
+                     'baseline_rate': avail_base.mean(), 'arm_rate': avail_arm.mean(),
+                     'delta_pp': (avail_arm.mean() - avail_base.mean())*100,
+                     'gained': gained, 'lost': lost,
+                     'p_mcnemar': binomtest(gained, gained + lost, 0.5).pvalue
+                     if gained + lost else 1.0,
+                     'n_patterns': int(joined.shape[0])})
 
-    seconds = {t: frames[t]['seconds'].sum() for t in thresholds}
-    per_pattern = {t: frames[t]['seconds'].mean() for t in thresholds}
-    pool = {t: frames[t]['pool_size'].mean() for t in thresholds}
+    table = pd.DataFrame(rows)
+    table['metric'] = np.where(table['top_n'] < 0, 'available', 'top' + table['top_n'].astype(str))
+
+    # Cost is PAIRED too, and it has to be. An arm run on a subset -- `--split fom-dev`, say --
+    # otherwise gets compared against a baseline averaged over patterns it never ran, and the
+    # difference then carries whatever makes those patterns faster or slower rather than the cut.
+    # So each arm is priced on the patterns it shares with the baseline, and the baseline is
+    # repriced on that same subset for every row.
+    cost_rows = []
+    for tag in tags:
+        joined = frames[baseline].merge(frames[tag], on=key, suffixes=('_base', '_arm'))
+        cost_rows.append({
+            'arm': tag, 'n_patterns_paired': int(joined.shape[0]),
+            'baseline_seconds': joined['seconds_base'].mean(),
+            'seconds_per_pattern': joined['seconds_arm'].mean(),
+            'baseline_pool': joined['pool_size_base'].mean(),
+            'pool_per_pattern': joined['pool_size_arm'].mean(),
+            'seconds_vs_baseline': (joined['seconds_arm'].mean()
+                                    / joined['seconds_base'].mean() - 1)*100,
+            'pool_vs_baseline': (joined['pool_size_arm'].mean()
+                                 / joined['pool_size_base'].mean() - 1)*100})
+    cost = pd.DataFrame(cost_rows)
 
     artifact_dir = Path(BASE) / args.artifact_dir
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    table.to_csv(artifact_dir / f'S03_confirm_topn_{args.arm}.csv', index=False)
-    joined.to_csv(artifact_dir / f'S03_confirm_per_entry_{args.arm}.csv', index=False)
+    stem = 'S03_confirm' if not args.arms else 'INTERIM_per_lattice_confirm'
+    table.to_csv(artifact_dir / f'{stem}_topn_{args.arm}.csv', index=False)
+    cost.to_csv(artifact_dir / f'{stem}_cost_{args.arm}.csv', index=False)
+    for tag in tags[1:]:
+        frames[baseline].merge(frames[tag], on=key, suffixes=('_base', '_arm')).to_csv(
+            artifact_dir / f'{stem}_per_entry_{args.arm}_{tag}.csv', index=False)
 
-    print(table.to_string(index=False))
-    print(f'\nwall clock per pattern: {high:g} -> {per_pattern[high]:.2f}s, '
-          f'{low:g} -> {per_pattern[low]:.2f}s '
-          f'({(per_pattern[low]/per_pattern[high]-1)*100:+.1f} %)')
-    print(f'ranked pool per pattern: {high:g} -> {pool[high]:.0f}, {low:g} -> {pool[low]:.0f}')
-    print(f'\nwrote {artifact_dir}/S03_confirm_topn_{args.arm}.csv')
+    print()
+    print(table[['arm', 'metric', 'baseline_rate', 'arm_rate', 'delta_pp',
+                 'gained', 'lost', 'p_mcnemar']].to_string(index=False))
+    print()
+    print(cost.to_string(index=False))
+    print(f'\nwrote {artifact_dir}/{stem}_topn_{args.arm}.csv')
 
 
 def run_figure(args):
@@ -289,7 +503,7 @@ def run_figure(args):
 
 def main():
     args = _parse_args()
-    {'report': run_report, 'figure': run_figure}.get(args.stage, run_arm)(args)
+    {'cuts': run_cuts, 'report': run_report, 'figure': run_figure}.get(args.stage, run_arm)(args)
 
 
 if __name__ == '__main__':
