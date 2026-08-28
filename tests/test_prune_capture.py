@@ -15,6 +15,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 from mlindex.optimization.Candidates import Candidates, PRUNE_CAPTURE_MERITS
+from mlindex.utilities.numba_functions import fast_assign
 from mlindex.optimization.CandidateValidation import (is_correct_known_bl_batch,
                                                       validate_candidate_known_bl)
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
@@ -205,3 +206,105 @@ def test_the_batched_labeller_agrees_with_the_scalar_one(lattice_system, bravais
 
     assert np.array_equal(batched, scalar)
     assert batched[0] and not batched[2]
+
+
+# ----------------------------------------------------------------------------------------------
+# The stored ORDER, and the support N_cal. Both had to be settled before S07's array, because
+# neither is repairable on a generated pool.
+# ----------------------------------------------------------------------------------------------
+
+def test_the_stored_order_is_the_order_the_manifest_declares():
+    """C2-F-067. `merit_at_prune` is a list, so position is the only label an entry has.
+
+    `_merit_at_prune` used to sort the names alphabetically while `run_fom_dump.py` wrote the
+    capture order into `manifest.json`. Four of seven entries disagreed -- a loader reading
+    `merit_at_prune[k]` by the manifest's k-th name got `M_rev` where it expected `M_tilde`. The
+    round-trip gate cannot see it, because it only recomputes M20, which is index 0 either way.
+    """
+    from mlindex.model_training.FomBenchmark import _merit_at_prune
+
+    n = 4
+    # Values that identify their own position, so a permutation is visible rather than plausible.
+    record = {f'merit_at_prune_{name}': np.full(n, float(index))
+              for index, name in enumerate(PRUNE_CAPTURE_MERITS)}
+    names, values = _merit_at_prune(record, n)
+
+    assert names == PRUNE_CAPTURE_MERITS
+    for index in range(len(PRUNE_CAPTURE_MERITS)):
+        assert np.all(values[:, index] == float(index)), (
+            f'entry {index} holds another criterion\'s values')
+
+
+def test_the_manifest_and_the_frame_builder_read_the_same_tuple():
+    """The two writers of that order must not be able to drift apart again."""
+    import mlindex.scripts.run_fom_dump as driver
+
+    assert driver.PRUNE_CAPTURE_MERITS is PRUNE_CAPTURE_MERITS
+
+
+def test_an_unexpected_criterion_is_appended_rather_than_shifting_the_others():
+    """A new criterion must not silently renumber every entry after it."""
+    from mlindex.model_training.FomBenchmark import _merit_at_prune
+
+    n = 2
+    record = {f'merit_at_prune_{name}': np.full(n, float(index))
+              for index, name in enumerate(PRUNE_CAPTURE_MERITS)}
+    record['merit_at_prune_zzz_new'] = np.full(n, -1.0)
+    names, values = _merit_at_prune(record, n)
+
+    assert names[:len(PRUNE_CAPTURE_MERITS)] == PRUNE_CAPTURE_MERITS
+    assert names[-1] == 'zzz_new'
+    assert np.all(values[:, -1] == -1.0)
+
+
+def test_n_cal_is_captured_and_explains_every_floored_M_rev():
+    """C2-Q-017: a floored row stores `M_rev` = 0.0 and nothing else says why.
+
+    With `n_cal` beside it the three states that share 0.0 are distinguishable after the fact:
+    floored (`n_cal` below the floor), no reference lines in the window at all (`n_cal` == 0), and
+    a candidate that simply scores nothing (`n_cal` at or above the floor, `M_rev` == 0).
+    """
+    from mlindex.utilities.FigureOfMerits import get_M_rev_sym
+
+    candidates = _candidates(capture=True)
+    candidates.prune_below_m20(threshold=0.0)
+    captured = candidates.merit_at_prune
+
+    assert 'n_cal' in captured
+    n_cal = captured['n_cal']
+    M_rev = captured['M_rev']
+    assert n_cal.shape == M_rev.shape
+    assert np.all(n_cal >= 0)
+
+    # The floor is ten. Every row below it must carry M_rev == 0, which is the floor's contract.
+    below = n_cal < 10
+    assert np.all(M_rev[below] == 0.0), 'a row below the support floor kept a non-zero M_rev'
+
+    # And `n_cal` must be the count the merit itself used, not a recount that could differ.
+    q2_ref_calc = candidates.q2_calculator.get_q2(candidates.best_xnn)
+    hkl_assign = fast_assign(candidates.q2_obs, q2_ref_calc)
+    q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+    _, _, _, n_cal_direct = get_M_rev_sym(
+        candidates.q2_obs, q2_calc, q2_ref_calc, return_n_cal=True)
+    assert np.array_equal(n_cal, n_cal_direct.astype(np.float64))
+
+
+def test_the_floor_can_be_reconstructed_from_what_is_stored():
+    """The point of storing it: recover the unfloored value for the rows the floor touched."""
+    from mlindex.utilities.FigureOfMerits import get_M_rev_sym
+
+    candidates = _candidates(capture=True)
+    candidates.prune_below_m20(threshold=0.0)
+    n_cal = candidates.merit_at_prune['n_cal']
+
+    q2_ref_calc = candidates.q2_calculator.get_q2(candidates.best_xnn)
+    hkl_assign = fast_assign(candidates.q2_obs, q2_ref_calc)
+    q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+    _, unfloored, _ = get_M_rev_sym(
+        candidates.q2_obs, q2_calc, q2_ref_calc, min_n_cal=None)
+
+    # Which rows the floor touched is exactly `n_cal < 10`, and nothing else in the pool says so.
+    touched = (n_cal < 10) & (unfloored > 0)
+    assert np.all(candidates.merit_at_prune['M_rev'][touched] == 0.0)
+    if touched.any():
+        assert np.all(unfloored[touched] > 0), 'the floor should only zero non-zero values'

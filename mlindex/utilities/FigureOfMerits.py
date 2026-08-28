@@ -449,7 +449,8 @@ def _reversed_line_terms(q2_obs, q_max, q2_ref_calc):
     return q_min, in_range, counts, q_n, scored
 
 
-def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10):
+def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10,
+                  return_n_cal=False):
     """Oishi-Tomiyasu 2013 eqs (5), (7), (9)-(11): the restricted, reversed and symmetric FOMs.
 
     Replaces the dead `get_M20_sym_reversed`, which called an undefined `get_multiplicity` and
@@ -473,6 +474,9 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10):
     positions of the assigned lines, q2_ref_calc (n_candidates, n_ref) every reference line.
     `weights` is 1/m per reference entry and defaults to 1 -- see get_N_cal for why that is right
     here. Returns (M_tilde, M_rev, M_sym), each (n_candidates,).
+
+    `return_n_cal` adds N_cal to the return, so a caller persisting M_rev can record what the
+    floor tested. Without it a stored 0.0 is unauditable after the fact (C2-Q-017).
 
     `min_n_cal` is the support floor on N_cal below which M_rev is not defined. **It is on**, at
     ten reference lines in the window. Pass `min_n_cal=None` for the unfloored value, which is what
@@ -563,6 +567,13 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10):
             # holds; M_sym inherits the floor through the product, which is the intent.
             usable &= n_cal >= min_n_cal
         M_rev[usable] = epsilon_reversed/discrepancy_reversed[usable]
+    if return_n_cal:
+        # The support the floor tested, for callers that persist M_rev. A floored row stores
+        # M_rev = 0.0, which already meant "N_cal was zero" and "this candidate is degenerate" --
+        # three states, one value. Nothing else stored distinguishes them, so a pool that keeps
+        # M_rev without N_cal cannot afterwards be asked which rows the floor touched, what the
+        # raw value was, or whether a zero means floored or worthless. C2-Q-017.
+        return M_tilde, M_rev, M_tilde*M_rev, n_cal
     return M_tilde, M_rev, M_tilde*M_rev
 
 

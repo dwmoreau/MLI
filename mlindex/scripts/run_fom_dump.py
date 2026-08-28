@@ -51,6 +51,7 @@ from mlindex.command_line.run import BRAVAIS_LATTICES
 from mlindex.model_training import FomBenchmark
 from mlindex.model_training import FomConditions
 from mlindex.model_training import FomPatterns
+from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 
 
@@ -708,7 +709,10 @@ def run(args):
         # 4.7 % of wall clock for a 17.8 % larger pool (C2-F-053, C2-F-054), so it is refused on
         # price -- and a pool has to record which schedule produced it either way.
         iteration_scale=1.0,
-        merit_at_prune_names=list(FomBenchmark.REDUCED_MERIT_COLUMNS),
+        # The capture site's own tuple, which is also what `_merit_at_prune` orders the
+        # stored list by. It used to write REDUCED_MERIT_COLUMNS while the list was sorted
+        # alphabetically, mislabelling four of seven entries (C2-F-067).
+        merit_at_prune_names=list(PRUNE_CAPTURE_MERITS),
         broadening_tag=FomPatterns.BROADENING_TAG,
         error_law=FomConditions.ERROR_LAW,
         n_peaks=FomPatterns.N_PEAKS,

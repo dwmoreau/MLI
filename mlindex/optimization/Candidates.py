@@ -26,12 +26,24 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
-# The merits a research run can capture at the prune site. The cut reads a merit once per
-# candidate, so this is one extra evaluation of each -- but it is off by default and the shipped
-# path never touches it: `prune_criterion_capture` is not a CLI option and never will be
-# (C2-F-008). It exists because campaign 1 stored only M20 at the cut, which is the one question
-# its 57-million-row threshold-0 dump cannot answer (C2-R-001).
-PRUNE_CAPTURE_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
+# The merits a research run can capture at the prune site, AND THE ORDER THEY ARE RECORDED IN.
+# The cut reads a merit once per candidate, so this is one extra evaluation of each -- but it is
+# off by default and the shipped path never touches it: `prune_criterion_capture` is not a CLI
+# option and never will be (C2-F-008). It exists because campaign 1 stored only M20 at the cut,
+# which is the one question its 57-million-row threshold-0 dump cannot answer (C2-R-001).
+#
+# THE ORDER IS PART OF THE CONTRACT. `merit_at_prune` is stored as a list per candidate, so
+# position is the only thing that says which entry is which. `FomBenchmark._merit_at_prune` orders
+# by this tuple and `run_fom_dump.py` writes it into manifest.json, so the three cannot disagree.
+# They did: the frame builder sorted alphabetically while the manifest wrote the capture order, and
+# four of seven entries were mislabelled -- a loader reading by the manifest got M_rev where it
+# expected M_tilde. Invisible to the round-trip gate, which only checks M20 (C2-F-067).
+#
+# `n_cal` is last and is NOT a merit. It is the support M_rev's floor tested: a floored row stores
+# M_rev = 0.0, which already meant "N_cal was zero" and "this candidate is degenerate", and nothing
+# else stored tells the three apart. Without it the floor is unauditable on a generated pool --
+# cheap to add before the array runs and impossible after (C2-Q-017).
+PRUNE_CAPTURE_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap', 'n_cal')
 
 # The per-peak assignment statistics `refine_cell`'s mask and the reported `n_indexed` may read.
 #
@@ -448,14 +460,25 @@ class Candidates:
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
 
-        M_tilde, M_rev, M_sym = get_M_rev_sym(self.q2_obs, q2_calc, q2_ref_calc)
+        M_tilde, M_rev, M_sym, n_cal = get_M_rev_sym(
+            self.q2_obs, q2_calc, q2_ref_calc, return_n_cal=True)
         n_over, max_gap = get_n_over(self.q2_obs, q2_calc, q2_ref_calc)
         X_N = get_X_N(self.q2_obs, q2_calc, q2_ref_calc)
         M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
 
-        return {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
-                'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
-                'max_gap': max_gap.astype(np.float64)}
+        # Keyed and ORDERED by PRUNE_CAPTURE_MERITS, which is the single source of truth for what
+        # `merit_at_prune` holds and in what order. The stored column is a list, so the order is
+        # the only thing that says which entry is which, and the manifest records this same tuple.
+        captured = {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
+                    'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
+                    'max_gap': max_gap.astype(np.float64),
+                    # N_cal is not a merit. It is the support M_rev's floor tested, stored beside
+                    # it because a floored row keeps M_rev = 0.0 and nothing else distinguishes
+                    # "floored" from "N_cal was zero" from "degenerate" (C2-Q-017).
+                    'n_cal': n_cal.astype(np.float64)}
+        assert tuple(captured) == PRUNE_CAPTURE_MERITS, (
+            f'capture order drifted from PRUNE_CAPTURE_MERITS: {tuple(captured)}')
+        return captured
 
     def standardize_cell(self):
         # These do a quick standardization of monoclinic and triclinic candidates. It is just a

@@ -337,12 +337,22 @@ def _merit_at_prune(record, n_candidates):
     at the cut, so the question of whether a different merit makes a better cut could not be
     asked where the cut actually is.
     """
-    names = sorted(name[len('merit_at_prune_'):] for name in record
-                   if name.startswith('merit_at_prune_'))
-    if not names:
+    from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
+
+    present = {name[len('merit_at_prune_'):] for name in record
+               if name.startswith('merit_at_prune_')}
+    if not present:
         return (), None
+    # ORDERED BY THE CAPTURE SITE'S OWN TUPLE, not alphabetically. This used to sort, while the
+    # manifest wrote the capture order -- so a loader reading merit_at_prune[k] by the manifest's
+    # k-th name got M_rev where it expected M_tilde, on four of seven entries, silently, and the
+    # round-trip gate could not see it because it only checks M20 (C2-F-067). Anything unexpected
+    # is appended in sorted order rather than dropped, so a new criterion is visible instead of
+    # silently shifting the ones after it.
+    names = tuple(name for name in PRUNE_CAPTURE_MERITS if name in present)
+    names += tuple(sorted(present - set(PRUNE_CAPTURE_MERITS)))
     values = np.stack([record[f'merit_at_prune_{name}'] for name in names], axis=1)
-    return tuple(names), values
+    return names, values
 
 
 def predownsample_records_to_frame(records):
