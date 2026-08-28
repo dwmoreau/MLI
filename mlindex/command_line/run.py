@@ -5,6 +5,7 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import argparse
+import math
 import types
 from pathlib import Path
 import numpy as np
@@ -28,6 +29,128 @@ _BL_MPI6_CFG = {
     'oC': (1, False), 'oF': (2, False), 'oI': (3, False), 'oP': (4, False),
     'mC': (5, False), 'mP': (0, False), 'aP': (5, False),
 }
+
+
+# Per-lattice cost in seconds, measured on a 20-peak pattern with one process.
+#
+#   gen -- `_generate_candidates_xnn`. Runs on a group's manager alone, because
+#          only the manager holds models, so it does NOT divide by group size.
+#   par -- the iteration loop plus the post-loop block, which stripe across the
+#          group and do divide.
+#
+# A group of `k` processes owning lattice set S therefore costs
+#     sum(gen[bl] for bl in S) + sum(par[bl] for bl in S) / k
+# which was checked against the shipped code by running single lattices at
+# --nproc 1/2/4: mP measured 9.81/6.22/4.35 against 9.87/6.15/4.29 predicted,
+# and eleven of twelve such points agree within 0.15 s.
+#
+# The table only has to RANK lattices, not predict wall clock on a given machine.
+# It travels between patterns: over 11bmb, glucose and s178 the gen column
+# totalled 15.20 / 15.59 / 15.68 s and the iteration half of par 21.68 / 21.65 /
+# 21.94 s, because neither depends on how well a pattern indexes. Only the
+# post-loop block moves, and it is the smallest of the three terms.
+_BL_COST = {
+    'cF': (1.00, 0.25), 'cI': (0.01, 0.00), 'cP': (0.01, 0.00),
+    'hP': (1.07, 0.76), 'hR': (1.17, 0.72),
+    'tI': (0.58, 0.54), 'tP': (0.63, 0.70),
+    'oC': (0.89, 2.58), 'oF': (0.84, 2.86), 'oI': (0.65, 2.56), 'oP': (1.48, 5.54),
+    'mC': (2.26, 6.62), 'mP': (2.43, 7.44), 'aP': (2.18, 5.02),
+    }
+
+
+def _group_cost(bravais_lattices, group_size):
+    gen = sum(_BL_COST[bl][0] for bl in bravais_lattices)
+    par = sum(_BL_COST[bl][1] for bl in bravais_lattices)
+    return gen + par / group_size
+
+
+def _plan_for_makespan(bravais_lattices, target, max_group_size):
+    """Cheapest assignment reaching `target`, or None if it cannot be reached.
+
+    A lattice whose solo cost exceeds the target is given enough processes to
+    itself to meet it, up to `max_group_size`; everything else is
+    first-fit-decreasing packed into single-process groups of capacity `target`.
+    """
+    if any(_BL_COST[bl][0] >= target for bl in bravais_lattices):
+        # Generation alone already exceeds the target and never divides.
+        return None
+    groups = []
+    light = []
+    for bl in bravais_lattices:
+        gen, par = _BL_COST[bl]
+        if gen + par > target:
+            group_size = int(math.ceil(par / (target - gen)))
+            if group_size > max_group_size:
+                return None
+            groups.append(([bl], group_size))
+        else:
+            light.append(bl)
+    bins = []
+    for bl in sorted(light, key=lambda b: -sum(_BL_COST[b])):
+        for existing in bins:
+            if sum(sum(_BL_COST[b]) for b in existing) + sum(_BL_COST[bl]) <= target + 1e-9:
+                existing.append(bl)
+                break
+        else:
+            bins.append([bl])
+    return groups + [(b, 1) for b in bins]
+
+
+def allocate_lattice_groups(bravais_lattices, n_procs):
+    """Assign Bravais lattices to `n_procs` processes as (lattice list, size) pairs.
+
+    Binary search on the makespan, with one rule covering fewer processes than
+    lattices, exactly as many, and more.
+
+    **While there are at least as many lattices as processes, every group holds
+    exactly one process**, and the results are then bit-identical to `--nproc 1`
+    on all fourteen lattices -- verified. That is a property the old
+    candidate-striping design never had: at `--nproc 8` it reproduced `--nproc 1`
+    on none of the fourteen, with mP's top M20 differing by 20 %.
+
+    Only once processes outnumber lattices does a lattice get more than one, and
+    the spare processes go to the heaviest lattices first. Those lattices are
+    then searched by striping candidates across the group, exactly as the whole
+    program used to be, so **above `len(bravais_lattices)` processes the results
+    depend on `--nproc` again**. That is the only regime where they do.
+
+    The heaviest group comes first: the caller runs group 0 itself.
+    """
+    bravais_lattices = list(bravais_lattices)
+    if n_procs <= 1 or len(bravais_lattices) <= 1:
+        return [(bravais_lattices, max(1, n_procs))]
+    # Splitting a lattice buys speed at the cost of reproducibility, so it is
+    # held back until there is nothing else left to spend a process on.
+    if n_procs <= len(bravais_lattices):
+        # Every group is one process, so this is plain longest-processing-time
+        # bin packing. Done directly rather than through the search below,
+        # which stops as soon as it meets the makespan and would leave
+        # processes unused -- at eight it found a six-process plan, because
+        # nothing can beat mP running alone. The makespan is the same either
+        # way, but spreading the rest over every available process shortens
+        # each group and so lowers the contention measured when several groups
+        # generate candidates at once.
+        n_groups = max(1, min(n_procs, len(bravais_lattices)))
+        bins = [[] for _ in range(n_groups)]
+        loads = [0.0] * n_groups
+        for bl in sorted(bravais_lattices, key=lambda b: -sum(_BL_COST[b])):
+            index = min(range(n_groups), key=lambda j: loads[j])
+            bins[index].append(bl)
+            loads[index] += sum(_BL_COST[bl])
+        return sorted([(b, 1) for b in bins if b],
+                      key=lambda group: -_group_cost(*group))
+    max_group_size = n_procs
+    low = max(_BL_COST[bl][0] for bl in bravais_lattices) + 1e-6
+    high = sum(sum(_BL_COST[bl]) for bl in bravais_lattices)
+    best = _plan_for_makespan(bravais_lattices, high, max_group_size)
+    for _ in range(60):
+        mid = 0.5 * (low + high)
+        plan = _plan_for_makespan(bravais_lattices, mid, max_group_size)
+        if plan is not None and sum(k for _, k in plan) <= n_procs:
+            best, high = plan, mid
+        else:
+            low = mid
+    return sorted(best, key=lambda group: -_group_cost(*group))
 
 
 def build_base_parser(description="Start the display application"):
@@ -238,10 +361,14 @@ def _is_same_cell(e1, e2, rtol, atol_deg):
     return True
 
 
-def _conventional_cell(output_data, delta=0.1):
-    """Promote entries to their highest-symmetry equivalent Bravais lattice
-    using cctbx metric_subgroups, update spacegroup/BL fields, then deduplicate
-    near-identical cells within the same Bravais lattice (keeping highest M20).
+def promote_entries(output_data, delta=0.1):
+    """Promote each entry to its highest-symmetry equivalent Bravais lattice.
+
+    Pure per-entry work with no shared state, which is what lets it be split
+    across processes. It is also the expensive half of `_conventional_cell`:
+    `metric_subgroups` costs 6.5 ms per candidate against 280 candidates, and a
+    thread pool cannot help because cctbx holds the GIL throughout -- measured
+    at 1.201 s on one thread and 1.190 s on eight.
     """
     from cctbx import crystal as cctbx_crystal
     from cctbx.sgtbx.lattice_symmetry import metric_subgroups
@@ -300,6 +427,23 @@ def _conventional_cell(output_data, delta=0.1):
             new_entry['spacegroup'] = best_sg
         updated.append(new_entry)
 
+    return updated
+
+
+def _conventional_cell(output_data, delta=0.1, promote=None):
+    """Promote entries, then deduplicate near-identical cells within the same
+    Bravais lattice, keeping the highest M20.
+
+    `promote` defaults to running `promote_entries` here, in this process. The
+    multiprocessing path passes one that fans the entries out over the lattice
+    groups, which are otherwise idle by this point. The deduplication stays
+    serial: it is O(n^2) over the promoted entries and cheap next to cctbx.
+    """
+    if promote is None:
+        updated = promote_entries(output_data, delta=delta)
+    else:
+        updated = promote(output_data, delta)
+
     updated.sort(key=lambda e: e['M20'], reverse=True)
     kept = []
     for entry in updated:
@@ -314,7 +458,7 @@ def _conventional_cell(output_data, delta=0.1):
 
 
 def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
-                  top_n_indexed):
+                  top_n_indexed, promote=None):
     output_data = []
     for bl in args.bravais_lattices:
         mock = types.SimpleNamespace(
@@ -327,7 +471,7 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
             Minfos=top_Minfo[bl],
             spacegroups=top_spacegroup[bl],
         )
-    output_data = _conventional_cell(output_data)
+    output_data = _conventional_cell(output_data, promote=promote)
     output_file_base = str(Path(args.output_file).with_suffix(''))
     _write_results(output_data, output_file_base=output_file_base)
 
@@ -416,42 +560,63 @@ def _run_mpi(args, peak_list, seed=12345):
 
 
 def _run_mp(args, peak_list, n_procs, seed=12345):
-    from mlindex.optimization.MPOptimizer import setup_mp_optimizers, run_mp_bl, shutdown_mp_workers
+    """Run every requested Bravais lattice, parallel across lattices AND candidates.
+
+    The lattices are dealt into groups by `allocate_lattice_groups`, and the
+    groups run at the same time. That is the point: candidate generation holds
+    the models and so runs only on a group's own manager, and with a single
+    group -- which is what this function used to build -- it is 15.6 s of a
+    20.5 s pattern with every other process blocked waiting for it.
+
+    Only lattices the caller asked for are built, so `--bravais-lattices cP` no
+    longer loads all fourteen lattices' models to use one of them.
+    """
+    from mlindex.optimization.MPOptimizer import (
+        setup_lattice_groups, run_lattice_groups, shutdown_lattice_groups,
+        promote_over_groups)
 
     broadening_tag = '1'
     n_top_candidates = 20
 
-    optimizers, processes, task_queues = setup_mp_optimizers(
-        n_procs, broadening_tag, n_candidates_scale=1, seed=seed
+    assignment = allocate_lattice_groups(args.bravais_lattices, n_procs)
+    groups, processes = setup_lattice_groups(
+        assignment, broadening_tag, n_candidates_scale=1, seed=seed
     )
 
-    top_unit_cell = {}
-    top_M20 = {}
-    top_Minfo = {}
-    top_spacegroup = {}
-    top_n_indexed = {}
-
-    for bravais_lattice in args.bravais_lattices:
-        run_mp_bl(
-            optimizers[bravais_lattice],
-            bravais_lattice,
-            task_queues,
+    try:
+        results = run_lattice_groups(
+            groups,
             q2=peak_list,
             zero_error=args.zero_error,
             wavelength=args.wavelength,
             n_top=n_top_candidates,
         )
-        opt = optimizers[bravais_lattice]
-        top_unit_cell[bravais_lattice] = opt.top_unit_cell
-        top_M20[bravais_lattice] = opt.top_M20
-        top_Minfo[bravais_lattice] = opt.top_Minfo
-        top_spacegroup[bravais_lattice] = opt.top_spacegroup
-        top_n_indexed[bravais_lattice] = opt.top_n_indexed
 
-    shutdown_mp_workers(processes, task_queues)
+        top_unit_cell = {}
+        top_M20 = {}
+        top_Minfo = {}
+        top_spacegroup = {}
+        top_n_indexed = {}
+        for bravais_lattice in args.bravais_lattices:
+            result = results[bravais_lattice]
+            top_unit_cell[bravais_lattice] = result['top_unit_cell']
+            top_M20[bravais_lattice] = result['top_M20']
+            top_Minfo[bravais_lattice] = result['top_Minfo']
+            top_spacegroup[bravais_lattice] = result['top_spacegroup']
+            top_n_indexed[bravais_lattice] = result['top_n_indexed']
 
-    _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
-                  top_n_indexed)
+        # Before the shutdown below, not after: the conventional-cell promotion
+        # is 6.5 ms of cctbx per candidate over roughly 280 of them, and it used
+        # to run with every worker already dead.
+        _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
+                      top_n_indexed,
+                      promote=lambda entries, delta: promote_over_groups(
+                          groups, entries, delta))
+    finally:
+        # In a finally block because every group manager and refinement worker
+        # blocks on a queue with no timeout: an exception on the way out would
+        # otherwise leave the run hanging instead of failing.
+        shutdown_lattice_groups(groups, processes)
 
 
 def main():

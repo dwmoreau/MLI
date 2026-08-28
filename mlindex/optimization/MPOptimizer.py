@@ -6,6 +6,10 @@ from mlindex.optimization.MPIOptimizer import _collect_at_prune, _worker_payload
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 
 
+BRAVAIS_LATTICES_ALL = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                        'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+
+
 class LocalComm:
     """Dummy MPI communicator for use during MPOptimizerManager.__init__ only.
 
@@ -170,14 +174,22 @@ class MPOptimizerWorker(OptimizerWorker):
         self._result_q.put({'M20': candidates.best_M20, 'xnn': candidates.best_xnn})
 
 
-def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None, seed=12345):
+def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None, seed=12345,
+                  bravais_lattices=None):
     """Module-level worker function (picklable for macOS spawn start method).
 
-    Builds all 14 MPOptimizerWorker objects at startup (reusing imports across
-    all Bravais lattices), then loops waiting for task signals.
+    Builds one MPOptimizerWorker per Bravais lattice at startup (reusing imports
+    across all of them), then loops waiting for task signals.
+
+    `bravais_lattices` must list the lattices in the SAME ORDER the manager
+    constructs them: each worker constructor drains one init tuple from the
+    shared data queue, so a different order silently pairs a worker with another
+    lattice's hkl_ref. Default None means all 14, which is what
+    `setup_mp_optimizers` builds; `setup_lattice_groups` passes its group's own
+    subset, and `get_optimizers` iterates the organizer dict in insertion order.
     """
-    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
-                        'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+    if bravais_lattices is None:
+        bravais_lattices = list(BRAVAIS_LATTICES_ALL)
     workers = {}
     try:
         for bl in bravais_lattices:
@@ -237,8 +249,7 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
     MPOptimizerManager._mp_result_queues = result_queues
     MPOptimizerManager._mp_n_ranks       = n_procs
 
-    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
-                        'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+    bravais_lattices = list(BRAVAIS_LATTICES_ALL)
     mp_organizers = {bl: SimpleNamespace(manager=0, workers=list(range(n_procs)),
                                          split_comm=None, color=None)
                      for bl in bravais_lattices}
@@ -273,6 +284,242 @@ def shutdown_mp_workers(processes, task_queues):
     """Send shutdown signal to all workers and wait for them to exit."""
     for r in range(1, len(task_queues)):
         task_queues[r].put('shutdown')
+    for p in processes:
+        p.join()
+
+
+# ---------------------------------------------------------------------------
+# Lattice groups: parallelism ACROSS Bravais lattices, not only across candidates.
+#
+# `setup_mp_optimizers` above gives every process the same lattice at the same
+# time, so only the manager -- the one process holding models -- can generate
+# candidates, and every worker blocks in `generate_candidates_rank` while it
+# does. Measured on a 20-peak pattern, that generation phase is 15.6 s of a
+# 20.5 s pattern at eight processes and does not shrink as processes are added,
+# which caps the whole program at about 2x however many cores it is given.
+#
+# A lattice group owns a subset of the lattices and holds only their models, so
+# several groups generate at once. Generation for a lattice depends only on that
+# lattice's own generator objects and the observed peak list -- verified: mP's
+# candidates are bit-identical whether mP runs alone or after twelve other
+# lattices -- so moving a lattice between processes does not perturb it, PROVIDED
+# the assignment is static. The generator streams still advance once per pattern,
+# so a lattice must stay with the same group for every pattern of a run.
+# ---------------------------------------------------------------------------
+
+
+def _build_group_optimizers(bl_list, group_size, data_queues, result_queues,
+                            broadening_tag, n_candidates_scale, seed, options,
+                            logger=None):
+    """Construct the manager optimizers for one lattice group.
+
+    Only the lattices in `bl_list` are built, so a group loads only the models it
+    will use: 12-222 MB per lattice against 1.29 GB for all fourteen.
+    """
+    from mlindex.optimization.UtilitiesOptimizer import get_optimizers
+    from types import SimpleNamespace
+
+    MPOptimizerManager._mp_data_queues = data_queues
+    MPOptimizerManager._mp_result_queues = result_queues
+    MPOptimizerManager._mp_n_ranks = group_size
+    organizers = {bl: SimpleNamespace(manager=0, workers=list(range(group_size)),
+                                      split_comm=None, color=None)
+                  for bl in bl_list}
+    try:
+        return get_optimizers(0, organizers, broadening_tag, n_candidates_scale,
+                              logger=logger, optimizer_class=MPOptimizerManager,
+                              seed=seed, options=options)
+    finally:
+        # Cleared even on failure. These are class attributes, so a manager left
+        # pointing at a dead group's queues would be inherited by the next
+        # construction in this process.
+        MPOptimizerManager._mp_data_queues = None
+        MPOptimizerManager._mp_result_queues = None
+        MPOptimizerManager._mp_n_ranks = None
+
+
+def _group_result(optimizer):
+    """The five arrays `run.py` needs back from a lattice, ready to pickle."""
+    return {
+        'top_unit_cell': optimizer.top_unit_cell,
+        'top_M20': optimizer.top_M20,
+        'top_Minfo': optimizer.top_Minfo,
+        'top_spacegroup': optimizer.top_spacegroup,
+        'top_n_indexed': optimizer.top_n_indexed,
+        }
+
+
+def _mp_group_manager_fn(bl_list, group_size, data_queues, result_queues, task_queues,
+                         control_queue, output_queue, broadening_tag,
+                         n_candidates_scale, seed, options):
+    """Manager process for one lattice group (module level, so spawn can pickle it).
+
+    Holds the models for `bl_list` and drives the group's own refinement workers
+    through `run_mp_bl`, exactly as the single manager does today. What is new is
+    only that several of these run at once.
+    """
+    try:
+        optimizers = _build_group_optimizers(
+            bl_list, group_size, data_queues, result_queues,
+            broadening_tag, n_candidates_scale, seed, options)
+        output_queue.put(('ready', None))
+        while True:
+            msg = control_queue.get()
+            if msg == 'shutdown':
+                break
+            if msg[0] == 'promote':
+                # Imported here, not at module scope: run.py imports this
+                # module, and cctbx costs a second to import in a process that
+                # may never be asked to promote anything.
+                from mlindex.command_line.run import promote_entries
+                output_queue.put(('promoted', promote_entries(msg[1], delta=msg[2])))
+                continue
+            _, q2, zero_error, wavelength, n_top, run_seed = msg
+            payload = {}
+            for bl in bl_list:
+                run_mp_bl(optimizers[bl], bl, task_queues, q2=q2,
+                          zero_error=zero_error, wavelength=wavelength,
+                          n_top=n_top, run_seed=run_seed)
+                payload[bl] = _group_result(optimizers[bl])
+            output_queue.put(('results', payload))
+    except Exception as e:
+        # Reported rather than raised, so the coordinator fails with this
+        # exception as the cause instead of hanging on a queue nobody will fill.
+        output_queue.put(('error', e))
+    finally:
+        for r in range(1, group_size):
+            task_queues[r].put('shutdown')
+
+
+def setup_lattice_groups(assignment, broadening_tag, n_candidates_scale,
+                         logger=None, seed=12345, options=None):
+    """Spawn one process group per (lattice list, group size) pair in `assignment`.
+
+    The FIRST entry is run by the calling process, so exactly `sum(group_size)`
+    processes do the work and the caller does not idle while the others run.
+    Returns (groups, processes) for `run_lattice_groups` and
+    `shutdown_lattice_groups`.
+    """
+    groups = []
+    processes = []
+    for group_index, (bl_list, group_size) in enumerate(assignment):
+        bl_list = list(bl_list)
+        data_queues = [Queue() for _ in range(group_size)]
+        result_queues = [Queue() for _ in range(group_size)]
+        task_queues = [Queue() for _ in range(group_size)]
+        # The group's refinement workers, ranks 1..group_size-1. Spawned before
+        # the manager is constructed, because each blocks in its constructor on
+        # the init tuple the manager's `_init_workers` sends.
+        for r in range(1, group_size):
+            p = Process(target=_mp_worker_fn,
+                        args=(r, group_size, data_queues[r], result_queues[r],
+                              task_queues[r]),
+                        kwargs={'seed': seed, 'bravais_lattices': bl_list})
+            p.start()
+            processes.append(p)
+        # data_queues and result_queues are held here even though only the
+        # group's own manager reads them. A Queue passed to Process() is
+        # rebuilt from a named semaphore in the child, so if the parent drops
+        # its last reference the semaphore is reclaimed before the child
+        # finishes unpickling and every group dies with
+        # `SemLock._rebuild ... FileNotFoundError` while the coordinator waits
+        # forever for a `ready` that will never come.
+        group = {'bravais_lattices': bl_list, 'size': group_size,
+                 'data_queues': data_queues, 'result_queues': result_queues,
+                 'task_queues': task_queues, 'control_queue': None,
+                 'output_queue': None, 'optimizers': None}
+        if group_index == 0:
+            group['optimizers'] = _build_group_optimizers(
+                bl_list, group_size, data_queues, result_queues,
+                broadening_tag, n_candidates_scale, seed, options, logger=logger)
+        else:
+            control_queue = Queue()
+            output_queue = Queue()
+            p = Process(target=_mp_group_manager_fn,
+                        args=(bl_list, group_size, data_queues, result_queues,
+                              task_queues, control_queue, output_queue,
+                              broadening_tag, n_candidates_scale, seed, options))
+            p.start()
+            processes.append(p)
+            group['control_queue'] = control_queue
+            group['output_queue'] = output_queue
+        groups.append(group)
+
+    # Wait out every remote group's model load here rather than inside the first
+    # pattern, so a caller timing patterns is not also timing the load.
+    for group in groups[1:]:
+        tag, payload = group['output_queue'].get()
+        if tag == 'error':
+            raise RuntimeError('Lattice group failed while loading models') from payload
+    return groups, processes
+
+
+def run_lattice_groups(groups, q2, zero_error, wavelength, n_top, run_seed=None):
+    """Run one pattern across every group concurrently.
+
+    Returns {bravais_lattice: `_group_result` dict}. `run_seed` reseeds every
+    rank for this one pattern, as in `run_mp_bl`.
+    """
+    message = ('run', q2, zero_error, wavelength, n_top, run_seed)
+    for group in groups[1:]:
+        group['control_queue'].put(message)
+
+    results = {}
+    local = groups[0]
+    for bl in local['bravais_lattices']:
+        run_mp_bl(local['optimizers'][bl], bl, local['task_queues'], q2=q2,
+                  zero_error=zero_error, wavelength=wavelength, n_top=n_top,
+                  run_seed=run_seed)
+        results[bl] = _group_result(local['optimizers'][bl])
+
+    for group in groups[1:]:
+        tag, payload = group['output_queue'].get()
+        if tag == 'error':
+            raise RuntimeError('Lattice group failed during optimization') from payload
+        results.update(payload)
+    return results
+
+
+def promote_over_groups(groups, entries, delta):
+    """Run `run.promote_entries` over `entries`, split across the lattice groups.
+
+    Called from `_write_output` while the groups are still alive. Each is idle
+    at this point -- the optimization is over -- and cctbx holds the GIL, so
+    processes are the only way to overlap this work at all.
+
+    The entries are dealt out round-robin and reassembled by the same stride, so
+    the promoted list is in the input order regardless of how many groups ran it
+    and the result does not depend on `--nproc`.
+    """
+    n_groups = len(groups)
+    if n_groups < 2 or len(entries) < 2 * n_groups:
+        from mlindex.command_line.run import promote_entries
+        return promote_entries(entries, delta=delta)
+
+    for index, group in enumerate(groups[1:], start=1):
+        group['control_queue'].put(('promote', entries[index::n_groups], delta))
+
+    from mlindex.command_line.run import promote_entries
+    promoted = {0: promote_entries(entries[0::n_groups], delta=delta)}
+    for index, group in enumerate(groups[1:], start=1):
+        tag, payload = group['output_queue'].get()
+        if tag == 'error':
+            raise RuntimeError('Lattice group failed during promotion') from payload
+        promoted[index] = payload
+
+    out = [None] * len(entries)
+    for index in range(n_groups):
+        out[index::n_groups] = promoted[index]
+    return out
+
+
+def shutdown_lattice_groups(groups, processes):
+    """Stop every group manager and refinement worker, then join."""
+    for group in groups[1:]:
+        group['control_queue'].put('shutdown')
+    local = groups[0]
+    for r in range(1, local['size']):
+        local['task_queues'][r].put('shutdown')
     for p in processes:
         p.join()
 
