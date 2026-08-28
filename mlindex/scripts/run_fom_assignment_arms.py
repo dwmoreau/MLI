@@ -147,7 +147,7 @@ def ranked_pool(optimizers, task_queues, entry, base_seed):
     unit_cell_true = np.asarray(entry['unit_cell_true'], dtype=np.float64)
     true_lattice = entry['bravais_lattice_true']
 
-    M20, correct, n_indexed = [], [], []
+    M20, correct, n_indexed, xnn, lattice_of, spacegroup = [], [], [], [], [], []
     for bravais_lattice in BRAVAIS_LATTICES:
         optimizer = optimizers[bravais_lattice]
         run_mp_bl(optimizer, bravais_lattice, task_queues, q2_obs[:optimizer.n_peaks],
@@ -156,6 +156,16 @@ def ranked_pool(optimizers, task_queues, entry, base_seed):
         top_M20 = np.asarray(optimizer.top_M20, dtype=np.float64)
         M20.append(top_M20)
         n_indexed.append(np.asarray(optimizer.top_n_indexed, dtype=float))
+        # The pooled candidates themselves, not just the rank M20 gives them. Without these, every
+        # distal number this harness produces is silently conditional on M20 -- which is both the
+        # merit that sorts the printed list and the gate `refine_cell` accepts a refinement on, so
+        # a change to the peak filter is being judged by a quantity it does not optimise. With
+        # them, "where would the correct cell rank under `M_sym`, or under a learned score" is a
+        # restriction of one run rather than a second run (PROTOCOL §3 rule 8; it is the design
+        # that got twelve thresholds out of one S03 pass).
+        xnn.append(np.asarray(optimizer.top_xnn, dtype=np.float64))
+        lattice_of.append(np.full(top_M20.size, bravais_lattice))
+        spacegroup.append(list(optimizer.top_spacegroup))
         if bravais_lattice == true_lattice:
             system = optimizer.lattice_system
             correct.append(is_correct_known_bl_batch(
@@ -170,7 +180,21 @@ def ranked_pool(optimizers, task_queues, entry, base_seed):
     correct = np.concatenate(correct)
     n_indexed = np.concatenate(n_indexed)
     order = np.argsort(-M20, kind='stable')
-    return {'pool_size': int(M20.size), 'n_correct': int(correct.sum()),
+    pool = pd.DataFrame({
+        'entry_id': entry['entry_id'], 'condition_bundle': entry['condition_bundle'],
+        'bravais_lattice': np.concatenate(lattice_of),
+        'lattice_system': np.concatenate([
+            np.full(len(block), optimizers[bl].lattice_system)
+            for bl, block in zip(BRAVAIS_LATTICES, xnn)]),
+        'spacegroup': [name for block in spacegroup for name in block],
+        # Ragged on purpose: `xnn` is one to six wide by lattice system, so the pooled column
+        # is a list per row rather than a matrix. Parquet stores that natively.
+        'xnn': [row.tolist() for block in xnn for row in block],
+        'M20': M20, 'Minfo': np.concatenate([
+            np.asarray(optimizers[bl].top_Minfo, dtype=np.float64) for bl in BRAVAIS_LATTICES]),
+        'n_indexed': n_indexed, 'is_correct': correct,
+        })
+    return pool, {'pool_size': int(M20.size), 'n_correct': int(correct.sum()),
             'best_correct_rank': best_correct_rank(M20, correct),
             'n_indexed_top1': float(n_indexed[order[0]]) if n_indexed.size else float('nan'),
             'n_indexed_mean': float(n_indexed.mean()) if n_indexed.size else float('nan'),
@@ -253,16 +277,21 @@ def run_arm(args):
                 entries = entries.head(args.limit_entries)
             if not len(entries):
                 continue
-            rows = []
+            rows, pools = [], []
             for _, entry in entries.iterrows():
                 at = time.perf_counter()
-                record = ranked_pool(optimizers, task_queues, entry, args.search_seed)
+                pool, record = ranked_pool(optimizers, task_queues, entry, args.search_seed)
+                pools.append(pool)
                 rows.append(dict(record, entry_id=entry['entry_id'], condition_bundle=bundle,
                                  split=entry['split'], arm=args.arm,
                                  search_seed=args.search_seed,
                                  seconds=time.perf_counter() - at,
                                  peak_rss_bytes=peak_resident_bytes()))
             pd.DataFrame(rows).to_parquet(destination, index=False)
+            # Written after the per-entry table, so a resume that finds `destination` also finds
+            # this. ~280 rows a pattern; the whole general arm is a few megabytes.
+            pd.concat(pools, ignore_index=True).to_parquet(
+                destination.with_name(f'pool_{tag}.parquet'), index=False)
             print(f'  {bundle}/{tag}: {len(rows)} patterns, '
                   f'{sum(r["seconds"] for r in rows):.0f}s of search, '
                   f'{time.time() - started:.0f}s elapsed', flush=True)

@@ -588,6 +588,15 @@ def run_replay(args):
                         get_unit_cell_from_xnn(accepted, partial_unit_cell=True,
                                                lattice_system=lattice_system),
                         lattice_system)
+                    # Split the M20 gain by whether the candidate was already correct. DWMM's
+                    # point: `refine_cell` keeps a refinement only where M20 improves, and M20
+                    # averages over ALL peaks -- so a cell refined on a subset is judged on the
+                    # whole set, including the peaks the filter excluded. Whether that matters
+                    # for *ranking* turns on whether the gain is differential: an improvement
+                    # shared by correct and incorrect candidates alike is a rising tide that
+                    # reorders nothing, whatever merit does the sorting.
+                    was_correct = unrefined['correct_rtol0.01']
+                    gain = kept_M20 - best_M20
                     rows.append(dict(
                         entry_id=entry_id, condition_bundle=bundle, split=split,
                         bravais_lattice=bravais_lattice, form=form, threshold=float(threshold),
@@ -595,7 +604,16 @@ def run_replay(args):
                         mode='weight' if threshold < 0 else 'mask',
                         mean_admitted=float(np.mean(np.sum(probability > threshold, axis=1))),
                         accepted_rate=float(improved.mean()),
-                        delta_M20=float(np.mean(kept_M20 - best_M20)),
+                        accepted_rate_correct=float(improved[was_correct].mean())
+                        if was_correct.any() else np.nan,
+                        accepted_rate_incorrect=float(improved[~was_correct].mean())
+                        if (~was_correct).any() else np.nan,
+                        n_correct_before=int(was_correct.sum()),
+                        delta_M20_correct=float(gain[was_correct].mean())
+                        if was_correct.any() else np.nan,
+                        delta_M20_incorrect=float(gain[~was_correct].mean())
+                        if (~was_correct).any() else np.nan,
+                        delta_M20=float(np.mean(gain)),
                         **{f'before_{k}': int(v.sum()) for k, v in unrefined.items()},
                         **{f'after_{k}': int(v.sum()) for k, v in ladder.items()}))
         print(f'{shard.name}: {len(rows)} arm rows', flush=True)
@@ -627,7 +645,12 @@ def run_replay(args):
                 n_lattices=int(len(per_lattice)), n_candidates=int(arm['n_candidates'].sum()),
                 mean_admitted=float(arm['mean_admitted'].mean()),
                 accepted_rate=float(arm['accepted_rate'].mean()),
-                delta_M20=float(arm['delta_M20'].mean()), **rates))
+                accepted_rate_correct=float(arm['accepted_rate_correct'].mean()),
+                accepted_rate_incorrect=float(arm['accepted_rate_incorrect'].mean()),
+                delta_M20=float(arm['delta_M20'].mean()),
+                delta_M20_correct=float(arm['delta_M20_correct'].mean()),
+                delta_M20_incorrect=float(arm['delta_M20_incorrect'].mean()),
+                **rates))
     summary = pd.DataFrame(summary)
     summary.to_csv(artifact_dir/f'S13_replay_{args.population}{suffix}.csv', index=False)
 
