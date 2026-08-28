@@ -73,8 +73,21 @@ POPULATIONS = ARMS
 # `assigner` swaps the distribution `IntegralFilter.generate` resamples Miller indices from.
 # `both` is not the sum of the two: they touch different stages and the second is upstream of the
 # first, so it is run rather than inferred.
+#
+# `nofilter` is the arm the replay says is the real comparison. Once the statistic is no longer the
+# broken one, the open question is not "which statistic should the filter read" but **whether a
+# filter is worth having at all**: the replay puts admitting every peak at +3.60 pp against the
+# shipped filter's +0.54 and the posterior's +4.87, so the shipped filter is already refuted and the
+# contrast that decides a change is posterior-against-no-filter. A threshold of 0 admits everything,
+# since both statistics are strictly positive, so the statistic is left at the shipped one and only
+# the cut moves -- which also keeps the arm one option wide.
+#
+# **Do not read `n_indexed` from this arm.** `assignment_threshold` is shared by the mask and the
+# reported count, so at 0 the count is identically the peak list length. It changes no ranking
+# (C2-F-066) and it makes that column meaningless here.
 ARM_OPTIONS = {
     'baseline': {},
+    'nofilter': {'assignment_threshold': 0.0},
     'mask': {'assignment_statistic': 'posterior'},
     'assigner': {'hkl_source': 'posterior'},
     'both': {'assignment_statistic': 'posterior', 'hkl_source': 'posterior'},
@@ -165,10 +178,36 @@ def ranked_pool(optimizers, task_queues, entry, base_seed):
             else float('nan')}
 
 
+def sampled_entry_ids(population, max_entries, seed=12345):
+    """A fixed subsample of **source crystals**, identical for every arm.
+
+    Drawn from the sorted unique entry ids of the whole population with a fixed seed, so two arms
+    see the same crystals whatever order the shard files are visited in -- which is what makes the
+    comparison paired. Subsampling by crystal and not by pattern-condition keeps all of a crystal's
+    condition bundles together: one crystal under several conditions is one draw, not several
+    (PROTOCOL section 8), and splitting it would break both the pairing and the cluster bootstrap.
+
+    Returns None when no cap is asked for, which the caller reads as "take everything".
+    """
+    if not max_entries:
+        return None
+    root = Path(BASE) / POPULATIONS[population]
+    ids = pd.concat(
+        [pd.read_parquet(shard, columns=['entry_id'])
+         for bundle_dir in sorted(root.iterdir()) if bundle_dir.is_dir()
+         for shard in sorted(bundle_dir.glob('entries_*.parquet'))], ignore_index=True)
+    unique = np.sort(ids['entry_id'].unique())
+    if max_entries >= unique.size:
+        return None
+    chosen = np.random.default_rng(seed).choice(unique, size=max_entries, replace=False)
+    return set(chosen.tolist())
+
+
 def run_arm(args):
     from mlindex.optimization.MPOptimizer import setup_mp_optimizers, shutdown_mp_workers
 
     root = Path(BASE) / POPULATIONS[args.population]
+    keep_entries = sampled_entry_ids(args.population, args.max_entries)
     out_dir = Path(BASE) / args.out_root / args.population / f'{args.arm}_s{args.search_seed}'
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -184,6 +223,8 @@ def run_arm(args):
         'processes': args.processes, 'broadening_tag': BROADENING_TAG,
         'n_top_candidates': N_TOP_CANDIDATES,
         'models_dir': os.environ.get('MLINDEX_MODELS_DIR', 'package default'),
+        'max_entries': args.max_entries,
+        'n_entries_selected': None if keep_entries is None else len(keep_entries),
         }, indent=2), encoding='utf-8')
 
     optimizers, processes, task_queues = setup_mp_optimizers(
@@ -206,8 +247,12 @@ def run_arm(args):
                 print(f'  {bundle}/{tag}: already done, skipping', flush=True)
                 continue
             entries = pd.read_parquet(shard)
+            if keep_entries is not None:
+                entries = entries.loc[entries['entry_id'].isin(keep_entries)]
             if args.limit_entries:
                 entries = entries.head(args.limit_entries)
+            if not len(entries):
+                continue
             rows = []
             for _, entry in entries.iterrows():
                 at = time.perf_counter()
@@ -226,12 +271,32 @@ def run_arm(args):
     print(f'wrote {out_dir}')
 
 
-def load_arm(out_root, population, arm, seed):
+def true_lattices(population):
+    """`bravais_lattice_true` per (entry, bundle), for the per-lattice stratification.
+
+    The outcome this harness stores -- the rank of the best correct candidate in `run.py`'s pooled
+    list -- is deliberately cross-lattice, because that is the list a user reads. Stratifying it
+    still needs each pattern's own true lattice, and that lives in the entry tables rather than in
+    the run output, so it is joined rather than stored twice.
+    """
+    root = Path(BASE) / POPULATIONS[population]
+    frames = [pd.read_parquet(shard, columns=['entry_id', 'condition_bundle',
+                                              'bravais_lattice_true'])
+              for bundle_dir in sorted(root.iterdir()) if bundle_dir.is_dir()
+              for shard in sorted(bundle_dir.glob('entries_*.parquet'))]
+    return pd.concat(frames, ignore_index=True).drop_duplicates(
+        ['entry_id', 'condition_bundle'])
+
+
+def load_arm(out_root, population, arm, seed, lattices=None):
     directory = Path(BASE) / out_root / population / f'{arm}_s{seed}'
     shards = sorted(directory.glob('ranked_*.parquet'))
     if not shards:
         raise SystemExit(f'no output under {directory}')
-    return pd.concat([pd.read_parquet(s) for s in shards], ignore_index=True)
+    frame = pd.concat([pd.read_parquet(s) for s in shards], ignore_index=True)
+    if lattices is not None:
+        frame = frame.merge(lattices, on=['entry_id', 'condition_bundle'], how='left')
+    return frame
 
 
 def paired_table(reference, arm, top_ns=(1, 5, 10, 20)):
@@ -258,26 +323,43 @@ def run_report(args):
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- the floor: the same arm at several seeds, every ordered pair contrasted -------------
-    floor_frames = {seed: load_arm(args.out_root, args.population, 'baseline', seed)
+    # Per lattice as well as pooled, because PROTOCOL section 8 requires a per-lattice claim to be
+    # read against that lattice's own floor -- the floor is ordered by free cell parameters over
+    # two orders of magnitude, and the lattices where the gains live are the least reproducible.
+    lattices = true_lattices(args.population)
+    floor_frames = {seed: load_arm(args.out_root, args.population, 'baseline', seed, lattices)
                     for seed in seeds}
     floor_rows = []
     for i, left in enumerate(seeds):
         for right in seeds[i + 1:]:
-            table, _ = paired_table(floor_frames[left], floor_frames[right])
-            for _, row in table.iterrows():
-                floor_rows.append(dict(row, seed_a=left, seed_b=right))
+            for lattice in ['ALL_pooled'] + sorted(lattices['bravais_lattice_true'].unique()):
+                a, b = floor_frames[left], floor_frames[right]
+                if lattice != 'ALL_pooled':
+                    a = a.loc[a['bravais_lattice_true'] == lattice]
+                    b = b.loc[b['bravais_lattice_true'] == lattice]
+                if len(a) < args.min_entries or len(b) < args.min_entries:
+                    continue
+                table, _ = paired_table(a, b)
+                for _, row in table.iterrows():
+                    floor_rows.append(dict(row, seed_a=left, seed_b=right,
+                                           bravais_lattice_true=lattice))
     floor = pd.DataFrame(floor_rows)
     floor.to_csv(artifact_dir / f'S13_floor_{args.population}.csv', index=False)
 
     # The floor a gate is read against is the spread of |delta| between two runs that differ only
     # in the seed -- the contrast floor, not a merit's own value spread (PROTOCOL section 8).
-    summary = (floor.assign(abs_delta=floor['delta_pp'].abs())
-               .groupby('top_n')['abs_delta']
-               .agg(['mean', 'max', 'std', 'count'])
-               .rename(columns={'mean': 'mean_abs_delta_pp', 'max': 'max_abs_delta_pp',
-                                'std': 'sd_delta_pp', 'count': 'n_pairs'}))
+    per_lattice_floor = (floor.assign(abs_delta=floor['delta_pp'].abs())
+                         .groupby(['bravais_lattice_true', 'top_n'])['abs_delta']
+                         .agg(['mean', 'max', 'std', 'count'])
+                         .rename(columns={'mean': 'mean_abs_delta_pp',
+                                          'max': 'max_abs_delta_pp',
+                                          'std': 'sd_delta_pp', 'count': 'n_pairs'}))
+    summary = per_lattice_floor.loc['ALL_pooled']
     print(f'CONTRAST FLOOR, {args.population}, {len(seeds)} seeds of the shipped arm')
-    print(summary.to_string(), '\n')
+    print(summary.to_string())
+    print('\nper lattice, top-10 (the lattice a per-lattice claim is read against):')
+    print(per_lattice_floor.xs(10, level='top_n')[['mean_abs_delta_pp', 'max_abs_delta_pp']]
+          .to_string(), '\n')
 
     # ---- the arms, paired against the reference seed -----------------------------------------
     reference = floor_frames[seeds[0]]
@@ -285,15 +367,27 @@ def run_report(args):
     for arm in args.arms.split(','):
         if arm == 'baseline':
             continue
-        table, joined = paired_table(reference, load_arm(
-            args.out_root, args.population, arm, seeds[0]))
+        arm_frame = load_arm(args.out_root, args.population, arm, seeds[0], lattices)
+        table, joined = paired_table(reference, arm_frame)
         joined.to_csv(artifact_dir / f'S13_arm_per_entry_{args.population}_{arm}.csv',
                       index=False)
-        for _, row in table.iterrows():
-            floor_at = summary.loc[row['top_n'], 'mean_abs_delta_pp']
-            arm_rows.append(dict(row, arm=arm, floor_mean_abs_delta_pp=floor_at,
-                                 delta_in_floors=row['delta_pp']/floor_at if floor_at else np.nan))
-        print(f'--- {arm} against baseline (seed {seeds[0]})')
+        for lattice in ['ALL_pooled'] + sorted(lattices['bravais_lattice_true'].unique()):
+            a, b = reference, arm_frame
+            if lattice != 'ALL_pooled':
+                a = a.loc[a['bravais_lattice_true'] == lattice]
+                b = b.loc[b['bravais_lattice_true'] == lattice]
+            if len(a) < args.min_entries:
+                continue
+            per_lattice_table, _ = paired_table(a, b)
+            for _, row in per_lattice_table.iterrows():
+                key = (lattice, row['top_n'])
+                floor_at = (per_lattice_floor.loc[key, 'mean_abs_delta_pp']
+                            if key in per_lattice_floor.index else np.nan)
+                arm_rows.append(dict(row, arm=arm, bravais_lattice_true=lattice,
+                                     floor_mean_abs_delta_pp=floor_at,
+                                     delta_in_floors=row['delta_pp']/floor_at
+                                     if floor_at else np.nan))
+        print(f'--- {arm} against baseline (seed {seeds[0]}), pooled over lattices')
         print(table.to_string(index=False), '\n')
 
     arms_table = pd.DataFrame(arm_rows)
@@ -334,7 +428,17 @@ def _parse_args():
     parser.add_argument('--artifact-dir', default=os.path.join('docs', 'fom_campaign2', 'artifacts'))
     parser.add_argument('--shard-stride', type=int, default=1)
     parser.add_argument('--shard-offset', type=int, default=0)
-    parser.add_argument('--limit-entries', type=int, default=None)
+    parser.add_argument('--max-entries', type=int, default=None,
+                        help='cap the number of source CRYSTALS, subsampled with a fixed seed so '
+                             'every arm sees the same ones; all of a crystal\'s condition '
+                             'bundles travel together')
+    parser.add_argument('--limit-entries', type=int, default=None,
+                        help='NOT a population cap: applied per shard FILE, so on the hard set '
+                             '(60 files of 16-17 entries) any value above 17 does nothing. Use '
+                             '--max-entries')
+    parser.add_argument('--min-entries', type=int, default=20,
+                        help='report stage: pattern-conditions below which a\n'
+                             'per-lattice row is not reported')
     parser.add_argument('--diagnostic-entries', type=int, default=15,
                         help='entries the network/posterior diagnostic runs over')
     return parser.parse_args()
