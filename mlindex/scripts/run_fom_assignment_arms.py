@@ -295,6 +295,16 @@ def run_arm(args):
             print(f'  {bundle}/{tag}: {len(rows)} patterns, '
                   f'{sum(r["seconds"] for r in rows):.0f}s of search, '
                   f'{time.time() - started:.0f}s elapsed', flush=True)
+        # Stamped only on the way out of the loop, so a killed run does not claim to be one.
+        # `load_arm` refuses a directory without it: a half-finished arm is indistinguishable from
+        # a finished one by its contents alone, and silently reporting a paired comparison over
+        # whichever crystals happened to finish is exactly the class of error this campaign keeps
+        # writing rebuild rows about.
+        provenance = json.loads((out_dir / 'provenance.json').read_text(encoding='utf-8'))
+        provenance['complete'] = True
+        provenance['n_shards'] = len(jobs)
+        (out_dir / 'provenance.json').write_text(json.dumps(provenance, indent=2),
+                                                 encoding='utf-8')
     finally:
         shutdown_mp_workers(processes, task_queues)
     print(f'wrote {out_dir}')
@@ -322,6 +332,13 @@ def load_arm(out_root, population, arm, seed, lattices=None):
     shards = sorted(directory.glob('ranked_*.parquet'))
     if not shards:
         raise SystemExit(f'no output under {directory}')
+    provenance = directory / 'provenance.json'
+    if not provenance.exists() or not json.loads(
+            provenance.read_text(encoding='utf-8')).get('complete'):
+        raise SystemExit(
+            f'{directory} is an INCOMPLETE arm -- it has {len(shards)} shard(s) and no completion '
+            f'stamp, so it was killed or is still running. Loading it would pair over whichever '
+            f'crystals happened to finish. Re-run it, or delete the directory.')
     frame = pd.concat([pd.read_parquet(s) for s in shards], ignore_index=True)
     if lattices is not None:
         frame = frame.merge(lattices, on=['entry_id', 'condition_bundle'], how='left')
