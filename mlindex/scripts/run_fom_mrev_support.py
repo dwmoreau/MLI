@@ -162,7 +162,7 @@ def run_mechanism(args):
     q2_calc = np.take_along_axis(q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)
 
     M_tilde, M_rev, M_sym = fom.get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc)
-    M20 = fom.get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
+    M20 = fom.get_M20(q2_obs, q2_calc, q2_ref_calc)
     q_min, in_range, counts, q_n, scored = fom._reversed_line_terms(
         q2_obs, q2_calc[:, -1], q2_ref_calc)
     window = np.flatnonzero(in_range[0])

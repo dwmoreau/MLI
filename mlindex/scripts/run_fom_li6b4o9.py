@@ -142,8 +142,14 @@ def main():
           f'ranking merits prefer the correct cell:')
     print('  ' + ', '.join(separating))
 
-    # Cost, against get_M20's ~14.5 ms/call baseline (ProfileOptimizer.py:485). Measured on a
-    # realistic pool rather than on this two-candidate pair.
+    # Cost, against get_M20's own baseline. Measured on a realistic pool rather than on this
+    # two-candidate pair.
+    #
+    # The baseline no longer copies q2_ref before each call, because get_M20 no longer destroys
+    # it. The copy used to be inside the timed lambda, so it was charged to get_M20 -- which
+    # means every ratio_to_M20 recorded before that change was measured against an inflated
+    # denominator and is understated. Re-run this script before comparing against a stored
+    # S01_fom_cost.csv.
     rng = np.random.default_rng(0)
     n_candidates, n_ref = 500, 750
     q2_obs = np.sort(rng.uniform(0.01, 0.2, 20))
@@ -160,7 +166,7 @@ def main():
             function()
         return (time.perf_counter() - start)/repeats
 
-    baseline = timed(lambda: get_M20(q2_obs, q2_calc, q2_ref.copy()))
+    baseline = timed(lambda: get_M20(q2_obs, q2_calc, q2_ref))
     whole = timed(lambda: compute_all(q2_obs, q2_calc, q2_ref, xnn, 'orthorhombic', 'oP'), 3)
     cost = pd.DataFrame([
         {'what': 'get_M20 (baseline)', 'seconds_per_call': baseline, 'ratio_to_M20': 1.0},

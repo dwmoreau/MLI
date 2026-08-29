@@ -1906,11 +1906,12 @@ def compute_all(
     maps to an array of shape (n_candidates,); `sigma_treatment` maps each key to 'free',
     'in-sample' or 'assumed' so that a sigma-dependent column can never be read as sigma-free.
 
-    **get_M20 is evaluated last, and on a copy.** It writes zeros into q2_ref_calc in place
-    (FigureOfMerits.py:19) as part of its own arithmetic, which is fine for the inner loop -- it is
-    performance-critical code and is deliberately left untouched -- but would silently corrupt
-    every other FOM in this frame. Ordering it last and handing it a copy contains that, and
-    tests/test_fom_literature.py asserts the frame is invariant to evaluation order.
+    **get_M20 no longer needs either guard.** It used to write zeros into q2_ref_calc in place as
+    part of its own arithmetic, which would silently corrupt every other FOM in this frame, so it
+    was evaluated last and handed a copy. `lines_below_cutoff` takes that reduction without
+    touching the input, so the copy is gone and the ordering is now free; it is still evaluated
+    last only because nothing is gained by moving it. tests/test_fom_literature.py asserts the
+    frame is invariant to evaluation order.
 
     Optional arguments degrade gracefully: without `wavelength` the published-units F_N is omitted,
     without `sigma_entrywise` the entrywise chi-squared is omitted, and without `g_min` the Werner
@@ -1998,8 +1999,7 @@ def compute_all(
         features["V_over_Vcrit"] = over_critical
         features["M_werner_max"] = m_max
 
-    # Last, and on a copy -- see the docstring.
-    features["M20"] = get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
+    features["M20"] = get_M20(q2_obs, q2_calc, q2_ref_calc)
     if g_min is not None:
         features["M_werner_frac"] = np.where(
             features["M_werner_max"] > 0, features["M20"]/features["M_werner_max"], 0.0

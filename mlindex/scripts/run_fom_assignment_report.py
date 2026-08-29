@@ -559,10 +559,8 @@ def run_replay(args):
                 ('posterior', lambda: fom.get_assignment_posterior(
                     q2_obs, q2_ref_calc, lattice_system)),
                 ) if name in forms}
-            # get_M20 mutates its reference array, so the baseline is scored on a copy and the
-            # untouched q2_ref_calc stays available to the posterior above.
             from mlindex.utilities.FigureOfMerits import get_M20
-            best_M20 = get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
+            best_M20 = get_M20(q2_obs, q2_calc, q2_ref_calc)
             q2_calculator = Q2Calculator(
                 lattice_system=lattice_system,
                 hkl=Bench.hkl_ref_for(lattice_system, bravais_lattice, spacegroup,
