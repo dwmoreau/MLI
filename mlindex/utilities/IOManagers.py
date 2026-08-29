@@ -1,5 +1,4 @@
 import csv
-import joblib
 import json
 import numba
 import numpy as np
@@ -143,6 +142,7 @@ class SKLearnManager:
     
     def _save_sklearn(self, model):
         """Save model using joblib"""
+        import joblib
         joblib.dump(model, f"{self.filename}.joblib")
     
     def _save_onnx(self, model, n_features):
@@ -210,6 +210,7 @@ class SKLearnManager:
     
     def _load_sklearn(self):
         """Load sklearn model using joblib"""
+        import joblib
         model_path = f"{self.filename}.joblib"
         if not os.path.exists(model_path):
             raise FileNotFoundError(

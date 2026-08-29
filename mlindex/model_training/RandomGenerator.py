@@ -1,8 +1,5 @@
-import matplotlib.pyplot as plt
 import os
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import GridSearchCV
 
 from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
@@ -39,6 +36,9 @@ class RandomGenerator:
                 self.model_params[key] = model_params_defaults[key]
 
     def train(self, data):
+        from sklearn.model_selection import GridSearchCV
+        from sklearn.ensemble import RandomForestRegressor
+        import matplotlib.pyplot as plt
         q2 = np.stack(data['q2'])
         reciprocal_reindexed_unit_cell = np.stack(data['reciprocal_reindexed_unit_cell'])
         reindexed_xnn = np.stack(data['reindexed_xnn'])

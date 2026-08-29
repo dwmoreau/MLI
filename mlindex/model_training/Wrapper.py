@@ -1,7 +1,5 @@
-import matplotlib.pyplot as plt
 import numpy as np
 import os
-import pandas as pd
 
 
 class Wrapper:
@@ -54,6 +52,7 @@ class Wrapper:
             self.setup()
 
     def setup(self):
+        import pandas as pd
         data_params_defaults = {
             'lattice_system': None,
             'data_dir': os.path.join(self.data_params['base_directory'], 'mlindex', 'data'),
@@ -236,6 +235,7 @@ class Wrapper:
         write_params(self.data_params, os.path.join(f'{self.save_to["data"]}', 'data_params.csv'))
 
     def load_data(self):
+        import pandas as pd
         read_columns = [
             'lattice_system',
             'bravais_lattice',
@@ -404,6 +404,7 @@ class Wrapper:
         # order of magnitude, and the columns are per peak arrays that cost far more in memory than
         # they do on disk: the largest lattice systems otherwise load tens of GB to keep a tenth of
         # it. The hkl restacking below is the peak, since it holds a second copy.
+        import pandas as pd
         filters = []
         if not load_augmented:
             filters.append(('augmented', '==', False))
@@ -525,6 +526,7 @@ class Wrapper:
         self.data['hkl_labels'] = list(hkl_labels)
 
     def augment_data(self):
+        import pandas as pd
         from mlindex.model_training.Augmentor import Augmentor
         self.augmentor = Augmentor(
             aug_params=self.aug_params,
@@ -556,7 +558,9 @@ class Wrapper:
             self.augmentor.evaluate(split_group_data, split_group)
 
     def plot_input(self):
+        import matplotlib.pyplot as plt
         def make_hkl_plot(data, n_peaks, hkl_ref_length, save_to):
+            import matplotlib.pyplot as plt
             fig, axes = plt.subplots(n_peaks, 1, figsize=(6, 10), sharex=True)
             hkl_labels = np.stack(data['hkl_labels'])  # n_data x n_peaks
             bins = np.arange(0, hkl_ref_length + 1) - 0.5

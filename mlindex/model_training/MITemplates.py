@@ -1,10 +1,7 @@
-import matplotlib.pyplot as plt
 import multiprocessing
 import numpy as np
 import os
 import scipy.spatial
-import sklearn.ensemble
-from sklearn.model_selection import GridSearchCV
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_assignment_posterior
@@ -149,6 +146,7 @@ class MITemplates:
         self.template_params['n_peaks_calibration'] = int(params['n_peaks_calibration'])
 
     def setup_templates(self, data):
+        import matplotlib.pyplot as plt
         def get_counts(hkl_labels_func, hkl_ref_length):
             hkl_labels_func = hkl_labels_func[hkl_labels_func != hkl_ref_length - 1]
             if hkl_labels_func.size > 0:
@@ -800,6 +798,9 @@ class MITemplates:
         return distance, probability, N_pred, q2_calc_max
     
     def calibrate_templates(self, data):
+        from sklearn.model_selection import GridSearchCV
+        import matplotlib.pyplot as plt
+        import sklearn.ensemble
         unaugmented_data = data[~data['augmented']]
         training_data = unaugmented_data[unaugmented_data['train']]
         val_data = unaugmented_data[~unaugmented_data['train']]

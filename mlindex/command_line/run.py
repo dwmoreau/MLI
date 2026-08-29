@@ -9,7 +9,6 @@ import math
 import types
 from pathlib import Path
 import numpy as np
-import pandas as pd
 
 from mlindex.optimization.UtilitiesOptimizer import get_logger
 from mlindex.optimization.UtilitiesOptimizer import get_mpi_organizer
@@ -294,6 +293,7 @@ def _collect_results(optimizer, bl, all_results,
 
 
 def _write_results(output_data, output_file_base='indexing_results'):
+    import pandas as pd
     output_df = pd.DataFrame(output_data)
     output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
     drop_columns = [c for c in ['Minfo'] if c in output_df.columns]

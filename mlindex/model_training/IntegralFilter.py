@@ -1,4 +1,3 @@
-import matplotlib.pyplot as plt
 import numpy as np
 import os
 import scipy.special
@@ -633,6 +632,7 @@ class IntegralFilter:
             )
 
     def train(self, data):
+        import matplotlib.pyplot as plt
         import keras
         train = data[data['train']]
         val = data[~data['train']]
@@ -779,6 +779,7 @@ class IntegralFilter:
                 )
 
     def train_calibration(self, data):
+        import matplotlib.pyplot as plt
         import keras
         if self.model_params['model_type'] == 'base_line':
             return None
@@ -1047,6 +1048,7 @@ class IntegralFilter:
         return unit_cell_gen
 
     def evaluate(self, data, quantitized_model=False):
+        import matplotlib.pyplot as plt
         data = data[~data['augmented']]
         train = data[data['train']]
         val = data[~data['train']]
@@ -1431,6 +1433,7 @@ class IntegralFilter:
                 )
 
     def plot_predictions(self, xnn_true, xnn_pred, softmax, index):
+        import matplotlib.pyplot as plt
         if self.lattice_system == 'orthorhombic':
             fig, axes = plt.subplots(1, 3, figsize=(7, 3))
             axes[0].scatter(xnn_pred[:, 0], xnn_pred[:, 1], c=softmax)
@@ -1461,6 +1464,7 @@ class IntegralFilter:
         plt.close()
 
     def evaluate_indexing(self, train, val, train_xnn, val_xnn, quantitized_model):
+        import matplotlib.pyplot as plt
         hkl_labels_true_train = np.stack(train['hkl_labels'])
         hkl_labels_true_val = np.stack(val['hkl_labels'])
 

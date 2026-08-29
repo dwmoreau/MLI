@@ -1,9 +1,6 @@
 import copy
-import matplotlib.pyplot as plt
 import numpy as np
 import os
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import GridSearchCV
 
 from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
@@ -58,6 +55,8 @@ class RandomForest:
         return train_inputs, val_inputs, train_true, val_true, volume_train_weights
 
     def fit(self, data):
+        from sklearn.model_selection import GridSearchCV
+        from sklearn.ensemble import RandomForestRegressor
         train_inputs, val_inputs, train_true, val_true, train_weights = self._get_train_val(data)
         if self.model_params['grid_search'] is not None:
             # param_grid input is a dictionary with the same names as the random forest model.
