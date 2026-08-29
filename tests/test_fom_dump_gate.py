@@ -162,3 +162,83 @@ def test_the_weights_layer_says_when_it_is_only_partial():
     # Without a fully-retained reference the weighted-count half cannot run, and saying so is the
     # point: a silently partial gate reads as a passed one.
     assert 'partial' in gate.layer_weights(candidates)
+
+
+# ------------------------------------------------------------------------------------------
+# Consolidation is streamed in Arrow, not concatenated in pandas. What that must not change.
+# ------------------------------------------------------------------------------------------
+
+def test_consolidation_never_holds_more_than_one_shard(tmp_path, monkeypatch):
+    """The rewrite's whole point: memory bounded by a shard, not by a bundle.
+
+    A core bundle is ~77 M rows and four of its 34 columns are list-valued, so the old
+    `pd.concat([pd.read_parquet(p) for p in paths])` built hundreds of millions of Python objects
+    before writing anything. Measured on a 32 MB pool the peak dropped 494 MB -> 150 MB; the ratio
+    is what matters, since the old figure scales with the bundle and the new one does not.
+
+    Asserted structurally rather than by measuring RSS, which is not reproducible in a test: no
+    more than one shard table may be alive at once.
+    """
+    import pyarrow.parquet as pq
+
+    root = tmp_path / 'dump'
+    _bundle(root, 'c2_error1_cont0', n_entries=3)
+    live = {'now': 0, 'peak': 0}
+    real_read = pq.read_table
+
+    def counting_read(*args, **kwargs):
+        live['now'] += 1
+        live['peak'] = max(live['peak'], live['now'])
+        table = real_read(*args, **kwargs)
+        live['now'] -= 1                      # released as soon as the caller rebinds it
+        return table
+
+    monkeypatch.setattr(consolidate.pq, 'read_table', counting_read)
+    consolidate.main(['--dump-root', str(root), '--out-dir', str(tmp_path / 'pool')])
+    assert live['peak'] <= 1
+
+
+def test_consolidation_checks_the_join_per_shard_not_per_row(tmp_path):
+    """A shard whose candidates disagree with the entry table is refused.
+
+    The check is on the DISTINCT (entry_id, q2_digest) pairs -- a shard holds ~74 entries and
+    millions of rows -- but it must still catch the case it exists for: a mis-joined shard is
+    otherwise silent, because every column parses and the numbers attach to the wrong pattern.
+    """
+    root = tmp_path / 'dump'
+    directory = _bundle(root, 'c2_error1_cont0', n_entries=2)
+    path = next(directory.glob('candidates_*.parquet'))
+    corrupted = pd.read_parquet(path)
+    corrupted['q2_digest'] = 'not-the-right-digest'
+    corrupted.to_parquet(path, index=False)
+    with pytest.raises(SystemExit, match='q2_digest'):
+        consolidate.main(['--dump-root', str(root), '--out-dir', str(tmp_path / 'pool')])
+
+
+def test_an_entry_absent_from_the_entry_table_is_refused(tmp_path):
+    root = tmp_path / 'dump'
+    directory = _bundle(root, 'c2_error1_cont0', n_entries=2)
+    path = next(directory.glob('candidates_*.parquet'))
+    orphaned = pd.read_parquet(path)
+    orphaned['entry_id'] = 'NOT_AN_ENTRY'
+    orphaned.to_parquet(path, index=False)
+    with pytest.raises(SystemExit, match='absent from the entry table'):
+        consolidate.main(['--dump-root', str(root), '--out-dir', str(tmp_path / 'pool')])
+
+
+def test_counts_are_grouped_by_the_TRUE_lattice_not_the_candidate_s(tmp_path):
+    """Two different groupings, and mixing them would misreport every stratum.
+
+    Files are partitioned by the candidate's lattice, because that is what a later step loads one
+    of. Counts are grouped by the ENTRY's true lattice, because that is the stratum METRICS.md
+    section 5 defines and what the acceptance floor is keyed on.
+    """
+    root = tmp_path / 'dump'
+    _bundle(root, 'c2_error1_cont0', n_entries=2)
+    entries, counts = consolidate.consolidate_bundle(
+        root / 'c2_error1_cont0', tmp_path / 'pool', consolidate.ROW_GROUP_SIZE)
+    assert list(counts['bravais_lattice_true'].unique()) == ['oP']
+    assert int(counts['n_candidates'].sum()) == 6      # 2 entries x 3 candidates
+    assert int(counts['n_correct'].sum()) == 2         # one per entry, by construction
+    assert int(counts['n_entries'].iloc[0]) == 2
+    assert int(counts['n_reachable_entries'].iloc[0]) == 2

@@ -33,6 +33,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from mlindex.model_training import FomBenchmark
 
@@ -54,6 +57,12 @@ def _parse_args(argv=None):
     parser.add_argument('--artifact-dir', type=str, default=None,
                         help='Where the row-count table is written, if anywhere')
     parser.add_argument('--row-group-size', type=int, default=ROW_GROUP_SIZE)
+    parser.add_argument('--processes', type=int, default=1,
+                        help='Bundles consolidated concurrently. They are independent, so '
+                             'this is the axis to parallelise on -- 9 is the maximum that '
+                             'does anything. Each process holds one shard table at a time, '
+                             'not a whole bundle. Do not run a large value on a login '
+                             'node; use a compute node or an salloc')
     return parser.parse_args(argv)
 
 
@@ -71,73 +80,184 @@ def bundle_directories(dump_root):
     return directories
 
 
-def _read_stream(bundle_dir, pattern):
-    paths = sorted(Path(bundle_dir).glob(pattern))
-    if not paths:
-        return None
-    return pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
+def _stream_paths(bundle_dir, pattern):
+    return sorted(Path(bundle_dir).glob(pattern))
 
 
 def _write(frame, path, row_group_size):
+    """The consolidated entry table. One row per (entry, bundle), so it stays small."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, index=False, row_group_size=row_group_size)
 
 
-def consolidate_bundle(bundle_dir, out_dir, row_group_size):
-    """One bundle's shards and pools, written out partitioned by Bravais lattice.
+def _read_small(paths):
+    """Concatenate the entry tables. They are small -- ~74 rows a file -- so pandas is fine."""
+    return pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
 
-    Returns (entries, counts) -- the entry table and one row per (bundle, lattice) with the
-    candidate and correct-candidate counts the gate reads.
+
+class _LatticeWriters:
+    """One open ParquetWriter per Bravais lattice, written to incrementally.
+
+    The point of writing this way rather than concatenating: a core bundle is ~25 GB of candidates
+    across 256 shard files, and the old implementation built it as ONE pandas frame before writing
+    it back out. Four of the 34 columns are list-valued (`xnn`, `unit_cell`, `merit_at_prune`,
+    `hkl_true_in_basis`), and those are what make the Arrow -> pandas -> Arrow round trip
+    expensive: each becomes an object column of numpy arrays, one Python object per row per column.
+    Staying in Arrow skips both conversions, and streaming file by file bounds memory at one shard.
     """
-    entries = _read_stream(bundle_dir, 'entries_*.parquet')
-    candidates = _read_stream(bundle_dir, 'candidates_*.parquet')
-    if entries is None or candidates is None:
+
+    def __init__(self, out_dir, stream, bundle, row_group_size):
+        self.out_dir, self.stream = Path(out_dir), stream
+        self.bundle, self.row_group_size = bundle, row_group_size
+        self._writers = {}
+
+    def write(self, table, bravais_lattice):
+        writer = self._writers.get(bravais_lattice)
+        if writer is None:
+            path = self.out_dir / f'{self.stream}_{self.bundle}_{bravais_lattice}.parquet'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # The first shard's schema is the file's schema. A later shard that disagrees raises
+            # here rather than producing a file whose columns silently shift.
+            writer = pq.ParquetWriter(path, table.schema)
+            self._writers[bravais_lattice] = writer
+        writer.write_table(table, row_group_size=self.row_group_size)
+
+    def close(self):
+        for writer in self._writers.values():
+            writer.close()
+        self._writers.clear()
+
+
+def _check_shard_join(table, digest_by_entry, path):
+    """Every candidate finds its entry, and agrees with its peak list. Per shard, in Arrow.
+
+    Reduced to the DISTINCT (entry_id, q2_digest) pairs first -- a shard holds ~74 entries and
+    millions of rows, so checking pairs is O(entries) where checking rows is O(rows). The earlier
+    version of this function called `.to_pylist()` on two full columns, which is the per-row Python
+    object creation this rewrite exists to avoid.
+
+    Both checks matter: a mis-joined shard is otherwise silent, since every column still parses and
+    the numbers are simply attached to the wrong pattern.
+    """
+    pairs = table.group_by(['entry_id', 'q2_digest']).aggregate([]).to_pylist()
+    for pair in pairs:
+        entry_id, digest = pair['entry_id'], pair['q2_digest']
+        expected = digest_by_entry.get(entry_id)
+        if expected is None:
+            raise SystemExit(f'{path.name}: entry {entry_id!r} is absent from the entry table')
+        if expected != digest:
+            raise SystemExit(
+                f'{path.name}: entry {entry_id!r} carries q2_digest {digest} but its entry row '
+                f'says {expected}. The shards do not belong to the same run.')
+
+
+def _with_true_lattice(table, entry_ids, true_lattices):
+    """Attach the entry's TRUE Bravais lattice, vectorised.
+
+    The counts are grouped by the entry's true lattice while the files are partitioned by the
+    candidate's -- METRICS.md section 5 defines the stratum on the truth, and the acceptance floor
+    is keyed on it. `index_in` + `take` does the lookup without a Python loop over rows.
+    """
+    positions = pc.index_in(table.column('entry_id'), value_set=entry_ids)
+    return table.append_column('bravais_lattice_true', pc.take(true_lattices, positions))
+
+
+def _accumulate(table, tally, seen, reachable):
+    """Fold one shard into the running counts, entirely in Arrow.
+
+    `group_by(...).aggregate(...)` returns one row per lattice and one per (lattice, entry), both
+    tiny, so the only Python-side work is proportional to the number of distinct groups rather than
+    to the number of candidates.
+    """
+    has_off_by_two = 'is_off_by_two' in table.column_names
+    aggregations = [('is_correct', 'sum'), ([], 'count_all')]
+    if has_off_by_two:
+        aggregations.insert(1, ('is_off_by_two', 'sum'))
+    summary = table.group_by(['bravais_lattice_true']).aggregate(aggregations).to_pylist()
+    for row in summary:
+        lattice = row['bravais_lattice_true']
+        entry = tally.setdefault(lattice, {'n_candidates': 0, 'n_correct': 0, 'n_off_by_two': 0})
+        entry['n_candidates'] += int(row['count_all'])
+        entry['n_correct'] += int(row['is_correct_sum'] or 0)
+        if has_off_by_two:
+            entry['n_off_by_two'] += int(row['is_off_by_two_sum'] or 0)
+
+    for row in table.group_by(['bravais_lattice_true', 'entry_id']).aggregate([]).to_pylist():
+        seen.setdefault(row['bravais_lattice_true'], set()).add(row['entry_id'])
+    correct_only = table.filter(pc.fill_null(table.column('is_correct'), False))
+    for row in (correct_only.group_by(['bravais_lattice_true', 'entry_id'])
+                .aggregate([]).to_pylist()):
+        reachable.setdefault(row['bravais_lattice_true'], set()).add(row['entry_id'])
+
+
+def consolidate_bundle(bundle_dir, out_dir, row_group_size):
+    """One bundle's shards and pools, repartitioned by Bravais lattice without ever holding it all.
+
+    Returns (entries, counts) -- the entry table and one row per (bundle, true lattice).
+
+    The old implementation read all 256 shards with `pd.read_parquet` and concatenated them into a
+    single frame before writing it back. A core bundle is ~77 M rows and four of the 34 columns are
+    list-valued (`xnn`, `unit_cell`, `merit_at_prune`, `hkl_true_in_basis`), so that materialised
+    hundreds of millions of Python objects and tens of GB of RAM. Here nothing larger than one
+    shard is ever in memory and no column is converted to Python at all.
+    """
+    bundle_dir = Path(bundle_dir)
+    entry_paths = _stream_paths(bundle_dir, 'entries_*.parquet')
+    candidate_paths = _stream_paths(bundle_dir, 'candidates_*.parquet')
+    if not entry_paths or not candidate_paths:
         raise SystemExit(f'{bundle_dir} is missing an entry or candidate stream; do not '
                          'consolidate a partial bundle')
 
+    entries = _read_small(entry_paths)
     bundles = entries['condition_bundle'].unique()
     if len(bundles) != 1:
-        # One manifest.json is written per output directory, so two bundles sharing a directory
-        # have already overwritten each other's. Catch it here rather than downstream.
         raise SystemExit(f'{bundle_dir} holds more than one bundle: {sorted(bundles)}. '
                          'One directory per bundle.')
     bundle = str(bundles[0])
+    if 'condition_bundle' not in entries.columns:
+        raise SystemExit(f'{bundle_dir}: entries carries no condition_bundle column (R8)')
 
-    # R8: the bundle is a COLUMN on every stream, not a fact about the filename. Both are written
-    # by the driver; this asserts it survived rather than assuming it.
-    for name, frame in (('candidates', candidates), ('entries', entries)):
-        if 'condition_bundle' not in frame.columns:
-            raise SystemExit(f'{bundle_dir}: {name} carries no condition_bundle column (R8)')
+    entry_ids = pa.array(entries['entry_id'].astype(str).tolist())
+    true_lattices = pa.array(entries['bravais_lattice_true'].astype(str).tolist())
+    digest_by_entry = dict(zip(entries['entry_id'], entries['q2_digest']))
 
-    FomBenchmark._check_join(candidates, entries)
+    tally, seen, reachable = {}, {}, {}
+    for stream, paths in (('candidates', candidate_paths),
+                          ('predownsample', _stream_paths(bundle_dir, 'predownsample_*.parquet'))):
+        if not paths:
+            continue
+        writers = _LatticeWriters(out_dir, stream, bundle, row_group_size)
+        try:
+            for path in paths:
+                table = pq.read_table(path)
+                if table.num_rows == 0:
+                    continue
+                if 'condition_bundle' not in table.column_names:
+                    raise SystemExit(f'{path.name}: no condition_bundle column (R8)')
+                if stream == 'candidates':
+                    _check_shard_join(table, digest_by_entry, path)
+                    _accumulate(_with_true_lattice(table, entry_ids, true_lattices),
+                                tally, seen, reachable)
+                lattice_column = table.column('bravais_lattice')
+                for lattice in pc.unique(lattice_column).to_pylist():
+                    writers.write(table.filter(pc.equal(lattice_column, lattice)), lattice)
+        finally:
+            writers.close()
 
-    for bravais_lattice, group in candidates.groupby('bravais_lattice', sort=True):
-        _write(group.reset_index(drop=True),
-               Path(out_dir) / f'candidates_{bundle}_{bravais_lattice}.parquet', row_group_size)
-
-    predownsample = _read_stream(bundle_dir, 'predownsample_*.parquet')
-    if predownsample is not None and not predownsample.empty:
-        for bravais_lattice, group in predownsample.groupby('bravais_lattice', sort=True):
-            _write(group.reset_index(drop=True),
-                   Path(out_dir) / f'predownsample_{bundle}_{bravais_lattice}.parquet',
-                   row_group_size)
-
-    truth = entries.set_index('entry_id')['bravais_lattice_true']
-    counts = (candidates
-              .assign(bravais_lattice_true=candidates['entry_id'].map(truth))
-              .groupby(['bravais_lattice_true'], sort=True)
-              .agg(n_candidates=('entry_id', 'size'),
-                   n_correct=('is_correct', 'sum'),
-                   n_off_by_two=('is_off_by_two', 'sum'),
-                   n_entries=('entry_id', 'nunique'))
-              .reset_index())
-    counts.insert(0, 'condition_bundle', bundle)
-    counts['n_reachable_entries'] = (
-        candidates.loc[candidates['is_correct']]
-        .assign(bravais_lattice_true=lambda f: f['entry_id'].map(truth))
-        .groupby('bravais_lattice_true')['entry_id'].nunique()
-        .reindex(counts['bravais_lattice_true']).fillna(0).astype(int).to_numpy())
+    counts = pd.DataFrame([
+        {'condition_bundle': bundle, 'bravais_lattice_true': lattice,
+         'n_candidates': row['n_candidates'], 'n_correct': row['n_correct'],
+         'n_off_by_two': row['n_off_by_two'], 'n_entries': len(seen.get(lattice, ())),
+         'n_reachable_entries': len(reachable.get(lattice, ()))}
+        for lattice, row in sorted(tally.items())])
     return entries, counts
+
+
+def _consolidate_one(payload):
+    """Module-level and picklable, so bundles can be consolidated in parallel under `spawn`."""
+    bundle_dir, out_dir, row_group_size = payload
+    entries, counts = consolidate_bundle(bundle_dir, out_dir, row_group_size)
+    return str(bundle_dir), entries, counts
 
 
 def main(argv=None):
@@ -145,10 +265,23 @@ def main(argv=None):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    directories = bundle_directories(args.dump_root)
+    payloads = [(str(d), str(out_dir), args.row_group_size) for d in directories]
+
+    # Bundles are independent -- each reads its own directory and writes its own files -- so this
+    # is the axis to parallelise on. Nine of them, and one process holds one shard's table at a
+    # time rather than a whole bundle, so the memory cost of the pool is bounded.
+    if args.processes > 1 and len(payloads) > 1:
+        from multiprocessing import Pool
+        with Pool(processes=min(args.processes, len(payloads))) as pool:
+            results = pool.map(_consolidate_one, payloads)
+    else:
+        results = [_consolidate_one(payload) for payload in payloads]
+
     all_entries, all_counts, manifests = [], [], {}
     seen = {}
-    for bundle_dir in bundle_directories(args.dump_root):
-        entries, counts = consolidate_bundle(bundle_dir, out_dir, args.row_group_size)
+    for bundle_dir, entries, counts in results:
+        bundle_dir = Path(bundle_dir)
         bundle = counts['condition_bundle'].iloc[0]
         # Two directories holding the SAME bundle overwrite each other's consolidated output, and
         # the run would report a bundle count lower than the directory count while looking
