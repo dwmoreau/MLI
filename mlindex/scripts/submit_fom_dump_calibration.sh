@@ -21,8 +21,18 @@
 #
 # CAMPAIGN 1'S CALIBRATION MEASURED THE WRONG THING and it is easy to repeat: it gave each pool a
 # single entry, so it measured model loading rather than throughput and the topologies it compared
-# came out within 1 % of each other. Subtract the ~111 s per-pool startup before projecting, which
-# is why every arm below runs enough entries per pool for the startup to amortise.
+# came out within 1 % of each other. Subtract the per-pool startup before projecting, which is why
+# every arm below runs enough entries per pool for the startup to amortise.
+#
+# AND DO NOT COMPARE THE ARMS ON `Elapsed (wall clock)` OR ON `seconds_total`. The arms run in
+# sequence inside one job, so the FIRST pays cold-cache model loading and the later ones read the
+# weights from page cache. Job 57700621 measured startup at 163 s for the first arm against 48 and
+# 77 s for the two that followed -- a 3x penalty with nothing to do with the topology. The
+# cache-independent number is the per-pool `s/entry`, whose clock starts after
+# `setup_mp_optimizers` returns; whole-node throughput is `n_pools / (s per entry)`. On 57700621
+# that ordered the arms 64x2 (5.87 entries/s) > 32x4 (3.80) > 16x8 (3.18), while wall clock put
+# 16x8 first. Throughput is what the array should be sized from: a 4 748-entry shard amortises
+# startup over hours, so only the marginal rate matters.
 #
 # ================================================================================================
 # RUNBOOK. docs/ is git-ignored, so `git pull` does NOT deliver the S07 handoff, STATUS.md, or the
@@ -153,21 +163,41 @@ for directory in sorted(glob.glob(os.path.join(root, 'topology_*'))):
         'reachable_frac': round(float(reachable) / max(1, len(entries)), 4),
         }
     if predownsample is not None:
-        row['predownsample_ratio_aP'] = round(
-            len(predownsample) / max(1, int(entries['pool_size_full'].head(2).sum())), 2)
+        # JOINED ON entry_id, not sliced. --predownsample-entries is per POOL, so the
+        # pre-deduplication stream covers n_pools x that many entries while a `.head(2)` of the
+        # entry table covers two -- which made the reported ratio scale with the pool count
+        # (21.82 / 37.82 / 80.74 at 16 / 32 / 64 pools, i.e. the same number times n_pools).
+        # Divide like by like: the entries that actually have both streams.
+        per_entry = predownsample.groupby('entry_id').size()
+        survivors = entries.set_index('entry_id')['pool_size_full']
+        shared = per_entry.index.intersection(survivors.index)
+        if len(shared):
+            row['predownsample_ratio_aP'] = round(
+                float(per_entry[shared].sum()) / max(1, int(survivors[shared].sum())), 2)
+            row['predownsample_entries_measured'] = int(len(shared))
     rows.append(row)
 
 table = pd.DataFrame(rows)
 print(table.to_string(index=False))
 if not table.empty:
-    best = table.loc[table['s_per_entry'].idxmin()]
-    per_cell = best['s_per_entry']
-    print(f"\nFASTEST TOPOLOGY: {best['topology']} at {per_cell} s per (entry, all-14-lattice) cell")
+    # `seconds_total` is confounded by cold-cache model loading on whichever arm ran first, so
+    # the verdict is taken on THROUGHPUT instead -- see the header. Ranking on seconds_total
+    # would tend to crown whichever arm ran last.
+    print("\nNOTE: seconds_total and wall clock are NOT comparable across arms -- the first arm")
+    print("pays cold-cache model loading. Ranking below is on per-pool throughput.")
+    best = table.loc[table['entries_per_s'].idxmax()] if 'entries_per_s' in table \
+        else table.loc[table['s_per_entry'].idxmin()]
+    print(f"\nFASTEST TOPOLOGY: {best['topology']}")
     print(f"  NOTE this arm ran aP ONLY. A full-lattice cell is the sum over fourteen lattices;")
     print(f"  scale by the S06 pilot's ratio before projecting the array, do not use it directly.")
     print(f"\nPRE-DEDUPLICATION RATIO on aP: "
           f"{best.get('predownsample_ratio_aP', 'not measured')} "
-          f"(the array's sizing assumed 7.7x, measured on cP and tP)")
+          f"over {best.get('predownsample_entries_measured', 0)} entries.")
+    print("  The 7.7x in the array sizing was measured on cP and tP, where deduplication\n"
+          "  collapses almost everything (cF 118 -> 1.2). aP barely collapses at all, so the\n"
+          "  ratio is near 1 there and the two numbers are not in conflict -- they are\n"
+          "  different lattices. Size --predownsample-entries on THIS number, since aP, mP\n"
+          "  and mC are 65 % of every pattern's pool (C2-F-052).")
     print(f"\naP REACHABILITY: {best['reachable_frac']:.3f}. Feed the per-lattice version of this")
     print( "  into `run_fom_dump_gate.py floor --reachability`, BEFORE submitting the array.")
 PY
