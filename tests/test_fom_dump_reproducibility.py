@@ -14,6 +14,7 @@ generates in -- was never exercised, and both known reproducibility defects live
 
 Skipped without the model set, which is a 545 MB download the test suite does not require.
 """
+import json
 import os
 import sys
 
@@ -106,13 +107,56 @@ def test_a_subset_reproduces_the_full_run_candidate_for_candidate(tmp_path):
     assert not _differing_columns(restricted, subset)
 
 
-def test_the_pool_topology_does_not_change_the_pool(tmp_path):
-    """R17 says it does. It no longer does, and this is what stops that regressing."""
+def test_the_number_of_pools_does_not_change_the_pool(tmp_path):
+    """R17 says it does. For `n_pools` it no longer does, and this stops that regressing.
+
+    NOTE the axis. This varies `--n-pools` at a FIXED `--pool-size`, which is the only half of
+    "topology" the pool is invariant to -- see the test below.
+    """
     ids = _entry_ids(2)
     one_pool = _generate(tmp_path / 'one', ids, 1, 2, tmp_path)
     two_pools = _generate(tmp_path / 'two', ids, 2, 2, tmp_path)
     assert one_pool.shape == two_pools.shape
     assert not _differing_columns(one_pool, two_pools)
+
+
+def test_pool_size_DOES_change_the_pool_and_is_part_of_its_identity(tmp_path):
+    """The other half of the axis, and it is not invariant. C2-F-069.
+
+    `_reseed_for_pattern` keys on (q2 digest, Bravais lattice, **rank**), and the number of ranks
+    IS `pool_size` -- so changing it is a different stochastic search, exactly as changing the
+    backend is (C2-F-009). Measured on six entries: 1x2, 2x2 and 3x2 all give 1 989 candidates and
+    15 correct; 1x3 gives 2 054 and 1x4 gives 2 071 and 14 correct.
+
+    This is asserted rather than fixed because the seeds are what they are and the benchmark is
+    generated at one pool size. What the assertion buys is that nobody reads
+    "bit-identical across pool topology" as covering this axis -- it does not, and an earlier
+    version of this file tested only `n_pools` while the record claimed both.
+    """
+    ids = _entry_ids(2)
+    two = _generate(tmp_path / 'ps2', ids, 1, 2, tmp_path)
+    four = _generate(tmp_path / 'ps4', ids, 1, 4, tmp_path)
+    assert two.shape != four.shape or _differing_columns(two, four), (
+        'pool_size no longer changes the pool. If the seeding was made rank-independent that is '
+        'an improvement -- update C2-F-069 and the driver guard rather than deleting this test.')
+
+
+def test_a_requeue_at_a_different_pool_size_is_refused(tmp_path):
+    """The dangerous case: `_pool_complete` skips finished pools, so a requeue at a different
+    `--pool-size` would keep the old ones and generate the rest under a different search."""
+    from mlindex.scripts.run_fom_dump import refuse_a_changed_pool_size
+
+    out = tmp_path / 'bundle'
+    out.mkdir()
+    (out / 'manifest.json').write_text(json.dumps({'pool_size': 4}), encoding='utf-8')
+    refuse_a_changed_pool_size(str(out), 4)          # the same size is fine
+    with pytest.raises(SystemExit, match='different searches'):
+        refuse_a_changed_pool_size(str(out), 2)
+
+
+def test_the_guard_is_silent_on_a_fresh_directory(tmp_path):
+    from mlindex.scripts.run_fom_dump import refuse_a_changed_pool_size
+    assert refuse_a_changed_pool_size(str(tmp_path / 'absent'), 4) is None
 
 
 def test_optimizer_seed_moves_the_search_and_nothing_else(tmp_path):

@@ -607,6 +607,38 @@ def _scipy_version():
         return None
 
 
+def refuse_a_changed_pool_size(out_dir, pool_size):
+    """A bundle must be generated at ONE `--pool-size`, and a requeue must not change it.
+
+    The per-pattern reseed keys on (q2 digest, Bravais lattice, **rank**), and the number of ranks
+    IS `pool_size` -- so the pool is bit-identical however many *pools* run, and across shards, but
+    a different `pool_size` is a different stochastic search. Measured on six entries: 1x2, 2x2 and
+    3x2 all give 1 989 candidates and 15 correct, while 1x3 gives 2 054 and 1x4 gives 2 071 and
+    **14** correct (C2-F-069).
+
+    That makes `pool_size` part of the benchmark's identity rather than a performance knob. The
+    dangerous case is a requeue: `_pool_complete` skips pools that are already written, so a task
+    resumed at a different `--pool-size` would keep the old pools and generate the rest under a
+    different search -- one bundle, two populations, and nothing in the data saying so. Refused
+    here by reading back the manifest the previous attempt wrote.
+    """
+    manifest_path = Path(out_dir) / 'manifest.json'
+    if not manifest_path.exists():
+        return
+    try:
+        with open(manifest_path, encoding='utf-8') as handle:
+            previous = json.load(handle).get('pool_size')
+    except Exception:
+        return
+    if previous is not None and int(previous) != int(pool_size):
+        raise SystemExit(
+            f'{out_dir} was generated at --pool-size {previous} and this run asks for '
+            f'{pool_size}. `pool_size` sets the number of ranks the per-pattern seed is keyed on, '
+            'so the two are different searches and mixing them in one bundle produces a pool that '
+            'is silently two populations. Re-run the whole bundle at one pool size, or delete the '
+            'directory and start again.')
+
+
 def run(args):
     condition = FomConditions.BY_KEY[args.condition]
     bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
@@ -617,6 +649,7 @@ def run(args):
     if args.out_dir is None:
         raise SystemExit('--out-dir is required for a generation run')
     preflight(args)
+    refuse_a_changed_pool_size(args.out_dir, args.pool_size)
     manifest = load_manifest(args.split_manifest)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
