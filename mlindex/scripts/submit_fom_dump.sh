@@ -25,7 +25,14 @@
 # run_fom_dump.py skips pools whose output is already written AND readable, so a requeued task
 # resumes rather than restarts. A mechanism bundle is ~1.2 h and runs unsharded.
 #
-# WALLTIME is 4 h against a projected ~2 h. That slack is deliberate over a quantity measured on a
+# WALLTIME is 4 h against a projected 1.1-2.0 h, and that slack is deliberate because the
+# calibration ran aP ONLY and the all-fourteen-lattice rate is therefore not measured on this
+# machine. Two independent estimates bracket it: S06's laptop pilot projects 4 748 x 188 s / 128 =
+# 1.94 h a shard, and scaling the measured aP rate (21.8 process-seconds an entry) by the survivor
+# ratio gives ~1.1 h. 4 h covers both with room, and a task that does hit the wall is requeueable
+# -- run_fom_dump.py skips pools already written.
+#
+# The original note follows. That slack is deliberate over a quantity measured on a
 # laptop and projected onto a Perlmutter node -- replace it with the calibration job's number.
 #
 # ONE DIRECTORY PER BUNDLE. One manifest.json is written per --out-dir, so two bundles sharing a
@@ -61,15 +68,40 @@ MANIFEST="$REPO/docs/fom_campaign2/artifacts/S06_split_manifest.parquet"
 OUTROOT="$SCRATCH/fom_campaign2/benchmark"
 SEED=12345
 
-# Set from submit_fom_dump_calibration.sh. NPOOLS x POOLSIZE must equal the PHYSICAL core count.
-NPOOLS=32
-POOLSIZE=4
+# Set from submit_fom_dump_calibration.sh, job 57700621 (2026-08-29). NPOOLS x POOLSIZE must
+# equal the PHYSICAL core count, and 64 x 2 = 128.
+#
+# Chosen on THROUGHPUT, not on the job's own wall clock. The three arms run in sequence, so the
+# first pays cold-cache model loading -- 163 s against 48 and 77 s for the two after it -- which
+# made the summary rank 16x8 first. Backing startup out, whole-node throughput was
+# 64x2 5.87 entries/s > 32x4 3.80 > 16x8 3.18, i.e. 64x2 is 55 % faster than the arm the summary
+# crowned. A 4 748-entry shard amortises startup over hours, so only the marginal rate matters.
+#
+# Memory is not the constraint: max RSS was ~2.4 GB per manager, so 64 managers is ~154 GB of the
+# node's 476 GB.
+#
+# POOLSIZE IS PART OF THE BENCHMARK'S IDENTITY, NOT A PERFORMANCE KNOB (C2-F-069). The per-pattern
+# seed is keyed on the rank and the rank count IS pool_size, so changing it is a different search:
+# 1x2/2x2/3x2 agree exactly while 1x4 gives 4 % more candidates and one fewer correct. Once this
+# array starts, every task AND every requeue must use this value. run_fom_dump.py reads back the
+# previous manifest.json and refuses a requeue that changes it.
+NPOOLS=64
+POOLSIZE=2
 
-# The pre-deduplication stream is ~7.7x the survivor stream, so it is written for a stratified
-# subsample of entries rather than all of them. Entries arrive in manifest order and the manifest
-# is lattice-stratified, so a prefix is a stratified subsample. 1000 entries over the 5 core
-# bundles is ~74 GB. The ratio is re-measured on aP by the calibration job.
-PREDOWNSAMPLE=8
+# The pre-deduplication stream, written for a stratified subsample of entries rather than all of
+# them. Entries arrive in manifest order and the manifest is lattice-stratified, so a prefix is a
+# stratified subsample.
+#
+# PER POOL, so this is NPOOLS x this many per shard: 64 x 4 = 256 a shard, 1 024 a core bundle,
+# ~5 000 entries over the five of them -- which is the "1 000 entries x 5 core bundles" the sizing
+# asked for, now that there are 64 pools rather than 32.
+#
+# The 7.7x this was sized against was wrong for the lattices that matter. Corrected from job
+# 57700621, aP's pre-deduplication stream is ~1.2x its survivors, and C2-F-052 independently
+# measured aP 7 548 -> 6 100 at this cut (1.24). The 7.7x came from cP and tP, where deduplication
+# collapses almost everything (cF 118 -> 1.2); aP barely collapses, and aP, mP and mC are 65 % of
+# every pattern's pool. So this stream is far smaller than the 74 GB the budget reserved.
+PREDOWNSAMPLE=4
 
 if [ ! -f "$MANIFEST" ]; then
     echo "FATAL: frozen split manifest missing at $MANIFEST" >&2
