@@ -1,6 +1,7 @@
 import numpy as np
 
 from mlindex.utilities.numba_functions import bracketing_line_indices
+from mlindex.utilities.numba_functions import lines_below_cutoff
 from mlindex.utilities.numba_functions import nearest_line_distances
 from mlindex.utilities.numba_functions import over_prediction_runs
 from mlindex.utilities.numba_functions import posterior_exponent_terms
@@ -612,11 +613,17 @@ def get_M20_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system):
 
 
 def get_M20(q2_obs, q2_calc, q2_ref_calc):
+    """de Wolff's M20.
+
+    `q2_ref_calc` is no longer modified. It used to be: the count and the maximum
+    were taken by zeroing the excluded lines in place with np.putmask, which made
+    the argument unusable afterwards and obliged callers either to pass a copy of
+    a 48 MB array or to call this function last. `lines_below_cutoff` returns the
+    same two reductions from one pass without touching the input, so neither is
+    needed now -- the remaining defensive `.copy()` calls are merely redundant.
+    """
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
-    smaller_ref_peaks = q2_ref_calc < q2_calc[:, -1][:, np.newaxis]
-    np.putmask(q2_ref_calc, ~smaller_ref_peaks, 0)
-    last_smaller_ref_peak = np.max(q2_ref_calc, axis=1)
-    N = np.sum(smaller_ref_peaks, axis=1)
+    N, last_smaller_ref_peak = lines_below_cutoff(q2_ref_calc, q2_calc[:, -1])
 
     # There is an unknown issue that causes q2_calc to be all zero
     # These cases are caught and the M20 score is returned as zero.

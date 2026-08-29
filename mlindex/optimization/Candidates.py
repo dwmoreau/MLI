@@ -438,8 +438,8 @@ class Candidates:
         q2_calc from the stored Miller indices instead would differ by an ULP that moves a line
         across M20's own cut-off (F-095).
 
-        `get_M20` is called LAST because it is the only one of the four that modifies
-        `q2_ref_calc`, via np.putmask.
+        `get_M20` is called last, though it no longer has to be: it used to be the only
+        one of the four that modified `q2_ref_calc`, via np.putmask, and that is fixed.
 
         ONE KNOWN DISAGREEMENT, and it is not this routine's. The recomputed M20 equals
         `best_M20` on every candidate except those `fix_unphysical` repaired at construction and

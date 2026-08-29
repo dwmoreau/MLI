@@ -92,6 +92,44 @@ def fast_assign(q2_obs, q2_ref):
     return hkl_assign
 
 
+# De Wolff's M20 needs two reductions per candidate over the reference lines:
+# how many fall below the last assigned line, and the largest of those. Done in
+# numpy that is about five passes over an (n_candidates x n_ref) array -- 48 MB
+# for monoclinic, built 1299 times a pattern -- plus two boolean temporaries the
+# same size, one of them only to hold the negation of the other. One pass here
+# does the same work: measured 2.37x on get_M20 across the eleven non-cubic
+# lattices and 4.2-4.7% on a whole serial pattern, bit-identical.
+#
+# No fastmath, for the reason given above fast_assign: q2_ref is xnn @ hkl2.T and
+# NaN rows are common enough that _downsample_computation filters for them.
+# `value < cutoff` is False for NaN, which is what the numpy version's comparison
+# did, so NaN lines are excluded from both the count and the maximum.
+#
+# The maximum starts at 0.0 rather than -inf on purpose. The numpy version zeroed
+# the excluded entries in place and then took the maximum over the whole row, so
+# a row with no line below the cut-off, or one whose lines below it are all
+# negative, yields 0.0. Starting from -inf would change both cases.
+@jit
+def lines_below_cutoff(q2_ref_calc, cutoff):
+    n_candidates = q2_ref_calc.shape[0]
+    n_ref = q2_ref_calc.shape[1]
+    counts = np.zeros(n_candidates, dtype=np.int64)
+    largest = np.zeros(n_candidates, dtype=np.float64)
+    for candidate_index in range(n_candidates):
+        limit = cutoff[candidate_index]
+        count = 0
+        best = 0.0
+        for ref_index in range(n_ref):
+            value = q2_ref_calc[candidate_index, ref_index]
+            if value < limit:
+                count += 1
+                if value > best:
+                    best = value
+        counts[candidate_index] = count
+        largest[candidate_index] = best
+    return counts, largest
+
+
 @jit(fastmath=True)
 def fast_assign_top_n(q2_obs, q2_ref, top_n):
     n_obs = q2_obs.size

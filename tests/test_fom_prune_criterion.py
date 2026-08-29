@@ -2,9 +2,10 @@
 
 The script's own gates run against 70 million rows of untracked run output, which no test can
 carry. What is testable without that data is the machinery those gates rest on: that the merit
-recompute honours `get_M20`'s in-place mutation, that a cut's sign convention is right on the
+recompute walks production's own route, that a cut's sign convention is right on the
 three merits where a low value is the good one, and that the deduplication emulator is production's
-own collapse rather than a second implementation of it.
+own collapse rather than a second implementation of it. `get_M20` no longer mutates the reference
+array it is handed, and one test here holds it to that.
 """
 import importlib.util
 import os
@@ -61,29 +62,33 @@ def test_merits_reproduce_get_M20_through_the_same_route(pool):
     assert np.array_equal(values['M20'], expected)
 
 
-def test_get_M20_is_called_last_so_the_other_merits_see_a_pristine_array(pool):
-    """`get_M20` zeroes q2_ref_calc outside the cut-off via np.putmask.
+def test_get_M20_leaves_the_reference_array_untouched_so_merit_order_stopped_mattering(pool):
+    """`get_M20` used to zero q2_ref_calc outside the cut-off via np.putmask.
 
-    If it ran before the reversed and symmetric merits, they would read an array two thirds of
-    which had been set to zero. Campaign 1 states this trap in three places; this is the test that
-    would catch it being reordered.
+    Running it before the reversed and symmetric merits then handed them an array two thirds of
+    which was zero, so it had to be called last -- a trap campaign 1 states in three places, and
+    the reason this test was originally written to assert that a reordering CHANGED the answer.
+
+    `lines_below_cutoff` takes the same two reductions in one pass without writing to the input,
+    so the hazard is gone and the guarantee is now the stronger one asserted here: the array
+    survives the call byte for byte, and the merits agree whatever order they run in. If the
+    mutation ever comes back, both halves of this fail.
     """
     q2_obs, q2_ref_calc = pool
+    from mlindex.utilities.FigureOfMerits import get_M_rev_sym
+    from mlindex.utilities.numba_functions import fast_assign
 
     ordered = PRUNE.merits_on_reference(q2_obs, q2_ref_calc.copy())
 
-    # The same merits computed with get_M20 deliberately run first, which is what a reordering
-    # would produce. They must NOT agree -- if they do, the mutation has stopped mattering and
-    # this test has stopped guarding anything.
-    damaged = q2_ref_calc.copy()
-    from mlindex.utilities.numba_functions import fast_assign
-    hkl_assign = fast_assign(q2_obs, damaged)
-    q2_calc = np.take_along_axis(damaged, hkl_assign, axis=1)
-    get_M20(q2_obs, q2_calc, damaged)
-    from mlindex.utilities.FigureOfMerits import get_M_rev_sym
-    _, _, M_sym_after = get_M_rev_sym(q2_obs, q2_calc, damaged)
+    reference = q2_ref_calc.copy()
+    hkl_assign = fast_assign(q2_obs, reference)
+    q2_calc = np.take_along_axis(reference, hkl_assign, axis=1)
+    get_M20(q2_obs, q2_calc, reference)
 
-    assert not np.allclose(ordered['M_sym'], M_sym_after)
+    assert np.array_equal(reference, q2_ref_calc)
+
+    _, _, M_sym_after = get_M_rev_sym(q2_obs, q2_calc, reference)
+    assert np.allclose(ordered['M_sym'], M_sym_after)
 
 
 def test_criterion_scores_flip_the_sign_where_a_low_value_is_the_good_one():

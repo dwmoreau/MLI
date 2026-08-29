@@ -187,7 +187,7 @@ def merits_on_reference(q2_obs, q2_ref_calc):
     M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc)
     n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc)
     X_N = get_X_N(q2_obs, q2_calc, q2_ref_calc)
-    M20 = get_M20(q2_obs, q2_calc, q2_ref_calc)   # destroys q2_ref_calc; must stay last
+    M20 = get_M20(q2_obs, q2_calc, q2_ref_calc)   # no longer destroys q2_ref_calc
 
     return {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
             'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
