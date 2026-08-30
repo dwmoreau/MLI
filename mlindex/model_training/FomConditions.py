@@ -195,6 +195,22 @@ HARD_BUNDLES = tuple(
     )
 
 
+# Which arm a bundle belongs to. S07 runs a wide `core` arm over every crystal in the frozen
+# manifest and a narrower `mechanism` arm over the nested ~15 % subset, so entry counts are
+# comparable WITHIN an arm and not across one: 17 591 against 2 636 is the design, not a shortfall.
+# Defined here because the consolidator and the acceptance gate both need it and a second copy
+# would drift -- the same reason `bundle_tag` is the only implementation of the tag rule.
+MECHANISM_AXES = ('sparsity', 'error_shape')
+
+
+def bundle_arm(tag):
+    """`core`, `mechanism`, or `unknown` for a tag this campaign did not generate."""
+    condition = BY_TAG.get(tag)
+    if condition is None:
+        return 'unknown'
+    return 'mechanism' if condition.axis in MECHANISM_AXES else 'core'
+
+
 def tags():
     return tuple(condition.tag for condition in CONDITIONS)
 

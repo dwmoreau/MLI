@@ -72,13 +72,8 @@ class GateFailure(Exception):
     """One layer's verdict. Carries the rows that failed, not just a message."""
 
 
-def _bundle_arm(bundle):
-    """Which arm a bundle belongs to. The core arm's entry set is larger than the mechanism arm's,
-    so coverage is only comparable within an arm."""
-    condition = FomConditions.BY_TAG.get(bundle)
-    if condition is None:
-        return 'unknown'
-    return 'mechanism' if condition.axis in ('sparsity', 'error_shape') else 'core'
+# One definition, in FomConditions, because the consolidator needs it too (C2-F-072).
+_bundle_arm = FomConditions.bundle_arm
 
 
 # ------------------------------------------------------------------------------------ the floor

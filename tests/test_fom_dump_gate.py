@@ -30,7 +30,7 @@ RIGHT = np.pi / 2
 MANIFEST_PATH = os.path.join('docs', 'fom_campaign2', 'artifacts', 'S06_split_manifest.parquet')
 
 
-def _bundle(tmp_path, bundle, n_entries=2, name=None):
+def _bundle(tmp_path, bundle, n_entries=2, name=None, shard='shard00of01', first_entry=0):
     directory = tmp_path / (name or bundle)
     directory.mkdir(parents=True, exist_ok=True)
     entries = pd.DataFrame([{
@@ -40,15 +40,15 @@ def _bundle(tmp_path, bundle, n_entries=2, name=None):
         'second_phase_partner': None,
         'unit_cell_true': np.array([8.0, 11.0, 14.0, RIGHT, RIGHT, RIGHT]),
         'volume_true': 1232.0,
-        } for i in range(n_entries)])
+        } for i in range(first_entry, first_entry + n_entries)])
     candidates = pd.DataFrame([{
         'entry_id': f'E{i}', 'q2_digest': f'd{i}', 'condition_bundle': bundle,
         'bravais_lattice': 'oP', 'lattice_system': 'orthorhombic', 'candidate_id': j,
         'M20': 1.0 + j, 'is_correct': j == 0, 'is_off_by_two': False,
         'retained_reason': 'correct' if j == 0 else 'top_k', 'sampling_weight': 1.0,
-        } for i in range(n_entries) for j in range(3)])
-    entries.to_parquet(directory / f'entries_{bundle}_shard00of01_pool00.parquet', index=False)
-    candidates.to_parquet(directory / f'candidates_{bundle}_shard00of01_pool00.parquet',
+        } for i in range(first_entry, first_entry + n_entries) for j in range(3)])
+    entries.to_parquet(directory / f'entries_{bundle}_{shard}_pool00.parquet', index=False)
+    candidates.to_parquet(directory / f'candidates_{bundle}_{shard}_pool00.parquet',
                           index=False)
     with open(directory / 'manifest.json', 'w', encoding='utf-8') as handle:
         json.dump({'bundle': bundle, 'search_seed_scheme': 'per_entry_bravais', 'arch': 'arm64'},
@@ -68,16 +68,33 @@ def test_consolidation_keeps_condition_bundle_as_a_real_column(tmp_path):
     assert candidates['condition_bundle'].nunique() == 1
 
 
-def test_two_directories_holding_one_bundle_are_refused(tmp_path):
-    # The "one manifest.json per --out-dir" trap one level up: the second silently overwrites the
-    # first, and the run still looks successful.
-    root = tmp_path / 'dump'
-    # Two sibling directories, differently named, holding the SAME bundle -- which is what a
-    # re-run into a new directory looks like.
-    _bundle(root, 'c2_error1_cont0', name='first')
-    _bundle(root, 'c2_error1_cont0', name='second')
-    with pytest.raises(SystemExit, match='both hold bundle'):
-        consolidate.main(['--dump-root', str(root), '--out-dir', str(tmp_path / 'pool')])
+def test_one_bundle_across_two_roots_is_merged_not_refused(tmp_path):
+    """A supplementary run is a legitimate second directory for the same bundle.
+
+    The earlier guard refused this outright, which was both too strict -- it forbids regenerating a
+    lattice the first pass lost without redoing the other 93 % -- and too loose, since it said
+    nothing about which files actually overlapped. The hazard is the same (shard, pool) generated
+    twice, and that is now caught by filename in `_stream_paths`.
+    """
+    main_root, supp_root = tmp_path / 'main', tmp_path / 'supp'
+    _bundle(main_root, 'c2_error1_cont0', n_entries=2, shard='shard00of02')
+    _bundle(supp_root, 'c2_error1_cont0', n_entries=1, shard='shard00of03', first_entry=90)
+    out = tmp_path / 'pool'
+    consolidate.main(['--dump-root', str(main_root), str(supp_root), '--out-dir', str(out)])
+
+    entries = pd.read_parquet(out / 'entries.parquet')
+    assert entries.shape[0] == 3, 'the supplementary entries were not merged in'
+    assert entries['entry_id'].nunique() == 3
+
+
+def test_the_same_shard_in_two_roots_is_refused(tmp_path):
+    """Because consolidating it would double those rows, silently."""
+    main_root, dup_root = tmp_path / 'main', tmp_path / 'dup'
+    _bundle(main_root, 'c2_error1_cont0', n_entries=2, shard='shard00of02')
+    _bundle(dup_root, 'c2_error1_cont0', n_entries=2, shard='shard00of02')
+    with pytest.raises(SystemExit, match='appears in both'):
+        consolidate.main(['--dump-root', str(main_root), str(dup_root),
+                          '--out-dir', str(tmp_path / 'pool')])
 
 
 def test_a_directory_without_a_manifest_is_not_a_bundle(tmp_path):

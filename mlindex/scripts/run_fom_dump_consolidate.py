@@ -38,6 +38,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from mlindex.model_training import FomBenchmark
+from mlindex.model_training import FomConditions
 
 
 # Parquet row groups. The default of ~1M rows was fine for campaign 1's 26M-row pool; this one is
@@ -50,8 +51,11 @@ ROW_GROUP_SIZE = 131072
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='Consolidate the campaign-2 bundle dumps into Benchmark B')
-    parser.add_argument('--dump-root', type=str, required=True,
-                        help='Directory holding one subdirectory per condition bundle')
+    parser.add_argument('--dump-root', type=str, required=True, nargs='+',
+                        help='One or more directories, each holding one subdirectory per '
+                             'condition bundle. Several are merged per bundle, which is how a '
+                             'supplementary run -- regenerating a lattice the first pass lost -- '
+                             'is folded in without regenerating the rest')
     parser.add_argument('--out-dir', type=str, required=True,
                         help='Where the frozen pool is written')
     parser.add_argument('--artifact-dir', type=str, default=None,
@@ -66,22 +70,50 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def bundle_directories(dump_root):
-    """One directory per bundle, identified by its own manifest.json.
+def bundle_directories(dump_roots):
+    """{bundle tag: [directories]}, across one or more dump roots.
 
-    A directory without one is not a bundle -- it is an incomplete run, and treating it as a
-    bundle would consolidate a partial pool while reporting a total that looks whole.
+    A bundle can legitimately be spread over two roots: the main array writes one, and a
+    supplementary run -- regenerating a lattice the first pass lost, say -- writes another. They
+    merge here because the output is one file per (bundle, lattice) regardless of which shard the
+    rows came from, so the writers simply append.
+
+    A directory without a manifest.json is not a bundle; it is an incomplete run, and treating it
+    as one would consolidate a partial pool while reporting a total that looks whole.
     """
-    root = Path(dump_root)
-    directories = sorted(child for child in root.iterdir()
-                         if child.is_dir() and (child / 'manifest.json').exists())
-    if not directories:
-        raise SystemExit(f'no bundle directory under {root} carries a manifest.json')
-    return directories
+    groups = {}
+    for root in dump_roots:
+        root = Path(root)
+        if not root.is_dir():
+            raise SystemExit(f'{root} is not a directory')
+        for child in sorted(root.iterdir()):
+            if child.is_dir() and (child / 'manifest.json').exists():
+                groups.setdefault(child.name, []).append(child)
+    if not groups:
+        raise SystemExit(f'no bundle directory under {list(dump_roots)} carries a manifest.json')
+    return dict(sorted(groups.items()))
 
 
-def _stream_paths(bundle_dir, pattern):
-    return sorted(Path(bundle_dir).glob(pattern))
+def _stream_paths(bundle_dirs, pattern):
+    """Every shard of one stream, across the directories holding this bundle.
+
+    REFUSES A REPEATED BASENAME. Shard files are named `<stream>_<tag>_shard<NN>of<NN>_pool<NN>`,
+    so the same basename in two roots means the same (shard, pool) was generated twice and its
+    entries would be counted and written twice. Guarding on the file name is exact, where the older
+    guard -- one bundle may not appear in two directories -- was both too strict, forbidding a
+    legitimate supplementary run, and too loose, saying nothing about what overlapped.
+    """
+    paths, seen = [], {}
+    for bundle_dir in bundle_dirs:
+        for path in sorted(Path(bundle_dir).glob(pattern)):
+            if path.name in seen:
+                raise SystemExit(
+                    f'{path.name} appears in both {seen[path.name].parent} and {path.parent}. '
+                    'The same (shard, pool) was generated twice; consolidating both would double '
+                    'its rows. Give a supplementary run a shard count the first pass did not use.')
+            seen[path.name] = path
+            paths.append(path)
+    return paths
 
 
 def _write(frame, path, row_group_size):
@@ -190,7 +222,7 @@ def _accumulate(table, tally, seen, reachable):
         reachable.setdefault(row['bravais_lattice_true'], set()).add(row['entry_id'])
 
 
-def consolidate_bundle(bundle_dir, out_dir, row_group_size):
+def consolidate_bundle(bundle_dirs, out_dir, row_group_size):
     """One bundle's shards and pools, repartitioned by Bravais lattice without ever holding it all.
 
     Returns (entries, counts) -- the entry table and one row per (bundle, true lattice).
@@ -201,21 +233,22 @@ def consolidate_bundle(bundle_dir, out_dir, row_group_size):
     hundreds of millions of Python objects and tens of GB of RAM. Here nothing larger than one
     shard is ever in memory and no column is converted to Python at all.
     """
-    bundle_dir = Path(bundle_dir)
-    entry_paths = _stream_paths(bundle_dir, 'entries_*.parquet')
-    candidate_paths = _stream_paths(bundle_dir, 'candidates_*.parquet')
+    bundle_dirs = [Path(d) for d in ([bundle_dirs] if isinstance(bundle_dirs, (str, Path))
+                                     else bundle_dirs)]
+    entry_paths = _stream_paths(bundle_dirs, 'entries_*.parquet')
+    candidate_paths = _stream_paths(bundle_dirs, 'candidates_*.parquet')
     if not entry_paths or not candidate_paths:
-        raise SystemExit(f'{bundle_dir} is missing an entry or candidate stream; do not '
+        raise SystemExit(f'{bundle_dirs} is missing an entry or candidate stream; do not '
                          'consolidate a partial bundle')
 
     entries = _read_small(entry_paths)
     bundles = entries['condition_bundle'].unique()
     if len(bundles) != 1:
-        raise SystemExit(f'{bundle_dir} holds more than one bundle: {sorted(bundles)}. '
+        raise SystemExit(f'{bundle_dirs} hold more than one bundle: {sorted(bundles)}. '
                          'One directory per bundle.')
     bundle = str(bundles[0])
     if 'condition_bundle' not in entries.columns:
-        raise SystemExit(f'{bundle_dir}: entries carries no condition_bundle column (R8)')
+        raise SystemExit(f'{bundle_dirs}: entries carries no condition_bundle column (R8)')
 
     entry_ids = pa.array(entries['entry_id'].astype(str).tolist())
     true_lattices = pa.array(entries['bravais_lattice_true'].astype(str).tolist())
@@ -223,7 +256,8 @@ def consolidate_bundle(bundle_dir, out_dir, row_group_size):
 
     tally, seen, reachable = {}, {}, {}
     for stream, paths in (('candidates', candidate_paths),
-                          ('predownsample', _stream_paths(bundle_dir, 'predownsample_*.parquet'))):
+                          ('predownsample',
+                           _stream_paths(bundle_dirs, 'predownsample_*.parquet'))):
         if not paths:
             continue
         writers = _LatticeWriters(out_dir, stream, bundle, row_group_size)
@@ -255,9 +289,9 @@ def consolidate_bundle(bundle_dir, out_dir, row_group_size):
 
 def _consolidate_one(payload):
     """Module-level and picklable, so bundles can be consolidated in parallel under `spawn`."""
-    bundle_dir, out_dir, row_group_size = payload
-    entries, counts = consolidate_bundle(bundle_dir, out_dir, row_group_size)
-    return str(bundle_dir), entries, counts
+    tag, bundle_dirs, out_dir, row_group_size = payload
+    entries, counts = consolidate_bundle(bundle_dirs, out_dir, row_group_size)
+    return tag, entries, counts
 
 
 def main(argv=None):
@@ -265,8 +299,13 @@ def main(argv=None):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    directories = bundle_directories(args.dump_root)
-    payloads = [(str(d), str(out_dir), args.row_group_size) for d in directories]
+    groups = bundle_directories(args.dump_root)
+    payloads = [(tag, [str(d) for d in dirs], str(out_dir), args.row_group_size)
+                for tag, dirs in groups.items()]
+    for tag, dirs in groups.items():
+        if len(dirs) > 1:
+            print(f'{tag}: merging {len(dirs)} directories -- '
+                  + ', '.join(str(d.parent.name) for d in dirs), flush=True)
 
     # Bundles are independent -- each reads its own directory and writes its own files -- so this
     # is the axis to parallelise on. Nine of them, and one process holds one shard's table at a
@@ -279,25 +318,17 @@ def main(argv=None):
         results = [_consolidate_one(payload) for payload in payloads]
 
     all_entries, all_counts, manifests = [], [], {}
-    seen = {}
-    for bundle_dir, entries, counts in results:
-        bundle_dir = Path(bundle_dir)
+    for tag, entries, counts in results:
         bundle = counts['condition_bundle'].iloc[0]
-        # Two directories holding the SAME bundle overwrite each other's consolidated output, and
-        # the run would report a bundle count lower than the directory count while looking
-        # successful. This is the "one manifest.json per --out-dir" trap one level up: there it is
-        # two bundles sharing a directory, here it is one bundle spread over two. Both are silent.
-        if bundle in seen:
-            raise SystemExit(
-                f'{bundle_dir.name} and {seen[bundle].name} both hold bundle {bundle!r}, so the '
-                'second has overwritten the first. Consolidate one directory per bundle; if '
-                'these are deliberately separate runs, consolidate them to separate --out-dirs.')
-        seen[bundle] = bundle_dir
-        with open(bundle_dir / 'manifest.json', encoding='utf-8') as handle:
+        # The old guard here refused one bundle appearing in two directories. That is now allowed
+        # and merged -- a supplementary run regenerating a lost lattice is a legitimate second
+        # directory -- and the real hazard, the same (shard, pool) generated twice, is caught by
+        # basename in `_stream_paths`, which is exact where the bundle-level guard was not.
+        with open(groups[tag][0] / 'manifest.json', encoding='utf-8') as handle:
             manifests[bundle] = json.load(handle)
         all_entries.append(entries)
         all_counts.append(counts)
-        print(f'{bundle_dir.name}: {entries.shape[0]} entries, '
+        print(f'{tag}: {entries.shape[0]} entries, '
               f'{int(counts["n_candidates"].sum())} candidates, '
               f'{int(counts["n_correct"].sum())} correct', flush=True)
 
@@ -307,22 +338,32 @@ def main(argv=None):
 
     # Coverage, NOT alignment. Every bundle keeps its own entry set; what is recorded is which
     # entries each one is missing, so a later step can restrict deliberately rather than inherit
-    # an intersection nobody chose.
+    # an intersection nobody chose (R14).
+    #
+    # COMPARED WITHIN AN ARM. The core arm runs every crystal in the manifest and the mechanism arm
+    # a nested ~15 % subset, so a union taken across both makes every mechanism bundle look short
+    # by the arm difference -- 14 955 entries, which is the design and not a loss. That reading
+    # buried the one real signal in the first Benchmark B consolidation.
     per_bundle = entries.groupby('condition_bundle')['entry_id'].apply(set)
-    union = set().union(*per_bundle) if len(per_bundle) else set()
+    arms = {bundle: FomConditions.bundle_arm(bundle) for bundle in per_bundle.index}
+    union_by_arm = {}
+    for bundle, ids in per_bundle.items():
+        union_by_arm.setdefault(arms[bundle], set()).update(ids)
     coverage = pd.DataFrame([
         {'condition_bundle': bundle,
+         'arm': arms[bundle],
          'n_entries': len(ids),
-         'n_missing_vs_union': len(union - ids),
-         'missing_examples': ','.join(sorted(union - ids)[:5])}
-        for bundle, ids in per_bundle.items()]).sort_values('condition_bundle')
+         'n_missing_vs_arm': len(union_by_arm[arms[bundle]] - ids),
+         'missing_examples': ','.join(sorted(union_by_arm[arms[bundle]] - ids)[:5])}
+        for bundle, ids in per_bundle.items()]).sort_values(['arm', 'condition_bundle'])
 
     FomBenchmark.write_manifest(
         out_dir,
         consolidated=True,
         bundles=sorted(manifests),
         n_entries=int(entries.shape[0]),
-        n_source_entries=len(union),
+        n_source_entries=int(entries['entry_id'].nunique()),
+        n_entries_by_arm={arm: len(ids) for arm, ids in sorted(union_by_arm.items())},
         n_candidates=int(counts['n_candidates'].sum()),
         n_correct=int(counts['n_correct'].sum()),
         row_group_size=int(args.row_group_size),
