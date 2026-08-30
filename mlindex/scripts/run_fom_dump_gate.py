@@ -43,6 +43,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from mlindex.model_training import FomBenchmark
 from mlindex.model_training import FomConditions
@@ -119,22 +122,136 @@ def build_floor(manifest_path, reachability_path=None, target=TARGET_CORRECT_PER
 
 # ----------------------------------------------------------------------------------- the layers
 
-def layer_structure(pool):
-    entries = FomBenchmark.load_entries(pool)
-    candidates = FomBenchmark.load_candidates(pool)
-    FomBenchmark._check_join(candidates, entries)
-    if not FomBenchmark.has_labels(candidates):
-        raise GateFailure('the pool carries no usable labels; it was not labelled at generation')
+# One row group at a time, projected to the columns a check needs. The pool is ~880 M candidate
+# rows across 34 columns, four of them list-valued, so `load_candidates` -- which concatenates the
+# lot into one pandas frame -- needs far more memory than a node has and killed the first gate run
+# outright (C2-F-074). Everything below streams instead: batches are bounded by the row-group size
+# the consolidator wrote, and no column is read that a check does not use.
+BATCH_ROWS = 131072
+
+
+def candidate_files(pool):
+    paths = sorted(Path(pool).glob('candidates_*.parquet'))
+    if not paths:
+        raise GateFailure(f'no candidates_*.parquet under {pool}')
+    return paths
+
+
+def _batches(path, columns):
+    """Row-group batches of one file, projected. Absent columns are simply not requested."""
+    available = set(pq.read_schema(path).names)
+    wanted = [column for column in columns if column in available]
+    parquet_file = pq.ParquetFile(path)
+    for batch in parquet_file.iter_batches(batch_size=BATCH_ROWS, columns=wanted):
+        yield pa.Table.from_batches([batch])
+
+
+def scan_candidates(pool, entries):
+    """One streaming pass over every candidate file, accumulating what the cheap layers need.
+
+    Returns a dict. Doing it once rather than per layer matters: each pass is a read of 122 GB.
+    """
+    truth = dict(zip(entries['entry_id'].astype(str) + '\x00'
+                     + entries['condition_bundle'].astype(str),
+                     entries['bravais_lattice_true']))
+    digests = dict(zip(entries['entry_id'].astype(str) + '\x00'
+                       + entries['condition_bundle'].astype(str),
+                       entries['q2_digest']))
+
+    scan = {'n_rows': 0, 'non_null': {}, 'columns': None, 'floor': {},
+            'correct_not_marked': 0, 'bad_weight': 0, 'weighted': {}, 'join_errors': []}
+
+    needed = ['entry_id', 'condition_bundle', 'q2_digest', 'bravais_lattice',
+              'is_correct', 'retained_reason', 'sampling_weight']
+    for path in candidate_files(pool):
+        schema = pq.read_schema(path)
+        if scan['columns'] is None:
+            scan['columns'] = list(schema.names)
+        # Null counts come from the footer's statistics -- no rows are read at all.
+        metadata = pq.ParquetFile(path).metadata
+        for index, name in enumerate(schema.names):
+            total = 0
+            for group in range(metadata.num_row_groups):
+                column = metadata.row_group(group).column(index)
+                total += column.num_values - (column.statistics.null_count
+                                              if column.statistics is not None else 0)
+            scan['non_null'][name] = scan['non_null'].get(name, 0) + total
+
+        for table in _batches(path, needed):
+            scan['n_rows'] += table.num_rows
+            pairs = table.group_by(['entry_id', 'condition_bundle', 'q2_digest']).aggregate([])
+            for row in pairs.to_pylist():
+                key = f"{row['entry_id']}\x00{row['condition_bundle']}"
+                expected = digests.get(key)
+                if expected is None:
+                    scan['join_errors'].append(f"{row['entry_id']}/{row['condition_bundle']} "
+                                               'is absent from the entry table')
+                elif expected != row['q2_digest']:
+                    scan['join_errors'].append(
+                        f"{row['entry_id']}/{row['condition_bundle']} carries q2_digest "
+                        f"{row['q2_digest']} but its entry row says {expected}")
+
+            if 'is_correct' in table.column_names:
+                keys = pa.array([truth.get(f'{e}\x00{b}') for e, b in
+                                 zip(table.column('entry_id').to_pylist(),
+                                     table.column('condition_bundle').to_pylist())])
+                tagged = table.append_column('bravais_lattice_true', keys)
+                for row in (tagged.group_by(['condition_bundle', 'bravais_lattice_true'])
+                            .aggregate([('is_correct', 'sum')]).to_pylist()):
+                    scan['floor'][(row['condition_bundle'], row['bravais_lattice_true'])] = (
+                        scan['floor'].get((row['condition_bundle'],
+                                           row['bravais_lattice_true']), 0)
+                        + int(row['is_correct_sum'] or 0))
+
+            if {'is_correct', 'retained_reason'} <= set(table.column_names):
+                correct = pc.fill_null(table.column('is_correct'), False)
+                reason = table.column('retained_reason')
+                scan['correct_not_marked'] += pc.sum(pc.and_(
+                    correct, pc.not_equal(reason, 'correct'))).as_py() or 0
+            if {'retained_reason', 'sampling_weight'} <= set(table.column_names):
+                certain = pc.not_equal(table.column('retained_reason'), 'sampled')
+                weights = table.column('sampling_weight')
+                scan['bad_weight'] += pc.sum(pc.and_(
+                    certain, pc.not_equal(weights, 1.0))).as_py() or 0
+            if {'entry_id', 'condition_bundle', 'bravais_lattice',
+                    'sampling_weight'} <= set(table.column_names):
+                for row in (table.group_by(['entry_id', 'condition_bundle', 'bravais_lattice'])
+                            .aggregate([('sampling_weight', 'sum')]).to_pylist()):
+                    key = (row['entry_id'], row['condition_bundle'], row['bravais_lattice'])
+                    scan['weighted'][key] = (scan['weighted'].get(key, 0.0)
+                                             + float(row['sampling_weight_sum'] or 0.0))
+    return scan
+
+
+def layer_structure(pool, entries, scan):
+    """Join integrity, labels, and no unexplained all-null column -- from the streaming scan.
+
+    The null counts come from the parquet footers' own statistics, so this touches no rows for
+    that check at all.
+    """
+    if scan['join_errors']:
+        raise GateFailure(f"{len(scan['join_errors'])} candidates do not match their entry row, "
+                          f"e.g. {scan['join_errors'][0]}")
+
+    required = [column for column in FomBenchmark.LABEL_COLUMNS]
+    absent = [column for column in required if column not in (scan['columns'] or [])]
+    if absent:
+        raise GateFailure(f'the pool carries no {absent}; it was not labelled at generation')
+    if scan['non_null'].get('is_correct', 0) != scan['n_rows']:
+        raise GateFailure('is_correct is null on some rows; the pool was not fully labelled')
 
     # A column null in every row is what C2-F-046 ruled out -- with two exceptions that are null
     # for a reason rather than by omission.
     allowed_null = {'second_phase_partner', 'hkl_true_in_basis'}
-    for name, frame in (('candidates', candidates), ('entries', entries)):
-        empty = [column for column in frame.columns
-                 if column not in allowed_null and frame[column].isna().all()]
-        if empty:
-            raise GateFailure(f'{name}: columns null in every row: {empty}')
-    # `second_phase_partner` must be null exactly when the bundle has no second phase.
+    empty = [name for name, count in scan['non_null'].items()
+             if count == 0 and name not in allowed_null]
+    if empty:
+        raise GateFailure(f'candidates: columns null in every row: {sorted(empty)}')
+    empty_entries = [column for column in entries.columns
+                     if column not in allowed_null and entries[column].isna().all()]
+    if empty_entries:
+        raise GateFailure(f'entries: columns null in every row: {empty_entries}')
+
     for bundle, group in entries.groupby('condition_bundle'):
         condition = FomConditions.BY_TAG.get(bundle)
         if condition is None:
@@ -145,7 +262,7 @@ def layer_structure(pool):
                               'entries record no partner')
         if condition.second_phase_lines == 0 and populated.any():
             raise GateFailure(f'{bundle} injects no second phase but records partners')
-    return entries, candidates, f'{entries.shape[0]} entries, {candidates.shape[0]} candidates'
+    return f"{entries.shape[0]} entries, {scan['n_rows']} candidates"
 
 
 def layer_manifest(pool):
@@ -197,20 +314,17 @@ def layer_coverage(entries):
     return '; '.join(report)
 
 
-def layer_floor(entries, candidates, floor_table):
+def layer_floor(scan, floor_table):
     """Gate 1: every (lattice x bundle) stratum meets its floor.
 
-    The stratum is keyed on the entry's TRUE Bravais lattice, not the candidate's -- METRICS.md
-    section 5. Counted over the whole pool; the per-split breakdown is reported beside it, because
-    `fom-dev` is what carries the claims.
+    Keyed on the entry's TRUE Bravais lattice, not the candidate's -- METRICS.md section 5.
+    Counted during the streaming scan.
     """
-    truth = entries.set_index(['entry_id', 'condition_bundle'])['bravais_lattice_true']
-    keyed = candidates.set_index(['entry_id', 'condition_bundle'])
-    counts = (candidates
-              .assign(bravais_lattice_true=keyed.index.map(truth).to_numpy())
-              .groupby(['condition_bundle', 'bravais_lattice_true'])['is_correct']
-              .sum().rename('n_correct').reset_index()
-              .rename(columns={'bravais_lattice_true': 'bravais_lattice'}))
+    counts = pd.DataFrame(
+        [{'condition_bundle': bundle, 'bravais_lattice': lattice, 'n_correct': n}
+         for (bundle, lattice), n in scan['floor'].items() if lattice is not None])
+    if counts.empty:
+        raise GateFailure('no correct candidates were counted anywhere in the pool')
     merged = floor_table.merge(counts, on=['condition_bundle', 'bravais_lattice'], how='inner')
     if merged.empty:
         raise GateFailure('no (bundle, lattice) stratum in the pool matches the floor table; '
@@ -226,72 +340,88 @@ def layer_floor(entries, candidates, floor_table):
             f'({n_capped} capped by the source population, C2-R-010)')
 
 
-def layer_weights(candidates, full_pool=None):
+def layer_weights(scan, pool, full_pool=None):
     """Gate 6: the subsampling weights reproduce full-pool rank metrics.
-
-    Checked on a held-back fully-retained subset -- a shard generated with --no-subsample. It is
-    the only check that the retention rule did not quietly change what the benchmark measures.
 
     Two properties, and they are different. Every correct candidate survives, which the retention
     rule guarantees by construction and which is checked here as an identity rather than assumed.
     And the weighted candidate count reproduces the unweighted full-pool count, which is what makes
     any aggregate over the thinned pool unbiased for the whole one.
     """
-    if 'retained_reason' not in candidates.columns:
+    if 'retained_reason' not in (scan['columns'] or []):
         raise GateFailure('the pool carries no retained_reason column, so the retention rule '
                           'cannot be audited (SCHEMA.md)')
-    correct_not_kept = candidates.loc[candidates['is_correct']
-                                      & (candidates['retained_reason'] != 'correct')]
-    if not correct_not_kept.empty:
-        raise GateFailure(f'{correct_not_kept.shape[0]} correct candidates are not marked '
+    if scan['correct_not_marked']:
+        raise GateFailure(f"{scan['correct_not_marked']} correct candidates are not marked "
                           'retained_reason="correct"; the retention rule did not protect them')
-    if (candidates.loc[candidates['retained_reason'] != 'sampled', 'sampling_weight'] != 1.0).any():
-        raise GateFailure('a candidate retained with certainty carries a weight other than 1.0')
+    if scan['bad_weight']:
+        raise GateFailure(f"{scan['bad_weight']} candidates retained with certainty carry a "
+                          'weight other than 1.0')
 
     if full_pool is None:
         return ('positives all retained; no --full-pool given, so the weighted-count check is '
                 'NOT run -- gate 6 is partial')
 
-    reference = FomBenchmark.load_candidates(full_pool)
-    keys = ['entry_id', 'condition_bundle', 'bravais_lattice']
-    thinned = (candidates.groupby(keys)['sampling_weight'].sum()
-               .rename('weighted').reset_index())
-    actual = reference.groupby(keys).size().rename('actual').reset_index()
-    merged = thinned.merge(actual, on=keys, how='inner')
-    if merged.empty:
+    reference = {}
+    for path in candidate_files(full_pool):
+        for table in _batches(path, ['entry_id', 'condition_bundle', 'bravais_lattice']):
+            for row in (table.group_by(['entry_id', 'condition_bundle', 'bravais_lattice'])
+                        .aggregate([([], 'count_all')]).to_pylist()):
+                key = (row['entry_id'], row['condition_bundle'], row['bravais_lattice'])
+                reference[key] = reference.get(key, 0) + int(row['count_all'])
+    shared = [key for key in reference if key in scan['weighted']]
+    if not shared:
         raise GateFailure('the thinned pool and the full pool share no (entry, bundle, lattice)')
-    relative = (merged['weighted'] - merged['actual']).abs() / merged['actual'].clip(lower=1)
+    relative = np.array([abs(scan['weighted'][key] - reference[key]) / max(reference[key], 1)
+                         for key in shared])
     # A Bernoulli sample of a pool of n has standard error sqrt(n(1-p)/p)/n on the weighted count,
     # so the tolerance is a sampling statement, not a numerical one.
-    worst = float(relative.max())
     if relative.mean() > 0.10:
         raise GateFailure(f'weighted counts do not reproduce full-pool counts: mean relative '
-                          f'error {relative.mean():.3f}, worst {worst:.3f}')
-    return (f'positives all retained; weighted counts reproduce {merged.shape[0]} pools, '
-            f'mean relative error {relative.mean():.4f}, worst {worst:.4f}')
+                          f'error {relative.mean():.3f}, worst {relative.max():.3f}')
+    return (f'positives all retained; weighted counts reproduce {len(shared)} pools, '
+            f'mean relative error {relative.mean():.4f}, worst {relative.max():.4f}')
 
 
-def layer_roundtrip(entries, candidates, tolerance=1e-6, max_rows=None):
+def layer_roundtrip(pool, entries, tolerance=1e-6, max_rows=2_000_000):
     """Gate 2: every stored merit recomputed from the dump matches the pipeline's value.
 
-    S05 measured 0.000e+00 over 19 493 candidates against a 1e-6 gate; there is no reason to
-    accept worse. Recomputation reads only the dumped columns, which is the property that makes
-    the pool self-describing.
+    S05 measured 0.000e+00 over 19 493 candidates against a 1e-6 gate; there is no reason to accept
+    worse. Recomputation reads only the dumped columns, which is the property that makes the pool
+    self-describing.
+
+    CAPPED, and it says so. Recomputing all ~880 M candidates means rebuilding every reference line
+    list, which is hours and far more memory than a node has. `max_rows` takes a prefix of each
+    file in turn, so the sample spans every (bundle, lattice) rather than whichever happened to
+    sort first. Pass `--roundtrip-rows 0` for no cap.
     """
-    sample = candidates if max_rows is None else candidates.head(max_rows)
-    recomputed = FomBenchmark.recompute_frame(sample, entries)
-    stored = recomputed['M20'].to_numpy(dtype=float)
-    fresh = recomputed['M20_recomputed'].to_numpy(dtype=float)
-    scale = np.maximum(np.abs(stored), 1e-12)
-    relative = np.abs(fresh - stored) / scale
-    n_bad = int((relative > tolerance).sum())
-    if n_bad:
-        worst = int(np.argmax(relative))
-        raise GateFailure(
-            f'{n_bad} of {relative.size} candidates do not reproduce their stored M20 '
-            f'(worst {relative[worst]:.3e} on {sample.iloc[worst]["entry_id"]}/'
-            f'{sample.iloc[worst]["bravais_lattice"]})')
-    return f'{relative.size} candidates, max relative difference {relative.max():.3e}'
+    checked, worst, worst_where = 0, 0.0, None
+    for path in candidate_files(pool):
+        if max_rows and checked >= max_rows:
+            break
+        budget = (max_rows - checked) if max_rows else None
+        frame = pd.read_parquet(path)
+        if budget is not None and frame.shape[0] > budget:
+            frame = frame.head(budget)
+        if frame.empty:
+            continue
+        recomputed = FomBenchmark.recompute_frame(frame, entries)
+        stored = recomputed['M20'].to_numpy(dtype=float)
+        fresh = recomputed['M20_recomputed'].to_numpy(dtype=float)
+        relative = np.abs(fresh - stored) / np.maximum(np.abs(stored), 1e-12)
+        n_bad = int((relative > tolerance).sum())
+        if n_bad:
+            position = int(np.argmax(relative))
+            raise GateFailure(
+                f'{n_bad} of {relative.size} candidates in {path.name} do not reproduce their '
+                f'stored M20 (worst {relative[position]:.3e} on '
+                f'{frame.iloc[position]["entry_id"]}/{frame.iloc[position]["bravais_lattice"]})')
+        if relative.size and relative.max() > worst:
+            worst, worst_where = relative.max(), path.name
+        checked += frame.shape[0]
+    capped = ' (CAPPED -- not the whole pool)' if max_rows and checked >= max_rows else ''
+    return (f'{checked} candidates, max relative difference {worst:.3e}'
+            + (f' in {worst_where}' if worst_where else '') + capped)
 
 
 # ------------------------------------------------------------------------------------------ CLI
@@ -322,14 +452,21 @@ def _run_check(args):
             'the pool is already generated, say so when reporting the gate.')
     floor_table = pd.read_csv(floor_path)
 
-    entries, candidates, structure = layer_structure(args.pool)
+    # The entry table is one row per (entry, bundle) -- ~106 000 rows -- so it is loaded whole.
+    # The candidates are ~880 M rows and are never loaded whole; one streaming pass feeds every
+    # layer but the round trip (C2-F-074).
+    entries = FomBenchmark.load_entries(args.pool)
+    print(f'[{"scan":10s}] streaming {len(candidate_files(args.pool))} candidate files...',
+          flush=True)
+    scan = scan_candidates(args.pool, entries)
+
     layers = [
-        ('structure', lambda: structure),
+        ('structure', lambda: layer_structure(args.pool, entries, scan)),
         ('manifest', lambda: layer_manifest(args.pool)),
         ('coverage', lambda: layer_coverage(entries)),
-        ('floor', lambda: layer_floor(entries, candidates, floor_table)),
-        ('weights', lambda: layer_weights(candidates, args.full_pool)),
-        ('roundtrip', lambda: layer_roundtrip(entries, candidates, args.tolerance,
+        ('floor', lambda: layer_floor(scan, floor_table)),
+        ('weights', lambda: layer_weights(scan, args.pool, args.full_pool)),
+        ('roundtrip', lambda: layer_roundtrip(args.pool, entries, args.tolerance,
                                               args.roundtrip_rows)),
         ]
     failed = []
@@ -367,9 +504,11 @@ def main(argv=None):
     check.add_argument('--full-pool', type=str, default=None,
                        help='A fully-retained pool over a held-back entry subset, for gate 6')
     check.add_argument('--tolerance', type=float, default=1e-6)
-    check.add_argument('--roundtrip-rows', type=int, default=None,
-                       help='Cap the round trip at this many candidates. Reported when set: a '
-                            'silently truncated check reads as full coverage')
+    check.add_argument('--roundtrip-rows', type=int, default=2_000_000,
+                       help='Cap the round trip at this many candidates, 0 for no cap. It is the '
+                            'one layer that must rebuild reference line lists, so the whole pool '
+                            'is hours and more memory than a node has. The cap is REPORTED in the '
+                            'result line: a silently truncated check reads as full coverage')
     check.add_argument('--keep-going', action='store_true')
     check.set_defaults(func=_run_check)
 

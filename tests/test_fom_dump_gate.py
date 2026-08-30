@@ -23,6 +23,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from mlindex.model_training import FomBenchmark
 from mlindex.scripts import run_fom_dump_consolidate as consolidate
 from mlindex.scripts import run_fom_dump_gate as gate
 
@@ -47,6 +48,7 @@ def _bundle(tmp_path, bundle, n_entries=2, name=None, shard='shard00of01', first
         'M20': 1.0 + j, 'is_correct': j == 0, 'is_off_by_two': False,
         'retained_reason': 'correct' if j == 0 else 'top_k', 'sampling_weight': 1.0,
         'hkl_true_in_basis': (np.array([1, 0, 0], dtype=np.int16) if j == 0 else None),
+        'xnn_distance_to_truth': 0.01 * j, 'volume_ratio_to_truth': 1.0 + 0.1 * j,
         } for i in range(first_entry, first_entry + n_entries) for j in range(3)])
     entries.to_parquet(directory / f'entries_{bundle}_{shard}_pool00.parquet', index=False)
     candidates.to_parquet(directory / f'candidates_{bundle}_{shard}_pool00.parquet',
@@ -163,23 +165,52 @@ def test_measured_reachability_overrides_the_default_and_is_recorded_as_such():
 
 
 def test_the_weights_layer_fails_when_a_positive_was_not_protected():
-    candidates = pd.DataFrame({
-        'entry_id': ['E1', 'E1'], 'condition_bundle': ['b', 'b'], 'bravais_lattice': ['oP', 'oP'],
-        'is_correct': [True, False], 'retained_reason': ['sampled', 'top_k'],
-        'sampling_weight': [20.0, 1.0],
-        })
+    """The retention rule keeps every correct candidate; a positive marked otherwise is a defect.
+
+    The layer reads the streaming scan's accumulated counts rather than a frame, because the pool
+    is ~880 M rows and loading it whole killed a node (C2-F-074).
+    """
+    scan = {'columns': ['retained_reason', 'sampling_weight', 'is_correct'],
+            'correct_not_marked': 3, 'bad_weight': 0, 'weighted': {}}
     with pytest.raises(gate.GateFailure, match='not marked'):
-        gate.layer_weights(candidates)
+        gate.layer_weights(scan, pool='unused')
+
+
+def test_the_weights_layer_fails_on_a_certain_row_carrying_a_sampled_weight():
+    scan = {'columns': ['retained_reason', 'sampling_weight', 'is_correct'],
+            'correct_not_marked': 0, 'bad_weight': 7, 'weighted': {}}
+    with pytest.raises(gate.GateFailure, match='weight other than 1.0'):
+        gate.layer_weights(scan, pool='unused')
 
 
 def test_the_weights_layer_says_when_it_is_only_partial():
-    candidates = pd.DataFrame({
-        'entry_id': ['E1'], 'condition_bundle': ['b'], 'bravais_lattice': ['oP'],
-        'is_correct': [True], 'retained_reason': ['correct'], 'sampling_weight': [1.0],
-        })
     # Without a fully-retained reference the weighted-count half cannot run, and saying so is the
     # point: a silently partial gate reads as a passed one.
-    assert 'partial' in gate.layer_weights(candidates)
+    scan = {'columns': ['retained_reason', 'sampling_weight', 'is_correct'],
+            'correct_not_marked': 0, 'bad_weight': 0, 'weighted': {}}
+    assert 'partial' in gate.layer_weights(scan, pool='unused')
+
+
+def test_the_gate_never_loads_the_whole_candidate_pool(tmp_path, monkeypatch):
+    """C2-F-074. `load_candidates` concatenates every shard into one pandas frame.
+
+    At 880 M rows across 34 columns, four of them list-valued, that is far more memory than a node
+    has, and it killed the first gate run outright. Every layer but the round trip now reads a
+    single streaming pass instead, and the round trip takes a capped prefix file by file.
+    """
+    root = tmp_path / 'dump'
+    _bundle(root, 'c2_error1_cont0', n_entries=2, shard='shard00of01')
+    out = tmp_path / 'pool'
+    consolidate.main(['--dump-root', str(root), '--out-dir', str(out)])
+
+    def refuse(*args, **kwargs):
+        raise AssertionError('load_candidates loads the entire pool into memory')
+
+    monkeypatch.setattr(FomBenchmark, 'load_candidates', refuse)
+    entries = FomBenchmark.load_entries(out)
+    scan = gate.scan_candidates(str(out), entries)
+    assert scan['n_rows'] == 6
+    assert gate.layer_structure(str(out), entries, scan)
 
 
 # ------------------------------------------------------------------------------------------
