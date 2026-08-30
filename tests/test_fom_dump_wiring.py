@@ -348,3 +348,40 @@ def test_the_lattice_check_is_silent_when_nothing_was_written(tmp_path):
 
     given = pd.DataFrame({'identifier': ['A'], 'bravais_lattice': ['hR']})
     assert refuse_a_missing_lattice(str(tmp_path), 'tag', given) is None
+
+
+def test_the_supplementary_entry_lists_are_split_by_arm(tmp_path):
+    """The mechanism arm is a nested subset, so it needs its own list.
+
+    `run_fom_dump.py --arm mechanism` restricts the manifest BEFORE `--entry-ids-file` is applied.
+    Handing a mechanism task the full per-lattice list makes the driver refuse -- correctly -- and
+    that is what cost the first supplementary run all four of its mechanism tasks.
+    """
+    from mlindex.scripts._hr_entry_lists import write_lists
+
+    manifest = pd.DataFrame({
+        'identifier': ['A', 'B', 'C', 'D'],
+        'bravais_lattice': ['hR', 'hR', 'hR', 'tP'],
+        'arm': ['core', 'core+mechanism', 'core', 'core+mechanism'],
+        })
+    path = tmp_path / 'm.parquet'
+    manifest.to_parquet(path, index=False)
+    core, mechanism = tmp_path / 'core.csv', tmp_path / 'mech.csv'
+    n_core, n_mechanism = write_lists(str(path), str(core), str(mechanism))
+
+    assert (n_core, n_mechanism) == (3, 1)
+    core_ids = set(pd.read_csv(core)['identifier'])
+    mechanism_ids = set(pd.read_csv(mechanism)['identifier'])
+    assert core_ids == {'A', 'B', 'C'}, 'the core list must be every entry of that lattice'
+    assert mechanism_ids == {'B'}, 'the mechanism list must be the nested subset only'
+    assert mechanism_ids < core_ids, 'the mechanism list must be a strict subset of the core one'
+
+
+def test_the_supplementary_lists_refuse_a_lattice_that_is_not_there(tmp_path):
+    from mlindex.scripts._hr_entry_lists import main
+
+    manifest = pd.DataFrame({'identifier': ['A'], 'bravais_lattice': ['tP'], 'arm': ['core']})
+    path = tmp_path / 'm.parquet'
+    manifest.to_parquet(path, index=False)
+    with pytest.raises(SystemExit, match='nothing to regenerate'):
+        main([str(path), str(tmp_path / 'c.csv'), str(tmp_path / 'm.csv')])

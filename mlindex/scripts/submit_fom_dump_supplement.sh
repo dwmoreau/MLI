@@ -27,6 +27,11 @@
 #   1. ON THE LAPTOP: git push origin fom_campaign2 && docs/sync_record.sh push
 #   2. HERE:          git pull && git log --oneline -1
 #   3.                sbatch submit_fom_dump_supplement.sh
+#
+#      Tasks are independent and the driver skips pools already written, so a partial attempt
+#      is resumable: `sbatch --array=5-8 submit_fom_dump_supplement.sh` re-runs the mechanism
+#      half alone. The first attempt (2026-08-29) lost exactly those four to a wrong entry
+#      list here; its five core tasks completed and must NOT be re-run.
 #   4. When it finishes, consolidate BOTH roots together -- the consolidator merges a bundle that
 #      appears in two directories and refuses any repeated shard file:
 #
@@ -62,7 +67,13 @@ cd "$REPO/mlindex/scripts" || exit 1
 
 MANIFEST="$REPO/docs/fom_campaign2/artifacts/S06_split_manifest.parquet"
 OUTROOT="$SCRATCH/fom_campaign2/benchmark_supplement"
-IDS="$SCRATCH/fom_campaign2/hR_entry_ids.csv"
+# TWO id lists, one per arm. `--arm mechanism` restricts the manifest to the nested ~15 %
+# subset BEFORE the id file is applied, and only 210 of the 1 400 hR entries are in it -- so
+# handing the mechanism tasks the full list makes the driver refuse "1190 of 1400 requested
+# entries were not found". That is the guard working correctly and the script being wrong; it
+# cost the first supplement attempt all four of its mechanism tasks.
+IDS_CORE="$SCRATCH/fom_campaign2/hR_ids_core.csv"
+IDS_MECH="$SCRATCH/fom_campaign2/hR_ids_mechanism.csv"
 SEED=12345
 
 # MUST match the first array exactly: pool_size is part of the benchmark's identity (C2-F-069).
@@ -76,20 +87,12 @@ if [ ! -f "$MANIFEST" ]; then
     exit 1
 fi
 
-# The entry list: every hR crystal in the frozen manifest. Written once, from the manifest itself,
-# so it cannot drift from what the first array was given.
-if [ ! -f "$IDS" ]; then
-    mkdir -p "$(dirname "$IDS")"
-    $PYTHON - "$MANIFEST" "$IDS" <<'PY'
-import sys
-import pandas as pd
-manifest = pd.read_parquet(sys.argv[1])
-identifier = 'identifier' if 'identifier' in manifest.columns else 'entry_id'
-rhombohedral = manifest.loc[manifest['bravais_lattice'] == 'hR', identifier]
-pd.DataFrame({'identifier': sorted(rhombohedral)}).to_csv(sys.argv[2], index=False)
-print(f'wrote {sys.argv[2]}: {len(rhombohedral)} hR entries')
-PY
-fi
+# The entry lists, derived from the frozen manifest itself so they cannot drift from what the
+# first array was given. Regenerated on every task: they are cheap, and a stale file from an
+# earlier attempt is exactly the kind of thing that survives a fix.
+mkdir -p "$(dirname "$IDS_CORE")"
+$PYTHON "$REPO/mlindex/scripts/_hr_entry_lists.py" "$MANIFEST" "$IDS_CORE" "$IDS_MECH" \
+    || exit 1
 
 # One task per bundle. Each runs all NSHARDS shards in sequence -- an hR-only bundle is ~1 400
 # entries at most, so the whole task is minutes, and this keeps the array small.
@@ -108,9 +111,14 @@ read -r CONDITION ARM <<< "${TASKS[$SLURM_ARRAY_TASK_ID]}"
 
 TAG=$($PYTHON run_fom_dump.py --condition "$CONDITION" --print-tag) || exit 1
 ARM_FLAG=""
-[ "$ARM" = "mechanism" ] && ARM_FLAG="--arm mechanism"
+IDS="$IDS_CORE"
+if [ "$ARM" = "mechanism" ]; then
+    ARM_FLAG="--arm mechanism"
+    IDS="$IDS_MECH"        # 210 entries, not 1 400 -- see the note above the two lists
+fi
 
 echo "task $SLURM_ARRAY_TASK_ID: $CONDITION ($ARM), hR only -> $TAG"
+echo "  entry list: $IDS ($(($(wc -l < "$IDS") - 1)) entries)"
 
 STATUS=0
 for SHARD in $(seq 0 $((NSHARDS - 1))); do
