@@ -151,12 +151,21 @@ def scan_candidates(pool, entries):
 
     Returns a dict. Doing it once rather than per layer matters: each pass is a read of 122 GB.
     """
-    truth = dict(zip(entries['entry_id'].astype(str) + '\x00'
-                     + entries['condition_bundle'].astype(str),
-                     entries['bravais_lattice_true']))
-    digests = dict(zip(entries['entry_id'].astype(str) + '\x00'
-                       + entries['condition_bundle'].astype(str),
-                       entries['q2_digest']))
+    # TUPLE keys, not a concatenated string. The pool joins on (entry_id, condition_bundle) and
+    # an earlier version built the key as `entry_id + '\x00' + condition_bundle` -- NUL being the
+    # one character that cannot occur in either field.
+    #
+    # It is also the one character numpy string handling treats specially. On a pandas that backs
+    # strings with object dtype, `Series.astype(str) + '\x00'` goes through numpy, which uses NUL
+    # as terminator/padding and DROPS it: the entry side produced 'ADOGEHc2_error0.1_cont0' while
+    # the candidate side, built with an f-string, produced 'ADOGEH\x00c2_error0.1_cont0'. Every
+    # single lookup missed. On a pandas that backs strings with Arrow the NUL survives and the same
+    # code works, so it passed locally and failed on the cluster (C2-F-075).
+    #
+    # A tuple has no encoding to get wrong, and it is what the join key actually is.
+    keys = list(zip(entries['entry_id'], entries['condition_bundle']))
+    truth = dict(zip(keys, entries['bravais_lattice_true']))
+    digests = dict(zip(keys, entries['q2_digest']))
 
     scan = {'n_rows': 0, 'non_null': {}, 'columns': None, 'floor': {},
             'correct_not_marked': 0, 'bad_weight': 0, 'weighted': {}, 'join_errors': [],
@@ -184,7 +193,7 @@ def scan_candidates(pool, entries):
             scan['n_rows'] += table.num_rows
             pairs = table.group_by(['entry_id', 'condition_bundle', 'q2_digest']).aggregate([])
             for row in pairs.to_pylist():
-                key = f"{row['entry_id']}\x00{row['condition_bundle']}"
+                key = (row['entry_id'], row['condition_bundle'])
                 if len(scan['sample_candidate_keys']) < 2:
                     scan['sample_candidate_keys'].append(repr(key))
                 expected = digests.get(key)
@@ -197,7 +206,7 @@ def scan_candidates(pool, entries):
                         f"{row['q2_digest']} but its entry row says {expected}")
 
             if 'is_correct' in table.column_names:
-                keys = pa.array([truth.get(f'{e}\x00{b}') for e, b in
+                keys = pa.array([truth.get(pair) for pair in
                                  zip(table.column('entry_id').to_pylist(),
                                      table.column('condition_bundle').to_pylist())])
                 tagged = table.append_column('bravais_lattice_true', keys)

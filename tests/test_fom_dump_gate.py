@@ -378,3 +378,46 @@ def test_coverage_accepts_a_shortfall_the_run_recorded(tmp_path):
     # And with no dump root at all it cannot know, so it must not pass silently.
     with pytest.raises(gate.GateFailure, match='no --dump-root'):
         gate.layer_coverage(entries, None)
+
+
+def test_the_join_key_survives_object_dtype_strings(tmp_path):
+    """C2-F-075. The gate passed on one pandas and failed on every row under another.
+
+    The join key is (entry_id, condition_bundle). An earlier version built it by concatenating
+    with '\\x00' -- NUL being the one character that cannot appear in either field. It is also the
+    one character numpy string handling treats specially: with object-dtype strings,
+    `Series.astype(str) + '\\x00'` drops it, so the entry side produced 'Ec2_error1_cont0' while
+    the candidate side produced 'E\\x00c2_error1_cont0' and every lookup missed. Arrow-backed
+    strings preserve it, which is why it worked on the development machine.
+
+    This forces the object dtype the cluster had. It must not matter.
+    """
+    root = tmp_path / 'dump'
+    _bundle(root, 'c2_error1_cont0', n_entries=2, shard='shard00of01')
+    out = tmp_path / 'pool'
+    consolidate.main(['--dump-root', str(root), '--out-dir', str(out)])
+
+    entries = FomBenchmark.load_entries(out)
+    for column in ('entry_id', 'condition_bundle', 'q2_digest', 'bravais_lattice_true'):
+        entries[column] = entries[column].astype(object)
+    assert entries['entry_id'].dtype == object
+
+    scan = gate.scan_candidates(str(out), entries)
+    assert not scan['join_errors'], scan['join_errors'][:3]
+    assert scan['n_entry_keys'] == 2
+    # And the floor counts land under a real lattice rather than under None, which is the same
+    # bug's second symptom: "no correct candidates counted anywhere" on a pool holding 715 571.
+    assert scan['floor'], 'no floor counts accumulated'
+    assert all(lattice is not None for _, lattice in scan['floor'])
+    assert sum(scan['floor'].values()) == 2, scan['floor']
+
+
+def test_the_key_is_a_tuple_not_a_concatenation():
+    """Pinned directly: any separator is an encoding waiting to be got wrong."""
+    import inspect
+
+    source = inspect.getsource(gate.scan_candidates)
+    assert "list(zip(entries['entry_id'], entries['condition_bundle']))" in source
+    body = [line for line in source.splitlines() if not line.strip().startswith('#')]
+    assert not any('\\x00' in line for line in body), (
+        'the join key is being built by string concatenation again')
