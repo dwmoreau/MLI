@@ -1078,16 +1078,58 @@ def write_entry_table(frame, out_dir, shard_tag):
     return path
 
 
-def _to_parquet(frame, path):
+# The Arrow type a column must have on disk whatever this particular shard happens to hold.
+#
+# A column that is null in every row of a shard has no type for Arrow to infer, so pandas writes it
+# as parquet type `null` rather than its real type -- and two shards of one run then disagree,
+# which makes a strict multi-file read fail. `hkl_true_in_basis` is the one that bites: it is null
+# for every candidate that is not correct, correctly so, and a shard containing no correct
+# candidate at all has it null throughout. That happened often enough in the first Benchmark B run
+# to stop consolidation dead (C2-F-073).
+#
+# Only columns that can legitimately be all-null need to be here. `xnn` and `unit_cell` are never
+# null, so their type is always inferred.
+NULLABLE_COLUMN_TYPES = ('hkl_true_in_basis', 'merit_at_prune')
+
+
+def _nullable_column_types():
+    """{column: Arrow type}, built lazily because pyarrow is an optional dependency here."""
+    import pyarrow as pa
+
+    return {'hkl_true_in_basis': pa.list_(pa.int16()),
+            'merit_at_prune': pa.list_(pa.float64())}
+
+
+def _typed_table(frame):
+    """The frame as an Arrow table, with all-null columns given their declared type."""
+    import pyarrow as pa
+
+    declared = _nullable_column_types()
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    fields, changed = [], False
+    for field in table.schema:
+        wanted = declared.get(field.name)
+        if wanted is not None and pa.types.is_null(field.type):
+            fields.append(pa.field(field.name, wanted))
+            changed = True
+        else:
+            fields.append(field)
+    if not changed:
+        return table
+    return table.cast(pa.schema(fields, metadata=table.schema.metadata))
+
+
+def _to_parquet(frame, path, row_group_size=None):
     try:
-        import pyarrow  # noqa: F401
+        import pyarrow.parquet as pq
     except ImportError as error:
         raise ImportError(
             "Writing the FOM benchmark needs pyarrow. Install it with "
             "'pip install mlindex[fom]' or 'pip install pyarrow'."
             ) from error
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(path, index=False)
+    pq.write_table(_typed_table(frame), path,
+                   **({'row_group_size': row_group_size} if row_group_size else {}))
 
 
 def write_manifest(out_dir, **run_metadata):

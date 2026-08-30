@@ -46,6 +46,7 @@ def _bundle(tmp_path, bundle, n_entries=2, name=None, shard='shard00of01', first
         'bravais_lattice': 'oP', 'lattice_system': 'orthorhombic', 'candidate_id': j,
         'M20': 1.0 + j, 'is_correct': j == 0, 'is_off_by_two': False,
         'retained_reason': 'correct' if j == 0 else 'top_k', 'sampling_weight': 1.0,
+        'hkl_true_in_basis': (np.array([1, 0, 0], dtype=np.int16) if j == 0 else None),
         } for i in range(first_entry, first_entry + n_entries) for j in range(3)])
     entries.to_parquet(directory / f'entries_{bundle}_{shard}_pool00.parquet', index=False)
     candidates.to_parquet(directory / f'candidates_{bundle}_{shard}_pool00.parquet',
@@ -259,3 +260,53 @@ def test_counts_are_grouped_by_the_TRUE_lattice_not_the_candidate_s(tmp_path):
     assert int(counts['n_correct'].sum()) == 2         # one per entry, by construction
     assert int(counts['n_entries'].iloc[0]) == 2
     assert int(counts['n_reachable_entries'].iloc[0]) == 2
+
+
+def test_shards_that_disagree_on_a_null_column_still_consolidate(tmp_path):
+    """C2-F-073. `hkl_true_in_basis` is null for every candidate that is not correct.
+
+    A shard containing NO correct candidate has the column all-None, so pandas gives Arrow nothing
+    to infer from and parquet records the type as `null` rather than `list<int16>`. Two shards of
+    one run then disagree, and a strict multi-file write raises "Table schema does not match schema
+    used to create file". That stopped the first Benchmark B consolidation outright.
+
+    Fixed at both ends: the writer types the column even when it is empty, and the consolidator
+    unifies the schemas across a stream's footers before writing. This pins the second, because
+    the pools already on disk carry the mixed schema and must stay readable.
+    """
+    import pyarrow.parquet as pq
+
+    root = tmp_path / 'dump'
+    directory = _bundle(root, 'c2_error1_cont0', n_entries=2, shard='shard00of02')
+    _bundle(root, 'c2_error1_cont0', n_entries=1, shard='shard01of02', first_entry=90)
+
+    # Force one shard to the untyped form, exactly as pandas wrote it before the fix.
+    path = directory / 'candidates_c2_error1_cont0_shard00of02_pool00.parquet'
+    frame = pd.read_parquet(path)
+    frame['hkl_true_in_basis'] = None
+    frame.to_parquet(path, index=False)
+    assert str(pq.read_schema(path).field('hkl_true_in_basis').type) == 'null'
+
+    out = tmp_path / 'pool'
+    consolidate.main(['--dump-root', str(root), '--out-dir', str(out)])
+
+    written = out / 'candidates_c2_error1_cont0_oP.parquet'
+    assert str(pq.read_schema(written).field('hkl_true_in_basis').type) == 'list<element: int16>'
+    assert pd.read_parquet(written).shape[0] == 9      # 3 entries x 3 candidates
+
+
+def test_the_writer_types_an_all_null_column(tmp_path):
+    """The other end: a shard with no correct candidate must not be written untyped."""
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    from mlindex.model_training.FomBenchmark import _to_parquet
+
+    frame = pd.DataFrame({
+        'entry_id': ['A', 'B'],
+        'hkl_true_in_basis': [None, None],
+        'merit_at_prune': [np.array([1.0, 2.0]), np.array([3.0, 4.0])],
+        })
+    path = tmp_path / 'shard.parquet'
+    _to_parquet(frame, path)
+    assert str(pq.read_schema(path).field('hkl_true_in_basis').type) == 'list<element: int16>'

@@ -138,9 +138,12 @@ class _LatticeWriters:
     Staying in Arrow skips both conversions, and streaming file by file bounds memory at one shard.
     """
 
-    def __init__(self, out_dir, stream, bundle, row_group_size):
+    def __init__(self, out_dir, stream, bundle, row_group_size, schema):
         self.out_dir, self.stream = Path(out_dir), stream
         self.bundle, self.row_group_size = bundle, row_group_size
+        # ONE schema for every file of this stream, unified across all shards up front rather than
+        # taken from whichever shard happened to be read first. See `unified_schema`.
+        self.schema = schema
         self._writers = {}
 
     def write(self, table, bravais_lattice):
@@ -148,16 +151,41 @@ class _LatticeWriters:
         if writer is None:
             path = self.out_dir / f'{self.stream}_{self.bundle}_{bravais_lattice}.parquet'
             path.parent.mkdir(parents=True, exist_ok=True)
-            # The first shard's schema is the file's schema. A later shard that disagrees raises
-            # here rather than producing a file whose columns silently shift.
-            writer = pq.ParquetWriter(path, table.schema)
+            writer = pq.ParquetWriter(path, self.schema)
             self._writers[bravais_lattice] = writer
-        writer.write_table(table, row_group_size=self.row_group_size)
+        writer.write_table(table.cast(self.schema), row_group_size=self.row_group_size)
 
     def close(self):
         for writer in self._writers.values():
             writer.close()
         self._writers.clear()
+
+
+def unified_schema(paths):
+    """One schema for a whole stream, unified over every shard's footer.
+
+    SHARDS OF ONE RUN DO NOT ALL HAVE THE SAME SCHEMA, which is not obvious and cost a
+    consolidation. `hkl_true_in_basis` is null for every candidate that is not correct -- correctly,
+    since no basis change relates a wrong cell to the truth -- so a shard that happened to contain
+    NO correct candidate has the column all-None, pandas gives Arrow nothing to infer from, and it
+    is written as parquet type `null` instead of `list<int16>`. Roughly one shard in a hundred at
+    these pool sizes, and enough to make a strict multi-file read fail outright.
+
+    `unify_schemas` promotes null to the concrete type whichever order the shards come in, and
+    reading a footer is cheap -- no row is touched. Every table is then cast to the result, so all
+    files of a stream agree and a loader can read them as one dataset.
+
+    The driver now types the column at write time too (`FomBenchmark._to_parquet`), so new pools do
+    not have the problem; this keeps the ones already on disk readable.
+    """
+    schemas = [pq.read_schema(path) for path in paths]
+    try:
+        return pa.unify_schemas(schemas)
+    except pa.ArrowInvalid as error:
+        raise SystemExit(
+            f'the shards of this stream have schemas that cannot be unified ({error}). That is a '
+            'column set difference, not a null-type promotion, and it means two different runs '
+            'were written to one directory.') from error
 
 
 def _check_shard_join(table, digest_by_entry, path):
@@ -260,7 +288,8 @@ def consolidate_bundle(bundle_dirs, out_dir, row_group_size):
                            _stream_paths(bundle_dirs, 'predownsample_*.parquet'))):
         if not paths:
             continue
-        writers = _LatticeWriters(out_dir, stream, bundle, row_group_size)
+        writers = _LatticeWriters(out_dir, stream, bundle, row_group_size,
+                                  unified_schema(paths))
         try:
             for path in paths:
                 table = pq.read_table(path)
