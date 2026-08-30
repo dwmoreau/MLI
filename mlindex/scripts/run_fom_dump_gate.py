@@ -159,7 +159,10 @@ def scan_candidates(pool, entries):
                        entries['q2_digest']))
 
     scan = {'n_rows': 0, 'non_null': {}, 'columns': None, 'floor': {},
-            'correct_not_marked': 0, 'bad_weight': 0, 'weighted': {}, 'join_errors': []}
+            'correct_not_marked': 0, 'bad_weight': 0, 'weighted': {}, 'join_errors': [],
+            'n_entry_keys': len(digests),
+            'sample_entry_keys': [repr(key) for key in list(digests)[:2]],
+            'sample_candidate_keys': []}
 
     needed = ['entry_id', 'condition_bundle', 'q2_digest', 'bravais_lattice',
               'is_correct', 'retained_reason', 'sampling_weight']
@@ -182,6 +185,8 @@ def scan_candidates(pool, entries):
             pairs = table.group_by(['entry_id', 'condition_bundle', 'q2_digest']).aggregate([])
             for row in pairs.to_pylist():
                 key = f"{row['entry_id']}\x00{row['condition_bundle']}"
+                if len(scan['sample_candidate_keys']) < 2:
+                    scan['sample_candidate_keys'].append(repr(key))
                 expected = digests.get(key)
                 if expected is None:
                     scan['join_errors'].append(f"{row['entry_id']}/{row['condition_bundle']} "
@@ -230,8 +235,24 @@ def layer_structure(pool, entries, scan):
     that check at all.
     """
     if scan['join_errors']:
-        raise GateFailure(f"{len(scan['join_errors'])} candidates do not match their entry row, "
-                          f"e.g. {scan['join_errors'][0]}")
+        # Counted per (batch, triple), not per candidate -- one bad key recurs in every batch it
+        # appears in, so the number is an occurrence count and saying "candidates" overstates it.
+        n_distinct = len(set(scan['join_errors']))
+        detail = '; '.join(sorted(set(scan['join_errors']))[:3])
+        diagnosis = ''
+        if n_distinct >= scan['n_entry_keys']:
+            # EVERY key failing is not a data fault, it is a lookup fault. Say so, with the two
+            # sides side by side, rather than making someone bisect a 122 GB pool for it.
+            diagnosis = (
+                f"\n  ALL {n_distinct} distinct keys failed, which is a lookup fault rather than "
+                f"missing data.\n"
+                f"  entry-table keys: {scan['n_entry_keys']}, e.g. {scan['sample_entry_keys']}\n"
+                f"  candidate keys  : e.g. {scan['sample_candidate_keys']}\n"
+                f"  If those look identical, compare their types and repr(), not their printed "
+                f"form.")
+        raise GateFailure(f'{n_distinct} distinct (entry, bundle) keys on candidate rows do not '
+                          f'match the entry table, over {len(scan["join_errors"])} occurrences. '
+                          f'e.g. {detail}{diagnosis}')
 
     required = [column for column in FomBenchmark.LABEL_COLUMNS]
     absent = [column for column in required if column not in (scan['columns'] or [])]
@@ -286,30 +307,63 @@ def layer_manifest(pool):
     return f'{len(bundle_manifests)} bundles, arch {arches.pop()}'
 
 
-def layer_coverage(entries):
+def recorded_failures(dump_roots):
+    """{bundle: entries the generation run recorded as failed}, from `failures_*.json`.
+
+    A bundle can legitimately cover fewer entries than its arm: contaminant and second-phase
+    placement are rejection-sampled, and an entry whose lines cannot be placed is skipped and
+    RECORDED. Campaign 1 lost 33 entries that way. What the gate has to separate is a loss with a
+    reason on disk from a loss with none -- the second is what condition 3 exists to catch, and
+    failing on the first would make the gate unpassable on a run that behaved correctly.
+    """
+    counts = {}
+    for root in dump_roots or ():
+        for path in sorted(Path(root).glob('*/failures_*.json')):
+            try:
+                with open(path, encoding='utf-8') as handle:
+                    failures = json.load(handle)
+            except Exception:
+                continue
+            bundle = path.parent.name
+            counts.setdefault(bundle, set()).update(
+                failure.get('identifier') for failure in failures)
+    return {bundle: len(ids) for bundle, ids in counts.items()}
+
+
+def layer_coverage(entries, dump_roots=None):
     """Gate 3: every bundle covers the same entry set for the arm it belongs to.
 
     NOT enforced by intersecting. Campaign 1 lost 33 entries to unplaceable second-phase lines and
     then aligned bundles by intersection, which is where its volume-decile drift entered (R14,
-    C2-F-050). Here a shortfall is a failure to report, not a set to silently shrink.
+    C2-F-050). Here a shortfall is reported, and it fails only when it is UNACCOUNTED -- larger
+    than the entries the run itself recorded as failed.
     """
-    report = []
-    failures = []
-    for arm in sorted({_bundle_arm(bundle) for bundle in entries['condition_bundle'].unique()}):
+    accounted = recorded_failures(dump_roots)
+    report, failures = [], []
+    for arm in sorted({FomConditions.bundle_arm(bundle)
+                       for bundle in entries['condition_bundle'].unique()}):
         bundles = {bundle: set(group['entry_id'])
                    for bundle, group in entries.groupby('condition_bundle')
-                   if _bundle_arm(bundle) == arm}
+                   if FomConditions.bundle_arm(bundle) == arm}
         if not bundles:
             continue
         union = set().union(*bundles.values())
         for bundle, ids in sorted(bundles.items()):
             missing = len(union - ids)
-            report.append(f'{bundle}: {len(ids)} entries, {missing} short of the {arm} union')
-            if missing:
-                failures.append((bundle, missing))
+            known = accounted.get(bundle, 0)
+            if missing == 0:
+                report.append(f'{bundle}: {len(ids)}, complete')
+            elif dump_roots is None:
+                failures.append(f'{bundle} short {missing}, and no --dump-root was given to '
+                                'check whether the run recorded them')
+            elif missing <= known:
+                report.append(f'{bundle}: {len(ids)}, short {missing} -- all accounted for by '
+                              f'{known} recorded generation failures')
+            else:
+                failures.append(f'{bundle} short {missing} with only {known} recorded failures, '
+                                f'so {missing - known} are unexplained')
     if failures:
-        raise GateFailure('bundles do not cover the same entry set within their arm: '
-                          + '; '.join(f'{bundle} short {n}' for bundle, n in failures)
+        raise GateFailure('; '.join(failures)
                           + '. Record the loss per bundle and do NOT intersect (R14).')
     return '; '.join(report)
 
@@ -463,7 +517,7 @@ def _run_check(args):
     layers = [
         ('structure', lambda: layer_structure(args.pool, entries, scan)),
         ('manifest', lambda: layer_manifest(args.pool)),
-        ('coverage', lambda: layer_coverage(entries)),
+        ('coverage', lambda: layer_coverage(entries, args.dump_root)),
         ('floor', lambda: layer_floor(scan, floor_table)),
         ('weights', lambda: layer_weights(scan, args.pool, args.full_pool)),
         ('roundtrip', lambda: layer_roundtrip(args.pool, entries, args.tolerance,
@@ -501,6 +555,12 @@ def main(argv=None):
     check = sub.add_parser('check', help='run the acceptance gate against a consolidated pool')
     check.add_argument('--pool', type=str, required=True)
     check.add_argument('--artifact-dir', type=str, required=True)
+    check.add_argument('--dump-root', type=str, default=None, nargs='+',
+                       help='The generation output the pool was consolidated from. Read for its '
+                            'failures_*.json, so a bundle covering fewer entries than its arm can '
+                            'be checked against what the run RECORDED as failed rather than '
+                            'failing outright. Without it any shortfall is unexplained by '
+                            'definition')
     check.add_argument('--full-pool', type=str, default=None,
                        help='A fully-retained pool over a held-back entry subset, for gate 6')
     check.add_argument('--tolerance', type=float, default=1e-6)

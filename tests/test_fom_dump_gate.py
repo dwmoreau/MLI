@@ -341,3 +341,40 @@ def test_the_writer_types_an_all_null_column(tmp_path):
     path = tmp_path / 'shard.parquet'
     _to_parquet(frame, path)
     assert str(pq.read_schema(path).field('hkl_true_in_basis').type) == 'list<element: int16>'
+
+
+def test_coverage_accepts_a_shortfall_the_run_recorded(tmp_path):
+    """A bundle may legitimately cover fewer entries than its arm.
+
+    Contaminant and second-phase placement are rejection-sampled, and an entry whose lines cannot
+    be placed is skipped and RECORDED in failures_*.json. Campaign 1 lost 33 that way; the first
+    real Benchmark B run lost 104 from the second-phase bundle. Failing on that would make the gate
+    unpassable on a run that behaved correctly, so what condition 3 must separate is a loss with a
+    reason on disk from a loss with none.
+    """
+    import json as json_module
+
+    root = tmp_path / 'dump'
+    directory = _bundle(root, 'c2_error1_cont0', n_entries=3, shard='shard00of01')
+    # A second bundle of the same arm, one entry short, with the loss recorded.
+    short = _bundle(root, 'c2_error1_cont2', n_entries=2, shard='shard00of01')
+    with open(short / 'failures_c2_error1_cont2_shard00of01_pool00.json', 'w',
+              encoding='utf-8') as handle:
+        json_module.dump([{'identifier': 'E2', 'reason': 'contaminant_placement'}], handle)
+
+    out = tmp_path / 'pool'
+    consolidate.main(['--dump-root', str(root), '--out-dir', str(out)])
+    entries = FomBenchmark.load_entries(out)
+
+    # Accounted for: passes, and says so.
+    message = gate.layer_coverage(entries, [str(root)])
+    assert 'accounted for' in message
+
+    # Unaccounted: fails. Same data, but the record of why is gone.
+    (short / 'failures_c2_error1_cont2_shard00of01_pool00.json').unlink()
+    with pytest.raises(gate.GateFailure, match='unexplained'):
+        gate.layer_coverage(entries, [str(root)])
+
+    # And with no dump root at all it cannot know, so it must not pass silently.
+    with pytest.raises(gate.GateFailure, match='no --dump-root'):
+        gate.layer_coverage(entries, None)
