@@ -69,7 +69,14 @@ BRAVAIS_HOLOHEDRY = {
     'cP': 'P m -3 m', 'cI': 'I m -3 m', 'cF': 'F m -3 m',
     'tP': 'P 4/m m m', 'tI': 'I 4/m m m',
     'oP': 'P m m m', 'oC': 'C m m m', 'oI': 'I m m m', 'oF': 'F m m m',
-    'hP': 'P 6/m m m', 'hR': 'R -3 m :H',
+    'hP': 'P 6/m m m',
+    # ':R', the RHOMBOHEDRAL setting, not ':H'. `reindexed_unit_cell` stores hR cells on
+    # rhombohedral axes -- a = b = c and alpha = beta = gamma, verified on all 1 400 of the frozen
+    # manifest's hR entries, none of which is on hexagonal axes. Handing those parameters to the
+    # ':H' symbol makes cctbx raise `Space group is incompatible with unit cell parameters` for
+    # EVERY hR crystal, which is what silently cost the first Benchmark B run its entire
+    # rhombohedral lattice (C2-F-071).
+    'hR': 'R -3 m :R',
     'mP': 'P 2/m', 'mC': 'C 2/m',
     'aP': 'P -1',
     }

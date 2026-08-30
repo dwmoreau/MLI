@@ -310,3 +310,41 @@ def test_the_submit_script_does_not_wrap_the_driver_in_srun():
                     if 'run_fom_dump.py' in line and not line.strip().startswith('#')]
     assert driver_lines, 'the submit script never invokes the driver'
     assert not any('srun' in line for line in driver_lines), driver_lines
+
+
+def test_a_lattice_that_produced_nothing_stops_the_run(tmp_path):
+    """C2-F-071's second half: the loss must not be silent.
+
+    `MAX_CONSECUTIVE_FAILURES` cannot see this. Entries arrive grouped by lattice but are striped
+    across shards and pools, so a lattice of 1 400 entries gives each of 256 pools about five --
+    below the threshold of 10. Every pool wrote, every task exited 0, and an entire Bravais lattice
+    was absent from the benchmark until consolidation three days later.
+    """
+    from mlindex.scripts.run_fom_dump import refuse_a_missing_lattice
+
+    given = pd.DataFrame({'identifier': ['A', 'B', 'C'],
+                          'bravais_lattice': ['hR', 'hR', 'tP']})
+    # Only tP produced an entry row; both hR entries failed.
+    pd.DataFrame({'entry_id': ['C'], 'bravais_lattice_true': ['tP']}).to_parquet(
+        tmp_path / 'entries_tag_pool00.parquet', index=False)
+    with pytest.raises(SystemExit, match=r"produced no entry at all: \['hR'\]"):
+        refuse_a_missing_lattice(str(tmp_path), 'tag', given)
+
+
+def test_a_complete_shard_passes_the_lattice_check(tmp_path):
+    from mlindex.scripts.run_fom_dump import refuse_a_missing_lattice
+
+    given = pd.DataFrame({'identifier': ['A', 'B'], 'bravais_lattice': ['hR', 'tP']})
+    pd.DataFrame({'entry_id': ['A', 'B'],
+                  'bravais_lattice_true': ['hR', 'tP']}).to_parquet(
+        tmp_path / 'entries_tag_pool00.parquet', index=False)
+    assert refuse_a_missing_lattice(str(tmp_path), 'tag', given) is None
+
+
+def test_the_lattice_check_is_silent_when_nothing_was_written(tmp_path):
+    # A shard with no entries at all is a different failure and is reported elsewhere; this guard
+    # must not turn it into a confusing message about lattices.
+    from mlindex.scripts.run_fom_dump import refuse_a_missing_lattice
+
+    given = pd.DataFrame({'identifier': ['A'], 'bravais_lattice': ['hR']})
+    assert refuse_a_missing_lattice(str(tmp_path), 'tag', given) is None

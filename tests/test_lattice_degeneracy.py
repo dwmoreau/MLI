@@ -164,3 +164,67 @@ def test_flagged_cells_have_higher_metric_symmetry_by_cctbxs_own_search(slack_fa
     else:
         assert group.order_z() == 1
         assert symbol == 'P 1'
+
+
+# ------------------------------------------------------------------------------------------
+# Every Bravais lattice, on real cells. C2-F-071.
+#
+# `is_degenerate` is called once per entry by the benchmark driver, inside the per-entry failure
+# guard, so a lattice it cannot handle does not crash the run -- it silently drops every entry of
+# that lattice. That is exactly what happened: BRAVAIS_HOLOHEDRY['hR'] named the HEXAGONAL setting
+# ('R -3 m :H') while `reindexed_unit_cell` stores hR on rhombohedral axes, cctbx raised
+# "Space group is incompatible with unit cell parameters" for all 1 400 hR crystals, and the first
+# Benchmark B run lost its entire rhombohedral lattice while all 24 SLURM tasks exited 0.
+#
+# A per-lattice smoke test on real cells is the cheap thing that would have caught it.
+# ------------------------------------------------------------------------------------------
+
+import os
+
+import pytest
+
+DATASETS = os.path.join('mlindex', 'data', 'generated_datasets')
+ALL_LATTICES = ('cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP')
+
+
+@pytest.mark.parametrize('bravais_lattice', ALL_LATTICES)
+def test_is_degenerate_handles_real_cells_of_every_lattice(bravais_lattice):
+    import numpy as np
+    import pandas as pd
+
+    from mlindex.utilities.LatticeDegeneracy import is_degenerate
+
+    path = os.path.join(DATASETS, f'dataset_{bravais_lattice}.parquet')
+    if not os.path.exists(path):
+        pytest.skip('generated_datasets is regenerable run output and is not in the repo')
+    cells = pd.read_parquet(path, columns=['reindexed_unit_cell']).head(25)
+
+    failures = []
+    for cell in cells['reindexed_unit_cell']:
+        try:
+            flag, accidental, systematic = is_degenerate(
+                np.asarray(cell, dtype=float), bravais_lattice)
+        except Exception as error:                       # noqa: BLE001 -- the point is any error
+            failures.append(f'{type(error).__name__}: {error}')
+            continue
+        assert isinstance(bool(flag), bool)
+        assert isinstance(accidental, tuple) and isinstance(systematic, tuple)
+
+    assert not failures, (
+        f'{len(failures)} of {cells.shape[0]} real {bravais_lattice} cells raise, e.g. '
+        f'{failures[0]}. The driver calls this once per entry inside its per-entry failure guard, '
+        f'so every {bravais_lattice} entry would be dropped and the run would still exit 0.')
+
+
+def test_the_rhombohedral_holohedry_is_the_rhombohedral_setting():
+    """Pinned directly, because the failure it caused was invisible for three days.
+
+    `reindexed_unit_cell` stores hR on rhombohedral axes -- a = b = c, alpha = beta = gamma -- on
+    all 1 400 of the frozen manifest's hR entries and none on hexagonal axes. The ':H' symbol
+    demands the hexagonal setting and cctbx rejects the pair outright.
+    """
+    from mlindex.utilities.LatticeDegeneracy import BRAVAIS_HOLOHEDRY
+
+    assert BRAVAIS_HOLOHEDRY['hR'].endswith(':R'), BRAVAIS_HOLOHEDRY['hR']
+    assert set(BRAVAIS_HOLOHEDRY) == set(ALL_LATTICES)

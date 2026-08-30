@@ -456,11 +456,18 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
     entry_rows, candidate_frames, predownsample_frames, failures = [], [], [], []
     merit_at_prune_names = ()
     consecutive_failures = 0
+    # Attempted and succeeded per TRUE Bravais lattice. `MAX_CONSECUTIVE_FAILURES` cannot see a
+    # systematic per-lattice failure: entries arrive grouped by lattice but are then striped across
+    # shards and pools, so a lattice with 1 400 entries gives each of 256 pools only ~5 -- below
+    # the threshold of 10. That is exactly how the first Benchmark B run lost every one of its
+    # rhombohedral entries while all 24 tasks exited 0 (C2-F-071).
+    attempted, succeeded = {}, {}
     started = time.time()
     aborted = None
     try:
         for position in range(entries.shape[0]):
             entry = entries.iloc[position]
+            attempted[entry['bravais_lattice']] = attempted.get(entry['bravais_lattice'], 0) + 1
             hkl_full = np.stack([
                 np.asarray(entry[f'reindexed_{axis}_{FomPatterns.BROADENING_TAG}'], dtype=float)
                 for axis in ('h', 'k', 'l')], axis=1)
@@ -539,11 +546,26 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
                 degeneracy=degeneracy)
             row['pool_size_full'] = int(candidates.shape[0])
             entry_rows.append(row)
+            succeeded[entry['bravais_lattice']] = succeeded.get(entry['bravais_lattice'], 0) + 1
 
             if (position + 1) % 25 == 0:
                 elapsed = time.time() - started
                 print(f'[pool {pool_index:02d}] {position + 1}/{entries.shape[0]} entries, '
                       f'{elapsed / (position + 1):.1f} s/entry', flush=True)
+
+        # A whole lattice failing is a defect, not a run of bad luck, and nothing else catches it.
+        # Three attempts is the floor for calling it systematic: the rare lattices give a pool one
+        # entry or none (cF is 106 entries over 256 pools), so a lower bar would fire on noise.
+        wiped = sorted(lattice for lattice, n in attempted.items()
+                       if n >= 3 and succeeded.get(lattice, 0) == 0)
+        if wiped:
+            raise RuntimeError(
+                f'every attempted entry failed for {wiped} -- '
+                + '; '.join(f'{lattice} 0 of {attempted[lattice]}' for lattice in wiped)
+                + '. That is a systematic failure, not isolated entries, and it would otherwise '
+                  'be invisible: entries are striped across pools, so a lattice can be wiped out '
+                  'while no pool sees MAX_CONSECUTIVE_FAILURES in a row and every task exits 0. '
+                  'Read failures_*.json for the exception.')
     except Exception as error:
         # Write what this pool has rather than losing hours of it. Re-raised once the tables are
         # on disk, so the process still exits non-zero and main() reports the failure.
@@ -639,6 +661,32 @@ def refuse_a_changed_pool_size(out_dir, pool_size):
             'directory and start again.')
 
 
+def refuse_a_missing_lattice(out_dir, shard_tag, entries):
+    """Every Bravais lattice this shard set out to index must appear in what it wrote.
+
+    The per-pool guard fires first and faster, but it only sees one pool's stripe. This reads back
+    the entry tables and compares against the entries the shard was given, so a lattice lost across
+    every pool at a rate no single pool found alarming still stops the run.
+
+    It is the check that would have caught C2-F-071 at the end of the first task rather than at
+    consolidation, three days and 43 node-hours later.
+    """
+    written = sorted(Path(out_dir).glob(f'entries_{shard_tag}_pool*.parquet'))
+    if not written or entries.empty:
+        return
+    produced = set()
+    for path in written:
+        produced.update(pd.read_parquet(path, columns=['bravais_lattice_true'])
+                        ['bravais_lattice_true'].unique())
+    wanted = set(entries['bravais_lattice'].unique())
+    missing = sorted(wanted - produced)
+    if missing:
+        raise SystemExit(
+            f'{shard_tag}: these Bravais lattices were given to this shard and produced no entry '
+            f'at all: {missing}. Every one of their entries failed. Read failures_*.json in '
+            f'{out_dir} for the exception; do NOT consolidate this bundle.')
+
+
 def run(args):
     condition = FomConditions.BY_KEY[args.condition]
     bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
@@ -716,6 +764,8 @@ def run(args):
         failed = [process.exitcode for process in pool_processes if process.exitcode]
         if failed:
             raise SystemExit(f'{len(failed)} pools exited non-zero: {failed}')
+
+    refuse_a_missing_lattice(out_dir, shard_tag, entries)
 
     FomBenchmark.write_manifest(
         out_dir,
