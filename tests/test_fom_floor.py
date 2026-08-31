@@ -156,8 +156,13 @@ def test_a_lattice_missing_from_the_composition_is_dropped_and_reported():
 # ----------------------------------------------------------------------------------------
 # The refusal that makes the arms an ensemble rather than four different experiments
 # ----------------------------------------------------------------------------------------
-def _arm(digests):
-    return pd.DataFrame({'entry_id': list(digests), 'q2_digest': list(digests.values())})
+def _arm(digests, bundle='c2_error1_cont0'):
+    """An arm's entry table: one row per (entry, condition bundle)."""
+    return pd.DataFrame({'entry_id': [key[0] if isinstance(key, tuple) else key
+                                      for key in digests],
+                         'condition_bundle': [key[1] if isinstance(key, tuple) else bundle
+                                              for key in digests],
+                         'q2_digest': list(digests.values())})
 
 
 def test_identical_peak_lists_pass():
@@ -179,6 +184,27 @@ def test_arms_sharing_no_entries_raise():
     with pytest.raises(SystemExit, match='share no entries'):
         floor_report.check_arms_are_comparable({
             'a': _arm({'E1': 'aaa'}), 'b': _arm({'E9': 'aaa'})})
+
+
+def test_two_conditions_of_one_entry_are_not_compared_against_each_other():
+    """The check keys on (entry, condition), not on the entry alone.
+
+    Two condition bundles apply different noise to the same crystal, so their peak lists differ by
+    design. Keyed on `entry_id` alone the check would compare a pattern against a deliberately
+    different pattern and fail on correct data -- and the obvious repair, relaxing the check, would
+    have thrown away the one guard that makes the arms an ensemble.
+    """
+    arm = _arm({('E1', 'c2_error1_cont0'): 'aaa', ('E1', 'c2_error2_cont0'): 'DIFFERENT'})
+    assert floor_report.check_arms_are_comparable({'a': arm, 'b': arm.copy()})
+
+
+def test_a_difference_within_one_condition_still_raises():
+    """The relaxation must not go too far: the same (entry, condition) in two arms is the thing
+    that has to be identical, and that check survives."""
+    left = _arm({('E1', 'c2_error1_cont0'): 'aaa', ('E1', 'c2_error2_cont0'): 'bbb'})
+    right = _arm({('E1', 'c2_error1_cont0'): 'MOVED', ('E1', 'c2_error2_cont0'): 'bbb'})
+    with pytest.raises(SystemExit, match='disagree on the peak lists'):
+        floor_report.check_arms_are_comparable({'a': left, 'b': right})
 
 
 def test_every_floor_merit_is_one_the_subsampler_ranked_on():

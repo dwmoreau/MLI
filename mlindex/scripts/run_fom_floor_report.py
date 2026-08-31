@@ -178,6 +178,31 @@ def compose_aggregate(per_lattice, composition):
 # ----------------------------------------------------------------------------------------
 # Loading the arms
 # ----------------------------------------------------------------------------------------
+def arm_frames(root, merit_dir=None):
+    """Candidate frames for one arm, one (bundle, lattice) file at a time, merits joined on.
+
+    `SCHEMA.md` stores only `M20` and `Minfo`; the other six of the reduced core are recomputable
+    and so do not earn a column. `run_fom_floor_merits.py` recomputes them once and writes them
+    beside the pool -- at 136 microseconds a candidate the recompute is ~2 hours for the four arms,
+    which is precisely the kind of quantity PROTOCOL section 3 rule 8 says to persist.
+
+    A generator, so only one file is resident: four arms at 13.08 M candidates will not be held.
+    """
+    root = Path(root)
+    merit_dir = Path(merit_dir) if merit_dir else root/'merits'
+    for path in sorted(root.glob('candidates*.parquet')):
+        frame = pd.read_parquet(path)
+        if 'condition_bundle' not in frame.columns:
+            frame['condition_bundle'] = FomBenchmark.bundle_from_candidate_path(path)
+        sidecar = merit_dir/path.name
+        if sidecar.exists():
+            merits = pd.read_parquet(sidecar)
+            keys = [key for key in ('entry_id', 'condition_bundle', 'bravais_lattice',
+                                    'candidate_id') if key in merits.columns]
+            frame = frame.merge(merits, on=keys, how='left', validate='1:1')
+        yield frame
+
+
 def arm_directories(root):
     """One directory per arm. A pool written per (arm, condition) nests one level deeper."""
     root = Path(root)
@@ -198,7 +223,12 @@ def check_arms_are_comparable(arms):
     """
     reference = reference_name = None
     for name, entries in arms.items():
-        digests = dict(zip(entries['entry_id'].astype(str), entries['q2_digest'].astype(str)))
+        # Keyed on (entry, condition). Two condition bundles apply different noise to the same
+        # crystal, so their peak lists differ by design; pooling them would compare quantities that
+        # are meant to differ and the check would fail on correct data.
+        digests = dict(zip(zip(entries['entry_id'].astype(str),
+                               entries['condition_bundle'].astype(str)),
+                           entries['q2_digest'].astype(str)))
         if reference is None:
             reference, reference_name = digests, name
             continue
@@ -216,7 +246,12 @@ def check_arms_are_comparable(arms):
 
 
 def load_arms(arm_root, benchmark, floor_entries):
-    """{arm name: (candidates, entries)}, with Benchmark B restricted in as the first arm."""
+    """{arm name: (root, entries)}, with Benchmark B restricted in as the first arm.
+
+    Benchmark B is an arm and costs nothing to be one: it was generated at a recorded search seed
+    and a run restricted to a subset of entries reproduces it bit for bit (C2-F-058), so its rows
+    for these patterns ARE the arm at that seed. Only the others had to be generated.
+    """
     arms = {}
     for path in arm_directories(arm_root):
         entries = FomBenchmark.load_entries(path)
@@ -422,9 +457,13 @@ def main(argv=None):
     for name, (path, entries) in arms.items():
         keep = entries.loc[entries['entry_id'].isin(floor_entries)]
         for merit in FLOOR_MERITS:
+            depth, subsampled = FomBenchmark.subsample_depth(path)
             results[(name, merit)] = FomMetrics.evaluate(
-                path, score=merit, threshold=args.threshold, top_n=args.top_n,
+                arm_frames(path), score=merit, threshold=args.threshold, top_n=args.top_n,
                 entries=keep, n_bootstrap=0,
+                # Read from the arm's own manifest rather than assumed: an iterable of frames
+                # carries no manifest, and 'auto' would take it for a full pool.
+                subsample_top_k=depth if subsampled else None,
                 )
         print(f'  {name}: {results[(name, FLOOR_MERITS[0])].meta["n_entries"]} cells')
 
