@@ -1150,6 +1150,44 @@ def write_manifest(out_dir, **run_metadata):
     return path
 
 
+def load_manifest(root):
+    """The pool's `manifest.json`, or `None` if the directory has none.
+
+    Returns the dict as written. Callers that need one field should reach for a helper beside
+    this one rather than indexing it directly, because a consolidated pool nests the per-bundle
+    manifests under `bundle_manifests` and a single-bundle run does not.
+    """
+    path = Path(root) / 'manifest.json'
+    if not path.exists():
+        return None
+    with open(path, encoding='utf-8') as manifest_file:
+        return json.load(manifest_file)
+
+
+def subsample_depth(root):
+    """The pool's negative-subsampling depth *K*, or `None` if it was not subsampled.
+
+    `(top_k, subsampled)`, read from the manifest and from every per-bundle manifest a
+    consolidated pool carries, because the pool is only exact to the *smallest* K any of its
+    bundles was written at. A pool whose manifest says `subsampled: false` returns `None`, which
+    means "no depth limit" rather than "unknown" -- `FomMetrics` distinguishes the two, since an
+    absent manifest cannot be read as an unsubsampled pool.
+    """
+    manifest = load_manifest(root)
+    if manifest is None:
+        return None, None
+    manifests = [manifest] + list(manifest.get('bundle_manifests', {}).values())
+    subsampled = [bool(entry.get('subsampled')) for entry in manifests
+                  if 'subsampled' in entry]
+    if not subsampled:
+        return None, None
+    if not any(subsampled):
+        return None, False
+    depths = [entry.get('top_k') for entry in manifests if entry.get('subsampled')]
+    depths = [int(depth) for depth in depths if depth is not None]
+    return (min(depths) if depths else None), True
+
+
 def load_entries(root):
     # `entries*` rather than `entries_*`: the per-pool shards a generation run writes are
     # entries_<tag>.parquet, but the consolidated pool is a single entries.parquet, and both must

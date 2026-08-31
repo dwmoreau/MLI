@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 
 from mlindex.model_training import FomBenchmark
+from mlindex.model_training import FomConditions
 
 
 # Tie-break order for candidates that score identically, and the canonical order of every
@@ -66,8 +67,15 @@ BRAVAIS_LATTICES = ('cP', 'cI', 'cF', 'tP', 'tI', 'hP', 'hR',
 # records that neither denominator has reproducible provenance, and nothing before S16 may quote
 # them.
 
-# PLAN section 6.3's condition bundles, as the S04 grid names them.
-BUNDLE_LABELS = {
+# The condition bundles, campaign 2's and campaign 1's, in one mapping.
+#
+# Both are here because both pools are live: Benchmark B is the campaign's own and carries `c2_`
+# tags, while Benchmark A is still on disk and S03, S04 and S09's back-comparisons read it. The
+# two tag namespaces are disjoint by construction -- `FomConditions.TAG_PREFIX` exists to make
+# them so -- so a union cannot mislabel a bundle from either pool, and a single mapping means a
+# caller never has to say which campaign it is holding.
+BUNDLE_LABELS = dict(FomConditions.BUNDLE_LABELS)
+BUNDLE_LABELS.update({
     'error0_cont0': 'C0',
     'error1_cont0': 'C1',
     'error2_cont0': 'C2',
@@ -75,19 +83,44 @@ BUNDLE_LABELS = {
     'error1_cont1_drop6': 'C4',
     'error1_cont1_drop10': 'C5',
     'error1_cont0_phase3': 'C6',
-}
+})
 
-# C0 is the zero-error control, and its M20 is arithmetically degenerate: 9.49% of its
-# candidates score above 1e9 and 248 are non-finite, because the residual denominator goes to
-# zero when the observed peaks *are* the calculated ones (F-054). DWMM's policy, 2026-08-17:
-# excluded from every metric by default, not merely from calibration.
-CONTROL_BUNDLES = ('error0_cont0',)
+# Bundles excluded from every metric.
+#
+# Campaign 1's C0 is the zero-error control and its M20 is arithmetically degenerate: 9.49 % of
+# its candidates score above 1e9 and 248 are non-finite, because the residual denominator goes to
+# zero when the observed peaks *are* the calculated ones (F-054). It is 13.9 M of Benchmark A's
+# 26.4 M rows, so a loader that globs the directory picks it up silently -- PROTOCOL section 3
+# rule 11.
+#
+# **Campaign 2 contributes none**, and that is a design decision rather than an omission:
+# `FomConditions.CONTROL_BUNDLES` is empty because campaign 2's own control uses a small NON-zero
+# error multiplier (0.1x), which keeps the control's purpose and every residual-denominator merit
+# finite (METRICS section 9). So on Benchmark B this exclusion is a no-op and `c2_error0.1_cont0`
+# is reported like any other bundle.
+#
+# The S08 handoff asked for the constant to be emptied and "the exclusion machinery" removed. It
+# is kept: emptying it would delete rule 11's only enforcement while the pool it protects is
+# still on disk and still read. Removing it becomes correct when Benchmark A does -- see
+# C2-F-076.
+CONTROL_BUNDLES = tuple(FomConditions.CONTROL_BUNDLES) + ('error0_cont0',)
 
-# The hard stratum, defined once and used everywhere. Kept literally as the S05 handoff
-# specifies it: C6 postdates the definition, so it is reported as its own stratum rather than
-# folded in (DWMM, 2026-08-17).
+# The hard stratum: low-symmetry lattice, large cell, hard condition (METRICS section 5).
+#
+# The definition is campaign 1's and is deliberately unchanged; what changed is that the split is
+# now SIZED so the stratum can carry a claim. Campaign 1's held 104 reachable source entries in
+# total, split 64/16/24, so on its reporting split every threshold metric was exactly 0.0000 and
+# McNemar found no discordant pairs (R3, F-063). S06 sized against measured reachability -- 77.4 %
+# per entry at the generation cut, not the 34.9 % its own handoff assumed -- and `fom-dev` now
+# carries 360 hard entries of which ~258 are reachable (C2-F-049).
+#
+# So `n_reachable` is reported beside every hard-stratum number (it is `n_found`, in the metric
+# block of every scope row), and the reachability sizing is a property of the split rather than a
+# term in this predicate. The S08 handoff reads as though reachability enters the definition; it
+# does not, and METRICS section 5 is the text that governs.
 HARD_LATTICES = ('mP', 'mC', 'aP')
-HARD_BUNDLES = ('error2_cont0', 'error1_cont2', 'error1_cont1_drop6', 'error1_cont1_drop10')
+HARD_BUNDLES = tuple(FomConditions.HARD_BUNDLES) + (
+    'error2_cont0', 'error1_cont2', 'error1_cont1_drop6', 'error1_cont1_drop10')
 HARD_MIN_DECILE = 8
 
 # `standardize_cell`'s write-back fix (Q27, 7ab633d) changed `best_xnn` for the monoclinic and
@@ -98,6 +131,63 @@ Q27_AFFECTED_LATTICES = ('mP', 'mC', 'aP')
 N_VOLUME_DECILES = 10
 DEFAULT_STRATA = ('bravais_lattice', 'volume_decile', 'condition_bundle')
 DEFAULT_TOP_N = 10
+
+# ---------------------------------------------------------------------------------------
+# Negative subsampling, and the one thing it is NOT exact for
+# ---------------------------------------------------------------------------------------
+# Benchmark B keeps every correct candidate, every candidate inside the top *K* by each of the
+# merits below, and a 5 % Bernoulli sample of the rest (SCHEMA.md; C2-F-051). A rank computed on
+# the retained rows is therefore exact to depth *K* -- but **only for a score in this tuple**.
+#
+# The guarantee is merit-conditional and neither SCHEMA.md nor METRICS.md said so; both state it
+# unqualified, as "nothing that could have entered the top K was dropped". For a score the
+# subsampler did not rank on -- a learned combiner, a neural score, any merit added later -- the
+# candidates above a correct one are retained at ~5 %, so its rank is measured against a thinned
+# field and comes out **optimistic**. See C2-F-077, which measures the size of it.
+#
+# `FomBenchmark.subsample_negatives` takes the union per (entry, condition, Bravais lattice), so
+# the guarantee survives the cross-lattice pooling this module ranks by: a candidate at pooled
+# rank r has within-lattice rank <= r, so r <= K implies it was retained.
+RANK_EXACT_MERITS = tuple(FomBenchmark.REDUCED_MERIT_COLUMNS)
+
+
+def rank_exactness(score, top_n, top_k, subsampled, mrr=True):
+    """Whether a rank metric on this pool is exact, and if not, why not.
+
+    Returns `(exact, reason)`. `reason` is `None` when exact and a sentence otherwise; it is
+    recorded in `MetricsResult.meta` whether or not the caller chose to proceed, so a number
+    computed on a thinned pool always carries the statement of what it is.
+
+    `top_k` is the pool's depth, `None` for a pool that was not subsampled or whose manifest
+    could not be read -- `subsampled` separates those two, because an absent manifest is not
+    evidence of a full pool.
+    """
+    if subsampled is False:
+        return True, None
+    if subsampled is None:
+        return False, ('The pool has no readable manifest, so whether it was negatively '
+                       'subsampled is unknown and no rank metric can be certified exact. '
+                       'Pass subsample_top_k explicitly.')
+    name = score if isinstance(score, str) else getattr(score, '__name__', 'a callable score')
+    if not isinstance(score, str) or score not in RANK_EXACT_MERITS:
+        return False, (
+            f'{name!r} is not one of the merits the subsampler ranked on '
+            f'({", ".join(RANK_EXACT_MERITS)}), so the candidates above a correct one were '
+            f'retained at the negative rate rather than in full and every rank metric is '
+            f'optimistic. Score the full pool, or add this merit to the retention rule.'
+            )
+    if top_k is not None and int(top_n) > int(top_k):
+        return False, (
+            f'top_n={int(top_n)} is deeper than the pool retention depth K={int(top_k)}; '
+            f'beyond K the pool is a weighted sample and a rank is no longer exact.'
+            )
+    if mrr:
+        return True, (
+            f'Exact to depth K={top_k} for {name!r}. Note `mrr` uses the full rank and is NOT '
+            f'bounded by top_n, so it is exact only for entries whose best correct candidate '
+            f'ranks within K.'
+            )
+    return True, None
 
 # The columns the metrics need, whatever the score. One bundle of fourteen lattices is 0.3 s
 # and 222 MB projected this way, against ~2 GB with `xnn` and `unit_cell` attached.
@@ -188,7 +278,8 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
              pool='cross_bl', top_n=DEFAULT_TOP_N, strata=DEFAULT_STRATA, entries=None, bundles=None, split=None, bravais_lattices=None,
              pool_subset='all', degenerates='exclude', score_columns=(),
              include_control=False, calibration=False, n_bootstrap=1000, seed=12345,
-             hard_min_decile=HARD_MIN_DECILE):
+             hard_min_decile=HARD_MIN_DECILE,
+             subsample_top_k='auto', allow_inexact_ranks=False):
     """Turn a candidate pool plus a score into every number the project reports.
 
     `candidates` is a benchmark root, a DataFrame, or an iterable of DataFrames. A root is read
@@ -204,6 +295,13 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
     one comparable with S02's live numbers. The operating point is identical either way -- a
     member of the pooled top ten is necessarily inside its own lattice's top twenty -- so this
     changes the ceiling, not the headline.
+
+    `subsample_top_k` is the pool's negative-subsampling depth *K*. 'auto' reads it from the
+    pool's manifest when `candidates` is a root, and means "not subsampled" for a frame handed in
+    directly, since a caller assembling its own frame knows what is in it. A rank metric that
+    this pool cannot answer exactly raises, naming what is wrong; `allow_inexact_ranks=True`
+    proceeds and records the reason in `meta['rank_exactness']` instead. It refuses rather than
+    warns because an optimistic rank is indistinguishable from a good one.
     """
     if pool not in ('cross_bl', 'per_bl'):
         raise ValueError(f"pool must be 'cross_bl' or 'per_bl', got {pool!r}")
@@ -216,6 +314,13 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
         candidates, entries, bundles=bundles, split=split, bravais_lattices=bravais_lattices,
         score=score, score_columns=score_columns,
         )
+    top_k, subsampled = _resolve_subsampling(candidates, subsample_top_k)
+    ranks_exact, exactness_reason = rank_exactness(score, top_n, top_k, subsampled)
+    if not ranks_exact and not allow_inexact_ranks:
+        raise ValueError(
+            f'Refusing to report a rank metric on this pool. {exactness_reason} '
+            f'Pass allow_inexact_ranks=True to proceed with the reason recorded in meta.'
+            )
     context = entry_context(entries, hard_min_decile=hard_min_decile)
     excluded = ([bundle for bundle in CONTROL_BUNDLES
                  if (context['condition_bundle'] == bundle).any()]
@@ -289,6 +394,10 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
         n_bootstrap=int(n_bootstrap),
         seed=int(seed),
         hard_min_decile=int(hard_min_decile),
+        subsample_top_k=(None if top_k is None else int(top_k)),
+        subsampled=subsampled,
+        ranks_exact=bool(ranks_exact),
+        rank_exactness=exactness_reason,
         entry_digest=entry_digest(per_entry),
         calibration_skipped_reason=calibration_reason,
         source=source,
@@ -329,6 +438,20 @@ def _resolve_inputs(candidates, entries, bundles, split, bravais_lattices, score
             frame = frame.loc[frame['entry_id'].isin(keep)]
         return entries, [frame], 'frame'
     return entries, candidates, 'iterable'
+
+
+def _resolve_subsampling(candidates, subsample_top_k):
+    """`(top_k, subsampled)` for the pool being evaluated.
+
+    'auto' reads the manifest for a root and assumes a full pool for a frame or an iterable: a
+    caller that assembled its own frame knows what went into it, and there is no manifest to
+    consult. Anything else is taken as the depth itself, `None` meaning "not subsampled".
+    """
+    if subsample_top_k != 'auto':
+        return subsample_top_k, subsample_top_k is not None
+    if isinstance(candidates, (str, Path)):
+        return FomBenchmark.subsample_depth(Path(candidates))
+    return None, False
 
 
 def _load_bundle(root, bundle, bravais_lattices, columns, keep_entry_ids):
@@ -627,7 +750,13 @@ def entry_context(entries, hard_min_decile=HARD_MIN_DECILE):
     else:
         context['volume_decile'] = volume_decile(context)
         context.attrs['volume_decile_source'] = 'recomputed'
-    for optional in ('n_peaks_available', 'n_dropout_achieved', 'second_phase_lines'):
+    # `pool_size_full` is the survivor count BEFORE negative subsampling, so it is the only
+    # correct denominator for a percentile on a thinned pool. Counting retained rows instead
+    # gives a percentile against a 5 % field, which is the same defect as an inexact rank one
+    # level down. Carried through here so nothing downstream has to re-derive it (PROTOCOL
+    # section 3 rule 8).
+    for optional in ('n_peaks_available', 'n_dropout_achieved', 'second_phase_lines',
+                     'pool_size_full'):
         if optional in entries.columns:
             context[optional] = entries[optional].to_numpy()
     context['zone_count_min'] = _zone_count_min(entries)
