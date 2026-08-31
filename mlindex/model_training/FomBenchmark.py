@@ -573,13 +573,26 @@ def recompute_frame(candidates, entries, models_directory=None):
 # exact to depth K -- which is the property the whole retention rule exists to preserve.
 REDUCED_MERIT_COLUMNS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
 
+# The support floor `get_M_rev_sym` applies to `M_rev`. Named here because a *stored* M_rev is
+# floored by this value and nothing in the column itself says so (C2-F-062, C2-Q-017).
+M_REV_MIN_N_CAL = 10
+
+# Everything `reduced_merits` computes, and so everything a merit sidecar carries. The first six
+# are the recomputable half of REDUCED_MERIT_COLUMNS -- M20 is stored, never recomputed. The last
+# two are the audit pair: without them a stored `M_rev` of 0.0 means "the floor fired", "N_cal was
+# zero" and "the candidate is degenerate" indistinguishably, and the floor cannot be undone after
+# the fact.
+RECOMPUTED_MERIT_COLUMNS = ('M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap',
+                            'N_cal', 'M_rev_unfloored')
+
 
 def reduced_merits(candidates, entries, models_directory=None):
-    """The six recomputable merits of the reduced core, for a whole candidate frame.
+    """The recomputable merits of the reduced core, plus the pair that audits the M_rev floor.
 
-    Returns a frame aligned to `candidates`' index carrying `M_tilde`, `M_rev`, `M_sym`, `X_N`,
-    `n_over` and `max_gap`. `M20` is not recomputed: it is already a stored column, and it is the
-    one merit whose stored value is the *reported* one by construction.
+    Returns a frame aligned to `candidates`' index carrying `RECOMPUTED_MERIT_COLUMNS`: the six
+    ranking merits `M_tilde`, `M_rev`, `M_sym`, `X_N`, `n_over` and `max_gap`, and the two audit
+    columns `N_cal` and `M_rev_unfloored`. `M20` is not recomputed: it is already a stored column,
+    and it is the one merit whose stored value is the *reported* one by construction.
 
     These are **not stored** in the pool. Every one is recomputable offline from `xnn`, the peak
     list and the extinction group, which is this schema's own rule for what does not earn a column
@@ -592,15 +605,28 @@ def reduced_merits(candidates, entries, models_directory=None):
     q2_calc from stored Miller indices differs by an ULP that can move a line across M20's cut-off
     (F-095).
 
-    `get_M20` is deliberately NOT called here. It is the only one of the family that mutates
-    `q2_ref_calc`, via `np.putmask`, so calling it would change what the other three see --
-    `Candidates._capture_merits_at_prune` orders its calls for the same reason.
+    **`M_rev` is floored, and both sides of the floor come out of one call.** `get_M_rev_sym`
+    zeroes `M_rev` wherever the counting window holds fewer than `M_REV_MIN_N_CAL` reference
+    lines: below that the refinement interpolates them exactly and the merit reads 1e11-1e14 for a
+    cell M20 correctly scores at 1.5 (C2-F-059). Asking for the *unfloored* value together with
+    `n_cal` and applying the floor here is exactly equivalent, because the floor is a mask over
+    the same arithmetic rather than a different one -- so both arms are available for the price of
+    one evaluation. `M_sym` inherits the floor through the product, which is the intent; `M_tilde`
+    is untouched by it, so the unfloored `M_sym` is `M_tilde * M_rev_unfloored` and is not stored
+    separately.
+
+    `get_M20` is deliberately NOT called here, though no longer for the reason this docstring gave
+    until 2026-08-31. It used to zero the excluded lines of `q2_ref_calc` in place with
+    `np.putmask`, so calling it changed what the other merits then saw; it was rewritten to take
+    both reductions without touching its input and that ordering constraint is gone (see
+    `FigureOfMerits.get_M20`). It is omitted now only because recomputing a stored column invites
+    the two copies to disagree.
     """
     from mlindex.utilities.FigureOfMerits import get_M_rev_sym
     from mlindex.utilities.FigureOfMerits import get_n_over
     from mlindex.utilities.FigureOfMerits import get_X_N
 
-    names = ['M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap']
+    names = list(RECOMPUTED_MERIT_COLUMNS)
     out = pd.DataFrame(index=candidates.index, columns=names, dtype=float)
     if candidates.empty:
         return out
@@ -618,16 +644,27 @@ def reduced_merits(candidates, entries, models_directory=None):
         q2_ref_calc, _, _, q2_calc = assign_lines(
             q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory)
 
-        M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc)
+        # Unfloored, with the support count, so the floored arm is a mask over this one rather
+        # than a second evaluation of identical arithmetic.
+        M_tilde, M_rev_unfloored, _, N_cal = get_M_rev_sym(
+            q2_obs, q2_calc, q2_ref_calc, min_n_cal=None, return_n_cal=True)
+        M_rev = np.where(N_cal >= M_REV_MIN_N_CAL, M_rev_unfloored, 0.0)
+        M_sym = M_tilde*M_rev
         n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc)
         X_N = get_X_N(q2_obs, q2_calc, q2_ref_calc)
-        for name, values in zip(names, (M_tilde, M_rev, M_sym, X_N, n_over, max_gap)):
+        computed = (M_tilde, M_rev, M_sym, X_N, n_over, max_gap, N_cal, M_rev_unfloored)
+        for name, values in zip(names, computed):
             out.loc[group.index, name] = np.asarray(values, dtype=float)
     return out
 
 
 def with_reduced_merits(candidates, entries, models_directory=None):
-    """`candidates` plus the six ranking merits, for the subsampler. Not written to disk."""
+    """`candidates` plus `RECOMPUTED_MERIT_COLUMNS`, for the subsampler. Not written to disk.
+
+    The subsampler ranks on `REDUCED_MERIT_COLUMNS` only; the two audit columns ride along and are
+    dropped again by the caller, which is why that drop list is `RECOMPUTED_MERIT_COLUMNS` rather
+    than the ranking set.
+    """
     merits = reduced_merits(candidates, entries, models_directory=models_directory)
     return pd.concat([candidates, merits], axis=1)
 
@@ -1296,6 +1333,73 @@ def load_candidates(root, split=None, bravais_lattices=None, columns=None, bundl
         keep = entries.loc[entries['split'] == split, 'entry_id']
         frame = frame.loc[frame['entry_id'].isin(set(keep))]
     return frame.reset_index(drop=True)
+
+
+def bundle_frames(root, merit_dir=None, columns=None, require_merits=False):
+    """Candidate frames for a pool, one condition bundle at a time, merit sidecars joined on.
+
+    The route to `FomMetrics.evaluate` for any pool whose merits live in sidecars. `evaluate` given
+    a *root* projects columns from the candidate parquet alone and so cannot see them; given an
+    iterable of frames it takes whatever it is handed. Lifted here from
+    `run_fom_floor_report.arm_frames`, which is now a thin wrapper, so the two cannot drift.
+
+    **ONE FRAME PER BUNDLE, NOT PER FILE.** The pool is partitioned by (bundle, lattice) but the
+    ranking is across all fourteen lattices at once -- that is the indexer's actual problem, and
+    ranking within a lattice is a different and much easier one (PROTOCOL section 10's worst
+    anti-pattern). Yielding a file at a time would reduce each lattice separately and the pooled
+    ranking would be a fiction. `FomMetrics._combine_reductions` refuses it outright, which is how
+    this was caught rather than shipped.
+
+    A generator, so one bundle is resident at a time: Benchmark B is 122 GB and is not held.
+
+    `columns` is projected. The pool's list-valued columns -- `xnn`, `unit_cell`,
+    `merit_at_prune`, `hkl_true_in_basis` -- are what make an Arrow to pandas conversion
+    expensive, one Python object per row per column, and none is needed once the merits are
+    recomputed.
+
+    `require_merits` turns the silent failure into a loud one. A missing sidecar, or a join that
+    matches nothing, leaves the merit columns null -- and NaN sorts *last*, so the merit does not
+    raise, it simply reports as the worst score in the zoo. That is indistinguishable from a real
+    measurement, which is the same reason `evaluate` refuses an uncertifiable rank rather than
+    warning about it.
+    """
+    root = Path(root)
+    merit_dir = Path(merit_dir) if merit_dir else root/'merits'
+    available = candidate_columns_present(root)
+    projection = None if columns is None else [name for name in columns if name in available]
+    wanted_merits = [] if columns is None else [
+        name for name in columns if name in RECOMPUTED_MERIT_COLUMNS]
+
+    by_bundle = {}
+    for path in sorted(root.glob('candidates*.parquet')):
+        by_bundle.setdefault(bundle_from_candidate_path(path), []).append(path)
+
+    for bundle, paths in sorted(by_bundle.items()):
+        frames = []
+        for path in paths:
+            frame = _read_parquet(path, columns=projection)
+            if 'condition_bundle' not in frame.columns:
+                frame['condition_bundle'] = bundle
+            sidecar = merit_dir/path.name
+            if sidecar.exists():
+                merits = pd.read_parquet(sidecar)
+                keys = [key for key in ZOO_KEY_COLUMNS if key in merits.columns]
+                frame = frame.merge(merits, on=keys, how='left', validate='1:1')
+            elif require_merits:
+                raise FileNotFoundError(
+                    f'No merit sidecar for {path.name} at {sidecar}. Write it with '
+                    f'run_fom_floor_merits.py --pool {root}; a missing sidecar would otherwise '
+                    f'leave every recomputed merit null, and NaN ranks last rather than raising.')
+            if require_merits:
+                missing = [name for name in wanted_merits if name not in frame.columns
+                           or frame[name].isna().any()]
+                if missing:
+                    raise ValueError(
+                        f'{path.name}: merit columns {missing} are absent or partly null after '
+                        f'the sidecar join. A left join that misses becomes NaN, and NaN sorts '
+                        f'last -- the merit would report as uniformly worthless.')
+            frames.append(frame)
+        yield pd.concat(frames, ignore_index=True)
 
 
 def load_benchmark(root, split=None, bravais_lattices=None, rtol=1e-2, label=True,

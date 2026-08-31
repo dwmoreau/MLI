@@ -367,8 +367,12 @@ def label_and_subsample(candidates, entry_rows, args, pool_index):
     thinned = FomBenchmark.subsample_negatives(
         ranked, merit_columns=FomBenchmark.REDUCED_MERIT_COLUMNS, top_k=int(args.top_k),
         negative_rate=float(args.negative_rate), base_seed=int(args.seed))
+    # Drop everything `with_reduced_merits` added and nothing else. The list is the *recomputed*
+    # set rather than the ranking set because M20 is in the ranking set and is a stored column --
+    # and because the audit columns are recomputed too, so keying on the ranking set would let
+    # them through into the schema silently.
     kept = [column for column in thinned.columns
-            if column not in FomBenchmark.REDUCED_MERIT_COLUMNS or column == 'M20']
+            if column not in FomBenchmark.RECOMPUTED_MERIT_COLUMNS]
     print(f'[pool {pool_index:02d}] subsampled {candidates.shape[0]} -> {thinned.shape[0]} rows '
           f'({thinned.shape[0] / max(1, candidates.shape[0]):.1%} retained)', flush=True)
     return thinned[kept], True

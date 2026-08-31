@@ -1,6 +1,25 @@
 #!/bin/bash
 # S09 prerequisite -- recompute the reduced merit set for Benchmark B and store it beside the pool.
 #
+# ============================================================================================
+# DO NOT RUN THIS FOR BENCHMARK B. IT IS ALREADY DONE (2026-08-31).
+# $SCRATCH/fom_campaign2/pool/merits/ is complete and verified at 880 704 233 of 880 704 233,
+# no column null. Re-running costs 33 core-hours and changes nothing S09 reads.
+#
+# The one thing that HAS changed is the column list: `reduced_merits` now also emits `N_cal` and
+# `M_rev_unfloored`, so a *fresh* run writes eight columns rather than six and ~40 GB rather than
+# ~26 GB. The six that S09's leaderboard uses are byte-identical either way -- the floor is a mask
+# over the same arithmetic, gated at 0 differing values over 38 449 rows (C2-F-086) -- so the
+# existing six-column sidecars are complete for everything the seven-merit zoo asks of them.
+#
+# The audit pair only matters to the UNFLOORED comparison arm, and by C2-F-084 that arm cannot be
+# run on Benchmark B at all: the subsampler ranked on the floored M_rev, so the rows an unfloored
+# ranking puts first are the ones it discarded at 95 %, and the arm comes out flattered. It belongs
+# on a fully retained pool. So widening the cluster's sidecars would buy nothing.
+#
+# Run this only for a NEW pool. To run S09 itself, use submit_fom_zoo_eval.sh.
+# ============================================================================================
+#
 #   sbatch submit_fom_zoo_merits.sh
 #
 # WHY THIS EXISTS AS ITS OWN JOB. `SCHEMA.md` stores `M20` and `Minfo` on a candidate row and no

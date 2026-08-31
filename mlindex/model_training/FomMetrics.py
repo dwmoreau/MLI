@@ -150,6 +150,35 @@ DEFAULT_TOP_N = 10
 # rank r has within-lattice rank <= r, so r <= K implies it was retained.
 RANK_EXACT_MERITS = tuple(FomBenchmark.REDUCED_MERIT_COLUMNS)
 
+# Which way each merit points. Held here, once, because `evaluate`'s `higher_is_better` defaults to
+# True and a lower-is-better merit passed without it is not an error -- it is a silently reversed
+# ranking that looks like a very bad merit. That is exactly what happened to `X_N` in every S08
+# floor table (C2-F-085): three of the seven count something you want *less* of.
+#
+#   X_N      observed lines below the cut-off that no calculated line explains (de Wolff)
+#   n_over   calculated lines in range that no observation accounts for
+#   max_gap  the largest run of them
+#
+# Callers should read this rather than pass a literal, so a merit added here is oriented everywhere
+# at once. `orientation_of` raises on an unknown name rather than guessing a direction.
+HIGHER_IS_BETTER = {
+    'M20': True, 'Minfo': True, 'M_tilde': True, 'M_rev': True, 'M_sym': True,
+    'M_rev_unfloored': True, 'M_sym_unfloored': True,
+    'X_N': False, 'n_over': False, 'max_gap': False,
+    }
+
+
+def orientation_of(merit):
+    """`higher_is_better` for a named merit. Raises rather than assuming a direction."""
+    try:
+        return HIGHER_IS_BETTER[merit]
+    except KeyError:
+        raise KeyError(
+            f'No recorded direction of merit for {merit!r}. Add it to '
+            f'FomMetrics.HIGHER_IS_BETTER rather than passing higher_is_better at the call site: '
+            f'a reversed ranking is indistinguishable from a poor merit (C2-F-085).'
+            ) from None
+
 
 def rank_exactness(score, top_n, top_k, subsampled, mrr=True):
     """Whether a rank metric on this pool is exact, and if not, why not.
@@ -320,12 +349,42 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
     proceeds and records the reason in `meta['rank_exactness']` instead. It refuses rather than
     warns because an optimistic rank is indistinguishable from a good one.
     """
+    reduced, calibration_rows, reduce_meta = reduce_to_per_entry(
+        candidates, score=score, higher_is_better=higher_is_better, pool=pool, top_n=top_n,
+        entries=entries, bundles=bundles, split=split, bravais_lattices=bravais_lattices,
+        score_columns=score_columns, include_control=include_control, calibration=calibration,
+        hard_min_decile=hard_min_decile, subsample_top_k=subsample_top_k,
+        allow_inexact_ranks=allow_inexact_ranks,
+        )
+    return summarise_per_entry(
+        reduced, reduce_meta, threshold=threshold, top_n=top_n, strata=strata,
+        pool_subset=pool_subset, degenerates=degenerates, n_bootstrap=n_bootstrap, seed=seed,
+        calibration=calibration, calibration_rows=calibration_rows,
+        )
+
+
+def reduce_to_per_entry(candidates, score='M20', higher_is_better=True, pool='cross_bl',
+                        top_n=DEFAULT_TOP_N, entries=None, bundles=None, split=None,
+                        bravais_lattices=None, score_columns=(), include_control=False,
+                        calibration=False, hard_min_decile=HARD_MIN_DECILE,
+                        subsample_top_k='auto', allow_inexact_ranks=False):
+    """The half of `evaluate` that touches the candidate pool. The expensive half.
+
+    Returns `(per_entry, calibration_rows, reduce_meta)`, where `per_entry` is one row per
+    (entry, condition) carrying the entry context and the pooled reduction, **before** any
+    threshold has been applied.
+
+    **This is a sufficient statistic for everything downstream.** `derive_flags` and every
+    summary read only columns that are already here, so one pool pass answers every threshold,
+    every metric, every stratum, McNemar and the bootstrap. That is what lets a 122 GB pool be
+    reduced on the cluster and analysed on a laptop: the reduction is a few hundred megabytes and
+    `summarise_per_entry` needs nothing else.
+
+    Split out for that reason, not for tidiness -- `evaluate` is exactly these two calls composed
+    and behaves identically.
+    """
     if pool not in ('cross_bl', 'per_bl'):
         raise ValueError(f"pool must be 'cross_bl' or 'per_bl', got {pool!r}")
-    if pool_subset not in ('all', 'in_top_n'):
-        raise ValueError(f"pool_subset must be 'all' or 'in_top_n', got {pool_subset!r}")
-    if degenerates not in ('exclude', 'include'):
-        raise ValueError(f"degenerates must be 'exclude' or 'include', got {degenerates!r}")
 
     entries, shards, source = _resolve_inputs(
         candidates, entries, bundles=bundles, split=split, bravais_lattices=bravais_lattices,
@@ -367,9 +426,49 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
 
     per_entry = context.merge(_combine_reductions(reductions),
                              on=['entry_id', 'condition_bundle'], how='inner', validate='1:1')
+    reduce_meta = dict(
+        score=score if isinstance(score, str) else getattr(score, '__name__', 'callable'),
+        higher_is_better=bool(higher_is_better),
+        pool=pool,
+        reduced_top_n=int(top_n),
+        split=split,
+        bundles_excluded=sorted(excluded),
+        hard_min_decile=int(hard_min_decile),
+        subsample_top_k=(None if top_k is None else int(top_k)),
+        subsampled=subsampled,
+        ranks_exact=bool(ranks_exact),
+        rank_exactness=exactness_reason,
+        source=source,
+        )
+    reduce_meta.update(diagnostics)
+    return per_entry, calibration_rows, reduce_meta
+
+
+def summarise_per_entry(per_entry, reduce_meta, threshold=None, top_n=DEFAULT_TOP_N,
+                        strata=DEFAULT_STRATA, pool_subset='all', degenerates='exclude',
+                        n_bootstrap=1000, seed=12345, calibration=False, calibration_rows=None):
+    """The half of `evaluate` that needs no pool: flags, summaries, curve, intervals.
+
+    Takes what `reduce_to_per_entry` returned. Every threshold policy, stratification and
+    bootstrap is a re-run of this function over the same reduction, which is why a threshold
+    sweep costs one pool pass rather than one per threshold.
+    """
+    if pool_subset not in ('all', 'in_top_n'):
+        raise ValueError(f"pool_subset must be 'all' or 'in_top_n', got {pool_subset!r}")
+    if degenerates not in ('exclude', 'include'):
+        raise ValueError(f"degenerates must be 'exclude' or 'include', got {degenerates!r}")
+    reduced_top_n = reduce_meta.get('reduced_top_n')
+    if reduced_top_n is not None and top_n > reduced_top_n and reduce_meta.get('subsampled'):
+        # The exactness check ran against the depth the reduction was certified at; asking for a
+        # deeper top-n afterwards would quietly evade it.
+        raise ValueError(
+            f'This reduction was certified for top_n <= {reduced_top_n}; {top_n} was asked for. '
+            f'Re-reduce at the deeper depth rather than summarising past the certificate.')
+
     # The threshold is quoted in the score's own orientation -- "accept below t" for a
     # lower-is-better merit -- so it is mirrored with the scores rather than by the caller. A
     # per-lattice mapping is mirrored value by value.
+    higher_is_better = reduce_meta['higher_is_better']
     if threshold is None or higher_is_better:
         internal_threshold = threshold
     elif isinstance(threshold, dict):
@@ -392,35 +491,25 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
     if not calibration:
         calibration_reason = 'not requested (pass calibration=True for a probability score)'
 
-    meta = dict(
-        score=score if isinstance(score, str) else getattr(score, '__name__', 'callable'),
-        higher_is_better=bool(higher_is_better),
+    meta = dict(reduce_meta)
+    meta.pop('reduced_top_n', None)
+    meta.update(
         threshold=(None if threshold is None else
                    ({str(k): float(v) for k, v in threshold.items()}
                     if isinstance(threshold, dict) else float(threshold))),
-        pool=pool,
         top_n=int(top_n),
         pool_subset=pool_subset,
         degenerates=degenerates,
         weights='none',
-        split=split,
         bundles=sorted(per_entry['condition_bundle'].unique().tolist()),
-        bundles_excluded=sorted(excluded),
         strata=list(strata),
         n_entries=int(per_entry.shape[0]),
         n_clusters=int(per_entry['cluster'].nunique()),
         n_bootstrap=int(n_bootstrap),
         seed=int(seed),
-        hard_min_decile=int(hard_min_decile),
-        subsample_top_k=(None if top_k is None else int(top_k)),
-        subsampled=subsampled,
-        ranks_exact=bool(ranks_exact),
-        rank_exactness=exactness_reason,
         entry_digest=entry_digest(per_entry),
         calibration_skipped_reason=calibration_reason,
-        source=source,
         )
-    meta.update(diagnostics)
     return MetricsResult(per_entry, aggregate, hard, by_stratum, by_cell, loss, curve,
                          calibration_table, meta)
 
@@ -1302,6 +1391,83 @@ def mcnemar(result_a, result_b, metric='operating_point', subset=None):
         delta=float(flags_a.mean() - flags_b.mean()),
         statistic=statistic, p_value=p_value, method=method,
         ))
+
+
+def stratum_mask(result, column, value):
+    """A boolean mask for `mcnemar`'s `subset`, aligned the way `mcnemar` requires.
+
+    `mcnemar` sorts both results by `(entry_id, condition_bundle)` and then applies the mask
+    positionally. A caller who builds a mask straight off `result.per_entry` -- whose natural order
+    is the pool's, not sorted -- gets a mask that lines up with the wrong rows and a paired test
+    that silently compares unrelated entries. Nothing raises; the numbers are simply wrong.
+
+    S09 is the first consumer of the mask path at all (campaign 1's raised on every call, F-087),
+    and the per-lattice leaderboard needs one mask per lattice, so the footgun would have been
+    fired fourteen times before anyone looked. Build masks with this.
+    """
+    frame = result.per_entry.set_index(['entry_id', 'condition_bundle']).sort_index()
+    if column not in frame.columns:
+        raise KeyError(
+            f'{column!r} is not a per-entry column; available strata include '
+            f'{sorted(c for c in frame.columns if frame[c].dtype == object)[:8]}')
+    return (frame[column] == value).to_numpy(dtype=bool)
+
+
+def paired_delta_ci(result_a, result_b, metric='top10', subset=None, n_bootstrap=1000,
+                    seed=12345):
+    """Cluster-bootstrap interval on the paired difference `a - b`, over source entries.
+
+    `mcnemar` gives the sign and the p-value; it does not give an interval, and S09's acceptance
+    gate asks for both. Resampling is over the **source crystal**, not the (entry, condition) row:
+    one crystal appears under every condition bundle with correlated noise, so treating its rows as
+    independent draws gives an interval up to sqrt(n_conditions) too tight (METRICS section 8).
+
+    The replicates come from `_bootstrap_replicates` at the same seed `evaluate` uses, so this
+    interval and the marginal intervals in the summary tables are drawn from one resampling and are
+    mutually consistent rather than merely both correct.
+    """
+    left = result_a.per_entry.set_index(['entry_id', 'condition_bundle']).sort_index()
+    right = result_b.per_entry.set_index(['entry_id', 'condition_bundle']).sort_index()
+    if result_a.meta['entry_digest'] != result_b.meta['entry_digest']:
+        raise ValueError(
+            'The two results cover different entry sets, so they cannot be paired. '
+            '`mcnemar` refuses the same comparison for the same reason.')
+    right = right.reindex(left.index)
+
+    if subset is None:
+        mask = np.ones(left.shape[0], dtype=bool)
+    elif isinstance(subset, str):
+        if subset != 'hard':
+            raise ValueError(f"subset must be None, 'hard', or a boolean mask; got {subset!r}")
+        mask = left['is_hard'].to_numpy(dtype=bool)
+    else:
+        mask = np.asarray(subset, dtype=bool)
+        if mask.shape != (left.shape[0],):
+            raise ValueError(
+                f'subset mask has shape {mask.shape}, expected ({left.shape[0]},). Build it with '
+                f'`stratum_mask`, which aligns it to the sorted order this function uses.')
+
+    difference = (left.loc[mask, metric].to_numpy(dtype=float)
+                  - right.loc[mask, metric].to_numpy(dtype=float))
+    clusters = left.loc[mask, 'cluster'].to_numpy()
+    point = float(difference.mean()) if difference.size else float('nan')
+    if not difference.size or n_bootstrap <= 0:
+        return pd.Series(dict(metric=metric, delta=point, ci_low=np.nan, ci_high=np.nan,
+                              n_entries=int(mask.sum()), n_clusters=int(len(set(clusters))),
+                              n_bootstrap=int(max(0, n_bootstrap))))
+
+    codes, unique = pd.factorize(clusters)
+    replicates = _bootstrap_replicates(codes, n_bootstrap, seed)
+    totals = np.bincount(codes, weights=difference, minlength=unique.size)
+    counts = np.bincount(codes, minlength=unique.size)
+    drawn_totals = totals[replicates].sum(axis=1)
+    drawn_counts = counts[replicates].sum(axis=1)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        means = np.where(drawn_counts > 0, drawn_totals/drawn_counts, np.nan)
+    low, high = np.nanpercentile(means, [2.5, 97.5])
+    return pd.Series(dict(metric=metric, delta=point, ci_low=float(low), ci_high=float(high),
+                          n_entries=int(mask.sum()), n_clusters=int(unique.size),
+                          n_bootstrap=int(n_bootstrap)))
 
 
 class ThresholdChoice:

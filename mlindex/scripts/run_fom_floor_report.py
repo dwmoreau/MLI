@@ -62,7 +62,11 @@ from mlindex.model_training import FomMetrics
 # The merits the floor is measured for. Every one is in `FomMetrics.RANK_EXACT_MERITS`, so rank
 # metrics on the subsampled arms are exact to the pool's own depth K -- which a learned score's
 # would not be (C2-F-077). A floor for a learned score has to be measured on a fully retained arm.
-FLOOR_MERITS = ('M20', 'M_sym', 'M_rev', 'M_tilde', 'X_N')
+# All seven, not five: `n_over` and `max_gap` had no floor at all, and PROTOCOL section 8 requires
+# a per-merit gate to be read against that merit's own floor. Three of the seven are
+# lower-is-better and are oriented from `FomMetrics.HIGHER_IS_BETTER`, never from a literal here
+# -- passing none at all is what reversed `X_N` in every table this script wrote (C2-F-085).
+FLOOR_MERITS = ('M20', 'M_sym', 'M_rev', 'M_tilde', 'X_N', 'n_over', 'max_gap')
 
 # Metrics reported per arm. `found` is the pool's ceiling and moves only when the *generation*
 # differs between arms, which is why it is here: it separates "the score moved" from "the pool
@@ -181,48 +185,14 @@ def compose_aggregate(per_lattice, composition):
 # Loading the arms
 # ----------------------------------------------------------------------------------------
 def arm_frames(root, merit_dir=None, columns=None):
-    """Candidate frames for one arm, one (bundle, lattice) file at a time, merits joined on.
+    """One arm's candidate frames, merits joined on -- `FomBenchmark.bundle_frames` by another name.
 
-    `SCHEMA.md` stores only `M20` and `Minfo`; the other six of the reduced core are recomputable
-    and so do not earn a column. `run_fom_floor_merits.py` recomputes them once and writes them
-    beside the pool -- at 136 microseconds a candidate the recompute is ~2 hours for the four arms,
-    which is precisely the kind of quantity PROTOCOL section 3 rule 8 says to persist.
-
-    A generator, so only one file is resident: four arms at 13.08 M candidates will not be held.
+    Kept as a name because this script and its tests read better for it, but the implementation
+    moved so that S09's zoo drivers and this report cannot drift apart in how they join a sidecar.
+    `require_merits` is deliberately not passed on: S08's arms predate the widened sidecar and a
+    six-column one is complete for what this report asks of it.
     """
-    root = Path(root)
-    merit_dir = Path(merit_dir) if merit_dir else root/'merits'
-    # Projected, not whole. The report makes one pass per (arm, merit), and the pool's list-valued
-    # columns -- `xnn`, `unit_cell`, `merit_at_prune`, `hkl_true_in_basis` -- are what make an
-    # Arrow -> pandas conversion expensive: one Python object per row per column. None of them is
-    # needed once the merits are recomputed.
-    projection = None if columns is None else [
-        name for name in columns if name in FomBenchmark.candidate_columns_present(root)]
-
-    # ONE FRAME PER BUNDLE, NOT PER FILE. The pool is partitioned by (bundle, lattice), but the
-    # ranking is across all fourteen lattices at once -- that is the indexer's actual problem, and
-    # ranking within a lattice is a different and much easier one (PROTOCOL section 10's worst
-    # anti-pattern). Yielding a file at a time would have each lattice reduced separately and the
-    # pooled ranking would be a fiction. `FomMetrics._combine_reductions` refuses it outright,
-    # which is how this was caught rather than shipped.
-    by_bundle = {}
-    for path in sorted(root.glob('candidates*.parquet')):
-        by_bundle.setdefault(FomBenchmark.bundle_from_candidate_path(path), []).append(path)
-
-    for bundle, paths in sorted(by_bundle.items()):
-        frames = []
-        for path in paths:
-            frame = pd.read_parquet(path, columns=projection)
-            if 'condition_bundle' not in frame.columns:
-                frame['condition_bundle'] = bundle
-            sidecar = merit_dir/path.name
-            if sidecar.exists():
-                merits = pd.read_parquet(sidecar)
-                keys = [key for key in ('entry_id', 'condition_bundle', 'bravais_lattice',
-                                        'candidate_id') if key in merits.columns]
-                frame = frame.merge(merits, on=keys, how='left', validate='1:1')
-            frames.append(frame)
-        yield pd.concat(frames, ignore_index=True)
+    return FomBenchmark.bundle_frames(root, merit_dir=merit_dir, columns=columns)
 
 
 def arm_directories(root):
@@ -516,7 +486,9 @@ def main(argv=None):
             depth, subsampled = FomBenchmark.subsample_depth(path)
             wanted = list(FomMetrics.SCORE_INDEPENDENT_COLUMNS) + ['condition_bundle', merit]
             results[(name, merit)] = FomMetrics.evaluate(
-                arm_frames(path, columns=wanted), score=merit, threshold=args.threshold, top_n=args.top_n,
+                arm_frames(path, columns=wanted), score=merit,
+                higher_is_better=FomMetrics.orientation_of(merit),
+                threshold=args.threshold, top_n=args.top_n,
                 entries=keep, n_bootstrap=0,
                 # Read from the arm's own manifest rather than assumed: an iterable of frames
                 # carries no manifest, and 'auto' would take it for a full pool.
