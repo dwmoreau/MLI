@@ -80,6 +80,11 @@ def _parse_args(argv=None):
                         help='Candidate rows held at once. Bounds memory per worker; the merits '
                              'are exact on any subset of an (entry, lattice, group) so chunking '
                              'costs a rebuilt reference list at a boundary and nothing else')
+    parser.add_argument('--verify', action='store_true',
+                        help='Check an existing set of sidecars instead of writing any: every '
+                             'candidate file has one, the row counts match file by file, and no '
+                             'merit column is wholly null. Reads parquet metadata, not data, so '
+                             'it is seconds even on Benchmark B')
     parser.add_argument('--overwrite', action='store_true',
                         help='Rescore files that already have a sidecar. Off by default, so an '
                              'interrupted run resumes instead of restarting')
@@ -119,10 +124,62 @@ def score_file(task):
     return path, written
 
 
+MERIT_COLUMNS = ('M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
+
+
+def verify(pool, out_dir):
+    """Check the sidecars without reading their data. Returns (rows, problems).
+
+    Exit code 0 is not evidence that this worked: C2-F-071 is an entire Bravais lattice lost from
+    Benchmark B while all 24 generation tasks exited 0. So this checks the three things that go
+    wrong quietly -- a sidecar missing, a sidecar short of its candidate file, and a merit column
+    written wholly null because the recompute raised for that group and was swallowed.
+
+    Null counts come from parquet's own column statistics, so a 26 GB sidecar set is checked in
+    seconds rather than read.
+    """
+    problems, total = [], 0
+    for path in sorted(Path(pool).glob('candidates*.parquet')):
+        sidecar = Path(out_dir)/path.name
+        if not sidecar.exists():
+            problems.append(f'{path.name}: NO SIDECAR')
+            continue
+        expected = pq.ParquetFile(path).metadata.num_rows
+        metadata = pq.ParquetFile(sidecar).metadata
+        if metadata.num_rows != expected:
+            problems.append(f'{path.name}: {metadata.num_rows} rows against {expected}')
+            continue
+        total += metadata.num_rows
+        names = list(metadata.schema.names)
+        nulls = {}
+        for group in range(metadata.num_row_groups):
+            row_group = metadata.row_group(group)
+            for column in range(row_group.num_columns):
+                stats = row_group.column(column).statistics
+                name = names[column]
+                if stats is not None and name in MERIT_COLUMNS:
+                    nulls[name] = nulls.get(name, 0) + stats.null_count
+        for name in MERIT_COLUMNS:
+            if name not in names:
+                problems.append(f'{path.name}: no {name} column')
+            elif nulls.get(name, 0) == metadata.num_rows:
+                problems.append(f'{path.name}: {name} is wholly null')
+    return total, problems
+
+
 def main(argv=None):
     args = _parse_args(argv)
     pool = Path(args.pool)
     out_dir = Path(args.out_dir) if args.out_dir else pool / 'merits'
+
+    if args.verify:
+        total, problems = verify(pool, out_dir)
+        print(f'{pool}: {total} candidates carry merits in {out_dir}')
+        for problem in problems:
+            print(f'  FAIL {problem}')
+        print('all sidecars complete and populated' if not problems
+              else f'{len(problems)} problem(s)')
+        return 1 if problems else 0
 
     tasks = []
     for path in sorted(pool.glob('candidates*.parquet')):

@@ -446,3 +446,59 @@ def test_the_zoo_merit_job_matches_the_scripts_interface():
     args = merits._parse_args(['--pool', 'x', '--processes', '64', '--chunk-rows', '1000000'])
     assert (args.pool, args.processes, args.chunk_rows) == ('x', 64, 1000000)
     assert 'srun' not in text
+
+
+# ----------------------------------------------------------------------------------------
+# Verifying the persisted merits. Exit code 0 is not evidence: C2-F-071 is an entire Bravais
+# lattice lost from Benchmark B while all 24 generation tasks exited 0.
+# ----------------------------------------------------------------------------------------
+import run_fom_floor_merits as merits_script
+
+
+def _pool_with_sidecars(tmp_path, rows=50):
+    pool, side = tmp_path/'pool', tmp_path/'pool'/'merits'
+    pool.mkdir(parents=True)
+    side.mkdir()
+    for name in ('candidates_c2_error1_cont0_aP.parquet',
+                 'candidates_c2_error1_cont0_mP.parquet'):
+        pd.DataFrame({'entry_id': [f'E{i}' for i in range(rows)],
+                      'M20': np.arange(rows, dtype=float)}).to_parquet(pool/name, index=False)
+        pd.DataFrame({'entry_id': [f'E{i}' for i in range(rows)],
+                      **{col: np.arange(rows, dtype=float)
+                         for col in merits_script.MERIT_COLUMNS}}).to_parquet(side/name,
+                                                                             index=False)
+    return pool, side
+
+
+def test_verify_passes_a_complete_set(tmp_path):
+    pool, side = _pool_with_sidecars(tmp_path)
+    total, problems = merits_script.verify(pool, side)
+    assert problems == [] and total == 100
+
+
+def test_verify_catches_a_missing_sidecar(tmp_path):
+    pool, side = _pool_with_sidecars(tmp_path)
+    (side/'candidates_c2_error1_cont0_mP.parquet').unlink()
+    _, problems = merits_script.verify(pool, side)
+    assert any('NO SIDECAR' in problem for problem in problems)
+
+
+def test_verify_catches_a_short_sidecar(tmp_path):
+    """A truncated write -- a full disk, a killed worker -- leaves a readable parquet."""
+    pool, side = _pool_with_sidecars(tmp_path)
+    path = side/'candidates_c2_error1_cont0_aP.parquet'
+    pd.read_parquet(path).head(10).to_parquet(path, index=False)
+    _, problems = merits_script.verify(pool, side)
+    assert any('rows against' in problem for problem in problems)
+
+
+def test_verify_catches_a_wholly_null_merit_column(tmp_path):
+    """The quiet one: the recompute raised for every group in a file and the column came out
+    empty, so the sidecar is present, the right length, and useless."""
+    pool, side = _pool_with_sidecars(tmp_path)
+    path = side/'candidates_c2_error1_cont0_aP.parquet'
+    frame = pd.read_parquet(path)
+    frame['M_sym'] = np.nan
+    frame.to_parquet(path, index=False)
+    _, problems = merits_script.verify(pool, side)
+    assert any('wholly null' in problem for problem in problems)
