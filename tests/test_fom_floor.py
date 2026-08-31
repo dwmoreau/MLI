@@ -14,6 +14,7 @@ Two things are checked here that campaign 1's version could not have been:
   base seed moved too, the arms differ in their data and their spread is generation noise and
   scoring noise together -- the one distinction the floor exists to make.
 """
+import json
 import os
 import sys
 
@@ -123,20 +124,23 @@ def test_the_aggregate_is_composed_from_the_split_not_the_sample():
     600 of the split and the other 20. Weighting them equally -- what the sample's own shape would
     give -- overstates the rare lattice's contribution thirty-fold.
     """
+    # `se_at_split_pp` is each lattice's floor already rescaled from the sample's source-entry
+    # count to the split's; only the weighting is left to do here.
     per_lattice = pd.DataFrame([
-        dict(bravais_lattice='aP', se_pp=1.0, n_entries=40),
-        dict(bravais_lattice='cF', se_pp=1.0, n_entries=40),
+        dict(bravais_lattice='aP', se_pp=1.0, se_at_split_pp=1.0*np.sqrt(40/600), n_entries=40),
+        dict(bravais_lattice='cF', se_pp=1.0, se_at_split_pp=1.0*np.sqrt(40/20), n_entries=40),
         ])
     composition = pd.DataFrame([
         dict(bravais_lattice='aP', split_entries=600, floor_weight=600/620),
         dict(bravais_lattice='cF', split_entries=20, floor_weight=20/620),
         ])
     se, covered = floor_report.compose_aggregate(per_lattice, composition)
-    expected = np.sqrt((600/620)**2*1.0*(40/600) + (20/620)**2*1.0*(40/20))
+    expected = np.sqrt((600/620)**2*(40/600) + (20/620)**2*(40/20))
     assert se == pytest.approx(expected)
     assert covered == pytest.approx(1.0)
-    # The naive equal-weight version is materially different, which is the point.
-    naive = np.sqrt(2*(0.5**2)*1.0*(40/600))
+    # Weighting them equally -- what the sample's own shape would give -- is materially different,
+    # which is the whole reason the composition table is written beside the sample.
+    naive = np.sqrt((0.5**2)*(40/600) + (0.5**2)*(40/20))
     assert not se == pytest.approx(naive, rel=0.1)
 
 
@@ -144,8 +148,8 @@ def test_a_lattice_missing_from_the_composition_is_dropped_and_reported():
     """`lattice_weight_covered` is how a caller sees that the aggregate is incomplete, rather than
     getting a confident number over whatever happened to be present."""
     per_lattice = pd.DataFrame([
-        dict(bravais_lattice='aP', se_pp=1.0, n_entries=40),
-        dict(bravais_lattice='zz', se_pp=1.0, n_entries=40),
+        dict(bravais_lattice='aP', se_pp=1.0, se_at_split_pp=0.5, n_entries=40),
+        dict(bravais_lattice='zz', se_pp=1.0, se_at_split_pp=0.5, n_entries=40),
         ])
     composition = pd.DataFrame([dict(bravais_lattice='aP', split_entries=600, floor_weight=0.5)])
     se, covered = floor_report.compose_aggregate(per_lattice, composition)
@@ -342,7 +346,8 @@ def test_the_figure_renders(tmp_path):
     pytest.importorskip('matplotlib')
     lattice, aggregate, condition = _report_shaped()
     out = tmp_path / 'floor.png'
-    floor_report.figure(lattice, aggregate, condition, out)
+    floor_report.figure(lattice, aggregate, condition, out, metric='operating_point',
+                        merit='M_sym')
     assert out.exists() and out.stat().st_size > 20_000
 
 
@@ -373,7 +378,8 @@ def test_the_figure_survives_an_absent_aggregate(tmp_path):
     pytest.importorskip('matplotlib')
     lattice, _, condition = _report_shaped()
     out = tmp_path / 'no_aggregate.png'
-    floor_report.figure(lattice, pd.DataFrame(columns=['metric', 'se_pp']), condition, out)
+    floor_report.figure(lattice, pd.DataFrame(columns=['merit', 'metric', 'se_pp']),
+                        condition, out)
     assert out.exists()
 
 
@@ -383,3 +389,44 @@ def test_condition_tags_are_shown_by_their_readable_key():
     assert floor_report._condition_label('c2_error2_cont0') == 'noisy'
     # An unknown tag falls back to itself rather than raising or rendering blank.
     assert floor_report._condition_label('not_a_tag') == 'not_a_tag'
+
+
+# ----------------------------------------------------------------------------------------
+# The tie-break floor, and the pool it may not be measured on
+# ----------------------------------------------------------------------------------------
+import run_fom_tiebreak_floor as tiebreak
+
+
+def test_a_subsampled_pool_is_refused_for_the_tiebreak_floor(tmp_path):
+    """The one measurement negative subsampling actually breaks.
+
+    A constant score puts every candidate in a tie, so rank is decided entirely by the tie-break
+    order -- which is unrelated to the merits the retention rule ranked on. Retention is therefore
+    random with respect to it, and a correct candidate is scored against a fraction of its true
+    field. Benchmark B retains 8 206 of 26 734 survivors a cell, so the floor would come out
+    flattered by ~3.3x.
+    """
+    (tmp_path/'manifest.json').write_text(
+        json.dumps(dict(schema_version='3', subsampled=True, top_k=200)), encoding='utf-8')
+    with pytest.raises(SystemExit, match='negatively subsampled'):
+        tiebreak.main(['--pool', str(tmp_path), '--artifact-dir', str(tmp_path)])
+
+
+def test_the_uniform_score_is_keyed_on_the_candidate_not_the_row_order():
+    """Reproducible however the pool was sharded or sorted -- the same property the subsampler's
+    own draw needs, and R17 one level down."""
+    frame = pd.DataFrame({'entry_id': ['E1', 'E1', 'E2'],
+                          'condition_bundle': ['c2_error1_cont0']*3,
+                          'bravais_lattice': ['aP', 'mP', 'aP'],
+                          'candidate_id': [0, 1, 0]})
+    score = tiebreak.UniformScore(12345)
+    first = score(frame)
+    shuffled = frame.iloc[::-1].reset_index(drop=True)
+    assert np.allclose(first[::-1], score(shuffled))
+    # And a different seed gives a different draw.
+    assert not np.allclose(first, tiebreak.UniformScore(999)(frame))
+
+
+def test_the_constant_score_really_is_constant():
+    frame = pd.DataFrame({'entry_id': ['E1']*5})
+    assert len(set(tiebreak.constant_score(frame))) == 1

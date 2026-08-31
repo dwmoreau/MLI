@@ -160,15 +160,17 @@ def compose_aggregate(per_lattice, composition):
     covered = 0.0
     for row in per_lattice.itertuples():
         lattice = row.bravais_lattice
-        if lattice not in weights.index or not np.isfinite(row.se_pp):
-            continue
-        n_split = float(weights.loc[lattice, 'split_entries'])
-        n_sample = float(row.n_entries)
-        if n_split <= 0 or n_sample <= 0:
+        if lattice not in weights.index:
             continue
         weight = float(weights.loc[lattice, 'floor_weight'])
-        # se_pp was measured at n_sample; rescale its variance to n_split before combining.
-        variance += (weight**2) * (row.se_pp**2) * (n_sample / n_split)
+        # `se_at_split_pp` is already this lattice's floor rescaled from the sample's SOURCE-ENTRY
+        # count to the split's, so only the weighting is left. Doing the rescale here from
+        # `n_entries` was wrong twice over: it mixed units -- pattern-conditions against source
+        # entries -- and it applied to a standard error that had not been clustered.
+        rescaled = getattr(row, 'se_at_split_pp', None)
+        if rescaled is None or not np.isfinite(rescaled):
+            continue
+        variance += (weight**2) * (rescaled**2)
         covered += weight
     if not covered:
         return float('nan'), 0.0
@@ -178,7 +180,7 @@ def compose_aggregate(per_lattice, composition):
 # ----------------------------------------------------------------------------------------
 # Loading the arms
 # ----------------------------------------------------------------------------------------
-def arm_frames(root, merit_dir=None):
+def arm_frames(root, merit_dir=None, columns=None):
     """Candidate frames for one arm, one (bundle, lattice) file at a time, merits joined on.
 
     `SCHEMA.md` stores only `M20` and `Minfo`; the other six of the reduced core are recomputable
@@ -190,17 +192,37 @@ def arm_frames(root, merit_dir=None):
     """
     root = Path(root)
     merit_dir = Path(merit_dir) if merit_dir else root/'merits'
+    # Projected, not whole. The report makes one pass per (arm, merit), and the pool's list-valued
+    # columns -- `xnn`, `unit_cell`, `merit_at_prune`, `hkl_true_in_basis` -- are what make an
+    # Arrow -> pandas conversion expensive: one Python object per row per column. None of them is
+    # needed once the merits are recomputed.
+    projection = None if columns is None else [
+        name for name in columns if name in FomBenchmark.candidate_columns_present(root)]
+
+    # ONE FRAME PER BUNDLE, NOT PER FILE. The pool is partitioned by (bundle, lattice), but the
+    # ranking is across all fourteen lattices at once -- that is the indexer's actual problem, and
+    # ranking within a lattice is a different and much easier one (PROTOCOL section 10's worst
+    # anti-pattern). Yielding a file at a time would have each lattice reduced separately and the
+    # pooled ranking would be a fiction. `FomMetrics._combine_reductions` refuses it outright,
+    # which is how this was caught rather than shipped.
+    by_bundle = {}
     for path in sorted(root.glob('candidates*.parquet')):
-        frame = pd.read_parquet(path)
-        if 'condition_bundle' not in frame.columns:
-            frame['condition_bundle'] = FomBenchmark.bundle_from_candidate_path(path)
-        sidecar = merit_dir/path.name
-        if sidecar.exists():
-            merits = pd.read_parquet(sidecar)
-            keys = [key for key in ('entry_id', 'condition_bundle', 'bravais_lattice',
-                                    'candidate_id') if key in merits.columns]
-            frame = frame.merge(merits, on=keys, how='left', validate='1:1')
-        yield frame
+        by_bundle.setdefault(FomBenchmark.bundle_from_candidate_path(path), []).append(path)
+
+    for bundle, paths in sorted(by_bundle.items()):
+        frames = []
+        for path in paths:
+            frame = pd.read_parquet(path, columns=projection)
+            if 'condition_bundle' not in frame.columns:
+                frame['condition_bundle'] = bundle
+            sidecar = merit_dir/path.name
+            if sidecar.exists():
+                merits = pd.read_parquet(sidecar)
+                keys = [key for key in ('entry_id', 'condition_bundle', 'bravais_lattice',
+                                        'candidate_id') if key in merits.columns]
+                frame = frame.merge(merits, on=keys, how='left', validate='1:1')
+            frames.append(frame)
+        yield pd.concat(frames, ignore_index=True)
 
 
 def arm_directories(root):
@@ -320,7 +342,8 @@ def _condition_label(tag):
     return condition.key if condition is not None else tag
 
 
-def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_point'):
+def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_point',
+           merit='M_sym'):
     """The floor figure. Two panels on ONE shared axis, which is what makes it an argument.
 
     (a) The floor is **ordered by free cell parameters**, spanning orders of magnitude, and is
@@ -351,7 +374,17 @@ def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_poin
         1, 2, figsize=(7.2, 3.2), sharex=True, layout='constrained',
         gridspec_kw=dict(width_ratios=[1.5, 1.0]))
 
-    rows = by_lattice.loc[by_lattice['metric'] == metric].copy()
+    # ONE merit. Different merits have different floors -- M_sym's aggregate is 0.19 pp against
+    # M_rev's 0.26 -- so averaging them would plot a quantity no gate is ever read against.
+    rows = by_lattice.loc[(by_lattice['metric'] == metric)
+                          & (by_lattice['merit'] == merit)].copy()
+    if rows.empty:
+        # An empty figure renders perfectly and says nothing, which is worse than not rendering.
+        raise SystemExit(
+            f'No per-lattice rows for metric {metric!r}; the table has '
+            f'{sorted(by_lattice["metric"].unique())} for merits '
+            f'{sorted(by_lattice["merit"].unique())}. Without --threshold the operating point is '
+            f'identically top10 and is not reported, so the figure is drawn on top10.')
     rows = rows.groupby('bravais_lattice', as_index=False).agg(
         se_pp=('se_pp', 'mean'), n_entries=('n_entries', 'sum'))
     rows['free'] = rows['bravais_lattice'].map(FREE_PARAMETERS)
@@ -367,7 +400,17 @@ def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_poin
                           in zip(rows['bravais_lattice'], rows['free'])])
     left.invert_yaxis()
     left.set_xlabel('contrast floor, one standard error (pp)')
-    left.set_title('(a) the lattice moves the floor by orders of magnitude',
+    # The title is COMPUTED, not asserted. Campaign 1 found this floor "ordered by free cell
+    # parameters over two orders of magnitude"; on this campaign's pool it is not (C2-F-081). A
+    # hardcoded caption would have shipped the inherited claim over the measurement.
+    ratio = float(rows['se_pp'].max()/rows['se_pp'].min()) if rows['se_pp'].min() else float('nan')
+    try:
+        from scipy.stats import spearmanr
+        rho = float(spearmanr(rows['free'], rows['se_pp']).statistic)
+        relation = f'rank correlation with free parameters {rho:+.2f}'
+    except Exception:
+        relation = ''
+    left.set_title(f'(a) the floor spans {ratio:.1f}x across lattices\n{relation}',
                    loc='left', color=INK)
     left.xaxis.grid(True, color=GRID, linewidth=0.6)
     left.set_axisbelow(True)
@@ -380,13 +423,19 @@ def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_poin
     # Top right, which is the only clear space on this axis. The accented lattices are the longest
     # bars by construction -- that is the figure's point -- so there is nothing beside them and
     # nothing below them either: the bottom rows ARE them.
+    # A figure-level caption, not an in-axes annotation. With the floor this flat there is no
+    # clear space left inside panel (a) -- every bar reaches past the middle -- and a note placed
+    # anywhere inside it lands on a mark.
+    caption = ''
     accent_names = [name for name in rows['bravais_lattice'] if name in GAIN_LATTICES]
     if accent_names:
-        left.annotate(f"{', '.join(accent_names)} are where\nthis campaign's gains are expected",
-                      xy=(0.985, 0.93), xycoords='axes fraction',
-                      color=ACCENT, fontsize=7.5, ha='right', va='top')
+        accent_rank = rows['se_pp'].rank(ascending=False)
+        worst = int(accent_rank[rows['bravais_lattice'].isin(GAIN_LATTICES)].min())
+        caption = (f"{', '.join(accent_names)} (blue) are where this campaign's gains are "
+                   f'expected; the highest floor among them ranks {worst} of {rows.shape[0]}.')
 
-    composed = aggregate.loc[aggregate['metric'] == metric, 'se_pp']
+    composed = aggregate.loc[(aggregate['metric'] == metric)
+                             & (aggregate['merit'] == merit), 'se_pp']
     aggregate_value = float(composed.iloc[0]) if composed.shape[0] else None
     if aggregate_value is not None:
         for axis in (left, right):
@@ -405,7 +454,8 @@ def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_poin
     # (b) the same quantity under each condition, on the same scale. One hue, because the story is
     # that these are the SAME number -- three categorical hues would assert they are three things
     # to be told apart.
-    conditions = by_condition.loc[by_condition['metric'] == metric]
+    conditions = by_condition.loc[(by_condition['metric'] == metric)
+                                  & (by_condition['merit'] == merit)]
     if conditions.shape[0]:
         grouped = (conditions.groupby('condition_bundle', as_index=False)['sd_pp'].mean()
                    .sort_values('sd_pp'))
@@ -419,9 +469,12 @@ def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_poin
         # Visible values: the relief rule, and three dots on a wide axis need their numbers.
         # Labels to the LEFT of each dot: everything below the smallest value is empty space, so
         # they cannot collide with each other, with the aggregate rule, or with the panel edge.
+        # To the RIGHT of each dot. The dots sit near the left edge of a shared axis that runs to
+        # the widest per-lattice floor, so everything to their right is empty while the space to
+        # their left is occupied by the tick labels.
         for spot, value in zip(spots, grouped['sd_pp']):
-            right.annotate(f'{value:.2f}', xy=(value, spot), xytext=(-9, 0),
-                           textcoords='offset points', ha='right', va='center', fontsize=7.5,
+            right.annotate(f'{value:.2f}', xy=(value, spot), xytext=(9, 0),
+                           textcoords='offset points', ha='left', va='center', fontsize=7.5,
                            color=INK_SECONDARY)
         spread = float(grouped['sd_pp'].max() - grouped['sd_pp'].min())
         right.annotate(f'total spread {spread:.2f} pp', xy=(0.98, 0.04),
@@ -434,7 +487,10 @@ def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_poin
     for spine in ('top', 'right', 'left'):
         right.spines[spine].set_visible(False)
 
-    figure_handle.savefig(out_path, dpi=300)
+    if caption:
+        figure_handle.text(0.005, -0.02, caption, fontsize=7.5, color=INK_SECONDARY,
+                           ha='left', va='top')
+    figure_handle.savefig(out_path, dpi=300, bbox_inches='tight')
     pyplot.close(figure_handle)
     return out_path
 
@@ -458,8 +514,9 @@ def main(argv=None):
         keep = entries.loc[entries['entry_id'].isin(floor_entries)]
         for merit in FLOOR_MERITS:
             depth, subsampled = FomBenchmark.subsample_depth(path)
+            wanted = list(FomMetrics.SCORE_INDEPENDENT_COLUMNS) + ['condition_bundle', merit]
             results[(name, merit)] = FomMetrics.evaluate(
-                arm_frames(path), score=merit, threshold=args.threshold, top_n=args.top_n,
+                arm_frames(path, columns=wanted), score=merit, threshold=args.threshold, top_n=args.top_n,
                 entries=keep, n_bootstrap=0,
                 # Read from the arm's own manifest rather than assumed: an iterable of frames
                 # carries no manifest, and 'auto' would take it for a full pool.
@@ -467,6 +524,7 @@ def main(argv=None):
                 )
         print(f'  {name}: {results[(name, FLOOR_MERITS[0])].meta["n_entries"]} cells')
 
+    split_counts = dict(zip(composition['bravais_lattice'], composition['split_entries']))
     metric_rows, contrast_rows, lattice_rows = [], [], []
     arm_names = sorted(arms)
     for merit in FLOOR_MERITS:
@@ -484,25 +542,42 @@ def main(argv=None):
                 ))
 
         # The contrast floor, and the per-lattice floors, both from paired per-entry flags.
+        #
+        # `operating_point` is reported ONLY when a threshold was given. Without one it is
+        # identically `top10` -- `derive_flags` accepts every candidate -- so reporting both would
+        # publish the same number twice under two names, one of which a reader would take for the
+        # headline criterion. Choosing a threshold is S09's, on `fom-train`.
         baseline = 'M20'
+        metrics = ('top10',) + (('operating_point',) if args.threshold is not None else ())
         if merit != baseline:
-            for metric in ('operating_point', 'top10'):
-                paired = _paired_contrast(results, arm_names, merit, baseline, metric)
-                if paired is None:
+            for metric in metrics:
+                clustered = _paired_contrast(results, arm_names, merit, baseline, metric)
+                if clustered is None:
                     continue
-                differences, lattices, n = paired
+                n_source = int(clustered['entry_id'].nunique())
                 contrast_rows.append(dict(
                     merit=merit, baseline=baseline, metric=metric,
-                    mean_delta_pp=float(np.mean(differences)*100.0),
-                    se_pp=induced_from_differences(differences*100.0, n),
-                    n_entries=int(n),
+                    # The effect: what the merit is actually worth against the baseline. Reported
+                    # beside its floor so a gate is a ratio and not a comparison of two tables.
+                    contrast_pp=float(clustered['contrast'].mean()*100.0),
+                    floor_pp=_floor_from(clustered),
+                    standard_errors=abs(float(clustered['contrast'].mean()*100.0))
+                    / _floor_from(clustered) if _floor_from(clustered) else float('nan'),
+                    # ~0 by construction: it is the same quantity measured twice. A value far from
+                    # zero would mean the arms differ systematically, not by their search seed.
+                    mean_shift_pp=float(clustered['shift'].mean()*100.0),
+                    n_source_entries=n_source,
+                    n_pairs=int(clustered['pair'].nunique()),
                     ))
-                for lattice in sorted(set(lattices)):
-                    mask = lattices == lattice
+                for lattice, block in clustered.groupby('bravais_lattice'):
+                    target = split_counts.get(lattice)
                     lattice_rows.append(dict(
                         merit=merit, baseline=baseline, metric=metric, bravais_lattice=lattice,
-                        se_pp=induced_from_differences(differences[mask]*100.0, int(mask.sum())),
-                        n_entries=int(mask.sum()),
+                        contrast_pp=float(block['contrast'].mean()*100.0),
+                        se_pp=_floor_from(block),
+                        se_at_split_pp=_floor_from(block, n_target=target),
+                        n_entries=int(block['entry_id'].nunique()),
+                        n_split_entries=int(target) if target else None,
                         ))
 
     # Per condition, so "the floor barely moves with the condition" is re-measured rather than
@@ -528,6 +603,50 @@ def main(argv=None):
                 n_arms=int(np.isfinite(series).sum()),
                 ))
 
+    # S08 acceptance condition 3: the floor derived from the flip rate must match the floor
+    # measured from the spread. They are different estimators of one quantity -- sqrt(f/n) assumes
+    # the flips are independent Bernoulli, sd(d)/sqrt(n) assumes nothing -- so agreement is
+    # evidence that the arms differ by their search seed and not by something structural.
+    # Campaign 1 got 0.366 derived against 0.360 reported and that is the standard to match.
+    derivation_rows = []
+    for merit in FLOOR_MERITS:
+        for metric in ('top10', 'top1', 'found'):
+            flips, measured = [], []
+            for index, left_name in enumerate(arm_names):
+                for right_name in arm_names[index + 1:]:
+                    left = results[(left_name, merit)].per_entry
+                    right = results[(right_name, merit)].per_entry
+                    joined = left[['entry_id', 'condition_bundle', metric]].merge(
+                        right[['entry_id', 'condition_bundle', metric]],
+                        on=['entry_id', 'condition_bundle'], suffixes=('_a', '_b'),
+                        validate='1:1')
+                    # Clustered to the source entry, as everything else here is.
+                    joined['flip'] = (joined[f'{metric}_a'].astype(bool)
+                                      != joined[f'{metric}_b'].astype(bool))
+                    joined['shift'] = (joined[f'{metric}_a'].astype(float)
+                                       - joined[f'{metric}_b'].astype(float))
+                    clustered = joined.groupby('entry_id', as_index=False)[['flip', 'shift']].mean()
+                    n_source = clustered.shape[0]
+                    # The derived form takes the number of ROWS the flip rate is computed over,
+                    # not the number of clusters. Campaign 1's arms carried ONE condition bundle,
+                    # so rows and entries coincided and the distinction never showed; on a
+                    # three-condition pool, using the cluster count overstates the derived floor by
+                    # exactly sqrt(3) and the check fails for a reason that is not a defect.
+                    flips.append(induced_standard_error(
+                        float(clustered['flip'].mean()), joined.shape[0])*100.0)
+                    measured.append(float(np.std(clustered['shift'].to_numpy()*100.0, ddof=1)
+                                          / np.sqrt(n_source)))
+            if not flips:
+                continue
+            derived_pp, measured_pp = float(np.mean(flips)), float(np.mean(measured))
+            derivation_rows.append(dict(
+                merit=merit, metric=metric, derived_pp=derived_pp, measured_pp=measured_pp,
+                ratio=derived_pp/measured_pp if measured_pp else float('nan'),
+                relative_gap=abs(derived_pp - measured_pp)/measured_pp if measured_pp
+                else float('nan'),
+                n_pairs=len(flips)))
+    derivation_table = pd.DataFrame(derivation_rows)
+
     metric_table = pd.DataFrame(metric_rows)
     condition_table = pd.DataFrame(condition_rows)
     contrast_table = pd.DataFrame(contrast_rows)
@@ -537,12 +656,24 @@ def main(argv=None):
     aggregate_rows = []
     for (merit, metric), block in lattice_table.groupby(['merit', 'metric']):
         se, covered = compose_aggregate(block, composition)
+        # Composed at the SAME split weights as the standard error beside it. A plain mean here
+        # would be a macro average over lattices sitting next to a split-weighted standard error,
+        # and their ratio -- which is what a gate reads -- would be of two different populations.
+        weights = composition.set_index('bravais_lattice')['floor_weight']
+        aligned = block.set_index('bravais_lattice')
+        shared = [name for name in aligned.index if name in weights.index]
+        total = float(weights.loc[shared].sum())
+        contrast = (float((aligned.loc[shared, 'contrast_pp']*weights.loc[shared]).sum()/total)
+                    if total else float('nan'))
         aggregate_rows.append(dict(merit=merit, baseline='M20', metric=metric,
-                                   se_pp=se, lattice_weight_covered=covered,
+                                   contrast_pp=contrast, se_pp=se,
+                                   standard_errors=abs(contrast)/se if se else float('nan'),
+                                   lattice_weight_covered=covered,
                                    composed_from='split_entries'))
     aggregate_table = pd.DataFrame(aggregate_rows)
 
-    for name, frame in (('metric', metric_table), ('by_condition', condition_table),
+    for name, frame in (('metric', metric_table), ('derivation', derivation_table),
+                        ('by_condition', condition_table),
                         ('contrast', contrast_table),
                         ('by_lattice', lattice_table), ('aggregate', aggregate_table)):
         path = artifact_dir / f'{args.tag}_{name}.csv'
@@ -550,35 +681,78 @@ def main(argv=None):
         print(f'wrote {path}')
 
     if not lattice_table.empty:
+        # The metric the tables actually carry: without a threshold the operating point is
+        # identically top10 and is not reported at all.
+        figure_metric = 'operating_point' if args.threshold is not None else 'top10'
         path = figure(lattice_table, aggregate_table, condition_table,
-                      artifact_dir / f'{args.tag}.png')
-        print(f'wrote {path}')
+                      artifact_dir / f'{args.tag}.png', metric=figure_metric)
+        print(f'wrote {path} (metric: {figure_metric})')
     return 0
 
 
 def _paired_contrast(results, arm_names, merit, baseline, metric):
-    """Per-entry (merit - baseline) contrast, differenced between the first two arms.
+    """The contrast, and how far the arms move it. Clustered on the source entry.
 
-    The contrast floor is the spread of a *difference between two merits on one pool*, so the
-    per-entry quantity is (merit_flag - baseline_flag) within an arm, and the floor is how much
-    that quantity moves between arms.
+    Returns a frame with one row per (source entry, arm pair): `contrast` is the mean
+    (merit - baseline) outcome for that crystal, and `shift` is how much that contrast moved
+    between the two arms of the pair.
+
+    **Clustered on `entry_id`, not on the (entry, condition) row.** One crystal appears under
+    every condition with correlated noise, so it is one draw and not three. Treating the rows as
+    independent gives a standard error up to sqrt(n_conditions) -- 1.73x here -- too tight, and a
+    floor that is too tight makes every gate in the campaign too permissive. It is the first
+    pitfall the S08 handoff lists and PROTOCOL section 8 states it twice.
+
+    **All pairs, not the first two.** Four arms give six ordered pairs, and averaging over them is
+    most of why three extra arms were generated rather than one.
     """
     if len(arm_names) < 2:
         return None
-    frames = []
-    for name in arm_names[:2]:
+    per_arm = {}
+    for name in arm_names:
         merged = results[(name, merit)].per_entry.merge(
             results[(name, baseline)].per_entry[['entry_id', 'condition_bundle', metric]],
             on=['entry_id', 'condition_bundle'], suffixes=('', '_base'), validate='1:1')
         merged['contrast'] = (merged[metric].astype(float)
                               - merged[f'{metric}_base'].astype(float))
-        frames.append(merged[['entry_id', 'condition_bundle', 'bravais_lattice', 'contrast']])
-    joined = frames[0].merge(frames[1], on=['entry_id', 'condition_bundle', 'bravais_lattice'],
-                             suffixes=('_a', '_b'), validate='1:1')
-    if joined.empty:
-        return None
-    differences = (joined['contrast_a'] - joined['contrast_b']).to_numpy(dtype=np.float64)
-    return differences, joined['bravais_lattice'].to_numpy(), joined.shape[0]
+        per_arm[name] = merged[['entry_id', 'condition_bundle', 'bravais_lattice', 'contrast']]
+
+    rows = []
+    for index, left_name in enumerate(arm_names):
+        for right_name in arm_names[index + 1:]:
+            joined = per_arm[left_name].merge(
+                per_arm[right_name], on=['entry_id', 'condition_bundle', 'bravais_lattice'],
+                suffixes=('_a', '_b'), validate='1:1')
+            if joined.empty:
+                continue
+            joined['shift'] = joined['contrast_a'] - joined['contrast_b']
+            joined['contrast'] = joined['contrast_a']
+            # To the source entry FIRST, then across entries. This is the clustering.
+            clustered = (joined.groupby(['entry_id', 'bravais_lattice'], as_index=False)
+                         [['shift', 'contrast']].mean())
+            clustered['pair'] = f'{left_name}|{right_name}'
+            rows.append(clustered)
+    return pd.concat(rows, ignore_index=True) if rows else None
+
+
+def _floor_from(clustered, n_target=None):
+    """The floor, in pp, from clustered per-entry shifts.
+
+    `sd(shift)/sqrt(n)` over SOURCE ENTRIES, averaged over the arm pairs so no pair's own draw
+    decides the answer. `n_target` rescales from the sample's entry count to the reporting split's,
+    which is what makes a floor measured on 40 crystals a statement about the 600 the split holds.
+    """
+    values = []
+    for _, block in clustered.groupby('pair'):
+        shift = block['shift'].to_numpy(dtype=np.float64)*100.0
+        if shift.size < 2:
+            continue
+        n_sample = shift.size
+        standard_error = float(np.std(shift, ddof=1)/np.sqrt(n_sample))
+        if n_target:
+            standard_error *= float(np.sqrt(n_sample/n_target))
+        values.append(standard_error)
+    return float(np.mean(values)) if values else float('nan')
 
 
 if __name__ == '__main__':
