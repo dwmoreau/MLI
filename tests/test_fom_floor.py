@@ -186,3 +186,104 @@ def test_every_floor_merit_is_one_the_subsampler_ranked_on():
     have optimistic ranks and its floor would be measured on a thinned field (C2-F-077)."""
     from mlindex.model_training import FomMetrics
     assert set(floor_report.FLOOR_MERITS) <= set(FomMetrics.RANK_EXACT_MERITS)
+
+
+# ----------------------------------------------------------------------------------------
+# The two submit scripts. Neither can be executed here, so what is checkable is that they
+# say what the design says -- and every one of these is a way a submitted job would run
+# for its full walltime and produce something that cannot be used.
+# ----------------------------------------------------------------------------------------
+import re
+
+SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       'mlindex', 'scripts')
+ARMS_PATH = os.path.join(SCRIPTS, 'submit_fom_floor_arms.sh')
+FULL_PATH = os.path.join(SCRIPTS, 'submit_fom_full_retained.sh')
+
+# Benchmark B's own, from its manifest. A fully retained pool generated at anything else does not
+# reproduce its candidates, and gate 6 would then be differencing two different candidate sets
+# rather than auditing the retention rule.
+BENCHMARK_SEED = 12345
+BENCHMARK_OPTIMIZER_SEED = 12345
+BENCHMARK_POOL_SIZE = 2
+
+
+def _script(path):
+    """The script's executable lines, comments stripped.
+
+    Stripped because these scripts carry their runbook in the header -- `docs/` is git-ignored and
+    never reaches NERSC, so the reasoning has to travel with the file. That means the header
+    legitimately contains the very strings these tests forbid: it explains why the driver is not
+    wrapped in `srun`, and why `--no-subsample` is not `--no-label`. Matching raw text would fail
+    on the documentation for the rule it is checking.
+    """
+    with open(path, encoding='utf-8') as handle:
+        lines = [line for line in handle
+                 if not line.lstrip().startswith('#') or line.startswith('#SBATCH')]
+    return ''.join(lines)
+
+
+def _array_bounds(text):
+    match = re.search(r'#SBATCH --array=(\d+)-(\d+)', text)
+    assert match, 'no --array directive'
+    return int(match.group(1)), int(match.group(2))
+
+
+def test_the_full_retained_job_reproduces_benchmark_bs_search_exactly():
+    """Gate 6 differences a thinned pool against a full one, which is only meaningful if both hold
+    the same candidates. C2-F-058 gives that for a subset run at the same seed -- but only at the
+    same seed, and only at the same pool_size, which is part of the benchmark's identity
+    (C2-F-069) because the per-pattern search seed keys on the rank count."""
+    text = _script(FULL_PATH)
+    assert f'SEED={BENCHMARK_SEED}' in text
+    assert f'OPTIMIZER_SEED={BENCHMARK_OPTIMIZER_SEED}' in text
+    assert f'POOLSIZE={BENCHMARK_POOL_SIZE}' in text
+    assert '--no-subsample' in text
+    # Labelling must still run: the retention rule keeps every correct candidate, and the driver
+    # refuses to subsample an unlabelled pool rather than deleting the positives silently.
+    assert '--no-label' not in text
+
+
+def test_the_full_retained_array_matches_its_condition_list():
+    text = _script(FULL_PATH)
+    conditions = re.search(r'CONDITIONS=\(([^)]*)\)', text)
+    assert conditions, 'no CONDITIONS list'
+    names = re.findall(r'"([^"]+)"', conditions.group(1))
+    assert _array_bounds(text) == (0, len(names) - 1), (
+        'a task index past the end of the list runs the driver with an empty condition')
+    from mlindex.model_training import FomConditions
+    assert set(names) <= set(FomConditions.BY_KEY)
+
+
+def test_the_full_retained_job_covers_the_floor_sample():
+    """It has to be the same patterns as the arms, or it serves only the gate and neither the
+    tie-break floor nor a fully retained arm 1."""
+    text = _script(FULL_PATH)
+    assert 'S08_floor_entries.csv' in text
+    assert '--entry-ids-file' in text
+
+
+def test_the_floor_arms_share_a_base_seed_and_vary_only_the_optimizer_seed():
+    """The whole design. If --seed moved too, the arms would differ in their peak lists and the
+    spread would be generation noise and scoring noise together."""
+    text = _script(ARMS_PATH)
+    assert f'SEED={BENCHMARK_SEED}' in text
+    assert '--optimizer-seed "$ARM_SEED"' in text
+    assert '--seed "$SEED"' in text
+    tasks = re.findall(r'"(\d+) (\w+)"', text)
+    seeds = {seed for seed, _ in tasks}
+    assert len(seeds) > 1, 'the arms do not vary the optimizer seed'
+    assert str(BENCHMARK_OPTIMIZER_SEED) not in seeds, (
+        "an arm at Benchmark B's own seed would duplicate arm 1 rather than adding one")
+    assert _array_bounds(text) == (0, len(tasks) - 1)
+
+
+def test_both_scripts_keep_benchmark_bs_pool_width():
+    for path in (ARMS_PATH, FULL_PATH):
+        assert f'POOLSIZE={BENCHMARK_POOL_SIZE}' in _script(path), path
+
+
+def test_neither_script_wraps_the_driver_in_srun():
+    """A bare `srun -n 1` pins CPU affinity to one core and strangles the 128 processes."""
+    for path in (ARMS_PATH, FULL_PATH):
+        assert 'srun' not in _script(path), path
