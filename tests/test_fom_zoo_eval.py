@@ -76,3 +76,34 @@ def test_a_missing_sidecar_is_loud_rather_than_null():
     frames = zoo.pool_frames(str(SLICE_ROOT), ['M_sym'], None, merit_dir=SLICE_ROOT/'no_such_dir')
     with pytest.raises(FileNotFoundError, match='No merit sidecar'):
         next(iter(frames))
+
+
+# ---------------------------------------------------------------------------------------
+# The mechanism analyses
+# ---------------------------------------------------------------------------------------
+def test_bravais_lattices_runs_high_symmetry_to_low():
+    """The direction the whole symmetry-lowering claim rests on.
+
+    `symmetry_lowering` reads "is the wrong winner of LOWER symmetry?" as "is its index in
+    `BRAVAIS_LATTICES` HIGHER?". If that ordering were reversed the headline mechanism claim would
+    invert -- and it would still produce a plausible-looking number, so nothing else would catch
+    it. Pinned against the physics rather than against the current tuple order.
+    """
+    order = list(FomMetrics.BRAVAIS_LATTICES)
+    free_parameters = {'cP': 1, 'cI': 1, 'cF': 1, 'tP': 2, 'tI': 2, 'hP': 2, 'hR': 2,
+                       'oP': 3, 'oC': 3, 'oI': 3, 'oF': 3, 'mP': 4, 'mC': 4, 'aP': 6}
+    assert set(order) == set(free_parameters), 'the tuple and the physics must cover the same set'
+    counts = [free_parameters[lattice] for lattice in order]
+    # Non-decreasing: more free cell parameters means less symmetry, and it comes later.
+    assert counts == sorted(counts), f'BRAVAIS_LATTICES is not ordered high symmetry to low: {order}'
+    assert order[0].startswith('c') and order[-1] == 'aP'
+
+
+def test_the_floor_arm_refuses_a_subsampled_pool():
+    """C2-F-084, expressed where the comparison would otherwise be run."""
+    from mlindex.scripts import run_fom_zoo_explain as explain
+    artifact_dir = FomBenchmark.Path(__file__).parent.parent/'docs'/'fom_campaign2'/'artifacts'
+    if not (artifact_dir/'S09_zoo_slice_reduced_meta.json').exists():
+        pytest.skip('no slice reductions on disk')
+    with pytest.raises(ValueError, match='SUBSAMPLED'):
+        explain.floor_arm(artifact_dir, 'S09_zoo_slice')

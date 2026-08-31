@@ -117,12 +117,18 @@ def pool_frames(pool, merits, entry_ids, merit_dir=None, unfloored=False):
             yield frame.reset_index(drop=True)
 
 
-def reduce_one(pool, merit, entry_ids, entries, split_label, merit_dir=None, unfloored=False):
-    """One merit, one split: the pool pass. Everything downstream is a function of the result."""
+def reduce_one(pool, merit, entry_ids, entries, split_label, merit_dir=None, unfloored=False,
+               pool_mode='cross_bl'):
+    """One merit, one split: the pool pass. Everything downstream is a function of the result.
+
+    `pool_mode='per_bl'` ranks within each Bravais lattice instead of across all fourteen. It is
+    never the headline -- it is a different and much easier problem than the one `run.py` solves --
+    and exists to measure the gap, which is where campaign 1 located ~90 % of `M_sym`'s advantage.
+    """
     depth, subsampled = FomBenchmark.subsample_depth(Path(pool))
     frames = pool_frames(pool, [merit], entry_ids, merit_dir=merit_dir, unfloored=unfloored)
     return FomMetrics.reduce_to_per_entry(
-        frames, score=merit,
+        frames, score=merit, pool=pool_mode,
         higher_is_better=FomMetrics.orientation_of(merit) if merit in FomMetrics.HIGHER_IS_BETTER
         else True,
         entries=entries, split=split_label,
@@ -149,6 +155,7 @@ def run_reduce(args, entries, splits):
             reduced, _, meta = reduce_one(
                 args.pool, merit, entry_ids, entries, split_label,
                 merit_dir=args.merit_dir, unfloored=args.unfloored or merit == UNFLOORED,
+                pool_mode=args.pool_mode,
                 )
             # Asserted rather than trusted: a reduction that silently lost its exactness
             # certificate is the one thing that cannot be detected downstream.
@@ -437,6 +444,10 @@ def main(argv=None):
                              'the subsampler ranked on the floored merit (C2-F-084).')
     parser.add_argument('--n-bootstrap', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=12345)
+    parser.add_argument('--pool-mode', choices=('cross_bl', 'per_bl'), default='cross_bl',
+                        help="'per_bl' ranks within each Bravais lattice. Never the headline -- a "
+                             'different and much easier problem than the one run.py solves. Used '
+                             'to size the cross-lattice half of a merit\'s advantage.')
     parser.add_argument('--reduce', action='store_true', help='Pool pass only.')
     parser.add_argument('--analyse', action='store_true', help='Analysis only.')
     parser.add_argument('--tag', default='S09_zoo')

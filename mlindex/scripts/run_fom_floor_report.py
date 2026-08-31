@@ -96,6 +96,11 @@ def _parse_args(argv=None):
                         help='Accept threshold, selected on fom-train and passed in. Omit for '
                              'rank metrics only')
     parser.add_argument('--top-n', type=int, default=10)
+    parser.add_argument('--thresholds-json', type=str, default=None,
+                        help="S09's {tag}_thresholds.json. Gives each merit its own operating "
+                             'threshold, which is what the operating-point floor needs: one '
+                             'scalar across merits that differ in scale by orders of magnitude is '
+                             'the wrong cut for all but one of them. Overrides --threshold')
     parser.add_argument('--tag', type=str, default='S08_floor')
     return parser.parse_args(argv)
 
@@ -184,6 +189,39 @@ def compose_aggregate(per_lattice, composition):
 # ----------------------------------------------------------------------------------------
 # Loading the arms
 # ----------------------------------------------------------------------------------------
+def has_threshold(args):
+    """Whether a threshold was supplied at all, by either route.
+
+    Both the contrast table and the figure switch to the operating point only when there is a
+    threshold to switch on. Testing `args.threshold` alone missed the `--thresholds-json` route and
+    silently reported the top-10 contrast under an operating-point heading -- which is the exact
+    shape of C2-F-085, a wrong number that raises nothing.
+    """
+    return args.threshold is not None or bool(getattr(args, '_thresholds', None))
+
+
+def per_merit_threshold(args, merit):
+    """This merit's own operating threshold, or the single scalar, or none.
+
+    S08 measured the floor on top-10 *without* a threshold and left the operating-point version to
+    S09, which is the step that selects one. But a single `--threshold` across the whole zoo is not
+    a meaningful instruction: the merits differ in scale by orders of magnitude -- M20 selects
+    12.2, `M_sym` 28.6, `X_N` 0 -- so one scalar is the wrong cut for every merit but one.
+
+    `--thresholds-json` takes the file S09's eval driver writes and gives each merit its own. The
+    stored value is in `per_entry`'s internal orientation, where every score is higher-is-better,
+    so a lower-is-better merit's threshold is negated there and has to be turned back before
+    `evaluate` mirrors it a second time.
+    """
+    if getattr(args, '_thresholds', None):
+        choice = args._thresholds.get(merit)
+        if choice is None:
+            return None
+        stored = float(choice['threshold'])
+        return stored if FomMetrics.orientation_of(merit) else -stored
+    return args.threshold
+
+
 def arm_frames(root, merit_dir=None, columns=None):
     """One arm's candidate frames, merits joined on -- `FomBenchmark.bundle_frames` by another name.
 
@@ -468,6 +506,14 @@ def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_poin
 def main(argv=None):
     args = _parse_args(argv)
     composition = pd.read_csv(args.composition)
+    args._thresholds = None
+    if getattr(args, 'thresholds_json', None):
+        import json
+        args._thresholds = json.loads(
+            Path(args.thresholds_json).read_text(encoding='utf-8'))['choices']
+        print(f'per-merit thresholds from {args.thresholds_json}: '
+              + ', '.join(f'{m} {c["threshold"]:.4g}' for m, c in sorted(args._thresholds.items())))
+
     artifact_dir = Path(args.artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -488,7 +534,7 @@ def main(argv=None):
             results[(name, merit)] = FomMetrics.evaluate(
                 arm_frames(path, columns=wanted), score=merit,
                 higher_is_better=FomMetrics.orientation_of(merit),
-                threshold=args.threshold, top_n=args.top_n,
+                threshold=per_merit_threshold(args, merit), top_n=args.top_n,
                 entries=keep, n_bootstrap=0,
                 # Read from the arm's own manifest rather than assumed: an iterable of frames
                 # carries no manifest, and 'auto' would take it for a full pool.
@@ -520,7 +566,7 @@ def main(argv=None):
         # publish the same number twice under two names, one of which a reader would take for the
         # headline criterion. Choosing a threshold is S09's, on `fom-train`.
         baseline = 'M20'
-        metrics = ('top10',) + (('operating_point',) if args.threshold is not None else ())
+        metrics = ('top10',) + (('operating_point',) if has_threshold(args) else ())
         if merit != baseline:
             for metric in metrics:
                 clustered = _paired_contrast(results, arm_names, merit, baseline, metric)
@@ -655,7 +701,7 @@ def main(argv=None):
     if not lattice_table.empty:
         # The metric the tables actually carry: without a threshold the operating point is
         # identically top10 and is not reported at all.
-        figure_metric = 'operating_point' if args.threshold is not None else 'top10'
+        figure_metric = 'operating_point' if has_threshold(args) else 'top10'
         path = figure(lattice_table, aggregate_table, condition_table,
                       artifact_dir / f'{args.tag}.png', metric=figure_metric)
         print(f'wrote {path} (metric: {figure_metric})')

@@ -182,6 +182,152 @@ def write_figure(main_table, summary, artifact_dir, tag, tiebreak=None, caption=
     return path
 
 
+def symmetry_lowering(artifact_dir, tag, merits):
+    """Where a wrong candidate outranks the correct cell, is the winner of LOWER symmetry?
+
+    Campaign 1's central mechanism claim: the failure is symmetry lowering, not volume inflation,
+    and `M_rev` wins because lowering the symmetry at fixed volume increases the number of distinct
+    calculated lines -- so a lower-symmetry cell over-predicts lines without over-predicting volume,
+    and `M_rev` is the only classical merit that scores line over-prediction directly.
+
+    **This needs no pool pass.** `reduce_pool` already stores the Bravais lattice of the top-ranked
+    candidate and of the best correct one, so the whole analysis is arithmetic over the reduction
+    -- which means it costs nothing at pool scale either.
+
+    `FomMetrics.BRAVAIS_LATTICES` runs high symmetry to low, so a *higher* index is a
+    *lower*-symmetry cell. Getting that backwards would invert the headline claim and nothing else
+    would catch it, so it is asserted in a test.
+    """
+    rank = {lattice: position for position, lattice in enumerate(FomMetrics.BRAVAIS_LATTICES)}
+    rows = []
+    for merit in merits:
+        path = Path(artifact_dir)/f'{tag}_reduced_{merit}_fom-dev.parquet'
+        if not path.exists():
+            continue
+        frame = pd.read_parquet(path)
+        beaten = frame.loc[frame['has_correct_all'].astype(bool)
+                           & ~frame['top_is_correct_all'].astype(bool)]
+        for scope, subset in (('all reachable', beaten),
+                              ('hard stratum', beaten.loc[beaten['is_hard'].astype(bool)])):
+            if not subset.shape[0]:
+                continue
+            true_rank = subset['bravais_lattice'].map(rank)
+            top_rank = subset['bravais_lattice_top_all'].map(rank)
+            rows.append({
+                'merit': merit, 'scope': scope, 'n_entries': int(subset.shape[0]),
+                'frac_wrong_cell_lower_symmetry': float((top_rank > true_rank).mean()),
+                'frac_wrong_cell_higher_symmetry': float((top_rank < true_rank).mean()),
+                'frac_same_lattice': float((top_rank == true_rank).mean()),
+                'median_score_top': float(subset['score_top_all'].median()),
+                'median_score_best_correct': float(subset['score_best_correct_all'].median()),
+                })
+    return pd.DataFrame(rows)
+
+
+def scale_transfer(artifact_dir, tag, merits):
+    """Cross-lattice against within-lattice: is the advantage fit quality, or scale?
+
+    Campaign 1 measured ~90 % of `M_sym`'s advantage over M20 as **cross-lattice scale transfer**
+    rather than better fit: within a lattice the whole zoo lands between 0.4407 and 0.6852 of
+    top-10, while across lattices it spreads 0.000-0.6175. The mechanism composes with the
+    symmetry-lowering result rather than competing with it -- within a lattice every candidate
+    already shares the true Bravais lattice, so "the wrong winner has lower symmetry" cannot
+    discriminate there, and `M_rev` collapses to about M20. **The over-prediction signal is
+    inherently cross-lattice**, and that sentence is the whole explanation.
+
+    Reads the `per_bl` reductions beside the `cross_bl` ones. Never the headline: ranking within a
+    single lattice is a different and much easier problem than the one `run.py` solves
+    (METRICS section 1).
+    """
+    rows = []
+    for merit in merits:
+        values = {}
+        for pool, suffix in (('cross_bl', ''), ('per_bl', '_per_bl')):
+            path = Path(artifact_dir)/f'{tag}{suffix}_reduced_{merit}_fom-dev.parquet'
+            meta_path = Path(artifact_dir)/f'{tag}{suffix}_reduced_meta.json'
+            if not (path.exists() and meta_path.exists()):
+                continue
+            import json
+            meta = json.loads(meta_path.read_text(encoding='utf-8'))[f'{merit}|fom-dev']
+            result = FomMetrics.summarise_per_entry(pd.read_parquet(path), meta, n_bootstrap=0)
+            values[pool] = (float(result.metric('top10')), float(result.metric('top1')))
+        if len(values) == 2:
+            rows.append({'merit': merit,
+                         'top10_cross_lattice': values['cross_bl'][0],
+                         'top10_within_lattice': values['per_bl'][0],
+                         'top1_cross_lattice': values['cross_bl'][1],
+                         'top1_within_lattice': values['per_bl'][1]})
+    frame = pd.DataFrame(rows)
+    if frame.shape[0] and 'M20' in set(frame['merit']):
+        baseline = frame.loc[frame['merit'] == 'M20'].iloc[0]
+        frame['advantage_cross_lattice_pp'] = 100*(frame['top10_cross_lattice']
+                                                   - baseline['top10_cross_lattice'])
+        frame['advantage_within_lattice_pp'] = 100*(frame['top10_within_lattice']
+                                                    - baseline['top10_within_lattice'])
+        # What share of the advantage over M20 exists only across lattices. Undefined where the
+        # merit has no advantage to apportion, which is most of the zoo on this pool.
+        total = frame['advantage_cross_lattice_pp']
+        frame['share_of_advantage_cross_lattice'] = np.where(
+            np.abs(total) > 1e-9,
+            1.0 - frame['advantage_within_lattice_pp']/total.replace(0, np.nan), np.nan)
+    return frame
+
+
+def floor_arm(artifact_dir, tag):
+    """Floored against unfloored `M_sym`, on a fully retained pool -- the only place it is honest.
+
+    The S09 handoff requires `M_sym` reported both ways, because campaign 1's number and S03's
+    stored columns were computed unfloored and a floored `M_sym` is not like for like against them.
+
+    **It cannot be run on Benchmark B** (C2-F-084). The negative subsampler ranked on the *floored*
+    merit, so a saturated fit scored 0.0, ranked last, and was retained at only the 5 % Bernoulli
+    rate; unfloored, those same rows read 1e11-1e14 and rank *first*. The unfloored arm would
+    therefore be scored against a field with its own strongest rivals deleted, and would come out
+    flattered -- understating what the floor is worth, which is the opposite of a conservative
+    error. On a fully retained pool nothing was deleted and the comparison means what it says.
+
+    Rank metrics only: the retained pool is `fom-dev` alone, so no threshold can be selected on it.
+    """
+    import json
+    rows = []
+    meta_path = Path(artifact_dir)/f'{tag}_reduced_meta.json'
+    if not meta_path.exists():
+        return pd.DataFrame(), pd.DataFrame()
+    metas = json.loads(meta_path.read_text(encoding='utf-8'))
+    results = {}
+    for merit in ('M20', 'M_sym', 'M_sym_unfloored'):
+        path = Path(artifact_dir)/f'{tag}_reduced_{merit}_fom-dev.parquet'
+        key = f'{merit}|fom-dev'
+        if not (path.exists() and key in metas):
+            continue
+        meta = metas[key]
+        if meta.get('subsampled'):
+            raise ValueError(
+                f'{tag} is a SUBSAMPLED pool. The unfloored arm is not interpretable there '
+                f'(C2-F-084); run it on a fully retained pool.')
+        result = FomMetrics.summarise_per_entry(pd.read_parquet(path), meta, n_bootstrap=1000)
+        results[merit] = result
+        for scope, block in (('all', result.aggregate), ('hard', result.hard)):
+            if block.shape[0]:
+                row = block.iloc[0]
+                rows.append({'merit': merit, 'scope': scope, 'n_entries': row['n_entries'],
+                             'n_found': row['n_found'], 'top1': row['top1'],
+                             'top10': row['top10'], 'mrr': row['mrr'],
+                             'ceiling_rescorer': row['ceiling_rescorer']})
+    tests = []
+    if 'M_sym' in results and 'M_sym_unfloored' in results:
+        for scope in (None, 'hard'):
+            for metric in ('top1', 'top10'):
+                test = FomMetrics.mcnemar(results['M_sym'], results['M_sym_unfloored'],
+                                          metric=metric, subset=scope)
+                interval = FomMetrics.paired_delta_ci(
+                    results['M_sym'], results['M_sym_unfloored'], metric=metric, subset=scope)
+                tests.append({'comparison': 'M_sym (floored) - M_sym (unfloored)',
+                              'scope': scope or 'all', **dict(test),
+                              'ci_low': interval['ci_low'], 'ci_high': interval['ci_high']})
+    return pd.DataFrame(rows), pd.DataFrame(tests)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description='S09 -- the union oracle and the mechanism analyses.')
@@ -193,6 +339,10 @@ def main(argv=None):
                         help='S08 measured this on the fully retained pool. A rank metric is read '
                              'against it, never against zero (C2-F-083).')
     parser.add_argument('--caption', default=None)
+    parser.add_argument('--floor-arm-tag', default=None,
+                        help='Tag of a FULLY RETAINED pool reduction carrying M_sym_unfloored. '
+                             'Reports the floored/unfloored comparison the handoff requires; '
+                             'refuses a subsampled pool (C2-F-084).')
     args = parser.parse_args(argv)
 
     artifact_dir = Path(args.artifact_dir)
@@ -218,12 +368,49 @@ def main(argv=None):
                   f'ceiling {row["reachable_ceiling"]:.4f}  '
                   f'headroom {row["combiner_headroom"]:+.4f}')
 
+    if args.floor_arm_tag:
+        arm, tests = floor_arm(artifact_dir, args.floor_arm_tag)
+        if arm.shape[0]:
+            arm.to_csv(artifact_dir/f'{out_tag}_floor_arm.csv', index=False, encoding='utf-8')
+            tests.to_csv(artifact_dir/f'{out_tag}_floor_arm_mcnemar.csv', index=False,
+                         encoding='utf-8')
+            print('\nthe M_rev support floor, on a fully retained pool')
+            for row in arm.itertuples():
+                print(f'  {row.merit:18s} {row.scope:5s} top1 {row.top1:.4f}  '
+                      f'top10 {row.top10:.4f}  mrr {row.mrr:.4f}  (n={int(row.n_entries)})')
+            for row in tests.itertuples():
+                print(f'  floored - unfloored  {row.scope:5s} {row.metric:6s} '
+                      f'{row.delta:+.4f} [{row.ci_low:+.4f}, {row.ci_high:+.4f}]  '
+                      f'{int(row.n_a_only)}/{int(row.n_b_only)}  p {row.p_value:.3g}')
+
     frame = pd.concat(summaries, ignore_index=True)
     frame.to_csv(artifact_dir/f'{out_tag}_complementarity.csv', index=False, encoding='utf-8')
     pd.concat(matrices, ignore_index=True).to_csv(
         artifact_dir/f'{out_tag}_complementarity_matrix.csv', index=False, encoding='utf-8')
 
     main_table = pd.read_csv(artifact_dir/f'{args.tag}_main_table.csv')
+    merits = list(main_table['merit'])
+
+    symmetry = symmetry_lowering(artifact_dir, args.tag, merits)
+    if symmetry.shape[0]:
+        symmetry.to_csv(artifact_dir/f'{out_tag}_symmetry.csv', index=False, encoding='utf-8')
+        print('\nsymmetry lowering, where a wrong candidate outranks the correct cell')
+        for row in symmetry.itertuples():
+            print(f'  {row.merit:16s} {row.scope:14s} n={row.n_entries:4d}  '
+                  f'lower symmetry {row.frac_wrong_cell_lower_symmetry:.3f}  '
+                  f'same lattice {row.frac_same_lattice:.3f}')
+
+    transfer = scale_transfer(artifact_dir, args.tag, merits)
+    if transfer.shape[0]:
+        transfer.to_csv(artifact_dir/f'{out_tag}_scale_transfer.csv', index=False,
+                        encoding='utf-8')
+        print('\ncross-lattice against within-lattice top-10')
+        for row in transfer.itertuples():
+            print(f'  {row.merit:16s} cross {row.top10_cross_lattice:.4f}  '
+                  f'within {row.top10_within_lattice:.4f}')
+    else:
+        print('\n(no per_bl reductions found -- run the eval driver with --pool-mode per_bl '
+              'to size the cross-lattice half)')
     path = write_figure(main_table, frame, artifact_dir, f'{out_tag}_explain',
                         tiebreak=args.tiebreak_floor, caption=args.caption)
     print(f'\nwrote {out_tag}_complementarity{{,_matrix}}.csv and {path.name} to {artifact_dir}')
