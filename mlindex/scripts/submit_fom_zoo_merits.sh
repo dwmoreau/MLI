@@ -71,6 +71,24 @@ POOL=${POOL:-$SCRATCH/fom_campaign2/pool}
 PROCESSES=${PROCESSES:-64}
 CHUNK_ROWS=${CHUNK_ROWS:-1000000}
 
+# A GUARD, NOT A WARNING. The header above says not to run this for Benchmark B, but a header is a
+# comment and a comment cannot stop a paste -- and this job and submit_fom_zoo_eval.sh differ by one
+# word in their names. If the sidecars are already there, refuse and say which script was meant.
+# FORCE=1 overrides, for a genuine recompute on a new pool.
+if [ -d "$POOL/merits" ] && [ -z "$FORCE" ]; then
+    echo "REFUSING: $POOL/merits already exists." >&2
+    echo "" >&2
+    echo "  These cost 33 core-hours and are verified complete. Recomputing changes nothing that" >&2
+    echo "  S09 reads -- the six merits its leaderboard uses are byte-identical either way." >&2
+    echo "" >&2
+    echo "  If you meant to RUN S09, the script is:  sbatch submit_fom_zoo_eval.sh" >&2
+    echo "  (this one only computes the merit columns that job reads)" >&2
+    echo "" >&2
+    echo "  To check them:      run_fom_floor_merits.py --pool $POOL --verify" >&2
+    echo "  To recompute anyway: FORCE=1 sbatch submit_fom_zoo_merits.sh" >&2
+    exit 1
+fi
+
 if [ ! -d "$POOL" ]; then
     echo "FATAL: pool not found at $POOL" >&2
     exit 1
