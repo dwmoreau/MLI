@@ -176,3 +176,27 @@ def test_hard_stratum_constants_match_the_metrics_module():
     node. A drifted copy would select for a stratum the metrics module does not report."""
     assert subset.HARD_LATTICES == FomMetrics.HARD_LATTICES
     assert subset.HARD_MIN_DECILE == FomMetrics.HARD_MIN_DECILE
+
+
+def test_parallel_filtering_gives_the_same_slice(pool, tmp_path):
+    """The files are independent, so the process count is a throughput knob and nothing else.
+
+    Worth pinning rather than assuming: the whole pool is scanned either way -- about 1 % of
+    entries are wanted and nothing is sorted on `entry_id`, so there is no index to skip on -- and
+    the only reason to reach for processes is the 122 GB of I/O. A knob that changed the output
+    would be worse than no knob.
+    """
+    root, _ = pool
+    serial, parallel = tmp_path / 'serial', tmp_path / 'parallel'
+    for out_dir, processes in ((serial, '1'), (parallel, '4')):
+        subset.main(['--pool', str(root), '--out-dir', str(out_dir),
+                     '--entries-per-lattice', '6', '--seed', '3', '--processes', processes])
+
+    from mlindex.model_training import FomBenchmark
+    left = FomBenchmark.load_candidates(serial).sort_values(
+        ['entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id']).reset_index(drop=True)
+    right = FomBenchmark.load_candidates(parallel).sort_values(
+        ['entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id']).reset_index(drop=True)
+    pd.testing.assert_frame_equal(left, right)
+    assert FomBenchmark.load_manifest(serial)['n_candidates'] == \
+        FomBenchmark.load_manifest(parallel)['n_candidates']

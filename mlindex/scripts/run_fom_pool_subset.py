@@ -5,14 +5,21 @@ cannot be developed or gated against real data without a slice. This writes one:
 same columns, a manifest that describes itself as a subset, and a stratified entry selection that
 keeps the things a metrics gate actually needs to exercise.
 
-    RUNBOOK -- run this ON NERSC, then copy the output directory back.
+    RUNBOOK -- run this ON NERSC, on a COMPUTE NODE, then copy the output directory back.
 
+    salloc -N 1 -C cpu -q interactive -A lcls -t 1:00:00
     python mlindex/scripts/run_fom_pool_subset.py \
         --pool /pscratch/sd/d/dwmoreau/fom_campaign2/pool \
         --out-dir $SCRATCH/fom_campaign2/pool_subset \
-        --entries-per-lattice 20
+        --entries-per-lattice 20 --processes 32
 
     tar -czf pool_subset.tar.gz -C $SCRATCH/fom_campaign2 pool_subset
+
+A compute node for the I/O, not the memory. Peak memory is a few GB -- the entry table dominates
+at ~2 GB and each worker holds one row group -- but the whole 122 GB pool has to be read to find
+the ~1 % of entries wanted, and there is no index to skip on. That is tens of minutes of Lustre
+traffic single-threaded, which is not what a login node is for. The 126 files are independent, so
+`--processes` divides it almost linearly.
 
 `docs/` is git-ignored and never reaches NERSC, so the runbook lives here rather than in a handoff.
 
@@ -34,6 +41,7 @@ tool that scans the same files is the obvious place for that to happen twice.
 import argparse
 import json
 import os
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -87,6 +95,14 @@ def _parse_args(argv=None):
     parser.add_argument('--seed', type=int, default=12345,
                         help='Selection seed. The draw is deterministic given the pool and this')
     parser.add_argument('--row-group-size', type=int, default=ROW_GROUP_SIZE)
+    parser.add_argument('--processes', type=int, default=1,
+                        help='Files filtered concurrently. The pool is partitioned one file per '
+                             '(bundle, Bravais lattice), so they are independent and this is the '
+                             'axis to parallelise on -- 126 is the most that does anything. Each '
+                             'worker holds one row group, not one file, so memory is flat in this. '
+                             'The whole pool has to be scanned either way: the wanted entries are '
+                             'about 1 % of the benchmark and nothing is sorted on entry_id, so '
+                             'there is no index and no statistics to skip on')
     return parser.parse_args(argv)
 
 
@@ -159,12 +175,23 @@ def _draw(frame, n, rng):
     return frame.iloc[np.sort(positions)]
 
 
+def _filter_task(task):
+    """One file, for the process pool. Module-level and picklable: Windows and macOS both spawn."""
+    path, out_path, entry_ids, row_group_size = task
+    rows_in, rows_out = filter_parquet(path, out_path, entry_ids, row_group_size)
+    return path, out_path, rows_in, rows_out
+
+
 def filter_parquet(path, out_path, entry_ids, row_group_size):
     """Copy the rows of one parquet whose `entry_id` is in `entry_ids`, a row group at a time.
 
     Returns (rows_in, rows_out). Nothing is written when no row survives: an empty parquet for
     every (bundle, lattice) pair the slice does not reach would make the subset look complete
     while carrying no candidates, and `available_bundles` counts files.
+
+    A row group at a time, never a whole file: this scans the entire pool, and the S07 acceptance
+    gate OOM-killed a node by loading it into one frame (C2-F-074). At the consolidator's row group
+    size that bounds this at a few tens of MB whatever the file holds.
     """
     source = pq.ParquetFile(path)
     keep = pa.array(sorted(entry_ids), type=pa.string())
@@ -227,15 +254,32 @@ def main(argv=None):
     kept_entries.to_parquet(out_dir / 'entries.parquet', index=False,
                             row_group_size=args.row_group_size)
 
-    counts = []
     prefixes = ['candidates'] + (['predownsample'] if args.with_predownsample else [])
+    tasks, labels = [], {}
     for prefix in prefixes:
         for bundle, path in _stream_names(pool, prefix, bundles):
-            rows_in, rows_out = filter_parquet(path, out_dir / path.name, entry_ids,
-                                               args.row_group_size)
-            counts.append(dict(stream=prefix, bundle=bundle, file=path.name,
-                               rows_in=rows_in, rows_out=rows_out))
-            print(f'  {path.name}: {rows_out} of {rows_in}')
+            tasks.append((str(path), str(out_dir / path.name), sorted(entry_ids),
+                          args.row_group_size))
+            labels[str(path)] = (prefix, bundle, path.name)
+
+    counts = []
+    processes = max(1, min(int(args.processes), len(tasks)))
+    print(f'filtering {len(tasks)} files over {processes} process(es)')
+    if processes == 1:
+        results = map(_filter_task, tasks)
+    else:
+        # `Pool` rather than a thread pool: parquet decode releases the GIL only in parts, and
+        # the tasks share nothing. imap_unordered so a long file does not hold up the log.
+        pool_handle = Pool(processes)
+        results = pool_handle.imap_unordered(_filter_task, tasks)
+    for path_string, _, rows_in, rows_out in results:
+        prefix, bundle, name = labels[path_string]
+        counts.append(dict(stream=prefix, bundle=bundle, file=name,
+                           rows_in=rows_in, rows_out=rows_out))
+        print(f'  {name}: {rows_out} of {rows_in}')
+    if processes > 1:
+        pool_handle.close()
+        pool_handle.join()
 
     manifest = FomBenchmark.load_manifest(pool) or {}
     # The slice describes itself as one. A manifest copied verbatim would claim the pool's own
