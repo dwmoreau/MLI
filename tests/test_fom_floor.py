@@ -430,3 +430,19 @@ def test_the_uniform_score_is_keyed_on_the_candidate_not_the_row_order():
 def test_the_constant_score_really_is_constant():
     frame = pd.DataFrame({'entry_id': ['E1']*5})
     assert len(set(tiebreak.constant_score(frame))) == 1
+
+
+def test_the_zoo_merit_job_matches_the_scripts_interface():
+    """The submit script and the script it calls must agree on the flag names.
+
+    A typo here costs a queue slot and an hour and surfaces only as an argparse error in a batch
+    log, long after the node was allocated.
+    """
+    import run_fom_floor_merits as merits
+    text = _script(os.path.join(SCRIPTS, 'submit_fom_zoo_merits.sh'))
+    for flag in ('--pool', '--processes', '--chunk-rows'):
+        assert flag in text, flag
+    # And the parser really accepts them together, in the shape the script passes them.
+    args = merits._parse_args(['--pool', 'x', '--processes', '64', '--chunk-rows', '1000000'])
+    assert (args.pool, args.processes, args.chunk_rows) == ('x', 64, 1000000)
+    assert 'srun' not in text

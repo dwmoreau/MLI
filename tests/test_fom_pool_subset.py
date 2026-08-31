@@ -266,3 +266,16 @@ def test_end_to_end_with_an_entry_list(pool, tmp_path):
     # The balanced-draw parameters are null rather than stale, so the manifest cannot be read as
     # describing a draw that did not happen.
     assert manifest['subset_entries_per_lattice'] is None
+
+
+def test_list_columns_are_visible_in_the_column_probe(pool):
+    """`ParquetFile.schema` flattens a list column to its leaf path -- `xnn` becomes
+    `xnn.list.element` -- so a probe built on it reports the column as absent and any caller
+    projecting on the result drops it, then fails somewhere else entirely."""
+    from mlindex.model_training import FomBenchmark
+    import pandas as pd
+    root, entries = pool
+    frame = pd.read_parquet(root / 'candidates_c2_error1_cont0_aP.parquet')
+    frame['xnn'] = [[1.0, 2.0, 3.0]]*frame.shape[0]
+    frame.to_parquet(root / 'candidates_c2_error1_cont0_aP.parquet', index=False)
+    assert 'xnn' in FomBenchmark.candidate_columns_present(root)

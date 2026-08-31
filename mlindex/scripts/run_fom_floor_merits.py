@@ -30,6 +30,7 @@ from multiprocessing import Pool
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from mlindex.model_training import FomBenchmark
 
@@ -37,6 +38,33 @@ from mlindex.model_training import FomBenchmark
 # What the sidecar carries besides the merits. `candidate_id` is only unique within an
 # (entry, bundle, lattice) pool, so all four are needed to join without fanning rows out.
 JOIN_KEYS = ('entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id')
+
+# All `reduced_merits` reads from the candidate side. Projecting to these is the difference between
+# a 1 GB read and a 6 GB one on Benchmark B's larger files: `unit_cell`, `merit_at_prune` and
+# `hkl_true_in_basis` are list-valued and become one Python object per row per column in pandas.
+CANDIDATE_COLUMNS = ('entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id',
+                     'lattice_system', 'spacegroup', 'n_peaks', 'xnn')
+
+# And all it reads from the entry side. The full entry table carries q2_holdout, hkl_holdout,
+# hkl_true and the ground-truth cell; on Benchmark B's 106 235 rows that is ~2 GB in pandas, and
+# the unprojected version loaded it once PER FILE in every worker.
+ENTRY_COLUMNS = ('entry_id', 'condition_bundle', 'q2_digest', 'q2_obs')
+
+# Rows held at once. `reduced_merits` groups by (entry, lattice, extinction group) and is exact on
+# any subset of a group -- the merits are per candidate given the entry's peak list -- so chunking
+# costs a rebuilt reference list at a boundary and nothing else.
+CHUNK_ROWS = 2_000_000
+
+_ENTRY_CACHE = {}
+
+
+def _entries_for(pool):
+    """The projected entry table, once per worker process rather than once per file."""
+    if pool not in _ENTRY_CACHE:
+        frame = FomBenchmark.load_entries(pool)
+        keep = [name for name in ENTRY_COLUMNS if name in frame.columns]
+        _ENTRY_CACHE[pool] = frame[keep]
+    return _ENTRY_CACHE[pool]
 
 
 def _parse_args(argv=None):
@@ -48,6 +76,10 @@ def _parse_args(argv=None):
     parser.add_argument('--processes', type=int, default=1,
                         help='Files scored concurrently. One file per (bundle, lattice), so they '
                              'are independent; each worker holds one file')
+    parser.add_argument('--chunk-rows', type=int, default=CHUNK_ROWS,
+                        help='Candidate rows held at once. Bounds memory per worker; the merits '
+                             'are exact on any subset of an (entry, lattice, group) so chunking '
+                             'costs a rebuilt reference list at a boundary and nothing else')
     parser.add_argument('--overwrite', action='store_true',
                         help='Rescore files that already have a sidecar. Off by default, so an '
                              'interrupted run resumes instead of restarting')
@@ -55,17 +87,36 @@ def _parse_args(argv=None):
 
 
 def score_file(task):
-    """One candidate file -> one sidecar. Module-level and picklable: spawn-safe."""
-    path, out_path, pool = task
-    entries = FomBenchmark.load_entries(pool)
-    candidates = pd.read_parquet(path)
-    merits = FomBenchmark.reduced_merits(candidates, entries)
-    keys = [key for key in JOIN_KEYS if key in candidates.columns]
-    sidecar = pd.concat([candidates[keys].reset_index(drop=True),
-                         merits.reset_index(drop=True)], axis=1)
+    """One candidate file -> one sidecar, streamed. Module-level and picklable: spawn-safe."""
+    path, out_path, pool, chunk_rows = task
+    entries = _entries_for(pool)
+    source = pq.ParquetFile(path)
+    # `schema_arrow`, not `schema`: the parquet schema flattens a list column to its leaf
+    # path, so `xnn` appears as `xnn.list.element` and a membership test drops it -- silently,
+    # because the read then succeeds and `reduced_merits` raises later on the missing column.
+    projection = [name for name in CANDIDATE_COLUMNS if name in source.schema_arrow.names]
+
+    pieces, held, written = [], 0, 0
+    out = []
+    for index in range(source.num_row_groups):
+        block = source.read_row_group(index, columns=projection).to_pandas()
+        pieces.append(block)
+        held += block.shape[0]
+        if held < chunk_rows and index < source.num_row_groups - 1:
+            continue
+        chunk = pd.concat(pieces, ignore_index=True) if len(pieces) > 1 else pieces[0]
+        pieces, held = [], 0
+        merits = FomBenchmark.reduced_merits(chunk, entries)
+        keys = [key for key in JOIN_KEYS if key in chunk.columns]
+        out.append(pd.concat([chunk[keys].reset_index(drop=True),
+                              merits.reset_index(drop=True)], axis=1))
+        written += chunk.shape[0]
+
+    if not out:
+        return path, 0
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    sidecar.to_parquet(out_path, index=False)
-    return path, sidecar.shape[0]
+    pd.concat(out, ignore_index=True).to_parquet(out_path, index=False)
+    return path, written
 
 
 def main(argv=None):
@@ -78,7 +129,7 @@ def main(argv=None):
         out_path = out_dir / path.name
         if out_path.exists() and not args.overwrite:
             continue
-        tasks.append((str(path), str(out_path), str(pool)))
+        tasks.append((str(path), str(out_path), str(pool), int(args.chunk_rows)))
     if not tasks:
         print(f'{pool}: every sidecar is already written')
         return 0

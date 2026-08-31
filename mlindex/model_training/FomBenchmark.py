@@ -1259,7 +1259,10 @@ def candidate_columns_present(root):
     paths = sorted(Path(root).glob('candidates*.parquet'))
     if not paths:
         raise FileNotFoundError(f'No candidates*.parquet under {root}')
-    return set(pq.ParquetFile(paths[0]).schema.names)
+    # `schema_arrow`, not `schema`. The parquet schema flattens list columns to their leaf
+    # paths -- `xnn` becomes `xnn.list.element` -- so a caller projecting on this would drop
+    # every list column it asked for and fail somewhere else entirely.
+    return set(pq.ParquetFile(paths[0]).schema_arrow.names)
 
 
 def load_candidates(root, split=None, bravais_lattices=None, columns=None, bundles=None):
