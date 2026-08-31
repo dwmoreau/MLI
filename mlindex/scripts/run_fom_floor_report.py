@@ -231,6 +231,179 @@ def load_arms(arm_root, benchmark, floor_entries):
     return arms
 
 
+# ----------------------------------------------------------------------------------------
+# The figure
+# ----------------------------------------------------------------------------------------
+# Free cell parameters per Bravais lattice, which is the order the floor is expected to follow --
+# campaign 1 found it spanning two orders of magnitude ordered this way, largest exactly on the
+# low-symmetry lattices where this campaign's gains are expected to live. Plotting alphabetically
+# would hide the one structural claim the figure exists to make.
+FREE_PARAMETERS = {
+    'cF': 1, 'cI': 1, 'cP': 1,
+    'hP': 2, 'hR': 2, 'tI': 2, 'tP': 2,
+    'oC': 3, 'oF': 3, 'oI': 3, 'oP': 3,
+    'mC': 4, 'mP': 4,
+    'aP': 6,
+    }
+
+# Where this campaign's gains are expected, from every measured result in campaign 1 and S03/S04.
+# They are also the least reproducible lattices, which is the point of the figure.
+GAIN_LATTICES = ('mC', 'mP', 'aP')
+
+# Light-mode slots 1 and 3 of the reference categorical palette, plus its ink and surface. Two
+# hues only: the story is one number per lattice, so the figure uses EMPHASIS -- the lattices where
+# the gains live carry the accent and the rest recede -- rather than fourteen categorical hues.
+# Validated: adjacent CVD Delta E 24.7 (protan), normal-vision 33.6, both clear of the floors.
+ACCENT = '#2a78d6'
+RECEDE = '#9a9a94'
+INK = '#0b0b0b'
+INK_SECONDARY = '#52514e'
+SURFACE = '#fcfcfb'
+GRID = '#e3e3df'
+CONDITION_HUES = ('#2a78d6', '#eb6834', '#1baf7a')
+
+
+def _style(pyplot):
+    """Hairline, recessive chrome. Thin marks and a grid one shade off the surface."""
+    pyplot.rcParams.update({
+        'figure.facecolor': SURFACE, 'axes.facecolor': SURFACE,
+        'savefig.facecolor': SURFACE,
+        'font.family': 'sans-serif', 'font.size': 8,
+        'axes.edgecolor': GRID, 'axes.linewidth': 0.6,
+        'axes.labelcolor': INK, 'text.color': INK,
+        'xtick.color': INK_SECONDARY, 'ytick.color': INK_SECONDARY,
+        'xtick.labelsize': 7.5, 'ytick.labelsize': 7.5,
+        'axes.titlesize': 8.5, 'axes.labelsize': 8,
+        'legend.frameon': False, 'legend.fontsize': 7.5,
+        })
+
+
+def _condition_label(tag):
+    """`c2_error1_cont0` -> `nominal`. Raw tags on an axis are unreadable and all look alike."""
+    from mlindex.model_training import FomConditions
+    condition = FomConditions.BY_TAG.get(tag)
+    return condition.key if condition is not None else tag
+
+
+def figure(by_lattice, aggregate, by_condition, out_path, metric='operating_point'):
+    """The floor figure. Two panels on ONE shared axis, which is what makes it an argument.
+
+    (a) The floor is **ordered by free cell parameters**, spanning orders of magnitude, and is
+        largest exactly on the lattices where the campaign's gains are expected. That is why
+        PROTOCOL section 8 requires a per-lattice claim to be read against that lattice's own
+        floor: reading an aP result against an aggregate dominated by cubic lattices would accept
+        noise as a result.
+
+    (b) On the same scale, moving the **condition** barely moves it at all. Campaign 1 collapsed
+        the operating point by a factor of 5.7 between conditions while the metric floor moved by
+        1.4 pp (F-150), which is what makes a floor expressed as a fraction of the baseline wrong
+        in shape as well as in size.
+
+    The panels share an x-axis deliberately: the claim is not "the floor varies by lattice" and
+    "the floor is stable in condition" as two separate facts, but that **one of these axes matters
+    and the other does not**, and that comparison is only legible on one scale.
+
+    The value floor is deliberately not a third panel. It is a percentage of a merit *value* while
+    these are percentage points of a *rate*; putting two units on one figure is the mistake a
+    second axis usually is. It goes in the results table.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as pyplot
+
+    _style(pyplot)
+    figure_handle, (left, right) = pyplot.subplots(
+        1, 2, figsize=(7.2, 3.2), sharex=True, layout='constrained',
+        gridspec_kw=dict(width_ratios=[1.5, 1.0]))
+
+    rows = by_lattice.loc[by_lattice['metric'] == metric].copy()
+    rows = rows.groupby('bravais_lattice', as_index=False).agg(
+        se_pp=('se_pp', 'mean'), n_entries=('n_entries', 'sum'))
+    rows['free'] = rows['bravais_lattice'].map(FREE_PARAMETERS)
+    rows = rows.dropna(subset=['free']).sort_values(['free', 'bravais_lattice'])
+    positions = np.arange(rows.shape[0])
+    colours = [ACCENT if name in GAIN_LATTICES else RECEDE
+               for name in rows['bravais_lattice']]
+
+    # height < 1 leaves the surface gap between adjacent bars; no borders on the marks.
+    left.barh(positions, rows['se_pp'], height=0.7, color=colours, linewidth=0)
+    left.set_yticks(positions)
+    left.set_yticklabels([f'{name} ({int(free)})' for name, free
+                          in zip(rows['bravais_lattice'], rows['free'])])
+    left.invert_yaxis()
+    left.set_xlabel('contrast floor, one standard error (pp)')
+    left.set_title('(a) the lattice moves the floor by orders of magnitude',
+                   loc='left', color=INK)
+    left.xaxis.grid(True, color=GRID, linewidth=0.6)
+    left.set_axisbelow(True)
+    for spine in ('top', 'right', 'left'):
+        left.spines[spine].set_visible(False)
+
+    # No legend box: this is one series with emphasis, not two series, and the skill's own rule is
+    # that a single series is named by the title or a direct label. The accent group is annotated
+    # once, beside itself, which also keeps identity off colour alone.
+    # Top right, which is the only clear space on this axis. The accented lattices are the longest
+    # bars by construction -- that is the figure's point -- so there is nothing beside them and
+    # nothing below them either: the bottom rows ARE them.
+    accent_names = [name for name in rows['bravais_lattice'] if name in GAIN_LATTICES]
+    if accent_names:
+        left.annotate(f"{', '.join(accent_names)} are where\nthis campaign's gains are expected",
+                      xy=(0.985, 0.93), xycoords='axes fraction',
+                      color=ACCENT, fontsize=7.5, ha='right', va='top')
+
+    composed = aggregate.loc[aggregate['metric'] == metric, 'se_pp']
+    aggregate_value = float(composed.iloc[0]) if composed.shape[0] else None
+    if aggregate_value is not None:
+        for axis in (left, right):
+            axis.axvline(aggregate_value, color=INK, linewidth=0.9, zorder=3)
+        left.annotate(f'aggregate {aggregate_value:.2f}', xy=(aggregate_value, -0.7),
+                      xytext=(3, 0), textcoords='offset points',
+                      color=INK, fontsize=7.5, ha='left', va='center')
+
+    # Direct-label the two extremes only. A number on every bar is the anti-pattern.
+    for position, row in zip(positions, rows.itertuples()):
+        if position in (positions[0], positions[-1]):
+            left.annotate(f'{row.se_pp:.2f}', xy=(row.se_pp, position),
+                          xytext=(3, 0), textcoords='offset points',
+                          va='center', fontsize=7.5, color=INK_SECONDARY)
+
+    # (b) the same quantity under each condition, on the same scale. One hue, because the story is
+    # that these are the SAME number -- three categorical hues would assert they are three things
+    # to be told apart.
+    conditions = by_condition.loc[by_condition['metric'] == metric]
+    if conditions.shape[0]:
+        grouped = (conditions.groupby('condition_bundle', as_index=False)['sd_pp'].mean()
+                   .sort_values('sd_pp'))
+        spots = np.arange(grouped.shape[0])
+        right.scatter(grouped['sd_pp'], spots, s=42, color=ACCENT, zorder=3,
+                      edgecolors=SURFACE, linewidths=1.2)
+        right.set_yticks(spots)
+        right.set_yticklabels([_condition_label(tag) for tag in grouped['condition_bundle']])
+        right.invert_yaxis()
+        right.set_ylim(grouped.shape[0] - 0.4, -0.9)
+        # Visible values: the relief rule, and three dots on a wide axis need their numbers.
+        # Labels to the LEFT of each dot: everything below the smallest value is empty space, so
+        # they cannot collide with each other, with the aggregate rule, or with the panel edge.
+        for spot, value in zip(spots, grouped['sd_pp']):
+            right.annotate(f'{value:.2f}', xy=(value, spot), xytext=(-9, 0),
+                           textcoords='offset points', ha='right', va='center', fontsize=7.5,
+                           color=INK_SECONDARY)
+        spread = float(grouped['sd_pp'].max() - grouped['sd_pp'].min())
+        right.annotate(f'total spread {spread:.2f} pp', xy=(0.98, 0.04),
+                       xycoords='axes fraction',
+                       color=INK_SECONDARY, fontsize=7.5, ha='right', va='bottom')
+    right.set_xlabel('contrast floor, one standard error (pp)')
+    right.set_title('(b) the condition barely moves it', loc='left', color=INK)
+    right.xaxis.grid(True, color=GRID, linewidth=0.6)
+    right.set_axisbelow(True)
+    for spine in ('top', 'right', 'left'):
+        right.spines[spine].set_visible(False)
+
+    figure_handle.savefig(out_path, dpi=300)
+    pyplot.close(figure_handle)
+    return out_path
+
+
 def main(argv=None):
     args = _parse_args(argv)
     composition = pd.read_csv(args.composition)
@@ -293,7 +466,31 @@ def main(argv=None):
                         n_entries=int(mask.sum()),
                         ))
 
+    # Per condition, so "the floor barely moves with the condition" is re-measured rather than
+    # inherited from F-150. Read off the condition_bundle stratum of each arm's own result, which
+    # is already computed -- a separate evaluate() per bundle would be a second pass over the pool
+    # for numbers the first pass produced.
+    condition_rows = []
+    for merit in FLOOR_MERITS:
+        per_arm = {}
+        for name in arm_names:
+            stratum = results[(name, merit)].stratum('condition_bundle')
+            for row in stratum.itertuples():
+                for metric in ('operating_point', 'top10', 'found'):
+                    per_arm.setdefault((row.level, metric), {})[name] = getattr(row, metric)
+        for (bundle, metric), values in per_arm.items():
+            series = np.array([values.get(name, np.nan) for name in arm_names],
+                              dtype=np.float64)*100.0
+            condition_rows.append(dict(
+                merit=merit, metric=metric, condition_bundle=bundle,
+                mean=float(np.nanmean(series)),
+                sd_pp=float(np.nanstd(series, ddof=1)) if np.isfinite(series).sum() > 1 else np.nan,
+                range_pp=float(np.nanmax(series) - np.nanmin(series)),
+                n_arms=int(np.isfinite(series).sum()),
+                ))
+
     metric_table = pd.DataFrame(metric_rows)
+    condition_table = pd.DataFrame(condition_rows)
     contrast_table = pd.DataFrame(contrast_rows)
     lattice_table = pd.DataFrame(lattice_rows)
 
@@ -306,10 +503,16 @@ def main(argv=None):
                                    composed_from='split_entries'))
     aggregate_table = pd.DataFrame(aggregate_rows)
 
-    for name, frame in (('metric', metric_table), ('contrast', contrast_table),
+    for name, frame in (('metric', metric_table), ('by_condition', condition_table),
+                        ('contrast', contrast_table),
                         ('by_lattice', lattice_table), ('aggregate', aggregate_table)):
         path = artifact_dir / f'{args.tag}_{name}.csv'
         frame.to_csv(path, index=False)
+        print(f'wrote {path}')
+
+    if not lattice_table.empty:
+        path = figure(lattice_table, aggregate_table, condition_table,
+                      artifact_dir / f'{args.tag}.png')
         print(f'wrote {path}')
     return 0
 

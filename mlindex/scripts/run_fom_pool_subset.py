@@ -92,8 +92,17 @@ def _parse_args(argv=None):
                         help='Also slice the pre-deduplication stream. It is ~7.7x the survivor '
                              'stream and is a stratified subsample of entries, so most selected '
                              'entries will not appear in it')
+    parser.add_argument('--entry-ids-file', type=str, default=None,
+                        help='CSV with an identifier or entry_id column. Takes exactly these '
+                             'entries instead of drawing a balanced sample, and refuses any that '
+                             'the pool does not hold or that is in a sealed split. This is how '
+                             'arm 1 of the reproducibility floor is cut out of Benchmark B: the '
+                             'floor sample is already drawn and frozen by run_fom_floor_entries.py '
+                             'and the aggregate is composed against the counts recorded beside it, '
+                             'so re-drawing here would silently give a different set of patterns')
     parser.add_argument('--seed', type=int, default=12345,
-                        help='Selection seed. The draw is deterministic given the pool and this')
+                        help='Selection seed. The draw is deterministic given the pool and this. '
+                             'Unused when --entry-ids-file names the entries')
     parser.add_argument('--row-group-size', type=int, default=ROW_GROUP_SIZE)
     parser.add_argument('--processes', type=int, default=1,
                         help='Files filtered concurrently. The pool is partitioned one file per '
@@ -164,6 +173,40 @@ def select_entries(entries, entries_per_lattice, hard_fraction, splits, seed):
             picked = pd.concat([picked, _draw(remaining, quota - picked.shape[0], rng)])
         chosen.append(picked)
     return pd.concat(chosen, ignore_index=True).sort_values('entry_id').reset_index(drop=True)
+
+
+def entries_from_file(entries, path, splits):
+    """Take exactly the entries `path` names, and refuse rather than quietly taking fewer.
+
+    Two refusals rather than a filter. An id the pool does not hold means the list and the pool
+    disagree about which benchmark this is -- a stale entry list against a regenerated pool is
+    silent otherwise, and the slice would simply be smaller than asked for. And an id in a sealed
+    split must stop the run: PROTOCOL section 3 rule 2 holds `fom-test` until S15, and dropping it
+    quietly would leave no evidence it had been asked for.
+    """
+    frame = pd.read_csv(path)
+    column = ('identifier' if 'identifier' in frame.columns
+              else 'entry_id' if 'entry_id' in frame.columns else None)
+    if column is None:
+        raise SystemExit(f'{path} has no identifier or entry_id column; found '
+                         f'{sorted(frame.columns)}')
+    wanted = set(frame[column].astype(str))
+
+    per_entry = entries.drop_duplicates(subset=['entry_id'])
+    known = dict(zip(per_entry['entry_id'].astype(str), per_entry['split'].astype(str)))
+    missing = sorted(wanted - set(known))
+    if missing:
+        raise SystemExit(
+            f'{len(missing)} of {len(wanted)} entries in {path} are not in this pool, e.g. '
+            f'{missing[:5]}. The entry list and the pool disagree about which benchmark this is.')
+    sealed = sorted(name for name in wanted if known[name] not in splits)
+    if sealed:
+        raise SystemExit(
+            f'{len(sealed)} entries in {path} are outside {splits}, e.g. {sealed[:5]} '
+            f'(splits {sorted({known[name] for name in sealed})}). '
+            f'{SEALED_SPLIT} is sealed until S15 and none of it may be copied off the cluster.')
+    return (per_entry.loc[per_entry['entry_id'].astype(str).isin(wanted)]
+            .sort_values('entry_id').reset_index(drop=True))
 
 
 def _draw(frame, n, rng):
@@ -241,8 +284,12 @@ def main(argv=None):
                else {name.strip() for name in args.bundles.split(',') if name.strip()})
 
     entries = FomBenchmark.load_entries(pool)
-    selected = select_entries(entries, args.entries_per_lattice, args.hard_fraction, splits,
-                              args.seed)
+    if args.entry_ids_file:
+        selected = entries_from_file(entries, args.entry_ids_file, splits)
+        print(f'took {selected.shape[0]} entries from {args.entry_ids_file}')
+    else:
+        selected = select_entries(entries, args.entries_per_lattice, args.hard_fraction, splits,
+                                  args.seed)
     entry_ids = set(selected['entry_id'].astype(str))
     print(f'selected {len(entry_ids)} source entries over '
           f'{selected["bravais_lattice_true"].nunique()} lattices')
@@ -288,8 +335,11 @@ def main(argv=None):
     manifest.update(
         subset_of=str(pool),
         subset_seed=int(args.seed),
-        subset_entries_per_lattice=int(args.entries_per_lattice),
-        subset_hard_fraction=float(args.hard_fraction),
+        subset_entries_per_lattice=(None if args.entry_ids_file
+                                    else int(args.entries_per_lattice)),
+        subset_hard_fraction=(None if args.entry_ids_file else float(args.hard_fraction)),
+        subset_entry_ids_file=args.entry_ids_file,
+        subset_selection=('entry_ids_file' if args.entry_ids_file else 'balanced_draw'),
         subset_splits=list(splits),
         n_entries=int(kept_entries.shape[0]),
         n_source_entries=len(entry_ids),

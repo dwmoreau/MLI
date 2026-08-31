@@ -200,3 +200,69 @@ def test_parallel_filtering_gives_the_same_slice(pool, tmp_path):
     pd.testing.assert_frame_equal(left, right)
     assert FomBenchmark.load_manifest(serial)['n_candidates'] == \
         FomBenchmark.load_manifest(parallel)['n_candidates']
+
+
+# ---------------------------------------------------------------------------------------
+# Taking an explicit entry list, which is how arm 1 of the floor is cut out of Benchmark B
+# ---------------------------------------------------------------------------------------
+def test_an_explicit_entry_list_is_taken_exactly(pool, tmp_path):
+    root, entries = pool
+    allowed = entries.loc[entries['split'].isin(subset.ALLOWED_SPLITS)]
+    wanted = sorted(allowed['entry_id'].unique())[:9]
+    path = tmp_path / 'ids.csv'
+    pd.DataFrame({'identifier': wanted}).to_csv(path, index=False)
+
+    taken = subset.entries_from_file(entries, path, subset.ALLOWED_SPLITS)
+    assert sorted(taken['entry_id']) == wanted
+    # No balancing, no quota, no seed: the list IS the sample.
+    assert taken.shape[0] == len(wanted)
+
+
+def test_an_entry_the_pool_does_not_hold_raises(pool, tmp_path):
+    """A stale entry list against a regenerated pool is otherwise silent -- the slice just comes
+    out smaller than asked for, and nothing says which entries went missing."""
+    root, entries = pool
+    path = tmp_path / 'ids.csv'
+    pd.DataFrame({'identifier': ['aP001', 'NOT_IN_POOL']}).to_csv(path, index=False)
+    with pytest.raises(SystemExit, match='not in this pool'):
+        subset.entries_from_file(entries, path, subset.ALLOWED_SPLITS)
+
+
+def test_a_sealed_entry_in_the_list_stops_the_run(pool, tmp_path):
+    """It must not be filtered out quietly: dropping it leaves no evidence it was ever asked for,
+    and the seal is the one thing in this campaign that cannot be undone."""
+    root, entries = pool
+    sealed = entries.loc[entries['split'] == 'fom-test', 'entry_id'].iloc[0]
+    path = tmp_path / 'ids.csv'
+    pd.DataFrame({'identifier': ['aP001', sealed]}).to_csv(path, index=False)
+    with pytest.raises(SystemExit, match='sealed until S15'):
+        subset.entries_from_file(entries, path, subset.ALLOWED_SPLITS)
+
+
+def test_either_column_name_is_accepted(pool, tmp_path):
+    """`run_fom_floor_entries.py` writes `identifier`, following the split manifest; the pool's own
+    tables call it `entry_id`. Both are the same thing and both arrive here."""
+    root, entries = pool
+    wanted = sorted(entries.loc[entries['split'] == 'fom-dev', 'entry_id'].unique())[:4]
+    for column in ('identifier', 'entry_id'):
+        path = tmp_path / f'{column}.csv'
+        pd.DataFrame({column: wanted}).to_csv(path, index=False)
+        assert sorted(subset.entries_from_file(entries, path, subset.ALLOWED_SPLITS)['entry_id']) \
+            == wanted
+
+
+def test_end_to_end_with_an_entry_list(pool, tmp_path):
+    root, entries = pool
+    wanted = sorted(entries.loc[entries['split'] == 'fom-dev', 'entry_id'].unique())[:5]
+    path = tmp_path / 'ids.csv'
+    pd.DataFrame({'identifier': wanted}).to_csv(path, index=False)
+    out_dir = tmp_path / 'arm1'
+    subset.main(['--pool', str(root), '--out-dir', str(out_dir), '--entry-ids-file', str(path)])
+
+    from mlindex.model_training import FomBenchmark
+    assert sorted(FomBenchmark.load_entries(out_dir)['entry_id'].unique()) == wanted
+    manifest = FomBenchmark.load_manifest(out_dir)
+    assert manifest['subset_selection'] == 'entry_ids_file'
+    # The balanced-draw parameters are null rather than stale, so the manifest cannot be read as
+    # describing a draw that did not happen.
+    assert manifest['subset_entries_per_lattice'] is None

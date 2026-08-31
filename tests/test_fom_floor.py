@@ -287,3 +287,73 @@ def test_neither_script_wraps_the_driver_in_srun():
     """A bare `srun -n 1` pins CPU affinity to one core and strangles the 128 processes."""
     for path in (ARMS_PATH, FULL_PATH):
         assert 'srun' not in _script(path), path
+
+
+# ----------------------------------------------------------------------------------------
+# The figure. Drafted now, against the report's own output shape, so that when the arms land
+# it is one command rather than a design problem solved under time pressure.
+# ----------------------------------------------------------------------------------------
+def _report_shaped(seed=0):
+    """Synthetic tables in exactly the shape `main` writes, with campaign 1's structure: the floor
+    rises with free cell parameters and barely moves with the condition."""
+    rng = np.random.default_rng(seed)
+    lattice = pd.DataFrame([
+        dict(merit='M_sym', baseline='M20', metric='operating_point', bravais_lattice=name,
+             se_pp=0.05*free**2.3*rng.uniform(0.8, 1.25), n_entries=40)
+        for name, free in floor_report.FREE_PARAMETERS.items()])
+    aggregate = pd.DataFrame([dict(merit='M_sym', baseline='M20', metric='operating_point',
+                                   se_pp=0.61, lattice_weight_covered=1.0,
+                                   composed_from='split_entries')])
+    condition = pd.DataFrame([
+        dict(merit='M_sym', metric='operating_point', condition_bundle=tag, mean=45.0,
+             sd_pp=value, range_pp=value*2, n_arms=4)
+        for tag, value in (('c2_error1_cont0', 0.58), ('c2_error2_cont0', 0.66),
+                           ('c2_error0.1_cont0', 0.54))])
+    return lattice, aggregate, condition
+
+
+def test_the_figure_renders(tmp_path):
+    pytest.importorskip('matplotlib')
+    lattice, aggregate, condition = _report_shaped()
+    out = tmp_path / 'floor.png'
+    floor_report.figure(lattice, aggregate, condition, out)
+    assert out.exists() and out.stat().st_size > 20_000
+
+
+def test_the_figure_orders_lattices_by_free_parameters_not_alphabetically():
+    """Alphabetical order would hide the one structural claim the figure exists to make."""
+    order = list(floor_report.FREE_PARAMETERS)
+    assert order != sorted(order)
+    assert floor_report.FREE_PARAMETERS['cF'] == 1
+    assert floor_report.FREE_PARAMETERS['aP'] == 6
+    assert all(floor_report.FREE_PARAMETERS[name] >= 4
+               for name in floor_report.GAIN_LATTICES)
+
+
+def test_the_figure_survives_a_lattice_the_composition_does_not_name(tmp_path):
+    """A pool missing a lattice must not take the figure down -- five of them are hard-capped by
+    the source population and one could come back empty (C2-R-010)."""
+    pytest.importorskip('matplotlib')
+    lattice, aggregate, condition = _report_shaped()
+    lattice = lattice.loc[~lattice['bravais_lattice'].isin(['cF', 'cI'])]
+    out = tmp_path / 'partial.png'
+    floor_report.figure(lattice, aggregate, condition, out)
+    assert out.exists()
+
+
+def test_the_figure_survives_an_absent_aggregate(tmp_path):
+    """The aggregate needs the composition table; without it the per-lattice panel is still the
+    useful half and must still render rather than raising."""
+    pytest.importorskip('matplotlib')
+    lattice, _, condition = _report_shaped()
+    out = tmp_path / 'no_aggregate.png'
+    floor_report.figure(lattice, pd.DataFrame(columns=['metric', 'se_pp']), condition, out)
+    assert out.exists()
+
+
+def test_condition_tags_are_shown_by_their_readable_key():
+    """`c2_error1_cont0` on an axis is unreadable and every tag looks like every other."""
+    assert floor_report._condition_label('c2_error1_cont0') == 'nominal'
+    assert floor_report._condition_label('c2_error2_cont0') == 'noisy'
+    # An unknown tag falls back to itself rather than raising or rendering blank.
+    assert floor_report._condition_label('not_a_tag') == 'not_a_tag'
