@@ -886,3 +886,65 @@ def test_gate_the_module_against_the_real_slice(slice_root):
     assert 0.0 <= result.metric('operating_point') <= result.metric('ceiling_rescorer')
     # Every reported bundle is a campaign-2 one, so no campaign-1 control could have crept in.
     assert all(bundle.startswith('c2_') for bundle in result.meta['bundles'])
+
+
+# ---------------------------------------------------------------------------------------
+# `is_degenerate` moved from the candidate row to the entry table between the campaigns
+# ---------------------------------------------------------------------------------------
+# Campaign 2's definition is a statement about the PATTERN's own true lattice -- whether its Niggli
+# reduced cell sits accidentally on one of Santoro's special-condition boundaries, so a different
+# lattice reproduces its peak positions exactly. That is one value per pattern, so schema v3 puts
+# it on the entry table (C2-F-043). This module was inherited from campaign 1 and asked for it per
+# candidate, which made it unable to read Benchmark B at all (C2-F-080).
+def test_the_projection_drops_the_optional_column_when_the_pool_lacks_it():
+    v3 = {'entry_id', 'bravais_lattice', 'candidate_id', 'in_top_n', 'is_correct',
+          'is_off_by_two', 'M20'}
+    columns = FomMetrics._projection('M20', (), available=v3)
+    assert 'is_degenerate' not in columns
+    assert 'is_correct' in columns and 'M20' in columns
+    # And it is kept for a pool that does carry it, so Benchmark A still reads as it did.
+    assert 'is_degenerate' in FomMetrics._projection('M20', (), available=v3 | {'is_degenerate'})
+
+
+def test_a_pool_that_never_computed_degeneracy_is_not_read_as_having_none():
+    """`None` and the empty set are different, and conflating them is what campaign 1 did.
+
+    It shipped the column null, so it excluded degenerates at a *measured* zero. The real rate is
+    2.86 % of entries and 16.7 % on mC.
+    """
+    _, entries = _tiny([('E1', 'oP', 20.0, True)])
+    assert FomMetrics._degenerate_entries(entries) is None
+    entries = entries.assign(is_degenerate=False)
+    assert FomMetrics._degenerate_entries(entries) == set()
+
+
+def test_the_entry_flag_is_broadcast_onto_that_entrys_candidates():
+    """A degenerate pattern's correct candidate must leave the denominator, not count as a loss.
+
+    If the pattern's true lattice is ambiguous from peak positions alone, a wrong cell fits exactly
+    as well as the right one, so scoring it as a ranking failure blames the merit for something no
+    merit could do.
+    """
+    rows = [('E1', 'oP', 20.0, True), ('E2', 'oP', 20.0, True)]
+    candidates, entries = _tiny(rows)
+    candidates = candidates.drop(columns=['is_degenerate'])     # as schema v3 stores it
+    entries['is_degenerate'] = entries['entry_id'] == 'E1'
+
+    result = FomMetrics.evaluate(candidates, entries=entries, score='score', threshold=10,
+                                 n_bootstrap=0)
+    # E1 is degenerate, so it is not "found" and is not a failure either; E2 succeeds.
+    assert result.metric('found') == 0.5
+    assert result.metric('degenerate_only') == 0.5
+    assert result.metric('operating_point') == 0.5
+    assert result.metric('lost_not_found') == 0.0
+
+
+def test_including_degenerates_puts_them_back():
+    rows = [('E1', 'oP', 20.0, True), ('E2', 'oP', 20.0, True)]
+    candidates, entries = _tiny(rows)
+    candidates = candidates.drop(columns=['is_degenerate'])
+    entries['is_degenerate'] = entries['entry_id'] == 'E1'
+    result = FomMetrics.evaluate(candidates, entries=entries, score='score', threshold=10,
+                                 n_bootstrap=0, degenerates='include')
+    assert result.metric('found') == 1.0
+    assert result.metric('operating_point') == 1.0

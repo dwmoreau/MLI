@@ -1241,6 +1241,27 @@ def available_bundles(root):
     return sorted({bundle_from_candidate_path(path) for path in paths})
 
 
+def candidate_columns_present(root):
+    """The candidate columns this pool actually has, read from one shard's schema.
+
+    A column set is not fixed across the two campaigns: `is_degenerate` was a candidate column in
+    Benchmark A and is an **entry** column here, because campaign 2's definition is a statement
+    about the pattern's own true lattice and so takes one value per pattern (C2-F-043). A caller
+    that projects a fixed column list onto a pool that lacks one gets `ArrowInvalid` from the
+    parquet reader, not a missing column it can recover from.
+
+    Reads the schema, not the rows.
+    """
+    # Imported here, as everywhere else in this module: pyarrow is an optional dependency and the
+    # merit and labelling paths must import without it.
+    import pyarrow.parquet as pq
+
+    paths = sorted(Path(root).glob('candidates*.parquet'))
+    if not paths:
+        raise FileNotFoundError(f'No candidates*.parquet under {root}')
+    return set(pq.ParquetFile(paths[0]).schema.names)
+
+
 def load_candidates(root, split=None, bravais_lattices=None, columns=None, bundles=None):
     """Candidate shards under `root`, tagged with the bundle their filename names.
 

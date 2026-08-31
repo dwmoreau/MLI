@@ -201,6 +201,23 @@ SCORE_INDEPENDENT_COLUMNS = (
     'is_degenerate',
 )
 
+# Columns of `SCORE_INDEPENDENT_COLUMNS` that a schema-v3 pool does NOT carry on the candidate row.
+#
+# `is_degenerate` is the only one, and it moved for a reason rather than by omission: campaign 2's
+# definition is a statement about the **pattern's own true lattice** -- whether its Niggli reduced
+# cell sits accidentally on one of Santoro's special-condition boundaries, so a different lattice
+# reproduces its peak positions exactly -- which takes one value per pattern, not one per candidate
+# (C2-F-043). Campaign 1 stored it per candidate and shipped it null, which is why it excluded
+# degenerates at a *measured* zero rather than a known one.
+#
+# Projecting the fixed list onto a v3 pool raises `ArrowInvalid` inside the parquet reader, so
+# **the module could not read Benchmark B at all** until this was handled (C2-F-080). The column is
+# dropped from the projection when absent and broadcast from the entry table instead, which is
+# exactly equivalent: if a pattern's true lattice is degenerate then every correct candidate for it
+# is, and the entry leaves the loss decomposition's denominator rather than counting as a figure of
+# merit's failure.
+OPTIONAL_CANDIDATE_COLUMNS = ('is_degenerate',)
+
 # Metrics that are means of a per-entry boolean, so they reweight and bootstrap identically.
 _FLAG_METRICS = (
     'operating_point', 'top1', 'top5', 'top10', 'rank_only', 'threshold_only', 'found',
@@ -329,8 +346,9 @@ def evaluate(candidates, score='M20', higher_is_better=True, threshold=None,
     reductions = []
     diagnostics = dict(n_candidates_seen=0, n_non_finite_score=0, n_score_above_1e9=0)
     calibration_rows = []
+    degenerate_entries = _degenerate_entries(entries)
     for frame in shards:
-        frame = _prepare_shard(frame, include_control)
+        frame = _prepare_shard(frame, include_control, degenerate_entries)
         if frame is None:
             continue
         values = _shard_scores(frame, score, higher_is_better)
@@ -417,7 +435,8 @@ def _resolve_inputs(candidates, entries, bundles, split, bravais_lattices, score
         root = Path(candidates)
         entries = FomBenchmark.load_entries(root) if entries is None else entries
         keep = None if split is None else set(entries.loc[entries['split'] == split, 'entry_id'])
-        columns = _projection(score, score_columns)
+        columns = _projection(score, score_columns,
+                              available=FomBenchmark.candidate_columns_present(root))
         available = FomBenchmark.available_bundles(root)
         wanted = available if bundles is None else [b for b in available if b in set(bundles)]
         if not wanted:
@@ -454,6 +473,20 @@ def _resolve_subsampling(candidates, subsample_top_k):
     return None, False
 
 
+def _degenerate_entries(entries):
+    """The entry ids whose true lattice is degenerate, or None when the table does not say.
+
+    `None` and the empty set are different: a pool that never computed the quantity must not read
+    as one that computed it and found none. That distinction is exactly what campaign 1 lost —
+    it shipped the column null and so excluded degenerates at a *measured* zero, where the real
+    rate is 2.86 % of entries and 16.7 % on mC (C2-F-043).
+    """
+    if 'is_degenerate' not in entries.columns:
+        return None
+    flags = pd.Series(entries['is_degenerate']).fillna(False).to_numpy(dtype=bool)
+    return set(np.asarray(entries['entry_id'].astype(str))[flags])
+
+
 def _load_bundle(root, bundle, bravais_lattices, columns, keep_entry_ids):
     frame = FomBenchmark.load_candidates(root, bundles=[bundle],
                                          bravais_lattices=bravais_lattices, columns=columns)
@@ -462,16 +495,27 @@ def _load_bundle(root, bundle, bravais_lattices, columns, keep_entry_ids):
     return frame
 
 
-def _projection(score, score_columns):
-    columns = list(SCORE_INDEPENDENT_COLUMNS)
+def _projection(score, score_columns, available=None):
+    """The columns to read. Optional ones are dropped when the pool does not carry them."""
+    columns = [column for column in SCORE_INDEPENDENT_COLUMNS
+               if available is None
+               or column not in OPTIONAL_CANDIDATE_COLUMNS
+               or column in available]
     if isinstance(score, str):
         columns.append(score)
     columns.extend(column for column in score_columns if column not in columns)
     return columns
 
 
-def _prepare_shard(frame, include_control):
-    """Drop what is not being evaluated, and refuse a frame that cannot be joined."""
+def _prepare_shard(frame, include_control, degenerate_entries=None):
+    """Drop what is not being evaluated, and refuse a frame that cannot be joined.
+
+    `degenerate_entries` supplies `is_degenerate` for a pool that carries it on the entry table
+    rather than on the candidate row -- every schema-v3 pool. Broadcasting the entry's flag onto
+    its candidates is the faithful translation, not a convenience: the quantity is a property of
+    the pattern's true lattice, so if it holds the pattern is ambiguous from peak positions alone
+    and *all* of its correct candidates are degenerate.
+    """
     if frame is None or frame.shape[0] == 0:
         return None
     if 'condition_bundle' not in frame.columns:
@@ -481,6 +525,11 @@ def _prepare_shard(frame, include_control):
             )
     if not include_control:
         frame = frame.loc[~frame['condition_bundle'].isin(CONTROL_BUNDLES)]
+    if 'is_degenerate' not in frame.columns:
+        frame = frame.copy()
+        frame['is_degenerate'] = (
+            False if not degenerate_entries
+            else frame['entry_id'].isin(degenerate_entries).to_numpy())
     return frame if frame.shape[0] else None
 
 
