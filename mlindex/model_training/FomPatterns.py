@@ -60,9 +60,13 @@ from mlindex.utilities.ErrorAdder import select_peaks_with_nested_dropout
 BROADENING_TAG = '1'
 
 N_PEAKS = 20
-# Store at least 20 surplus peaks, per SCHEMA.md. A typical entry carries ~60 lines, so this is
-# affordable, and S10 sweeps how many of them are worth scoring on -- campaign 1 imposed five a
-# priori and never swept it.
+# Store at least 20 surplus peaks, per SCHEMA.md. Affordable because the source pool stores up
+# to 60 lines an entry -- but that 60 is `GenerateDataset.EntryGenerator.peak_length`, a
+# truncation constant rather than a line count, and 54.9 % of entries sit exactly on it, so it
+# is NOT evidence about how many peaks a pattern has. A real pattern carries 20-25, 30 at best
+# (DWMM), which is fewer than the window plus this surplus. S10 sweeps how many surplus peaks
+# are worth scoring on and reports the realistic end -- campaign 1 imposed five a priori and
+# never swept it. See C2-F-103.
 N_HOLDOUT = 20
 
 N_TOP_CANDIDATES = 20

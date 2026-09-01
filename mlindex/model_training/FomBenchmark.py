@@ -685,9 +685,15 @@ def with_reduced_merits(candidates, entries, models_directory=None):
 # The peak budgets the S10 sweep reports. `n_extra` IS the total peak budget minus the 20-peak
 # window, so 5 is a 25-peak pattern and 10 a 30-peak one -- which is the range real data actually
 # occupies (DWMM, 2026-09-01: "In many of the experimental data cases, only 20 - 25 peaks are
-# actually recorded. On extremely good data, maybe 30"). The simulator's median entry carries ~60
-# lines, so 20 and `all` are reachable here and are NOT reachable on an instrument; they are kept
-# as a labelled upper bound and must never be quoted as achievable.
+# actually recorded. On extremely good data, maybe 30").
+#
+# 20 is reachable HERE and on no instrument, and the reason is worth stating precisely, because
+# the record got it wrong for a day: the benchmark stores up to 60 lines an entry **because
+# `GenerateDataset.EntryGenerator` sets `self.peak_length = 60` and truncates to it**. That is a
+# storage constant, not a property of a pattern, and 54.9 % of entries sit exactly on it -- so
+# their true line count is unknown and >= 60. Two consequences: 20 is kept as a labelled upper
+# bound and must never be quoted as achievable, and there is deliberately **no `all` budget**,
+# since for the censored majority it would measure the constant rather than the data (C2-F-103).
 HOLDOUT_N_EXTRA = (1, 2, 3, 5, 10, 20)
 HOLDOUT_REALISTIC_MAX = 10
 
@@ -758,8 +764,59 @@ def entry_id_of(entry_key, join_keys):
     return entry_key[list(join_keys).index('entry_id')]
 
 
+# How a candidate's hold-out peak list is built. S10a gate 4 found that cubic candidates are
+# fitted on TEN peaks where everything else gets twenty (R5, the `n_peaks` column), so for a cubic
+# cell `q2_obs[10:]` are *already* peaks it was never fitted to -- and `q2_holdout` does not contain
+# them. That is a free 50 % larger budget on exactly the two lattices where S09 found `M_sym` loses
+# to M20 (cF -8.93 pp, 1 gained / 11 lost, C2-F-096, C2-F-101). C2-Q-026 asks whether using it
+# repairs the loss, and it must be answered as a PAIRED arm: campaign 1 tried four remedies for a
+# single losing lattice and all four were worse than nothing (F-088), so a wider cubic budget is a
+# hypothesis to test and never a fix to adopt into an aggregate.
+#
+#   'surplus'      the uniform definition. Hold-out peaks are `q2_holdout[:n_extra]` for every
+#                  lattice, which is what S10a measured and what every other step means by
+#                  hold-out.
+#   'free_window'  **fixed pattern length.** On a (20 + n_extra)-peak pattern, a candidate fitted
+#                  on `n_peaks` peaks holds out everything above it: `q2_obs[n_peaks:20]` followed
+#                  by `q2_holdout[:n_extra]`. Cubic gets 10 + n_extra peaks, everything else gets
+#                  n_extra and is byte-identical to 'surplus'. This is what an instrument actually
+#                  hands you, so it is the primary arm.
+#   'free_equal'   **fixed hold-out budget.** The same concatenated list, truncated to `n_extra`,
+#                  so cubic scores peaks 11-15 rather than 21-25 at the same count. Separates
+#                  *which* peaks from *how many*, and is the secondary arm.
+#
+# **The budget axis does not mean the same thing in 'free_equal', and that is the point.** In
+# 'surplus' and 'free_window' an `n_extra` of 5 always consumes five SURPLUS peaks, so it always
+# describes a 25-peak pattern. In 'free_equal' it consumes five HOLD-OUT peaks wherever they come
+# from -- and for a cubic candidate the first ten of those are window peaks, so `n_extra <= 10`
+# consumes **no surplus at all** and describes a plain 20-peak pattern. That is not a defect in the
+# axis; it is the arm's most useful property, because it means a cubic cell can be scored out of
+# sample on data that carries no surplus whatever. Label it as hold-out peaks, never as surplus.
+#
+# The window peaks a cubic cell holds out carry the window's own contaminants already, because they
+# are real observed lines; nothing is seeded into them and nothing needs to be (C2-F-098).
+HOLDOUT_MODES = ('surplus', 'free_window', 'free_equal')
+
+
+def holdout_peaks(q2_obs, q2_holdout, n_peaks, mode):
+    """The peak list a candidate is scored on, and how many of it a budget of `n_extra` takes.
+
+    Returns `(peaks, offset)`: `peaks` is the ordered hold-out list and `offset` is how many of it
+    a budget consumes before the surplus, so a caller asks for `peaks[:offset + n_extra]`. Both are
+    returned rather than one list per budget because the list is a property of the entry and the
+    budget is a property of the sweep.
+    """
+    if mode not in HOLDOUT_MODES:
+        raise ValueError(f'mode must be one of {HOLDOUT_MODES}, got {mode!r}')
+    if mode == 'surplus':
+        return q2_holdout, 0
+    unused = np.asarray(q2_obs, dtype=np.float64)[int(n_peaks):]
+    peaks = np.concatenate([unused, q2_holdout]) if unused.size else q2_holdout
+    return peaks, (int(unused.size) if mode == 'free_window' else 0)
+
+
 def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contaminate=True,
-                   seed=HOLDOUT_CONTAMINANT_SEED, models_directory=None):
+                   seed=HOLDOUT_CONTAMINANT_SEED, models_directory=None, mode='surplus'):
     """Score every candidate on the surplus peaks it was never fitted to, at several peak budgets.
 
     S10's object. The cell was refined against the 20-peak window and these peaks are not among it,
@@ -794,7 +851,7 @@ def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contamin
 
     join_keys = _join_keys(candidates, entries)
     entry_index = entries.set_index(join_keys)
-    surplus_cache = {}
+    surplus_cache, window_cache = {}, {}
 
     group_keys = list(join_keys) + ['lattice_system', 'bravais_lattice', 'spacegroup', 'n_peaks']
     for key, group in candidates.groupby(group_keys, sort=False):
@@ -811,7 +868,13 @@ def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contamin
                 else (np.asarray(row['q2_holdout'], dtype=np.float64),
                       np.asarray(row['hkl_holdout']).reshape(-1, 3), 0)
                 )
+            window_cache[entry_key] = np.asarray(row['q2_obs'], dtype=np.float64)
         q2_holdout, _, _ = surplus_cache[entry_key]
+        # The peak list depends on the candidate's own fitted-peak count, so it is built inside the
+        # group loop rather than cached on the entry: `n_peaks` is a group key precisely because
+        # cubic and non-cubic candidates of one pattern hold out different peaks (C2-F-101).
+        q2_scored, offset = holdout_peaks(
+            window_cache[entry_key], q2_holdout, n_peaks, mode)
 
         xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
         hkl_ref = hkl_ref_for(lattice_system, bravais_lattice, spacegroup, models_directory)
@@ -821,9 +884,12 @@ def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contamin
         reach = q2_ref_calc.max(axis=1)
 
         for n_extra in n_extra_values:
+            # The budget is always quoted in SURPLUS peaks, so the sweep axis means the same thing
+            # in every mode and a 25-peak pattern is n_extra = 5 whatever the candidate holds out.
+            # `offset` is what the free-window mode adds on top, and it is free.
             if q2_holdout.size < n_extra:
                 continue
-            prefix = q2_holdout[:n_extra]
+            prefix = q2_scored[:offset + n_extra]
             values = _holdout_block(
                 prefix, xnn, hkl_ref, q2_ref_calc, lattice_system, bravais_lattice,
                 reciprocal_volume, reach, get_holdout_fom, get_M_rev_sym, get_M20_likelihood)
