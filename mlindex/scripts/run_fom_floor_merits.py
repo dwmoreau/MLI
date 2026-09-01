@@ -85,6 +85,11 @@ def _parse_args(argv=None):
                              'candidate file has one, the row counts match file by file, and no '
                              'merit column is wholly null. Reads parquet metadata, not data, so '
                              'it is seconds even on Benchmark B')
+    parser.add_argument('--soft', action='store_true',
+                        help='Compute the posterior-based counting merits instead (C2-Q-025): '
+                             'X_N_soft, n_over_soft, max_gap_soft. Write them to their own '
+                             '--out-dir, e.g. <pool>/merits_soft; they must NOT overwrite the '
+                             'verified merits/ sidecars')
     parser.add_argument('--overwrite', action='store_true',
                         help='Rescore files that already have a sidecar. Off by default, so an '
                              'interrupted run resumes instead of restarting')
@@ -93,7 +98,9 @@ def _parse_args(argv=None):
 
 def score_file(task):
     """One candidate file -> one sidecar, streamed. Module-level and picklable: spawn-safe."""
-    path, out_path, pool, chunk_rows = task
+    # `soft` rides in the tuple rather than in a module global: Windows and macOS both spawn,
+    # so a global set in main() is not visible in the worker (CLAUDE.md's spawn-safety rule).
+    path, out_path, pool, chunk_rows, soft = task
     entries = _entries_for(pool)
     source = pq.ParquetFile(path)
     # `schema_arrow`, not `schema`: the parquet schema flattens a list column to its leaf
@@ -111,7 +118,7 @@ def score_file(task):
             continue
         chunk = pd.concat(pieces, ignore_index=True) if len(pieces) > 1 else pieces[0]
         pieces, held = [], 0
-        merits = FomBenchmark.reduced_merits(chunk, entries)
+        merits = FomBenchmark.reduced_merits(chunk, entries, soft=soft)
         keys = [key for key in JOIN_KEYS if key in chunk.columns]
         out.append(pd.concat([chunk[keys].reset_index(drop=True),
                               merits.reset_index(drop=True)], axis=1))
@@ -159,10 +166,15 @@ def verify(pool, out_dir):
                 name = names[column]
                 if stats is not None and name in MERIT_COLUMNS:
                     nulls[name] = nulls.get(name, 0) + stats.null_count
-        for name in MERIT_COLUMNS:
-            if name not in names:
-                problems.append(f'{path.name}: no {name} column')
-            elif nulls.get(name, 0) == metadata.num_rows:
+        # The sidecar's OWN merit columns, not a fixed list: a pool can carry more than one
+        # sidecar set -- the verified `merits/` and, for C2-Q-025, a `merits_soft/` whose columns
+        # are named differently. Checking against a constant reported 252 false failures on the
+        # soft set purely because it looked for `n_over` in a file that stores `n_over_soft`.
+        carried = [name for name in names if name not in JOIN_KEYS]
+        if not carried:
+            problems.append(f'{path.name}: no merit columns at all')
+        for name in carried:
+            if nulls.get(name, 0) == metadata.num_rows:
                 problems.append(f'{path.name}: {name} is wholly null')
     return total, problems
 
@@ -186,7 +198,8 @@ def main(argv=None):
         out_path = out_dir / path.name
         if out_path.exists() and not args.overwrite:
             continue
-        tasks.append((str(path), str(out_path), str(pool), int(args.chunk_rows)))
+        tasks.append((str(path), str(out_path), str(pool), int(args.chunk_rows),
+                      bool(args.soft)))
     if not tasks:
         print(f'{pool}: every sidecar is already written')
         return 0

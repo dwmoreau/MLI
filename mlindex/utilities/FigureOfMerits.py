@@ -1188,6 +1188,18 @@ SIGMA_TREATMENT.update(
         "ho_M20": "free",
         "ho_n_predicted": "free",
         "ho_chi2": "in-sample",
+        # The classical merits moved out of sample (S10a). Every one is a ratio of measured
+        # distances to a coincidence baseline built from the cell's own reference lines, so none
+        # of them touches a residual scale -- sigma-free by PROTOCOL section 3 rule 4's default,
+        # exactly as their in-window counterparts are. `ho_N_cal` and `ho_ref_reach` are support
+        # diagnostics rather than merits but are registered anyway, because the test that every
+        # emitted column declares a treatment is the thing that catches a column added silently.
+        "ho_M_tilde": "free",
+        "ho_M_rev": "free",
+        "ho_M_sym": "free",
+        "ho_Minfo": "free",
+        "ho_N_cal": "free",
+        "ho_ref_reach": "free",
     }
 )
 
@@ -1413,6 +1425,109 @@ def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5, sorted_lines=
             best = max(best, run)
         max_gap[row] = best
     return n_over, max_gap
+
+
+def get_soft_counts(q2_obs, q2_calc, q2_ref_calc, lattice_system, sigma=None,
+                    sigma_multiplier=1.0, chunk=256):
+    """`X_N`, `n_over` and `max_gap` rebuilt on the assignment posterior instead of a hard cut.
+
+    **Why these exist (C2-Q-025, DWMM).** The hard forms decide "is this peak explained" with a
+    self-referential tolerance and a constant chosen a priori -- `|dQ| > 1.0 x Q_N/(2N)` for `X_N`,
+    "nearest peak further than `0.5 x` the local line gap" for `n_over`. That criterion has three
+    problems. The constants were never swept. The decision is binary, so the merit is a small
+    integer and barely orders the pool: measured, `X_N` gives **1 522 of 8 272** candidates the
+    identical score and the ranking then collapses onto the tie-break (C2-F-095). And this campaign
+    has since established a much better per-peak criterion -- S13 measured the assignment posterior
+    at **AUC 0.941** against the shipped statistic's 0.616, where 0.616 is the *ceiling* for any
+    monotone rescoring of it. A merit built on a poor statistic cannot be informative however well
+    it counts, which is the whole of DWMM's objection.
+
+    **The construction, and why it is two directions rather than one.** The posterior's power comes
+    from normalising over the *competitors*, which is what lets it read local crowding. So the two
+    directions need different normalisations, and they mirror the `M_tilde` / `M_rev` duality that
+    makes `M_sym` the leading classical merit:
+
+        forward   P(peak i came from line j), softmax over LINES  -> expected unexplained peaks
+        reverse   P(line j produced by peak i), softmax over PEAKS -> expected unaccounted lines
+
+    Then:
+
+        X_N_soft    = sum_i (1 - max_j P_ij)      over observed peaks below the cut-off
+        n_over_soft = sum_j (1 - max_i P_ji)      over calculated lines in range
+        max_gap_soft= the largest sum of (1 - max_i P_ji) over a CONSECUTIVE run of lines
+
+    Each is the expected value of the integer its hard counterpart returns, so the scale and the
+    direction are unchanged -- lower is better, and a confidently-explained pattern still scores
+    near zero. What changes is that the value is continuous, so ties stop deciding the ranking.
+
+    **sigma is estimated in-sample per candidate** by `get_assignment_sigma` (Taupin's reduced
+    chi-square) when not supplied, which is the "in-sample estimation with a validated estimator"
+    PROTOCOL section 3 rule 4 allows. `sigma_multiplier` scales it, so the sigma-sensitivity curve
+    that rule also requires is a sweep over this argument.
+
+    Returns a dict of (n_candidates,) arrays: `X_N_soft`, `n_over_soft`, `max_gap_soft`.
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_calc = np.atleast_2d(np.asarray(q2_calc, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    n_candidates = q2_ref_calc.shape[0]
+
+    if sigma is None:
+        sigma, _ = get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system)
+    sigma = np.atleast_1d(np.asarray(sigma, dtype=np.float64))
+    if sigma.size == 1:
+        sigma = np.repeat(sigma, n_candidates)
+
+    # FORWARD: the established statistic, called rather than re-derived. An earlier draft of this
+    # function reimplemented the softmax and masked the competitor set to lines below the cut-off
+    # -- which scored a peak as unexplained whenever its nearest line sat just above that boundary,
+    # inflating the count from a median 4.8 of 20 to 16.8 and inverting its correlation with the
+    # hard form. The competitor set for "which line produced this peak" is the whole reference
+    # list; the in-range restriction belongs to the reverse direction alone.
+    posterior = get_assignment_posterior(
+        q2_obs, q2_ref_calc, lattice_system, sigma=sigma, sigma_multiplier=sigma_multiplier)
+    cutoff = q2_calc[:, -1]
+    below = q2_obs[np.newaxis, :] <= cutoff[:, np.newaxis]
+    X_N_soft = np.where(below, 1.0 - posterior, 0.0).sum(axis=1)
+
+    scale = _posterior_scale(sigma, sigma_multiplier)
+    n_over_soft = np.zeros(n_candidates)
+    max_gap_soft = np.zeros(n_candidates)
+
+    # REVERSE: "which peak produced this line", normalised over PEAKS. No established function
+    # exists for this direction -- the posterior answers the forward question -- so it is built
+    # here from the same Gaussian and the same in-sample sigma. Chunked over candidates: the
+    # (peaks x lines) block is the memory, and `get_assignment_distribution` is emphatic that the
+    # full stack must never be materialised over a candidate pool.
+    for start in range(0, n_candidates, chunk):
+        stop = min(start + chunk, n_candidates)
+        lines = q2_ref_calc[start:stop]
+        width = scale[start:stop][:, np.newaxis, np.newaxis]
+        delta = q2_obs[np.newaxis, :, np.newaxis] - lines[:, np.newaxis, :]
+        with np.errstate(over='ignore', under='ignore', invalid='ignore'):
+            weight = np.exp(-0.5*np.square(delta/np.where(width > 0, width, np.inf)))
+        weight = np.where(np.isfinite(weight), weight, 0.0)
+
+        total = weight.sum(axis=1)
+        explained = np.divide(weight.max(axis=1), total,
+                              out=np.zeros_like(total), where=total > 0)
+        in_range = lines < cutoff[start:stop][:, np.newaxis]
+        unaccounted = np.where(in_range, 1.0 - explained, 0.0)
+        n_over_soft[start:stop] = unaccounted.sum(axis=1)
+
+        # The soft run: the largest sum of (1 - explained) over consecutive in-range lines. The
+        # hard form's longest run is this with every term rounded to 0 or 1.
+        order = np.argsort(np.where(in_range, lines, np.inf), axis=1)
+        ordered = np.take_along_axis(unaccounted, order, axis=1)
+        running = np.zeros(stop - start)
+        best = np.zeros(stop - start)
+        for column in range(ordered.shape[1]):
+            value = ordered[:, column]
+            running = np.where(value > 0.5, running + value, 0.0)
+            best = np.maximum(best, running)
+        max_gap_soft[start:stop] = best
+
+    return {'X_N_soft': X_N_soft, 'n_over_soft': n_over_soft, 'max_gap_soft': max_gap_soft}
 
 
 def get_M_nn(q2_obs, q2_calc, q2_ref_calc, dimension=1):
@@ -1847,7 +1962,7 @@ def _reduce_predictive(discrepancy, ratio, sigma_hat, prefix, expected=None):
 
 
 def get_holdout_fom(q2_obs_holdout, xnn, hkl_ref, lattice_system, bravais_lattice,
-                    sigma_entrywise=None, min_discrepancy=0.0):
+                    sigma_entrywise=None, min_discrepancy=0.0, q2_ref_calc=None):
     """The literal hold-out: score the fitted cell on peaks beyond the window it was fitted to.
 
     This is approach 3 as the brief originally proposed it, and it needs no refit -- the cell was
@@ -1863,14 +1978,25 @@ def get_holdout_fom(q2_obs_holdout, xnn, hkl_ref, lattice_system, bravais_lattic
 
     `q2_obs_holdout` is (n_holdout,), ascending. Returns a dict of (n_candidates,) arrays with the
     'ho' prefix.
+
+    `q2_ref_calc` lets a caller hand in the reference lines it already holds instead of having them
+    rebuilt here. It is `xnn @ hkl2_ref.T` and depends on the cell alone, not on the peaks, so a
+    caller sweeping the number of surplus peaks would otherwise pay for the same matmul once per
+    sweep point -- and that matmul is the whole cost of this function. Passing it changes no result
+    and `tests/test_fom_holdout.py` pins the two routes bit-for-bit; omitting it reproduces the
+    behaviour this function had before the argument existed. Added by S10a, 2026-09-01, which is
+    the one divergence from the `fom` original (CHERRY_PICK.md).
     """
     q2_obs_holdout = np.asarray(q2_obs_holdout, dtype=np.float64)
     xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
 
     from mlindex.utilities.numba_functions import fast_assign
 
-    hkl2_ref = get_hkl_matrix(np.asarray(hkl_ref), lattice_system)
-    q2_ref_calc = np.matmul(xnn, hkl2_ref.T)
+    if q2_ref_calc is None:
+        hkl2_ref = get_hkl_matrix(np.asarray(hkl_ref), lattice_system)
+        q2_ref_calc = np.matmul(xnn, hkl2_ref.T)
+    else:
+        q2_ref_calc = np.asarray(q2_ref_calc, dtype=np.float64)
     assign = fast_assign(q2_obs_holdout, q2_ref_calc)
     q2_assigned = np.take_along_axis(q2_ref_calc, assign, axis=1)
 

@@ -107,3 +107,66 @@ def test_the_floor_arm_refuses_a_subsampled_pool():
         pytest.skip('no slice reductions on disk')
     with pytest.raises(ValueError, match='SUBSAMPLED'):
         explain.floor_arm(artifact_dir, 'S09_zoo_slice')
+
+
+def test_the_counting_arm_refuses_a_subsampled_pool_and_sizes_the_oracle_correctly(tmp_path):
+    """C2-Q-025's analysis: the refusal, and the union-oracle arithmetic it reports.
+
+    The oracle question is the one that actually bears on S12 -- what a merit is worth *in
+    combination* -- so its arithmetic is pinned rather than eyeballed. Built so a naive
+    implementation that unions the wrong column set gets a different answer.
+    """
+    import json
+    import numpy as np
+    import pandas as pd
+    from mlindex.scripts import run_fom_zoo_explain as explain
+
+    index = pd.MultiIndex.from_product([[f'E{i}' for i in range(10)], ['c2_error1_cont0']],
+                                       names=['entry_id', 'condition_bundle'])
+    # M20 gets the first five; the hard count adds one more; the soft count adds two more.
+    truth = {'M20':          [1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
+             'X_N':          [0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+             'X_N_soft':     [0, 0, 0, 0, 0, 0, 1, 1, 0, 0]}
+    metas = {}
+    for merit, flags in truth.items():
+        frame = pd.DataFrame({
+            'entry_id': index.get_level_values(0), 'condition_bundle': 'c2_error1_cont0',
+            'cluster': np.arange(10), 'is_hard': False, 'bravais_lattice': 'oP',
+            'volume_decile': 5, 'split': 'fom-dev',
+            'has_correct_all': True, 'n_correct_all': 1,
+            'rank_best_correct_all': np.where(np.array(flags) == 1, 1, 999),
+            'score_best_correct_all': 1.0, 'score_top_all': 1.0,
+            'top_is_correct_all': np.array(flags, dtype=bool),
+            'n_candidates_all': 100, 'n_ties_at_best_correct_all': 1,
+            'n_degenerate_all': 0, 'n_off_by_two_all': 0, 'n_non_finite_score_all': 0,
+            'bravais_lattice_top_all': 'oP', 'bravais_lattice_best_correct_all': 'oP',
+            })
+        # `reduce_pool` emits each quantity in four forms: {all, in_top_n} x
+        # {excluding, including degenerates}. `derive_flags` reads whichever the caller asked for,
+        # so a fixture missing any of them fails on a KeyError rather than on its arithmetic.
+        for column in list(frame.columns):
+            if column.endswith('_all'):
+                stem = column[:-len('_all')]
+                frame[f'{stem}_in_top_n'] = frame[column]
+                frame[f'{stem}_incl_degenerate_all'] = frame[column]
+                frame[f'{stem}_incl_degenerate_in_top_n'] = frame[column]
+        frame.to_parquet(tmp_path/f'T_reduced_{merit}_fom-dev.parquet', index=False)
+        metas[f'{merit}|fom-dev'] = dict(score=merit, higher_is_better=True, pool='cross_bl',
+                                         reduced_top_n=10, split='fom-dev', subsampled=False,
+                                         subsample_top_k=None, ranks_exact=True,
+                                         rank_exactness=None, source='test',
+                                         hard_min_decile=8, bundles_excluded=[])
+    (tmp_path/'T_reduced_meta.json').write_text(json.dumps(metas), encoding='utf-8')
+
+    arm, oracle = explain.counting_arm(tmp_path, 'T', reference=('M20',))
+    got = dict(zip(oracle['set'], oracle['union_oracle_top10']))
+    assert got['reference only'] == pytest.approx(0.5)
+    assert got['reference + hard counts'] == pytest.approx(0.6)
+    assert got['reference + soft counts'] == pytest.approx(0.7)
+    assert got['everything'] == pytest.approx(0.8)
+
+    # And it must refuse a subsampled pool outright -- C2-R-013.
+    metas['M20|fom-dev']['subsampled'] = True
+    (tmp_path/'T_reduced_meta.json').write_text(json.dumps(metas), encoding='utf-8')
+    with pytest.raises(ValueError, match='SUBSAMPLED'):
+        explain.counting_arm(tmp_path, 'T', reference=('M20',))

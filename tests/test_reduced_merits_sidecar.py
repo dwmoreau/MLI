@@ -152,3 +152,62 @@ def test_reduced_merits_on_a_real_slice_chunk():
                                   merits['M_sym'].to_numpy())
     # The unfloored value is never below the floored one: the floor only ever removes.
     assert (merits['M_rev_unfloored'] >= merits['M_rev']).all()
+
+
+# ---------------------------------------------------------------------------------------
+# The posterior-based counting merits -- C2-Q-025
+# ---------------------------------------------------------------------------------------
+def test_the_soft_counts_are_the_expected_value_of_the_hard_ones():
+    """Same question, same direction, same scale -- but continuous.
+
+    Each soft count is the expectation of the integer its hard counterpart returns, so a pattern
+    every peak explains confidently still scores near zero and lower is still better. If that
+    correspondence broke, the soft form would be a different merit wearing the same name.
+    """
+    import numpy as np
+    from mlindex.utilities.FigureOfMerits import get_soft_counts, get_X_N
+
+    # Twenty peaks sitting exactly on twenty of two hundred calculated lines: nothing unexplained.
+    q2_ref = np.linspace(0.1, 2.0, 200)[np.newaxis]
+    index = np.linspace(0, 199, 20).astype(int)
+    q2_obs = q2_ref[0][index]
+    q2_calc = q2_ref[:, index]
+
+    soft = get_soft_counts(q2_obs, q2_calc, q2_ref, 'orthorhombic')
+    assert get_X_N(q2_obs, q2_calc, q2_ref)[0] == 0
+    # Not exactly zero -- a posterior never awards probability 1 while a competitor exists -- but
+    # far below the twenty peaks it is counting over.
+    assert 0.0 <= soft['X_N_soft'][0] < 5.0
+    for name in ('X_N_soft', 'n_over_soft', 'max_gap_soft'):
+        assert np.isfinite(soft[name]).all()
+        assert (soft[name] >= 0).all()
+
+
+def test_the_soft_counts_break_the_ties_that_make_the_hard_ones_useless():
+    """The point of C2-Q-025: a binary criterion cannot order a pool, a posterior can.
+
+    `X_N` gives 1 522 of 8 272 real candidates the same score (C2-F-095), so its ranking is
+    settled by the tie-break rather than by the merit. This is the property that has to change.
+    """
+    import numpy as np
+    from mlindex.utilities.FigureOfMerits import get_soft_counts, get_X_N
+
+    rng = np.random.default_rng(12345)
+    q2_ref = np.sort(rng.uniform(0.1, 2.0, size=(40, 150)), axis=1)
+    q2_obs = np.sort(rng.uniform(0.1, 1.5, size=12))
+    q2_calc = q2_ref[:, :12]
+
+    hard = get_X_N(q2_obs, q2_calc, q2_ref)
+    soft = get_soft_counts(q2_obs, q2_calc, q2_ref, 'orthorhombic')['X_N_soft']
+    assert len(np.unique(soft)) > len(np.unique(hard)), (
+        f'soft resolved {len(np.unique(soft))} values, hard {len(np.unique(hard))}')
+
+
+def test_the_soft_counts_are_oriented_and_kept_out_of_the_verified_sidecar():
+    from mlindex.model_training import FomMetrics as FM
+    for name in FomBenchmark.SOFT_MERIT_COLUMNS:
+        assert FM.orientation_of(name) is False
+        # They are NOT in the subsampler's retention rule, so they must not be smuggled into the
+        # set that claims rank-exactness on Benchmark B (C2-R-013).
+        assert name not in FM.RANK_EXACT_MERITS
+        assert name not in FomBenchmark.RECOMPUTED_MERIT_COLUMNS

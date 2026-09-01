@@ -328,6 +328,80 @@ def floor_arm(artifact_dir, tag):
     return pd.DataFrame(rows), pd.DataFrame(tests)
 
 
+HARD_COUNTS = ('X_N', 'n_over', 'max_gap')
+SOFT_COUNTS = ('X_N_soft', 'n_over_soft', 'max_gap_soft')
+
+
+def counting_arm(artifact_dir, tag, reference=('M20', 'M_sym')):
+    """Hard against posterior-based counting merits, on a fully retained pool (C2-Q-025).
+
+    **Why a fully retained pool is the only honest venue.** The soft counts were not in the
+    subsampler's retention rule, so on Benchmark B the candidates that would outrank a correct one
+    under them were kept at 5 % and every rank metric comes out optimistic (C2-R-013). This is the
+    remedy that rebuild row names.
+
+    **Why the comparison is not just "which scores higher".** DWMM's objection is that a merit built
+    on a poor statistic cannot be informative however well it counts, and that these merits were
+    never meant to work alone. So three things are reported: the standalone rank metric, the tie
+    structure -- the mechanism C2-F-095 identified -- and the union-oracle contribution, which is
+    what a merit is worth *in combination* and is the question that actually bears on S12.
+    """
+    import json
+    meta_path = Path(artifact_dir)/f'{tag}_reduced_meta.json'
+    if not meta_path.exists():
+        return pd.DataFrame(), pd.DataFrame()
+    metas = json.loads(meta_path.read_text(encoding='utf-8'))
+
+    rows, flags = [], {}
+    for merit in list(reference) + list(HARD_COUNTS) + list(SOFT_COUNTS):
+        key = f'{merit}|fom-dev'
+        path = Path(artifact_dir)/f'{tag}_reduced_{merit}_fom-dev.parquet'
+        if not (path.exists() and key in metas):
+            continue
+        meta = metas[key]
+        if meta.get('subsampled'):
+            raise ValueError(
+                f'{tag} is a SUBSAMPLED pool. A merit outside the retention rule is not '
+                f'rank-exact there (C2-R-013); run this on a fully retained pool.')
+        frame = pd.read_parquet(path)
+        result = FomMetrics.summarise_per_entry(frame, meta, n_bootstrap=0)
+        ties = frame['n_ties_at_best_correct_all'].replace(0, np.nan)
+        rows.append({
+            'merit': merit,
+            'family': ('reference' if merit in reference
+                       else 'hard' if merit in HARD_COUNTS else 'soft'),
+            'n_entries': int(result.metric('n_entries')),
+            'top1': float(result.metric('top1')), 'top10': float(result.metric('top10')),
+            'mrr': float(result.metric('mrr')),
+            'median_ties_at_best_correct': float(ties.median()),
+            'median_pool_size': float(frame['n_candidates_all'].median()),
+            })
+        flags[merit] = result.per_entry.set_index(
+            ['entry_id', 'condition_bundle']).sort_index()['top10'].astype(bool)
+
+    if not flags:
+        return pd.DataFrame(rows), pd.DataFrame()
+
+    wide = pd.DataFrame(flags)
+    present = [m for m in reference if m in wide.columns]
+    oracle = []
+    for label, members in (('reference only', present),
+                           ('reference + hard counts',
+                            present + [m for m in HARD_COUNTS if m in wide.columns]),
+                           ('reference + soft counts',
+                            present + [m for m in SOFT_COUNTS if m in wide.columns]),
+                           ('everything', list(wide.columns))):
+        if not members:
+            continue
+        oracle.append({'set': label, 'n_merits': len(members),
+                       'union_oracle_top10': float(wide[members].any(axis=1).mean())})
+    oracle = pd.DataFrame(oracle)
+    if oracle.shape[0]:
+        base = float(oracle.loc[oracle['set'] == 'reference only', 'union_oracle_top10'].iloc[0])
+        oracle['adds_over_reference_pp'] = 100*(oracle['union_oracle_top10'] - base)
+    return pd.DataFrame(rows), oracle
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description='S09 -- the union oracle and the mechanism analyses.')
@@ -339,6 +413,9 @@ def main(argv=None):
                         help='S08 measured this on the fully retained pool. A rank metric is read '
                              'against it, never against zero (C2-F-083).')
     parser.add_argument('--caption', default=None)
+    parser.add_argument('--counting-arm-tag', default=None,
+                        help='Tag of a FULLY RETAINED pool reduction carrying both the hard and '
+                             'the posterior-based counting merits (C2-Q-025).')
     parser.add_argument('--floor-arm-tag', default=None,
                         help='Tag of a FULLY RETAINED pool reduction carrying M_sym_unfloored. '
                              'Reports the floored/unfloored comparison the handoff requires; '
@@ -367,6 +444,23 @@ def main(argv=None):
                   f'best single {row["best_single_merit"]:.4f} ({row["best_merit"]})  '
                   f'ceiling {row["reachable_ceiling"]:.4f}  '
                   f'headroom {row["combiner_headroom"]:+.4f}')
+
+    if args.counting_arm_tag:
+        arm, oracle = counting_arm(artifact_dir, args.counting_arm_tag)
+        if arm.shape[0]:
+            arm.to_csv(artifact_dir/f'{out_tag}_counting_arm.csv', index=False, encoding='utf-8')
+            oracle.to_csv(artifact_dir/f'{out_tag}_counting_oracle.csv', index=False,
+                          encoding='utf-8')
+            print('\nhard against posterior-based counting merits, fully retained pool')
+            for row in arm.itertuples():
+                print(f'  {row.merit:14s} {row.family:9s} top1 {row.top1:.4f}  '
+                      f'top10 {row.top10:.4f}  mrr {row.mrr:.4f}  '
+                      f'median ties {row.median_ties_at_best_correct:8.0f} '
+                      f'of {row.median_pool_size:.0f}')
+            print('\n  union oracle, top-10')
+            for row in oracle.itertuples():
+                print(f'    {row.set:26s} {row.union_oracle_top10:.4f}  '
+                      f'({row.adds_over_reference_pp:+.3f} pp over the reference merits)')
 
     if args.floor_arm_tag:
         arm, tests = floor_arm(artifact_dir, args.floor_arm_tag)

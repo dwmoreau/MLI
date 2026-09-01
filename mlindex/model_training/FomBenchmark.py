@@ -585,8 +585,14 @@ M_REV_MIN_N_CAL = 10
 RECOMPUTED_MERIT_COLUMNS = ('M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap',
                             'N_cal', 'M_rev_unfloored')
 
+# The posterior-based counting merits (C2-Q-025). Written to their own sidecar rather than added
+# to the set above, because the pool's existing sidecars are complete and verified and must not be
+# invalidated -- and because these are NOT in the subsampler's retention rule, so a rank metric on
+# them is only exact on a fully retained pool (C2-R-013).
+SOFT_MERIT_COLUMNS = ('X_N_soft', 'n_over_soft', 'max_gap_soft')
 
-def reduced_merits(candidates, entries, models_directory=None):
+
+def reduced_merits(candidates, entries, models_directory=None, soft=False):
     """The recomputable merits of the reduced core, plus the pair that audits the M_rev floor.
 
     Returns a frame aligned to `candidates`' index carrying `RECOMPUTED_MERIT_COLUMNS`: the six
@@ -626,7 +632,7 @@ def reduced_merits(candidates, entries, models_directory=None):
     from mlindex.utilities.FigureOfMerits import get_n_over
     from mlindex.utilities.FigureOfMerits import get_X_N
 
-    names = list(RECOMPUTED_MERIT_COLUMNS)
+    names = list(SOFT_MERIT_COLUMNS) if soft else list(RECOMPUTED_MERIT_COLUMNS)
     out = pd.DataFrame(index=candidates.index, columns=names, dtype=float)
     if candidates.empty:
         return out
@@ -643,6 +649,13 @@ def reduced_merits(candidates, entries, models_directory=None):
         xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
         q2_ref_calc, _, _, q2_calc = assign_lines(
             q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory)
+
+        if soft:
+            from mlindex.utilities.FigureOfMerits import get_soft_counts
+            values = get_soft_counts(q2_obs, q2_calc, q2_ref_calc, lattice_system)
+            for name in names:
+                out.loc[group.index, name] = np.asarray(values[name], dtype=float)
+            continue
 
         # Unfloored, with the support count, so the floored arm is a mask over this one rather
         # than a second evaluation of identical arithmetic.
@@ -667,6 +680,197 @@ def with_reduced_merits(candidates, entries, models_directory=None):
     """
     merits = reduced_merits(candidates, entries, models_directory=models_directory)
     return pd.concat([candidates, merits], axis=1)
+
+
+# The peak budgets the S10 sweep reports. `n_extra` IS the total peak budget minus the 20-peak
+# window, so 5 is a 25-peak pattern and 10 a 30-peak one -- which is the range real data actually
+# occupies (DWMM, 2026-09-01: "In many of the experimental data cases, only 20 - 25 peaks are
+# actually recorded. On extremely good data, maybe 30"). The simulator's median entry carries ~60
+# lines, so 20 and `all` are reachable here and are NOT reachable on an instrument; they are kept
+# as a labelled upper bound and must never be quoted as achievable.
+HOLDOUT_N_EXTRA = (1, 2, 3, 5, 10, 20)
+HOLDOUT_REALISTIC_MAX = 10
+
+# Base seed for the offline surplus contamination. Fixed here rather than passed, so that two
+# analyses of the same pool contaminate it identically; the per-entry stream is derived from the
+# entry ID on top of it (PROTOCOL section 6).
+HOLDOUT_CONTAMINANT_SEED = 12345
+
+# One hold-out column set, per n_extra. Every name is registered in FomMetrics.HIGHER_IS_BETTER.
+#
+# `ho_tail_nll` is a SUM over surplus peaks and `ho_Minfo` would be one, so their scale grows with
+# the window and a sweep would read that growth as a gain. `ho_Minfo` is therefore emitted as the
+# per-peak MEAN of its terms -- which is what makes it comparable across n_extra and comparable
+# with the intensive merits beside it -- and `ho_tail_nll` is kept in its native summed form and
+# must be read at fixed n_extra only.
+HOLDOUT_MERIT_NAMES = (
+    'ho_M20', 'ho_M', 'ho_raw', 'ho_tail_nll',
+    'ho_M_tilde', 'ho_M_rev', 'ho_M_sym',
+    'ho_Minfo',
+    'ho_N_cal', 'ho_n_scored', 'ho_ref_reach',
+    )
+
+
+def holdout_column(name, n_extra):
+    """`ho_M_sym` at 5 surplus peaks is `ho_M_sym__n5`. One place, so a reader is never guessing."""
+    return f'{name}__n{n_extra}'
+
+
+def holdout_columns(n_extra_values=HOLDOUT_N_EXTRA, names=HOLDOUT_MERIT_NAMES):
+    return tuple(holdout_column(name, k) for k in n_extra_values for name in names)
+
+
+def contaminated_holdout(entry_row, entry_id, seed=HOLDOUT_CONTAMINANT_SEED):
+    """This entry's surplus peaks with contaminants seeded in, and the count added.
+
+    **Once per (entry, condition), never per candidate or per Bravais lattice.** Every candidate of
+    one pattern must face the same surplus or the comparison between them is not paired, so this is
+    keyed on the entry and cached by the caller.
+
+    The rate is the entry's own bundle rate -- injected lines per window peak -- so a `cont0` bundle
+    draws nothing and is returned untouched. See `ErrorAdder.add_surplus_contaminants` for why the
+    generator cannot produce these itself and why applying them offline is sound.
+    """
+    from mlindex.model_training.FomPatterns import derived_seed
+    from mlindex.utilities.ErrorAdder import add_surplus_contaminants
+    from mlindex.utilities.ErrorAdder import surplus_contaminant_rate
+
+    q2_holdout = np.asarray(entry_row['q2_holdout'], dtype=np.float64)
+    hkl_holdout = np.asarray(entry_row['hkl_holdout']).reshape(-1, 3)
+    n_window = len(np.asarray(entry_row['q2_obs']))
+    injected = int(entry_row.get('n_contaminants', 0) or 0)
+    injected += int(entry_row.get('second_phase_lines', 0) or 0)
+    rate = surplus_contaminant_rate(injected, n_window)
+    if rate <= 0.0:
+        return q2_holdout, hkl_holdout, 0
+    # Keyed on the entry, not on (entry, bundle) -- the convention `FomPatterns.mechanism_rng`
+    # already uses, so a bundle differing only in contaminant count does not thereby get a
+    # different realisation. `entry_id` is passed rather than read off the row because the caller
+    # indexes the entry table by the join keys, which makes it the index and not a column.
+    rng = np.random.default_rng(derived_seed(f'surplus_contaminants:{entry_id}', seed))
+    return add_surplus_contaminants(q2_holdout, hkl_holdout, rate*q2_holdout.size, rng)
+
+
+def entry_id_of(entry_key, join_keys):
+    """The entry id out of whatever `_join_keys` produced -- a scalar for one key, a tuple for two."""
+    if len(join_keys) == 1:
+        return entry_key
+    return entry_key[list(join_keys).index('entry_id')]
+
+
+def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contaminate=True,
+                   seed=HOLDOUT_CONTAMINANT_SEED, models_directory=None):
+    """Score every candidate on the surplus peaks it was never fitted to, at several peak budgets.
+
+    S10's object. The cell was refined against the 20-peak window and these peaks are not among it,
+    so **there is no refit anywhere here** -- that is the entire claim, and a refit would turn this
+    into the cross-validated family campaign 2 dropped as a designed negative.
+
+    Returns a frame aligned to `candidates`' index carrying `holdout_columns(n_extra_values)`. An
+    entry whose surplus is shorter than `n_extra` gets **NaN, not zero**, at that budget: it is
+    missing rather than bad, and a paired comparison has to drop it rather than score it as a
+    failure. This is the pitfall campaign 1's restricted-population footnote exists for.
+
+    Grouped exactly as `reduced_merits` groups -- by (entry, lattice, extinction group) -- so the
+    cctbx-backed reference list is built once per group, and the reference lines are then handed to
+    `get_holdout_fom` rather than rebuilt per budget, since they depend on the cell alone. That
+    matmul is the whole cost of the merit, so passing it makes a seven-point sweep cost roughly one
+    evaluation instead of seven.
+
+    **`ho_M20` is not "the surplus peaks scored alone", and that is worth knowing before reading
+    it.** de Wolff's baseline is Q_N/(2 N_cal), which must count reference lines below a cut-off, so
+    it reaches over the whole reference list out to the last surplus peak. `ho_Minfo` and the
+    posterior family are per-peak by construction and genuinely do restrict to an arbitrary subset;
+    that difference is the reason Minfo is carried here as a baseline at all (DWMM, 2026-09-01).
+    """
+    from mlindex.utilities.FigureOfMerits import get_holdout_fom
+    from mlindex.utilities.FigureOfMerits import get_M20_likelihood
+    from mlindex.utilities.FigureOfMerits import get_M_rev_sym
+
+    names = list(holdout_columns(n_extra_values))
+    out = pd.DataFrame(index=candidates.index, columns=names, dtype=float)
+    if candidates.empty:
+        return out
+
+    join_keys = _join_keys(candidates, entries)
+    entry_index = entries.set_index(join_keys)
+    surplus_cache = {}
+
+    group_keys = list(join_keys) + ['lattice_system', 'bravais_lattice', 'spacegroup', 'n_peaks']
+    for key, group in candidates.groupby(group_keys, sort=False):
+        entry_key = key[0] if len(join_keys) == 1 else key[:len(join_keys)]
+        lattice_system, bravais_lattice, spacegroup, n_peaks = key[len(join_keys):]
+
+        if entry_key not in surplus_cache:
+            row = entry_index.loc[entry_key]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            surplus_cache[entry_key] = (
+                contaminated_holdout(row, entry_id_of(entry_key, join_keys), seed=seed)
+                if contaminate
+                else (np.asarray(row['q2_holdout'], dtype=np.float64),
+                      np.asarray(row['hkl_holdout']).reshape(-1, 3), 0)
+                )
+        q2_holdout, _, _ = surplus_cache[entry_key]
+
+        xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
+        hkl_ref = hkl_ref_for(lattice_system, bravais_lattice, spacegroup, models_directory)
+        q2_ref_calc = reference_lines(
+            xnn, lattice_system, bravais_lattice, spacegroup, models_directory)
+        reciprocal_volume = np.asarray(group['reciprocal_volume'], dtype=np.float64)
+        reach = q2_ref_calc.max(axis=1)
+
+        for n_extra in n_extra_values:
+            if q2_holdout.size < n_extra:
+                continue
+            prefix = q2_holdout[:n_extra]
+            values = _holdout_block(
+                prefix, xnn, hkl_ref, q2_ref_calc, lattice_system, bravais_lattice,
+                reciprocal_volume, reach, get_holdout_fom, get_M_rev_sym, get_M20_likelihood)
+            for name, column in values.items():
+                out.loc[group.index, holdout_column(name, n_extra)] = column
+    return out
+
+
+def _holdout_block(prefix, xnn, hkl_ref, q2_ref_calc, lattice_system, bravais_lattice,
+                   reciprocal_volume, reach, get_holdout_fom, get_M_rev_sym, get_M20_likelihood):
+    """One peak budget's worth of columns. Split out so the group loop stays readable."""
+    from mlindex.utilities.numba_functions import fast_assign
+
+    # q2_ref_calc is handed in rather than rebuilt: it is a property of the cell, not of the peaks.
+    predictive = get_holdout_fom(
+        prefix, xnn, hkl_ref, lattice_system, bravais_lattice, q2_ref_calc=q2_ref_calc)
+
+    assign = fast_assign(prefix, q2_ref_calc)
+    q2_calc = np.take_along_axis(q2_ref_calc, assign, axis=1)
+
+    # The counting window becomes the surplus interval itself: _reversed_line_terms takes q_min from
+    # the reference line nearest the FIRST peak it is given and q_max from the last assigned line,
+    # so handing it the surplus asks exactly "does this cell over-predict lines out there". Whether
+    # that window holds enough lines to support the merit is S10a's gate 2, which is why N_cal is
+    # returned and stored rather than inferred from a floored M_rev of 0.0 (C2-Q-017).
+    M_tilde, M_rev, M_sym, N_cal = get_M_rev_sym(
+        prefix, q2_calc, q2_ref_calc, return_n_cal=True)
+
+    # Minfo's terms are a sum over peaks, so the per-peak mean is what compares across budgets.
+    _, _, Minfo = get_M20_likelihood(prefix, q2_calc, bravais_lattice, reciprocal_volume)
+    Minfo = Minfo/max(prefix.size, 1)
+
+    return {
+        'ho_M20': predictive['ho_M20'],
+        'ho_M': predictive['ho_M'],
+        'ho_raw': predictive['ho_raw'],
+        'ho_tail_nll': predictive['ho_tail_nll'],
+        'ho_n_scored': predictive['ho_n_scored'],
+        'ho_M_tilde': M_tilde,
+        'ho_M_rev': M_rev,
+        'ho_M_sym': M_sym,
+        'ho_N_cal': np.asarray(N_cal, dtype=float),
+        'ho_Minfo': Minfo,
+        # Gate 1: does the reference list reach the peak being asked about at all? Where it does
+        # not, ho_* is measuring the list running out rather than the cell mispredicting.
+        'ho_ref_reach': (reach >= float(prefix[-1])).astype(float),
+        }
 
 
 # The keys a feature row is identified by. candidate_id is only meaningful within its own
@@ -1364,11 +1568,18 @@ def bundle_frames(root, merit_dir=None, columns=None, require_merits=False):
     warning about it.
     """
     root = Path(root)
-    merit_dir = Path(merit_dir) if merit_dir else root/'merits'
+    # A sequence, so a pool can carry more than one sidecar set -- the verified `merits/` and, for
+    # C2-Q-025, a `merits_soft/` written separately rather than by invalidating the first.
+    if merit_dir is None:
+        merit_dirs = [root/'merits']
+    elif isinstance(merit_dir, (str, Path)):
+        merit_dirs = [Path(merit_dir)]
+    else:
+        merit_dirs = [Path(one) for one in merit_dir]
     available = candidate_columns_present(root)
     projection = None if columns is None else [name for name in columns if name in available]
-    wanted_merits = [] if columns is None else [
-        name for name in columns if name in RECOMPUTED_MERIT_COLUMNS]
+    known = set(RECOMPUTED_MERIT_COLUMNS) | set(SOFT_MERIT_COLUMNS)
+    wanted_merits = [] if columns is None else [name for name in columns if name in known]
 
     by_bundle = {}
     for path in sorted(root.glob('candidates*.parquet')):
@@ -1380,14 +1591,18 @@ def bundle_frames(root, merit_dir=None, columns=None, require_merits=False):
             frame = _read_parquet(path, columns=projection)
             if 'condition_bundle' not in frame.columns:
                 frame['condition_bundle'] = bundle
-            sidecar = merit_dir/path.name
-            if sidecar.exists():
+            found = False
+            for one in merit_dirs:
+                sidecar = one/path.name
+                if not sidecar.exists():
+                    continue
                 merits = pd.read_parquet(sidecar)
                 keys = [key for key in ZOO_KEY_COLUMNS if key in merits.columns]
                 frame = frame.merge(merits, on=keys, how='left', validate='1:1')
-            elif require_merits:
+                found = True
+            if not found and require_merits:
                 raise FileNotFoundError(
-                    f'No merit sidecar for {path.name} at {sidecar}. Write it with '
+                    f'No merit sidecar for {path.name} in {merit_dirs}. Write it with '
                     f'run_fom_floor_merits.py --pool {root}; a missing sidecar would otherwise '
                     f'leave every recomputed merit null, and NaN ranks last rather than raising.')
             if require_merits:

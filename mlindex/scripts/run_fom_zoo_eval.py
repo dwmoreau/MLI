@@ -93,7 +93,9 @@ def commit_hash():
 
 def merit_columns(merits, unfloored=False):
     """The sidecar columns to project for a given merit list."""
-    wanted = [m for m in merits if m in FomBenchmark.RECOMPUTED_MERIT_COLUMNS]
+    known = (set(FomBenchmark.RECOMPUTED_MERIT_COLUMNS)
+             | set(FomBenchmark.SOFT_MERIT_COLUMNS))
+    wanted = [m for m in merits if m in known]
     if unfloored:
         wanted += ['M_tilde', 'M_rev_unfloored', 'N_cal']
     return sorted(set(wanted))
@@ -430,14 +432,20 @@ def main(argv=None):
     parser.add_argument('--pool', default=os.path.join(BASE, 'mlindex', 'data',
                                                        'fom_benchmark_c2'),
                         help='Benchmark root. Needed for --reduce only.')
-    parser.add_argument('--merit-dir', default=None,
-                        help='Merit sidecars. Defaults to <pool>/merits.')
+    parser.add_argument('--merit-dir', nargs='+', default=None,
+                        help='Merit sidecar directories. Defaults to <pool>/merits. Several may '
+                             'be given, e.g. <pool>/merits <pool>/merits_soft -- they are joined '
+                             'in turn on the four keys, so a pool can carry the verified set and '
+                             'an experimental one without either invalidating the other.')
     parser.add_argument('--artifact-dir',
                         default=os.path.join(BASE, 'docs', 'fom_campaign2', 'artifacts'))
     parser.add_argument('--train-split', default='fom-train')
     parser.add_argument('--report-split', default='fom-dev')
     parser.add_argument('--merits', nargs='+', default=None,
-                        help='Restrict to these merits, for a quick pass.')
+                        help='The merits to evaluate. Defaults to the seven the subsampler ranked '
+                             'on. Anything else -- a soft count, a learned score -- is only '
+                             'rank-exact on a FULLY RETAINED pool (C2-R-013), and evaluate() will '
+                             'refuse it on a subsampled one, which is the intended behaviour.')
     parser.add_argument('--unfloored', action='store_true',
                         help='Add the unfloored M_sym comparison arm. Only meaningful on a fully '
                              'retained pool: on a subsampled one the arm is flattered, because '

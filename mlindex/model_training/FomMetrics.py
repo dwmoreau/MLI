@@ -165,6 +165,18 @@ HIGHER_IS_BETTER = {
     'M20': True, 'Minfo': True, 'M_tilde': True, 'M_rev': True, 'M_sym': True,
     'M_rev_unfloored': True, 'M_sym_unfloored': True,
     'X_N': False, 'n_over': False, 'max_gap': False,
+    # The posterior-based forms (C2-Q-025). Same direction as the counts they replace:
+    # each is the EXPECTED value of the integer its hard counterpart returns.
+    'X_N_soft': False, 'n_over_soft': False, 'max_gap_soft': False,
+    # S10's hold-out family: the same statistics computed on the surplus peaks the cell was never
+    # fitted to. `ho_raw` is a median |dQ| and `ho_tail_nll` a summed negative log-likelihood, so
+    # those two point the other way from the merits beside them -- which is the C2-F-085 trap
+    # again, one family later. `ho_N_cal`, `ho_n_scored` and `ho_ref_reach` are support and
+    # coverage diagnostics rather than merits and are deliberately absent: ranking on one is a
+    # mistake this map should refuse rather than serve.
+    'ho_M20': True, 'ho_M': True, 'ho_M_tilde': True, 'ho_M_rev': True, 'ho_M_sym': True,
+    'ho_Minfo': True,
+    'ho_raw': False, 'ho_chi2': False, 'ho_tail_nll': False,
     }
 
 
@@ -178,6 +190,16 @@ def orientation_of(merit):
             f'FomMetrics.HIGHER_IS_BETTER rather than passing higher_is_better at the call site: '
             f'a reversed ranking is indistinguishable from a poor merit (C2-F-085).'
             ) from None
+
+
+def holdout_orientation_of(column):
+    """`higher_is_better` for a suffixed hold-out column: `ho_M_sym__n5` -> the `ho_M_sym` entry.
+
+    The sweep names a column per peak budget, and the budget cannot change which way a merit
+    points. Splitting the suffix here keeps one direction per merit rather than one per column,
+    so a seven-point sweep cannot orient two of its points differently by typo.
+    """
+    return orientation_of(str(column).split('__n')[0])
 
 
 def rank_exactness(score, top_n, top_k, subsampled, mrr=True):
