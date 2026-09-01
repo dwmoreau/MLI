@@ -456,6 +456,156 @@ def hkl_ref_for(lattice_system, bravais_lattice, spacegroup, models_directory=No
         )[spacegroup]
 
 
+def extinction_group_sweep(q2_obs, xnn, lattice_system, bravais_lattice, hkl_ref=None,
+                           criteria=None, models_directory=None):
+    """Every extinction group scored under every criterion, for one (entry, lattice) block.
+
+    The offline counterpart of `Candidates.assign_extinction_group`: same reference lists, same
+    `fast_assign`, same merits, same tie-break -- `argmax_extinction_group` is imported rather than
+    reimplemented, which is the whole point. What is NOT shared is the loop scaffolding, so the
+    sweep is gated against a real `Candidates` rather than assumed to agree with it.
+
+    Returns `(keys, winners, M20, scores, n_cal, n_absent_in_range)`:
+      keys                the lattice's group keys, in `get_spacegroup_hkl_ref` order
+      winners             {criterion: (n_candidates,) index into `keys`}
+      M20                 (n_candidates, n_groups), M20 at every group
+      scores              {criterion: (n_candidates, n_groups)}
+      n_cal               (n_candidates, n_groups) support, NaN-free; zeros under 'M20' alone
+      n_absent_in_range   (n_candidates, n_groups) lines the group deletes inside the window
+
+    `n_absent_in_range` uses the GENERIC list's cutoff for every group, held fixed. A window that
+    moved with the group would confound "this group deletes more lines" with "this group's own
+    cutoff sits elsewhere", and the whole point of the count is to describe the choice.
+
+    `Q2Calculator` is built once per group outside the candidate loop. Do not be tempted by the
+    apparent saving of computing q2 once over the full list and slicing per group with a mask: it
+    is bit-identical but measurably SLOWER (0.2-0.3x on oP, tP and mP), because indexing a large
+    float array 68 times costs more than 68 matmuls with an inner dimension of three.
+    """
+    from mlindex.utilities.ExtinctionCounts import absent_in_range, build_group_masks
+    from mlindex.utilities.FigureOfMerits import (
+        EXTINCTION_CRITERIA, argmax_extinction_group, extinction_criterion_score,
+        )
+
+    if criteria is None:
+        criteria = EXTINCTION_CRITERIA
+    if hkl_ref is None:
+        hkl_ref = np.load(_hkl_ref_path(lattice_system, bravais_lattice, models_directory))
+    hkl_ref_sg = get_spacegroup_hkl_ref(hkl_ref, bravais_lattice=bravais_lattice)
+    keys = list(hkl_ref_sg.keys())
+    masks = build_group_masks(hkl_ref, bravais_lattice)
+
+    xnn = np.atleast_2d(xnn)
+    n, n_groups = xnn.shape[0], len(keys)
+    M20 = np.zeros((n, n_groups))
+    n_cal = np.zeros((n, n_groups))
+    n_absent = np.zeros((n, n_groups), dtype=np.int64)
+    scores = {criterion: np.zeros((n, n_groups)) for criterion in criteria}
+
+    # The generic list, once, for the fixed counting window described above.
+    q2_ref_full = Q2Calculator(
+        lattice_system=lattice_system, hkl=hkl_ref, tensorflow=False, representation='xnn'
+        ).get_q2(xnn)
+
+    for index, key in enumerate(keys):
+        q2_ref_calc = Q2Calculator(
+            lattice_system=lattice_system, hkl=hkl_ref_sg[key], tensorflow=False,
+            representation='xnn'
+            ).get_q2(xnn)
+        hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+        M20[:, index] = get_M20(q2_obs, q2_calc, q2_ref_calc)
+        n_absent[:, index], _ = absent_in_range(q2_ref_full, masks[key], q2_calc[:, -1])
+        for criterion in criteria:
+            if criterion == 'M20':
+                scores[criterion][:, index] = M20[:, index]
+                continue
+            value, support = extinction_criterion_score(criterion, q2_obs, q2_calc, q2_ref_calc)
+            scores[criterion][:, index] = value
+            n_cal[:, index] = support
+
+    winners = {
+        criterion: argmax_extinction_group(criterion, scores[criterion], M20, n_cal)[0]
+        for criterion in criteria
+        }
+    return keys, winners, M20, scores, n_cal, n_absent
+
+
+class UnknownExtinctionGroupError(KeyError):
+    """A truth symbol that no candidate key admits.
+
+    Raised rather than scored as a miss. A truth value the vocabulary cannot express is a defect
+    in the mapping, not a wrong answer by the rule, and silently counting it against the rule is
+    how a benchmark acquires a bias nobody can see.
+    """
+
+
+_EXTINCTION_TRUTH_CACHE = {}
+
+
+def extinction_group_key_map(bravais_lattice):
+    """{`extinction_group_true` symbol: frozenset of candidate group keys}, for one lattice.
+
+    S11's ground truth and the thing the assignment rule chooses between are written in two
+    different notations, and the temptation is to normalise one into the other. Do not: the
+    candidate key carries its own bridge. `get_spacegroup_hkl_ref` builds keys as
+    "<extinction group> e.g. <spacegroup>", and `map_spacegroup_to_extinction_group` is the same
+    EXPO table that produced the truth column -- so routing the key's *space group* half back
+    through that table lands in the truth's own vocabulary exactly.
+
+    Measured on `fom_full_c2_pool` when this was written: the `e.g.` route resolves 530 of 530
+    entries with no symbol on either side admitting more than one key, where character-level
+    normalisation left 69 unmatched. The differences it absorbs are notation drift in the
+    candidate list -- "R (obv) - -" against "R - - -", "C c c (ab)" against "C c c a", and a
+    typo, "P - c1 c" for "P - 21 c" -- none of which is a real crystallographic ambiguity.
+
+    Keys come from the committed `extinction_absence_counts.json`, so this needs no cctbx and
+    runs in the inference-only environment. `map_spacegroup_to_extinction_group` prints on a
+    miss, hence the per-lattice cache.
+    """
+    from mlindex.utilities.ExtinctionCounts import get_absence_counts
+    from mlindex.utilities.SpaceGroups import map_spacegroup_to_extinction_group
+
+    if bravais_lattice not in _EXTINCTION_TRUTH_CACHE:
+        mapping = {}
+        unreachable = []
+        for key in get_absence_counts(bravais_lattice):
+            symbol, _ = map_spacegroup_to_extinction_group(key.split(' e.g. ')[1])
+            if symbol is None:
+                unreachable.append(key)
+                continue
+            mapping.setdefault(symbol.strip(), set()).add(key)
+        _EXTINCTION_TRUTH_CACHE[bravais_lattice] = (
+            {symbol: frozenset(keys) for symbol, keys in mapping.items()},
+            tuple(sorted(unreachable)),
+            )
+    return _EXTINCTION_TRUTH_CACHE[bravais_lattice][0]
+
+
+def unreachable_group_keys(bravais_lattice):
+    """Candidate group keys that no truth symbol can name, so a candidate choosing one never scores.
+
+    Four of mP's eight keys -- `P 1 c 1`, `P 1 a 1`, `P 1 21/c 1`, `P 1 21/a 1` -- have no row in
+    the EXPO table, which carries no monoclinic c- or a-glide entry. It does not bite the current
+    pool because monoclinic standardisation puts every mP entry in the n-glide setting, but it is
+    a hole in the ground truth rather than in the rule, and accuracy on mP is bounded by it.
+    """
+    extinction_group_key_map(bravais_lattice)
+    return _EXTINCTION_TRUTH_CACHE[bravais_lattice][1]
+
+
+def admissible_group_keys(bravais_lattice, extinction_group_true):
+    """The candidate group keys the truth admits. Raises on a symbol the vocabulary cannot express."""
+    mapping = extinction_group_key_map(bravais_lattice)
+    symbol = str(extinction_group_true).strip()
+    if symbol not in mapping:
+        raise UnknownExtinctionGroupError(
+            f'{symbol!r} is not an extinction group of {bravais_lattice}. '
+            f'Known symbols: {sorted(mapping)}'
+            )
+    return mapping[symbol]
+
+
 def reference_lines(xnn, lattice_system, bravais_lattice, spacegroup,
                     models_directory=None):
     """Calculated q2 for every reference line of one extinction group.

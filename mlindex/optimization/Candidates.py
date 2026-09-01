@@ -1,6 +1,9 @@
 import numpy as np
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+from mlindex.utilities.FigureOfMerits import EXTINCTION_CRITERIA
+from mlindex.utilities.FigureOfMerits import argmax_extinction_group
+from mlindex.utilities.FigureOfMerits import extinction_criterion_score
 from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_M_rev_sym
 from mlindex.utilities.FigureOfMerits import get_X_N
@@ -75,6 +78,15 @@ class Candidates:
             raise ValueError(
                 f'assignment_statistic must be one of {ASSIGNMENT_STATISTICS}, '
                 f'not {self.assignment_statistic!r}'
+                )
+        # Which merit `assign_extinction_group`'s argmax runs on. 'M20' is the incumbent and stays
+        # the default, so M20-era behaviour is reproducible (PROTOCOL section 5). opt_params only,
+        # never a CLI option (C2-F-008). S11 owns the question; see EXTINCTION_CRITERIA.
+        self.extinction_criterion = opt_params.get('extinction_criterion', 'M20')
+        if self.extinction_criterion not in EXTINCTION_CRITERIA:
+            raise ValueError(
+                f'extinction_criterion must be one of {EXTINCTION_CRITERIA}, '
+                f'not {self.extinction_criterion!r}'
                 )
         self.figure_of_merit = opt_params['figure_of_merit']
         self.rng = rng
@@ -695,6 +707,12 @@ class Candidates:
 
         M20 = np.zeros((self.n, len(spacegroups)))
         hkl = np.zeros([self.n, self.n_peaks, 3, len(spacegroups)])
+        # On the shipped path `score` IS `M20` -- an alias, not a copy -- so every line the
+        # default executes is the line it executed before the criterion was configurable, and
+        # byte-identity is a property of the code rather than of a test.
+        default_criterion = self.extinction_criterion == 'M20'
+        score = M20 if default_criterion else np.zeros_like(M20)
+        n_cal = None if default_criterion else np.zeros_like(M20)
         if self.zero_error:
             best_zeropoint = self.best_zeropoint
 
@@ -718,8 +736,19 @@ class Candidates:
             hkl[:, :, :, spacegroup_index] = np.take(hkl_ref_sg[spacegroup], hkl_assign, axis=0)
             q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
             M20[:, spacegroup_index] = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+            if not default_criterion:
+                score[:, spacegroup_index], n_cal[:, spacegroup_index] = (
+                    extinction_criterion_score(
+                        self.extinction_criterion, self.q2_obs, q2_calc, q2_ref_calc
+                        )
+                    )
 
-        best_indices = np.argmax(M20, axis=1)
+        if default_criterion:
+            best_indices = np.argmax(M20, axis=1)
+        else:
+            best_indices, self.n_ties_at_best_extinction, self.n_floored_groups = (
+                argmax_extinction_group(self.extinction_criterion, score, M20, n_cal)
+                )
         self.best_spacegroup = list(np.take(spacegroups, best_indices))
         self.best_M20 = np.take_along_axis(M20, best_indices[:, np.newaxis], axis=1)[:, 0]
         self.best_hkl = np.take_along_axis(

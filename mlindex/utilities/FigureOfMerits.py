@@ -586,6 +586,107 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10,
     return M_tilde, M_rev, M_tilde*M_rev
 
 
+# The criteria `Candidates.assign_extinction_group` may run its argmax on (S11). M20 is the
+# incumbent and the shipped default; everything else is research, selected through `opt_params`
+# and never through the CLI (C2-F-008).
+#
+# Why the incumbent is suspect: choosing an extinction group is a decision about which CALCULATED
+# lines should exist, and get_M20 is close to indifferent to it. Worse, part of the gain is an
+# arithmetic identity -- get_M20 divides by N, the reference lines inside its window, so deleting
+# an in-range absent line raises M20 for any cell, right or wrong (C2-F-034). M_rev measures line
+# over-prediction directly and carries no such identity; under it the same choice separates
+# correct from incorrect cells by 9.5-89x (C2-F-035). That is C2-Q-011.
+EXTINCTION_CRITERIA = ('M20', 'M_rev', 'M_sym', 'M_rev_unfloored', 'M_rev_then_M20')
+
+
+def m_rev_support_floor():
+    """The N_cal floor `get_M_rev_sym` applies by default, read from its own signature.
+
+    C2-F-062 put the floor in that signature as a literal on purpose, so there is no constant to
+    import. Reading it back is not cleverness for its own sake: a caller that needs to know which
+    rows the floor touched -- `assign_extinction_group`, to tell "no group is supported" from "all
+    groups tie at zero" -- would otherwise restate `10`, and a second copy of the number is how
+    the two come apart the next time it is tuned.
+    """
+    import inspect
+    return inspect.signature(get_M_rev_sym).parameters['min_n_cal'].default
+
+
+def extinction_criterion_score(criterion, q2_obs, q2_calc, q2_ref_calc):
+    """One extinction group's score under one criterion. Returns (score, n_cal).
+
+    The single implementation. `Candidates.assign_extinction_group` and every offline consumer
+    call this, so the production rule and the analysis of it cannot drift -- the `fom` branch
+    already carries a hand-written second copy of that loop, which is what drift looks like.
+
+    `n_cal` is None for M20 and the support count otherwise. It is returned rather than discarded
+    because a floored M_rev reads 0.0, which already means "no support" and "degenerate": an
+    argmax over up to 68 groups would otherwise be choosing among ties at zero without knowing it,
+    and an extinction group's whole job is to delete lines, which is how a candidate arrives there
+    (C2-F-059, C2-Q-017).
+
+    M_rev_then_M20 is not a merit but a composite rule -- M_rev where the support floor permits,
+    M20 elsewhere -- so it returns both and lets the caller combine them. It was invented in S11
+    and must be selected on fom-train before it is reported anywhere.
+    """
+    if criterion not in EXTINCTION_CRITERIA:
+        raise ValueError(
+            f'unknown extinction criterion {criterion!r}; expected one of {EXTINCTION_CRITERIA}'
+            )
+    if criterion == 'M20':
+        return get_M20(q2_obs, q2_calc, q2_ref_calc), None
+
+    # One call each way, and the floor's value is never restated here: it lives in
+    # get_M_rev_sym's signature as a literal, deliberately (C2-F-062), and a second copy of "10"
+    # in this file is exactly how the two would come apart.
+    if criterion == 'M_rev_unfloored':
+        _, M_rev_unfloored, _, n_cal = get_M_rev_sym(
+            q2_obs, q2_calc, q2_ref_calc, min_n_cal=None, return_n_cal=True
+            )
+        return M_rev_unfloored, n_cal
+
+    M_tilde, M_rev, M_sym, n_cal = get_M_rev_sym(
+        q2_obs, q2_calc, q2_ref_calc, return_n_cal=True
+        )
+    if criterion == 'M_sym':
+        return M_sym, n_cal
+    # M_rev and M_rev_then_M20 both score on the floored M_rev; they differ in what the caller
+    # does with a floored row, not in the number computed here.
+    return M_rev, n_cal
+
+
+def argmax_extinction_group(criterion, score, M20, n_cal):
+    """The winning group per candidate, with ties broken on M20. Returns (winner, n_ties, n_floored).
+
+    Shared by `Candidates.assign_extinction_group` and `FomBenchmark.extinction_group_sweep`, so
+    the production rule and every offline measurement of it are the same arithmetic. The `fom`
+    branch carries a hand-written second copy of that loop, which is what this exists to prevent.
+
+    The tie-break is not cosmetic. Under a floored `M_rev` a tie at 0.0 is the expected state, not
+    an edge case: an extinction group's job is to delete predicted lines, deleting them is what
+    drives `N_cal` under the floor, and up to 68 groups are searched. `np.argmax` returns the
+    FIRST maximum and the generic zero-absence group is first in all fourteen of
+    `get_spacegroup_hkl_ref`'s key lists -- so an unbroken tie would hand every unsupported
+    candidate the generic group while looking like a decision. Resolving on M20 instead makes the
+    degenerate case fall back to the incumbent's own answer, which is the conservative direction.
+    """
+    if criterion == 'M20':
+        winner = np.argmax(M20, axis=1)
+        return winner, np.ones(M20.shape[0], dtype=np.int64), np.zeros(M20.shape[0], dtype=np.int64)
+
+    floor = m_rev_support_floor()
+    if criterion == 'M_rev_then_M20':
+        # Where NO group clears the support floor the criterion has nothing to say about this
+        # candidate, so the decision falls back to M20 wholesale rather than to a tie among zeros.
+        supported = (n_cal >= floor).any(axis=1)
+        score = np.where(supported[:, np.newaxis], score, M20)
+
+    tied = score >= score.max(axis=1, keepdims=True)
+    n_ties = tied.sum(axis=1).astype(np.int64)
+    n_floored = (n_cal < floor).sum(axis=1).astype(np.int64)
+    return np.argmax(np.where(tied, M20, -np.inf), axis=1), n_ties, n_floored
+
+
 def get_X_N(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=1.0):
     """de Wolff's X_N: how many observed lines below the cut-off are *not* explained.
 

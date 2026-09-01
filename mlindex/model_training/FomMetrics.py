@@ -183,6 +183,13 @@ HIGHER_IS_BETTER = {
     # posterior divides away (F-131 found it worth more than the ratio), and it is a log of a sum
     # of positive terms, so it is higher-is-better for the same reason the others are.
     'ho_post': True, 'ho_post_logmean': True, 'ho_evidence': True,
+    # S11's extinction-rule arms. Every one of these is M20 EVALUATED AT the group the named
+    # criterion chose -- not the criterion's own value -- so they are all higher-is-better and all
+    # on M20's scale, which is what makes them comparable to each other and to the incumbent. The
+    # criterion never becomes the ranking score here; ranking on M_sym is S09's question and
+    # answering it inside the assignment rule would confound the two changes.
+    'M20_at_M20': True, 'M20_at_M_rev': True, 'M20_at_M_sym': True,
+    'M20_at_M_rev_unfloored': True, 'M20_at_M_rev_then_M20': True,
     }
 
 
