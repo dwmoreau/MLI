@@ -366,3 +366,212 @@ def test_the_recommendation_is_generated_from_the_tables_not_written_beside_them
     # And the merit that abstains is named from the threshold table, not hard-coded.
     assert 'ho_M_rev' in text
     assert 'ho_M_sym' not in text.split('## 5.')[1].split('**Which budget')[0]
+
+
+# ---------------------------------------------------------------------------------------
+# S10c: the posterior hold-out statistic
+# ---------------------------------------------------------------------------------------
+# A GENERIC cell, and the genericness is the point. The fixture at the top of this file uses
+# [0.04, 0.02, 0.01], whose axes are in the ratio 4:2:1 -- so q2 = 4h^2 + 2k^2 + l^2 in units of
+# 0.01 and the reference list is riddled with exact coincidences, e.g. (1,0,0) and (0,0,2). The
+# other merits tolerate that; the posterior cannot, because it normalises over competing lines and
+# an exactly coincident line caps P at 1/multiplicity **for the correct cell**. Measured: the
+# correct cell scored 0.333 and lost to a badly wrong one. Use irrational-ish ratios here.
+POSTERIOR_CELL = np.array([0.0413, 0.0237, 0.0119])
+
+
+def _posterior_setup(seed=1, n_surplus=5):
+    """A correct cell and three wrong ones, with a window to fit sigma on and a surplus to score."""
+    rng = np.random.default_rng(seed)
+    grid = np.stack(np.meshgrid(*[np.arange(0, 7)]*3, indexing='ij'), axis=-1).reshape(-1, 3)
+    hkl_ref = grid[np.any(grid != 0, axis=1)]
+    cells = np.vstack([POSTERIOR_CELL,
+                       POSTERIOR_CELL*np.array([1.7, 0.6, 1.3]),
+                       POSTERIOR_CELL*np.array([1.02, 0.99, 1.01]),
+                       POSTERIOR_CELL*np.array([0.5, 1.0, 1.0])])
+    lines = np.sort(np.matmul(POSTERIOR_CELL[None],
+                              get_hkl_matrix(hkl_ref, LATTICE_SYSTEM).T)[0])
+    window = lines[:20] + rng.normal(0, 5e-5, 20)
+    surplus = lines[20:20 + n_surplus] + rng.normal(0, 5e-5, n_surplus)
+    return window, surplus, cells, hkl_ref
+
+
+def test_the_posterior_columns_rank_the_correct_cell_first():
+    """`ho_post` and `ho_post_logmean` must prefer the cell that generated the peaks.
+
+    Over three seeds and three flavours of wrong cell -- badly wrong, a near miss, and a halved
+    axis, which is the symmetry-lowering failure M20 actually suffers from.
+    """
+    from mlindex.utilities.FigureOfMerits import get_holdout_posterior_fom
+    for seed in (1, 2, 3):
+        window, surplus, cells, hkl_ref = _posterior_setup(seed)
+        out = get_holdout_posterior_fom(window, surplus, cells, hkl_ref, LATTICE_SYSTEM)
+        for key in ('ho_post', 'ho_post_logmean'):
+            assert out[key][0] == max(out[key]), (seed, key, out[key])
+
+
+def test_the_evidence_column_is_a_line_density_statistic_and_prefers_the_HALVED_cell():
+    """Pinned as a **known property**, not as desired behaviour.
+
+    `ho_evidence` is `log sum_j exp(-d_j^2/2 sigma^2)` -- the denominator the posterior divides
+    away. F-131 found that denominator worth more than the ratio, which is why S10c carries it as
+    a column. But summing over competing lines rewards a cell that simply has *more* of them near
+    every peak, so a halved axis -- twice the line density -- scores highest and the correct cell
+    does not win. That is the same systematic inversion `X_N` has (C2-F-095), predicted here
+    before it was measured on the benchmark.
+
+    If this test ever fails because the correct cell starts winning, the column has changed
+    meaning and the S10c results that rest on it need re-reading.
+    """
+    from mlindex.utilities.FigureOfMerits import get_holdout_posterior_fom
+    for seed in (1, 2, 3):
+        window, surplus, cells, hkl_ref = _posterior_setup(seed)
+        out = get_holdout_posterior_fom(window, surplus, cells, hkl_ref, LATTICE_SYSTEM)
+        assert out['ho_evidence'][3] == max(out['ho_evidence']), (seed, out['ho_evidence'])
+        assert out['ho_evidence'][0] != max(out['ho_evidence'])
+
+
+def test_the_evidence_identity_avoids_the_full_distribution():
+    """`log sum_j exp(-d_j^2/s) == -d_1^2/s - log P_1`, exactly.
+
+    This is why `ho_evidence` costs no `n_ref` axis. `get_assignment_distribution` returns
+    n_candidates x n_peaks x n_ref and its own docstring says never to call it on a candidate
+    pool, so an implementation that used it would not survive contact with 43 M candidates.
+    """
+    from mlindex.utilities.FigureOfMerits import (get_assignment_sigma, get_assignment_posterior,
+                                                  get_assignment_distribution, _posterior_scale)
+    window, surplus, cells, hkl_ref = _posterior_setup()
+    q2_ref = np.matmul(cells, get_hkl_matrix(hkl_ref, LATTICE_SYSTEM).T)
+    sigma, _ = get_assignment_sigma(window, q2_ref, LATTICE_SYSTEM)
+    _, d1 = get_assignment_sigma(surplus, q2_ref, LATTICE_SYSTEM)
+    posterior = get_assignment_posterior(surplus, q2_ref, LATTICE_SYSTEM, sigma=sigma, d1=d1)
+    scale = _posterior_scale(sigma, 1.0)[:, np.newaxis]
+
+    identity = -(d1**2)/scale - np.log(posterior)
+    explicit = np.log(get_assignment_distribution(
+        surplus, q2_ref, LATTICE_SYSTEM, sigma=sigma, d1=d1, normalise=False).sum(axis=2)) \
+        - (d1**2)/scale
+    np.testing.assert_allclose(identity, explicit, rtol=0, atol=1e-12)
+
+
+def test_sigma_comes_from_the_window_and_not_from_the_surplus():
+    """The design decision, asserted rather than trusted.
+
+    Estimating sigma on the peaks being scored is what made the posterior worthless at the
+    candidate question in campaign 1 (F-130/131/132): a badly-fitting cell earns a large sigma, a
+    flat posterior, and a **cancelled** penalty. Scoring the surplus at the window's scale is the
+    whole of S10c's hypothesis, so a regression that quietly re-estimated on the surplus would
+    silently restore campaign 1's negative.
+    """
+    from mlindex.utilities.FigureOfMerits import get_holdout_posterior_fom
+    window, surplus, cells, hkl_ref = _posterior_setup()
+    baseline = get_holdout_posterior_fom(window, surplus, cells, hkl_ref, LATTICE_SYSTEM)
+    # Corrupt ONLY the window. If sigma came from the surplus this would change nothing.
+    bad_window = window + np.linspace(0, 5e-3, window.size)
+    perturbed = get_holdout_posterior_fom(bad_window, surplus, cells, hkl_ref, LATTICE_SYSTEM)
+    assert not np.allclose(baseline['ho_post'], perturbed['ho_post'])
+    # And corrupting the surplus must change it too, or it is not scoring the surplus at all.
+    shifted = get_holdout_posterior_fom(window, surplus + 1e-3, cells, hkl_ref, LATTICE_SYSTEM)
+    assert not np.allclose(baseline['ho_post'], shifted['ho_post'])
+
+
+def test_the_posterior_columns_are_per_peak_means_so_the_budget_can_be_swept():
+    """S10a's gate 3: an extensive column would have its growth read as a gain.
+
+    `ho_tail_nll` grew 27.75x from one surplus peak to twenty and is barred from the sweep for it.
+    These three are means over peaks, so doubling the budget on a cell that fits uniformly well
+    must leave them put.
+    """
+    from mlindex.utilities.FigureOfMerits import get_holdout_posterior_fom
+    window, five, cells, hkl_ref = _posterior_setup(n_surplus=5)
+    _, ten, _, _ = _posterior_setup(n_surplus=10)
+    at_five = get_holdout_posterior_fom(window, five, cells, hkl_ref, LATTICE_SYSTEM)
+    at_ten = get_holdout_posterior_fom(window, ten, cells, hkl_ref, LATTICE_SYSTEM)
+    for key in ('ho_post', 'ho_post_logmean'):
+        # Intensive: the correct cell saturates at the same value either way, and no column may
+        # grow by anything like `ho_tail_nll`'s factor.
+        ratio = abs(at_ten[key][1])/max(abs(at_five[key][1]), 1e-12)
+        assert ratio < 3.0, (key, at_five[key][1], at_ten[key][1])
+
+
+def test_every_posterior_column_declares_a_treatment_and_a_direction():
+    """Sigma is estimated here, so `in-sample` and never `free` (PROTOCOL section 3 rule 4)."""
+    from mlindex.utilities.FigureOfMerits import get_holdout_posterior_fom
+    window, surplus, cells, hkl_ref = _posterior_setup()
+    out = get_holdout_posterior_fom(window, surplus, cells, hkl_ref, LATTICE_SYSTEM)
+    for key in out:
+        assert SIGMA_TREATMENT[key] == 'in-sample', key
+        assert FM.orientation_of(key) is True, key
+
+
+def test_an_empty_surplus_is_missing_rather_than_zero():
+    """The missing-not-zero rule, which the whole sweep depends on."""
+    from mlindex.utilities.FigureOfMerits import get_holdout_posterior_fom
+    window, _, cells, hkl_ref = _posterior_setup()
+    out = get_holdout_posterior_fom(window, np.array([]), cells, hkl_ref, LATTICE_SYSTEM)
+    for key, values in out.items():
+        assert values.shape == (cells.shape[0],), key
+        assert np.all(np.isnan(values)), key
+
+
+def test_passing_the_window_sigma_changes_nothing():
+    """The hoist must be an optimisation and not a second code path.
+
+    `holdout_merits` fits the window sigma once per group and hands it to all six budgets, because
+    it is a property of the cell and the peaks it was refined against and does not move as the
+    sweep widens. Same reasoning as `q2_ref_calc`, and the same guard: if the two routes ever
+    disagree, a sweep silently reports six different statistics.
+    """
+    from mlindex.utilities.FigureOfMerits import get_assignment_sigma, get_holdout_posterior_fom
+    window, surplus, cells, hkl_ref = _posterior_setup()
+    q2_ref = np.matmul(cells, get_hkl_matrix(hkl_ref, LATTICE_SYSTEM).T)
+    sigma, _ = get_assignment_sigma(window, q2_ref, LATTICE_SYSTEM)
+
+    inside = get_holdout_posterior_fom(window, surplus, cells, hkl_ref, LATTICE_SYSTEM,
+                                       q2_ref_calc=q2_ref)
+    handed = get_holdout_posterior_fom(window, surplus, cells, hkl_ref, LATTICE_SYSTEM,
+                                       q2_ref_calc=q2_ref, sigma=sigma)
+    for key in inside:
+        np.testing.assert_array_equal(inside[key], handed[key], err_msg=key)
+
+
+def test_the_control_auc_handles_ties_one_class_and_nans():
+    """The within-band control's own arithmetic, pinned.
+
+    Ties matter more than they look: `X_N` gave 1 522 of 8 272 candidates the identical score
+    (C2-F-095), and an AUC that broke ties by input order would report that as skill. Average
+    ranks make a constant score score exactly 0.5, which is the honest answer.
+    """
+    from mlindex.model_training.FomHoldoutReport import _auc
+    labels = np.array([1, 1, 0, 0], dtype=bool)
+    assert _auc(np.array([4., 3., 2., 1.]), labels)[0] == pytest.approx(1.0)
+    assert _auc(np.array([1., 2., 3., 4.]), labels)[0] == pytest.approx(0.0)
+    # A constant score is exactly chance, not an artefact of the sort order.
+    assert _auc(np.array([1., 1., 1., 1.]), labels)[0] == pytest.approx(0.5)
+    # A band with no correct candidate has no AUC, and must say so rather than return 0 or 0.5.
+    assert np.isnan(_auc(np.array([1., 2.]), np.array([True, True]))[0])
+    # Non-finite scores drop out rather than sorting to an end and inventing separation.
+    assert _auc(np.array([1., np.nan, 3., 4.]), labels)[0] == pytest.approx(0.0)
+
+
+def test_the_control_keeps_every_correct_candidate():
+    """Correct candidates are 0.081 % of the pool, so sampling them would gut the control."""
+    import pandas as pd
+    from mlindex.model_training import FomHoldoutReport as HR
+    rng = np.random.default_rng(0)
+    n = 20000
+    frame = pd.DataFrame({
+        'candidate_id': np.arange(n),
+        'M20': rng.uniform(0, 60, n),
+        'is_correct': np.arange(n) < 40,
+        'ho_post__n5': rng.random(n),
+        'bravais_lattice': 'mP', 'condition_bundle': 'b', 'Minfo': rng.random(n),
+        })
+    block = HR.control_rows(frame, ['M20', 'Minfo', 'candidate_id', 'ho_post__n5'], rate=0.01)
+    assert int(block['is_correct'].sum()) == 40
+    # And the negatives are thinned to roughly the requested rate, not kept whole.
+    assert 100 < int((~block['is_correct']).sum()) < 400
+    # Every row lands in exactly one band, and the bands are the fixed edges rather than
+    # quantiles of whatever this shard happened to contain.
+    assert block['m20_band'].notna().all()
+    assert len(set(block['m20_band'])) > 1

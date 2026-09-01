@@ -1137,3 +1137,159 @@ def threshold_table(train_stacked, train_meta, report_stacked, report_meta, meri
     if frame.shape[0]:
         frame.insert(0, 'matched_fpr_budget', budget)
     return frame
+
+
+# ---------------------------------------------------------------------------------------
+# The within-M20-band control — S10c's acceptance gate 4
+# ---------------------------------------------------------------------------------------
+# Fixed M20 bands rather than quantiles of whatever rows a pass happens to see. A quantile edge
+# recomputed per shard would put the same candidate in different bands on different runs, which is
+# the drift R14 records for `volume_decile`. These edges are interpretable on their own terms:
+# below de Wolff's 10 is "would not be reported", and the upper bands are where the pool's mass is.
+M20_BAND_EDGES = (0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, np.inf)
+
+# Correct candidates are 0.081 % of the pool, so they are all kept and the rest are sampled. AUC is
+# a rank statistic and uniform subsampling of one class leaves it unbiased, so this costs precision
+# and not correctness -- and it turns a 43 M-row control into a 500 k-row one.
+CONTROL_NEGATIVE_RATE = 0.01
+
+
+def control_rows(frame, columns, rate=CONTROL_NEGATIVE_RATE, seed=12345):
+    """Every correct candidate and a sample of the rest, banded by M20.
+
+    **What this control is for.** M20 cannot separate correct from incorrect candidates *within its
+    own bands* -- it is at chance there by construction, 0.503 in campaign 1's table. So a merit
+    that separates them inside a band is carrying information M20 does not have, which is the
+    question a combiner actually asks. `M_sym` reaches 0.822 and that is the bar S10c is measured
+    against.
+    """
+    if 'M20' not in frame.columns or 'is_correct' not in frame.columns:
+        return None
+    correct = FomMetrics.as_bool(frame['is_correct'])
+    # Seeded from the shard's own content, so the same pool gives the same control every time
+    # without carrying a counter across shards (PROTOCOL section 6).
+    digest = int(pd.util.hash_pandas_object(frame['candidate_id'], index=False).sum() % (2**32))
+    rng = np.random.default_rng((seed + digest) % (2**32))
+    keep = correct | (rng.random(frame.shape[0]) < rate)
+    if not keep.any():
+        return None
+    block = frame.loc[keep, [c for c in columns if c in frame.columns]].copy()
+    block['is_correct'] = correct[keep]
+    block['m20_band'] = pd.cut(frame.loc[keep, 'M20'].to_numpy(), bins=list(M20_BAND_EDGES),
+                               right=False).astype(str)
+    return block
+
+
+def _auc(scores, labels):
+    """AUC by rank, NaN-safe, returning NaN where one class is absent.
+
+    Written out rather than imported so the control has no sklearn dependency and so ties are
+    handled by average ranks, which is what makes a merit with many equal values -- the failure
+    C2-F-095 found in `X_N` -- score 0.5 rather than something flattering.
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=bool)
+    usable = np.isfinite(scores)
+    scores, labels = scores[usable], labels[usable]
+    n_pos, n_neg = int(labels.sum()), int((~labels).sum())
+    if n_pos == 0 or n_neg == 0:
+        return np.nan, n_pos, n_neg
+    order = np.argsort(scores, kind='mergesort')
+    ranks = np.empty(scores.size, dtype=np.float64)
+    ranks[order] = np.arange(1, scores.size + 1, dtype=np.float64)
+    # Average ranks over ties, so a constant score gives exactly 0.5.
+    sorted_scores = scores[order]
+    start = 0
+    for stop in range(1, sorted_scores.size + 1):
+        if stop == sorted_scores.size or sorted_scores[stop] != sorted_scores[start]:
+            if stop - start > 1:
+                ranks[order[start:stop]] = ranks[order[start:stop]].mean()
+            start = stop
+    return (ranks[labels].sum() - n_pos*(n_pos + 1)/2)/(n_pos*n_neg), n_pos, n_neg
+
+
+def band_m20(control, n_bands=40):
+    """Re-band the control on the whole frame, finely, and return it with `m20_band` replaced.
+
+    **The band width is not a presentation choice; it is what makes the control a control.** The
+    premise is that M20 cannot separate correct from incorrect candidates *within* a band, so a
+    merit that does is carrying information M20 lacks. That premise only holds if the bands are
+    narrow enough to exhaust M20's own discrimination -- and with the seven interpretable fixed
+    bands this function replaces, **M20 scored 0.7225 within its own bands rather than ~0.5**, so
+    every other row in the table was measuring residual M20 signal as though it were the merit's.
+
+    Quantile bands over the whole control frame, computed once here rather than per shard. Doing
+    it per shard is the drift R14 records for `volume_decile`: a within-set rank moves when rows
+    are dropped, so the same candidate would land in different bands on different runs.
+    """
+    control = control.copy()
+    values = control['M20'].to_numpy(dtype=np.float64)
+    edges = np.unique(np.nanquantile(values, np.linspace(0, 1, n_bands + 1)))
+    control['m20_band'] = pd.cut(values, bins=edges, include_lowest=True).astype(str)
+    return control
+
+
+def within_band_control(control, merits, reference=('M20', 'M_sym', 'Minfo'), n_bands=40):
+    """Within-M20-band AUC for every column, plus the reference columns, per band and pooled.
+
+    `M20` is included deliberately and must come out near 0.5 inside its own bands. If it does
+    not, the bands are wrong and every other row in the table is uninterpretable -- so it is the
+    control's own control.
+    """
+    control = band_m20(control, n_bands=n_bands)
+    rows = []
+    columns = [c for c in list(merits) + list(reference) if c in control.columns]
+    for band, block in list(control.groupby('m20_band')) + [('unconditional', control)]:
+        for column in columns:
+            auc, n_pos, n_neg = _auc(block[column].to_numpy(),
+                                     FomMetrics.as_bool(block['is_correct']))
+            rows.append({'m20_band': band, 'merit': column, 'auc': auc,
+                         'n_correct': n_pos, 'n_incorrect': n_neg,
+                         'pairs': n_pos*n_neg})
+    frame = pd.DataFrame(rows)
+    # The stratified number: each band's AUC weighted by the comparisons it actually contains, so
+    # a band holding three correct candidates cannot swing the headline. This is the row to quote.
+    banded = frame.loc[(frame['m20_band'] != 'unconditional') & frame['auc'].notna()]
+    for column, block in banded.groupby('merit'):
+        weight = block['pairs'].sum()
+        frame = pd.concat([frame, pd.DataFrame([{
+            'm20_band': 'within-band (pair-weighted)', 'merit': column,
+            'auc': float((block['auc']*block['pairs']).sum()/weight) if weight else np.nan,
+            'n_correct': int(block['n_correct'].sum()),
+            'n_incorrect': int(block['n_incorrect'].sum()),
+            'pairs': int(weight)}])], ignore_index=True)
+    return frame
+
+
+def control_from_pool(pool, merit_dir, columns, rate=CONTROL_NEGATIVE_RATE, seed=12345):
+    """Control rows straight from a pool and a sidecar directory, without a reduce.
+
+    The within-band control is **candidate-level** -- it asks whether a merit separates correct
+    from incorrect candidates inside a narrow M20 band, and never ranks anything. So it needs
+    neither the cross-lattice pooling nor the per-entry reduction that `--reduce` pays for, and a
+    four-column projection of the pool joined to the sidecar answers it in a fraction of the time.
+
+    That matters because the sigma-sensitivity curve needs one of these **per multiplier**, and
+    each multiplier is already a full sidecar pass (C2-F-110). Going through `--reduce` as well
+    would have made a five-point curve cost more than the headline measurement.
+    """
+    from mlindex.model_training import FomBenchmark
+    keys = list(FomBenchmark.ZOO_KEY_COLUMNS)
+    wanted = keys + ['M20', 'is_correct']
+    blocks = []
+    for path in sorted(Path(pool).glob('candidates*.parquet')):
+        sidecar = Path(merit_dir)/path.name
+        if not sidecar.exists():
+            continue
+        available = FomBenchmark.candidate_columns_present(Path(pool))
+        frame = pd.read_parquet(path, columns=[c for c in wanted if c in available])
+        if 'condition_bundle' not in frame.columns:
+            frame['condition_bundle'] = FomBenchmark.bundle_from_candidate_path(path)
+        merits = pd.read_parquet(sidecar)
+        frame = frame.merge(merits, on=[k for k in keys if k in merits.columns], how='left',
+                            validate='1:1')
+        block = control_rows(frame, [c for c in columns if c in frame.columns] + ['M20'],
+                             rate=rate, seed=seed)
+        if block is not None:
+            blocks.append(block)
+    return pd.concat(blocks, ignore_index=True) if blocks else pd.DataFrame()

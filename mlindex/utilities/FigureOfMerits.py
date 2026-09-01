@@ -35,6 +35,14 @@ SIGMA_TREATMENT = {
     "M_rev": "free",
     "M_sym": "free",
     "X_N": "free",
+    # S10c's posterior hold-out family. `in-sample` and not `free`: sigma is estimated from the
+    # candidate's own fitted window. That is the design rather than a compromise -- see
+    # `get_holdout_posterior_fom` -- but it is exactly what PROTOCOL section 3 rule 4 requires a
+    # sensitivity curve for, and C2-R-007 is why: the generator's own sigma(q2) model is the
+    # repository's, so a merit that absorbs sigma flatters itself on synthetic data.
+    "ho_post": "in-sample",
+    "ho_post_logmean": "in-sample",
+    "ho_evidence": "in-sample",
 }
 
 
@@ -1959,6 +1967,115 @@ def _reduce_predictive(discrepancy, ratio, sigma_hat, prefix, expected=None):
     if sigma_hat is not None and sigma_hat > 0:
         features[f"{prefix}_chi2"] = np.where(has_value, median_discrepancy/sigma_hat, 0.0)
     return features
+
+
+def get_holdout_posterior_fom(q2_obs_window, q2_obs_holdout, xnn, hkl_ref, lattice_system,
+                              sigma_multiplier=1.0, q2_ref_calc=None, robust=False, chunk=256,
+                              sigma=None):
+    """Score the surplus peaks at the precision the cell demonstrably fits its own window at.
+
+    S10c's object, and DWMM's proposal: *"something based in the 'posterior' used to determine if a
+    peak has been indexed or not by a cell"*. The statistic is
+
+        sigma  estimated from the **fitted window**, the 20 peaks the cell was refined against
+        P_i    = exp(-d_i^2/2 sigma^2) / sum_j exp(-d_j^2/2 sigma^2), at the nearest line,
+               evaluated on the **surplus** peaks the cell never saw
+
+    so it reads *"given the precision this cell demonstrably fits at, are the extra peaks where it
+    predicts?"*
+
+    **Why the window sigma is the whole design, and not a detail.** Campaign 1 found the posterior
+    worth nothing at the candidate question (F-130/131/132): normalising divides out the absolute
+    fit quality that separates candidates, and its own discarded denominator was worth more than
+    the ratio. That was measured **in sample**, where sigma comes from the same peaks the posterior
+    is then evaluated on, so a badly-fitting cell earns a large sigma, a flat posterior and a
+    *cancelled* penalty. Estimating sigma on the window and spending it on the surplus puts the
+    absolute fit quality back, because it now lives in sigma rather than in the ratio.
+
+    **Do not estimate sigma from the surplus peaks.** On five residuals it is noisy, and the
+    cancellation above returns in full. A surplus-sigma arm is a control, never the headline.
+
+    Three columns, all **per-peak means** so they are comparable across peak budgets -- S10a's
+    gate 3, which caught `ho_tail_nll` growing 27.75x from one surplus peak to twenty and being
+    unsweepable for it:
+
+      ho_post           mean P_i. The direct reading of "is this peak indexed by this cell".
+      ho_post_logmean   mean log P_i. A proper score: it punishes a confidently wrong assignment,
+                        where the mean of P_i only fails to reward it.
+      ho_evidence       mean log sum_j exp(-d_j^2/2 sigma^2) -- **the denominator the posterior
+                        divides away**, which F-131 found was worth more than the ratio it forms.
+                        Carried as a column of its own for the first time.
+
+    `ho_evidence` is computed from the posterior and the nearest-line distance rather than from
+    `get_assignment_distribution`, using
+
+        log sum_j exp(-d_j^2/s) = -d_1^2/s - log P_1
+
+    which is exact -- agreement to 1.1e-16 against the explicit sum, pinned in
+    `tests/test_fom_holdout.py`. That matters for more than tidiness: the distribution form
+    returns `n_candidates x n_peaks x n_ref` and its own docstring says to call it on a
+    generator's predicted cells and never on a candidate pool. This identity gets the same number
+    with no `n_ref` axis at all, so the evidence column costs one extra array of the posterior's
+    own shape.
+
+    `sigma_multiplier` scales the fitted sigma, for the sensitivity curve PROTOCOL section 3
+    rule 4 requires of anything using an estimated scale. Note the transfer risk it exists to
+    probe: the repository's own sigma(q2) model is also what the generator uses (C2-R-007), so a
+    merit that quietly absorbs sigma looks excellent on synthetic data and need not transfer. This
+    one uses sigma deliberately rather than quietly, and the curve is what has to support that.
+
+    `q2_ref_calc` may be handed in as it may to `get_holdout_fom`; it depends on the cell alone,
+    and the matmul that builds it is the dominant cost of a peak-budget sweep.
+
+    `sigma` may be handed in for the same reason and is worth more here than it looks. **The
+    window sigma does not depend on the peak budget** -- it is fitted to the peaks the cell was
+    refined against, which are the same peaks whatever the sweep is asking about -- so a caller
+    sweeping six budgets would otherwise pay for six identical nearest-line scans over the whole
+    reference list. `holdout_merits` computes it once per (entry, lattice, extinction group) and
+    passes it to every budget. Passing it changes no result and a test pins the two routes.
+
+    Returns a dict of (n_candidates,) arrays. Every key is registered in `SIGMA_TREATMENT` as
+    `in-sample` and in `FomMetrics.HIGHER_IS_BETTER`.
+    """
+    q2_obs_window = np.atleast_1d(np.asarray(q2_obs_window, dtype=np.float64))
+    q2_obs_holdout = np.atleast_1d(np.asarray(q2_obs_holdout, dtype=np.float64))
+    xnn = np.atleast_2d(np.asarray(xnn, dtype=np.float64))
+
+    if q2_ref_calc is None:
+        hkl2_ref = get_hkl_matrix(np.asarray(hkl_ref), lattice_system)
+        q2_ref_calc = np.matmul(xnn, hkl2_ref.T)
+    else:
+        q2_ref_calc = np.asarray(q2_ref_calc, dtype=np.float64)
+
+    n_candidates = q2_ref_calc.shape[0]
+    if q2_obs_holdout.size == 0 or q2_obs_window.size == 0:
+        empty = np.full(n_candidates, np.nan)
+        return {'ho_post': empty.copy(), 'ho_post_logmean': empty.copy(),
+                'ho_evidence': empty.copy()}
+
+    # The scale, from the window alone. `d1` from this call belongs to the window peaks and is
+    # deliberately NOT reused below -- the surplus needs its own nearest-line distances.
+    if sigma is None:
+        sigma, _ = get_assignment_sigma(q2_obs_window, q2_ref_calc, lattice_system,
+                                        robust=robust, chunk=chunk)
+    else:
+        sigma = np.asarray(sigma, dtype=np.float64)
+    # And the surplus distances, at that scale.
+    _, d1_holdout = get_assignment_sigma(q2_obs_holdout, q2_ref_calc, lattice_system,
+                                         robust=robust, chunk=chunk)
+    posterior = get_assignment_posterior(
+        q2_obs_holdout, q2_ref_calc, lattice_system, sigma=sigma,
+        sigma_multiplier=sigma_multiplier, robust=robust, chunk=chunk, d1=d1_holdout)
+
+    scale = _posterior_scale(sigma, sigma_multiplier)[:, np.newaxis]
+    log_posterior = np.log(posterior)
+    evidence = -(d1_holdout**2)/scale - log_posterior
+
+    return {
+        'ho_post': np.mean(posterior, axis=1),
+        'ho_post_logmean': np.mean(log_posterior, axis=1),
+        'ho_evidence': np.mean(evidence, axis=1),
+        }
 
 
 def get_holdout_fom(q2_obs_holdout, xnn, hkl_ref, lattice_system, bravais_lattice,

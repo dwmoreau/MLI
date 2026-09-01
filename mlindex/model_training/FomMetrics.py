@@ -177,6 +177,12 @@ HIGHER_IS_BETTER = {
     'ho_M20': True, 'ho_M': True, 'ho_M_tilde': True, 'ho_M_rev': True, 'ho_M_sym': True,
     'ho_Minfo': True,
     'ho_raw': False, 'ho_chi2': False, 'ho_tail_nll': False,
+    # S10c's posterior hold-out family. All three point the same way -- a cell that predicts the
+    # surplus peaks well assigns them confidently, so a higher posterior, a higher mean log
+    # posterior and a higher evidence are all better. `ho_evidence` is the denominator the
+    # posterior divides away (F-131 found it worth more than the ratio), and it is a log of a sum
+    # of positive terms, so it is higher-is-better for the same reason the others are.
+    'ho_post': True, 'ho_post_logmean': True, 'ho_evidence': True,
     }
 
 

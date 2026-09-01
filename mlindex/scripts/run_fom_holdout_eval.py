@@ -257,7 +257,7 @@ def run_reduce(args):
     projection = list(POOL_COLUMNS)
 
     accumulated = {(score, split): [] for score in scores for split in splits}
-    coverage, seen = [], 0
+    coverage, control, seen = [], [], 0
     started = time.perf_counter()
     for frame in FomBenchmark.bundle_frames(pool, merit_dir=merit_dir, columns=projection,
                                             require_merits=True):
@@ -270,6 +270,16 @@ def run_reduce(args):
         if args.bundles and frame['condition_bundle'].iloc[0] not in set(args.bundles):
             continue
         coverage.append(coverage_counts(frame, budgets))
+        # The within-M20-band control rides along on the pass that is already streaming every
+        # candidate. Running it separately would mean a second read of a 43 M-candidate pool to
+        # answer a question this one has the rows for (PROTOCOL section 3 rule 8).
+        if args.control:
+            from mlindex.model_training import FomHoldoutReport
+            block = FomHoldoutReport.control_rows(
+                frame, ['M20', 'Minfo', 'candidate_id', 'bravais_lattice', 'condition_bundle']
+                + [c for c in frame.columns if c.startswith('ho_')], seed=args.seed)
+            if block is not None:
+                control.append(block)
         for split, ids in splits.items():
             shard = frame.loc[frame['entry_id'].isin(ids)]
             if not shard.shape[0]:
@@ -329,6 +339,9 @@ def run_reduce(args):
     artifact_dir.mkdir(parents=True, exist_ok=True)
     pd.concat(stacked, ignore_index=True).to_parquet(
         artifact_dir/f'{args.tag}_reduced.parquet', index=False)
+    if control:
+        pd.concat(control, ignore_index=True).to_parquet(
+            artifact_dir/f'{args.tag}_control.parquet', index=False)
     pd.concat(coverage, ignore_index=True).groupby(
         ['n_extra', 'condition_bundle', 'bravais_lattice'], as_index=False).sum().to_csv(
             artifact_dir/f'{args.tag}_coverage.csv', index=False, encoding='utf-8')
@@ -378,6 +391,12 @@ def main(argv=None):
     parser.add_argument('--headline-n-extra', type=int, default=5,
                         help='The budget the leaderboard is quoted at. 5 surplus peaks is a '
                              '25-peak pattern, the middle of what real data supplies.')
+    parser.add_argument('--control', action='store_true',
+                        help='Accumulate the within-M20-band control on the same pool pass. M20 '
+                             'is at chance inside its own bands by construction, so a merit that '
+                             'separates correct from incorrect candidates there is carrying '
+                             'information M20 does not have -- which is the question a combiner '
+                             'asks. Keeps every correct candidate and 1 %% of the rest.')
     parser.add_argument('--threshold-train-tag', default=None,
                         help='A --reduce tag carrying the selection split, for the threshold half. '
                              'Pass the SLICE tag when reporting on the fully retained pool: that '

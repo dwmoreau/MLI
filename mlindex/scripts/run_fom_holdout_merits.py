@@ -100,6 +100,14 @@ def _parse_args(argv=None):
                              "'free_equal' takes the same peaks at a fixed COUNT instead. The two "
                              'free modes are PAIRED arms against the uniform one and must never '
                              'be adopted into an aggregate (F-088)')
+    parser.add_argument('--sigma-multiplier', type=float, default=1.0,
+                        help='Scale the fitted window sigma for S10c posterior columns. The '
+                             'sensitivity curve PROTOCOL section 3 rule 4 requires of anything '
+                             'using an estimated scale -- and C2-R-007 is why it matters here: '
+                             "the generator's own sigma(q2) model is the repository's, so a merit "
+                             'that absorbs sigma flatters itself on synthetic data. Any value but '
+                             '1.0 must go to an explicit --out-dir, since it changes what every '
+                             'posterior column means')
     parser.add_argument('--bravais-lattices', nargs='+', default=None,
                         help='Score only these Bravais lattices. The pool is partitioned by '
                              '(bundle, lattice), so this is a file filter and costs nothing. Used '
@@ -118,7 +126,8 @@ def _parse_args(argv=None):
 
 def score_file(task):
     """One candidate file -> one sidecar, streamed. Module-level and picklable: spawn-safe."""
-    path, out_path, pool, chunk_rows, n_extra, contaminate, sample_row_groups, mode = task
+    (path, out_path, pool, chunk_rows, n_extra, contaminate, sample_row_groups, mode,
+     sigma_multiplier) = task
     entries = _entries_for(pool)
     source = pq.ParquetFile(path)
     # `schema_arrow`, not `schema`: the parquet schema flattens a list column to its leaf path, so
@@ -141,7 +150,8 @@ def score_file(task):
         chunk = pd.concat(pieces, ignore_index=True) if len(pieces) > 1 else pieces[0]
         pieces, held = [], 0
         merits = FomBenchmark.holdout_merits(
-            chunk, entries, n_extra_values=n_extra, contaminate=contaminate, mode=mode)
+            chunk, entries, n_extra_values=n_extra, contaminate=contaminate, mode=mode,
+            sigma_multiplier=sigma_multiplier)
         keys = [key for key in JOIN_KEYS if key in chunk.columns]
         out.append(pd.concat([chunk[keys].reset_index(drop=True),
                               merits.astype('float32').reset_index(drop=True)], axis=1))
@@ -212,6 +222,12 @@ def main(argv=None):
     # A non-default mode changes what every column means, so it may not land in the pool's own
     # sidecar directory either -- an arm written there would be picked up by the next resume as
     # though it were the uniform definition.
+    if args.sigma_multiplier != 1.0 and out_dir == default_out:
+        raise SystemExit(
+            f'A --sigma-multiplier {args.sigma_multiplier} run must write to an explicit '
+            f'--out-dir outside the pool: it changes what every posterior column means, and '
+            f'resume-by-default would treat it as the fitted-sigma set.')
+
     if args.mode != 'surplus' and out_dir == default_out:
         raise SystemExit(
             f'A --mode {args.mode} run must write to an explicit --out-dir outside the pool: its '
@@ -241,14 +257,16 @@ def main(argv=None):
         if out_path.exists() and not args.overwrite:
             continue
         tasks.append((str(path), str(out_path), str(pool), int(args.chunk_rows), n_extra,
-                      not args.no_contaminate, args.sample_row_groups, args.mode))
+                      not args.no_contaminate, args.sample_row_groups, args.mode,
+                      float(args.sigma_multiplier)))
     if not tasks:
         print(f'{pool}: every sidecar is already written')
         return 0
 
     processes = max(1, min(int(args.processes), len(tasks)))
     print(f'{pool}: scoring {len(tasks)} files over {processes} process(es) at n_extra={n_extra}, '
-          f'contaminate={not args.no_contaminate}, mode={args.mode}')
+          f'contaminate={not args.no_contaminate}, mode={args.mode}, '
+          f'sigma_multiplier={args.sigma_multiplier}')
     total = 0
     if processes == 1:
         results = map(score_file, tasks)

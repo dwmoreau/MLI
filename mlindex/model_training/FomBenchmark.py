@@ -713,6 +713,11 @@ HOLDOUT_MERIT_NAMES = (
     'ho_M20', 'ho_M', 'ho_raw', 'ho_tail_nll',
     'ho_M_tilde', 'ho_M_rev', 'ho_M_sym',
     'ho_Minfo',
+    # S10c's posterior family. `ho_evidence` is the denominator the posterior divides away, which
+    # F-131 found worth more than the ratio; it is carried as a column of its own for the first
+    # time, and a unit test pins the fact that it prefers a HALVED cell, so read it expecting the
+    # same systematic inversion `X_N` has (C2-F-095) until the benchmark says otherwise.
+    'ho_post', 'ho_post_logmean', 'ho_evidence',
     'ho_N_cal', 'ho_n_scored', 'ho_ref_reach',
     )
 
@@ -816,7 +821,8 @@ def holdout_peaks(q2_obs, q2_holdout, n_peaks, mode):
 
 
 def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contaminate=True,
-                   seed=HOLDOUT_CONTAMINANT_SEED, models_directory=None, mode='surplus'):
+                   seed=HOLDOUT_CONTAMINANT_SEED, models_directory=None, mode='surplus',
+                   sigma_multiplier=1.0):
     """Score every candidate on the surplus peaks it was never fitted to, at several peak budgets.
 
     S10's object. The cell was refined against the 20-peak window and these peaks are not among it,
@@ -883,6 +889,19 @@ def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contamin
         reciprocal_volume = np.asarray(group['reciprocal_volume'], dtype=np.float64)
         reach = q2_ref_calc.max(axis=1)
 
+        # The peaks the cell was ACTUALLY FITTED TO, which is what sigma must be estimated from
+        # for S10c's posterior columns. Cubic is fitted on ten and everything else on twenty (R5),
+        # so this is not `q2_obs` and using `q2_obs` would give a cubic candidate a sigma fitted
+        # partly to peaks it never saw -- the in-sample/out-of-sample line this whole step rests on.
+        q2_fitted = window_cache[entry_key][:int(n_peaks)]
+        # Fitted once per group, not once per budget: the window sigma is a property of the cell
+        # and the peaks it was refined against, and neither moves as the sweep widens. Six budgets
+        # would otherwise pay for six identical scans of the whole reference list.
+        sigma_window = None
+        if q2_fitted.size:
+            from mlindex.utilities.FigureOfMerits import get_assignment_sigma
+            sigma_window, _ = get_assignment_sigma(q2_fitted, q2_ref_calc, lattice_system)
+
         for n_extra in n_extra_values:
             # The budget is always quoted in SURPLUS peaks, so the sweep axis means the same thing
             # in every mode and a 25-peak pattern is n_extra = 5 whatever the candidate holds out.
@@ -892,15 +911,19 @@ def holdout_merits(candidates, entries, n_extra_values=HOLDOUT_N_EXTRA, contamin
             prefix = q2_scored[:offset + n_extra]
             values = _holdout_block(
                 prefix, xnn, hkl_ref, q2_ref_calc, lattice_system, bravais_lattice,
-                reciprocal_volume, reach, get_holdout_fom, get_M_rev_sym, get_M20_likelihood)
+                reciprocal_volume, reach, get_holdout_fom, get_M_rev_sym, get_M20_likelihood,
+                q2_fitted=q2_fitted, sigma_window=sigma_window,
+                sigma_multiplier=sigma_multiplier)
             for name, column in values.items():
                 out.loc[group.index, holdout_column(name, n_extra)] = column
     return out
 
 
 def _holdout_block(prefix, xnn, hkl_ref, q2_ref_calc, lattice_system, bravais_lattice,
-                   reciprocal_volume, reach, get_holdout_fom, get_M_rev_sym, get_M20_likelihood):
+                   reciprocal_volume, reach, get_holdout_fom, get_M_rev_sym, get_M20_likelihood,
+                   q2_fitted=None, sigma_window=None, sigma_multiplier=1.0):
     """One peak budget's worth of columns. Split out so the group loop stays readable."""
+    from mlindex.utilities.FigureOfMerits import get_holdout_posterior_fom
     from mlindex.utilities.numba_functions import fast_assign
 
     # q2_ref_calc is handed in rather than rebuilt: it is a property of the cell, not of the peaks.
@@ -922,6 +945,18 @@ def _holdout_block(prefix, xnn, hkl_ref, q2_ref_calc, lattice_system, bravais_la
     _, _, Minfo = get_M20_likelihood(prefix, q2_calc, bravais_lattice, reciprocal_volume)
     Minfo = Minfo/max(prefix.size, 1)
 
+    # S10c: sigma from the fitted window, spent on the surplus. `q2_ref_calc` is handed through
+    # for the same reason every other column gets it -- it is a property of the cell, and building
+    # it is the dominant cost of a seven-point sweep.
+    if q2_fitted is None or np.asarray(q2_fitted).size == 0:
+        nan = np.full(q2_ref_calc.shape[0], np.nan)
+        posterior = {'ho_post': nan.copy(), 'ho_post_logmean': nan.copy(),
+                     'ho_evidence': nan.copy()}
+    else:
+        posterior = get_holdout_posterior_fom(
+            q2_fitted, prefix, xnn, hkl_ref, lattice_system, q2_ref_calc=q2_ref_calc,
+            sigma=sigma_window, sigma_multiplier=sigma_multiplier)
+
     return {
         'ho_M20': predictive['ho_M20'],
         'ho_M': predictive['ho_M'],
@@ -933,6 +968,7 @@ def _holdout_block(prefix, xnn, hkl_ref, q2_ref_calc, lattice_system, bravais_la
         'ho_M_sym': M_sym,
         'ho_N_cal': np.asarray(N_cal, dtype=float),
         'ho_Minfo': Minfo,
+        **posterior,
         # Gate 1: does the reference list reach the peak being asked about at all? Where it does
         # not, ho_* is measuring the list running out rather than the cell mispredicting.
         'ho_ref_reach': (reach >= float(prefix[-1])).astype(float),
