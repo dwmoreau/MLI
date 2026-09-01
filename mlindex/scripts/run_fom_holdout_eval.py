@@ -378,6 +378,13 @@ def main(argv=None):
     parser.add_argument('--headline-n-extra', type=int, default=5,
                         help='The budget the leaderboard is quoted at. 5 surplus peaks is a '
                              '25-peak pattern, the middle of what real data supplies.')
+    parser.add_argument('--threshold-train-tag', default=None,
+                        help='A --reduce tag carrying the selection split, for the threshold half. '
+                             'Pass the SLICE tag when reporting on the fully retained pool: that '
+                             'pool has no fom-train, and the two entry sets are disjoint, which is '
+                             'asserted rather than assumed. Selection is restricted to the '
+                             "reporting pool's own condition bundles so both halves face the same "
+                             'mix. Omit to skip the threshold half entirely.')
     parser.add_argument('--cubic-tag', nargs='+', default=None,
                         help='One or two --reduce tags produced with a cubic free-peaks '
                              'definition, compared here as PAIRED arms within cF/cI/cP '

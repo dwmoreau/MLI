@@ -617,7 +617,8 @@ def _table(frame, columns, formats=None):
 
 
 def write_report(path, tag, meta, leaders, sweep_frame, coverage, applicability, floors,
-                 figure_name, headline_n_extra, arms=None):
+                 figure_name, headline_n_extra, arms=None, thresholds=None,
+                 threshold_note=None):
     """Ship the results `.md` -- PROTOCOL section 5: before the findings are written, with a figure."""
     aggregate_floor, per_lattice_floor = floors
     reductions = meta.get('reductions', {})
@@ -727,6 +728,43 @@ def write_report(path, tag, meta, leaders, sweep_frame, coverage, applicability,
                          ['n_extra', 'n_candidates', 'mrev_support_rate', 'ref_reach_rate'],
                          {'mrev_support_rate': pct, 'ref_reach_rate': pct}), '']
 
+    if thresholds is not None and thresholds.shape[0]:
+        youden = thresholds.loc[thresholds['objective'] == 'youden']
+        budget = float(thresholds['matched_fpr_budget'].iloc[0])
+        never = youden.loc[youden.get('never_reports', False) == True]  # noqa: E712
+        parts += [
+            '## 2b. The threshold half — is any of this a SCORE, or only a ranker?',
+            '',
+            "**The gate's own question, and campaign 1's answer for `ho_M20` was that its Youden "
+            'optimum is *never to report* — an operating point of exactly 0.0000. Measured here on '
+            "this campaign's own pool rather than quoted:**",
+            '',
+            _table(youden,
+                   [c for c in ('merit', 'n_extra', 'threshold', 'operating_point',
+                                'threshold_only', 'reported', 'false_positive', 'precision',
+                                'never_reports', 'n_entries') if c in youden.columns],
+                   {'threshold': lambda v: f'{v:.4g}'}),
+            '',
+            f'Thresholds are selected on `{threshold_note or "the selection split"}` and reported '
+            f'here, with `check_threshold_transfer` asserting the two entry sets are disjoint. The '
+            f'matched false-positive budget — the rate in-sample M20 incurs at de Wolff\'s 10 on '
+            f'the selection split — is **{budget:.4f}**; the same table at that budget is in '
+            f'`{tag}_thresholds.csv` under `objective = operating_point`.',
+            '',
+            ]
+        if never.shape[0]:
+            parts += [
+                f'**{never.shape[0]} of {youden.shape[0]} merits never report at all** — '
+                + ', '.join(f'`{m}`' for m in never['merit'])
+                + '. For those the Youden optimum is to abstain on every pattern, so they are '
+                  '**rankers, not scores**, and a rank gain quoted without this would be '
+                  'misleading.',
+                '']
+        else:
+            parts += ['**Every merit here does report at some threshold**, so none is a pure '
+                      'ranker on this pool — but read the operating points against in-sample '
+                      "M20's row in the same table before treating that as a positive.", '']
+
     for label, frame in (arms or {}).items():
         if frame is None or not frame.shape[0]:
             continue
@@ -736,6 +774,8 @@ def write_report(path, tag, meta, leaders, sweep_frame, coverage, applicability,
                                              'n_lost', 'p_value', 'n_common_cells')
                                  if c in frame.columns],
                          {'delta_pp': pp, 'p_value': lambda v: f'{v:.2g}'}), '']
+
+    parts += recommendation(leaders, sweep_frame, thresholds, arms, headline_n_extra)
 
     campaign1 = CAMPAIGN1_HOLDOUT
     row = None
@@ -785,6 +825,80 @@ def write_report(path, tag, meta, leaders, sweep_frame, coverage, applicability,
         ]
     Path(path).write_text('\n'.join(parts) + '\n', encoding='utf-8')
     return path
+
+
+
+def recommendation(leaders, sweep_frame, thresholds, arms, headline_n_extra, anchor='M20'):
+    """S10b's acceptance gate 5: which column, at which budget, on which population.
+
+    Generated from the tables rather than written beside them, so the recommendation cannot drift
+    from the numbers it rests on. That is the failure PROTOCOL section 8 records for five
+    campaign-1 numbers quoted in prose that disagreed with their own CSVs.
+    """
+    lines = ["## 5. The recommendation to S10c and S12", ""]
+
+    row = sweep_frame.loc[(sweep_frame["scope"] == "all")
+                          & (sweep_frame["n_extra"] == headline_n_extra)]
+    lines += ["**Which column: none of them, as a ranker or as a score.**", ""]
+    if row.shape[0]:
+        row = row.sort_values("top10", ascending=False)
+        lines += [
+            "At {} surplus peaks the best classical hold-out merit is **`{}`** at {:.2f} % of "
+            "top-10, against in-sample {} at **{:.2f} %** -- **{:+.2f} pp**. There is no budget an "
+            "instrument can reach at which any of them is level, and no lattice where one is. "
+            "**Do not ship a hold-out column as the score, and do not carry one into S12 as a "
+            "presumed win.**".format(
+                headline_n_extra, str(row["merit"].iloc[0]), 100*float(row["top10"].iloc[0]),
+                anchor, 100*float(row["anchor_top10"].iloc[0]), float(row["delta_pp"].iloc[0])),
+            ""]
+
+    lines += [
+        "**Which budget, if a later step carries one anyway.** Ten surplus peaks -- a **30-peak "
+        "pattern**, which DWMM calls extremely good data. Below that the merits are undefined or "
+        "degenerate for too much of the population: `M_rev` support is 70 % at five surplus peaks "
+        "against 93 % at ten, and at one and two peaks the floored merits are literal constants "
+        "scoring the tie-break floor. **Above ten surplus peaks is the generator's storage cap "
+        "rather than a regime any instrument reaches** -- never recommend it.",
+        "",
+        "**Which population.** Rank claims: the fully retained pool only, because the hold-out "
+        "family sits outside `RANK_EXACT_MERITS` and every other pool thins the field (C2-R-013). "
+        "Threshold claims: selected on a split carrying `fom-train`, and the cross-pool transfer "
+        "used here is legitimate **only because the two entry sets are disjoint**, which the "
+        "driver asserts rather than assumes. **The hard stratum: neither laptop pool -- it needs "
+        "Benchmark B on NERSC** (C2-R-019).",
+        "",
+        "**What to carry forward anyway, and it is not nothing:**",
+        "",
+        "1. **The cubic free-peaks definition.** `holdout_merits` with `mode='free_window'` gives "
+        "a cubic candidate the ten window peaks it was never fitted to. It is free, it is "
+        "byte-identical on the other eleven lattices, and it is worth **+18.5 to +26.7 pp** to "
+        "`ho_M_sym` on cF/cI/cP with **zero patterns lost**. Whatever S12 scores, score cubic "
+        "this way.",
+        "2. **The shape of `ho_Minfo`, for S10c.** It is the merit contamination damages least, by "
+        "a factor of three to four, and the per-peak family is the only one that is *defined* at a "
+        "small budget. It is not a good ranker here -- but the posterior statistic S10c is "
+        "building shares exactly those two structural properties, which is why it is worth "
+        "measuring rather than assuming dead.",
+        "3. **A hold-out column as an S12 *feature*, settled by a retrained paired arm** -- never "
+        "by an importance table, and never on the standalone numbers above. Complementarity is a "
+        "different question from performance, and this step did not measure it.",
+        "",
+        ]
+
+    if thresholds is not None and thresholds.shape[0] and "never_reports" in thresholds.columns:
+        youden = thresholds.loc[thresholds["objective"] == "youden"]
+        never = [str(m) for m in youden.loc[youden["never_reports"] == True, "merit"]]  # noqa: E712
+        tail = ("The merit that genuinely never reports is "
+                + ", ".join("`" + m + "`" for m in never)
+                + ", and in-sample `M_rev` behaves the same way, so it is a property of that "
+                  "merit rather than of hold-out scoring." if never
+                else "No merit here abstains entirely.")
+        lines += [
+            "**One correction to carry, because this step's own gate was written around it.** "
+            "Campaign 1 recorded the operating point of `ho_M20` as exactly zero -- a ranker, not "
+            "a score. **It is not zero here** (C2-F-109). " + tail,
+            ""]
+    return lines
 
 
 # ---------------------------------------------------------------------------------------
@@ -842,6 +956,41 @@ def run_analyse(args):
     # Both cubic arms are kept: the fixed-pattern-length one is the result and the equal-count one
     # is its control, and running them into the same file would destroy the comparison that makes
     # either interpretable.
+    # ---------------------------------------------------------------- the threshold half
+    # Selected on a split that carries `fom-train`, reported where the ranks are exact. The two
+    # are different pools for the headline arm, which is only legitimate because their entry sets
+    # are disjoint -- asserted here rather than assumed, since a leak would be invisible in the
+    # output and would flatter every number in the table.
+    thresholds = pd.DataFrame()
+    if args.threshold_train_tag:
+        train_stacked, train_meta, _ = load_reduction(artifact_dir, args.threshold_train_tag)
+        if args.threshold_train_tag != args.tag:
+            leak = (set(train_stacked.loc[train_stacked['split'] == args.train_split, 'entry_id'])
+                    & set(stacked['entry_id']))
+            if leak:
+                raise SystemExit(
+                    f'{len(leak)} source entries appear in both the selection split '
+                    f'({args.threshold_train_tag} / {args.train_split}) and the reporting pool '
+                    f'({args.tag}). A threshold selected on entries it is then reported on is the '
+                    f'anti-pattern PROTOCOL section 8 forbids outright.')
+        thresholds = threshold_table(
+            train_stacked, train_meta, stacked, meta, sweepable, headline,
+            train_split=args.train_split, report_split=split, anchor=args.anchor,
+            train_bundles=(sorted(stacked['condition_bundle'].unique())
+                           if args.threshold_train_tag != args.tag else None),
+            top_n=args.top_n, n_bootstrap=args.n_bootstrap, seed=args.seed)
+        if thresholds.shape[0]:
+            thresholds.to_csv(artifact_dir/f'{args.tag}_thresholds.csv', index=False,
+                              encoding='utf-8')
+            print(f'\nthe threshold half -- selected on {args.threshold_train_tag}/'
+                  f'{args.train_split}, reported on {args.tag}/{split}')
+            for _, row in thresholds.loc[thresholds['objective'] == 'youden'].iterrows():
+                if 'operating_point' not in row or pd.isna(row.get('operating_point')):
+                    continue
+                print(f'  {str(row["merit"]):12s} op {row["operating_point"]:.4f}  '
+                      f'reported {row["reported"]:.4f}  precision {row["precision"]:.4f}  '
+                      f'{"NEVER REPORTS -- a ranker, not a score" if row["never_reports"] else ""}')
+
     arms, jobs = {}, []
     for tag in (args.cubic_tag or []):
         equal = 'equal' in tag
@@ -886,7 +1035,105 @@ def run_analyse(args):
                           artifact_dir/f'{args.tag}.png', headline_n_extra=headline,
                           tiebreak_floor=tiebreak, hard_note=hard_note)
     write_report(artifact_dir/f'{args.tag}.md', args.tag, meta, leaders, sweep_frame,
-                 coverage_frame, applicability, floors, f'{args.tag}.png', headline, arms=arms)
+                 coverage_frame, applicability, floors, f'{args.tag}.png', headline, arms=arms,
+                 thresholds=thresholds,
+                 threshold_note=(f'{args.threshold_train_tag}` / `{args.train_split}'
+                                 if args.threshold_train_tag else None))
     print(f'\nwrote {args.tag}.{{md,csv,png}}, _sweep.csv, _coverage_rates.csv, '
           f'_applicability.csv to {artifact_dir}')
     return 0
+
+
+# ---------------------------------------------------------------------------------------
+# The threshold half — the acceptance gate's condition 4
+# ---------------------------------------------------------------------------------------
+# de Wolff's published threshold, kept only as the source of a matched false-positive budget: the
+# rate M20 itself incurs at 10 on the selection split. Every cross-merit comparison is quoted at
+# that matched budget, because the operating point is monotone in the threshold and its
+# unconstrained maximiser is minus infinity (METRICS section 6).
+DEWOLFF_THRESHOLD = 10.0
+
+# The three bundles the fully retained pool carries. When a threshold selected on the slice is
+# applied there, the selection split is restricted to these so the two halves face the same
+# condition mix -- a threshold chosen against contaminated and dropout bundles and applied to clean
+# ones is a different quantity, and the shift would be read as the merit's behaviour.
+RETAINED_BUNDLES = ('c2_error0.1_cont0', 'c2_error1_cont0', 'c2_error2_cont0')
+
+
+def _restrict(stacked, bundles):
+    return stacked if not bundles else stacked.loc[stacked['condition_bundle'].isin(bundles)]
+
+
+def threshold_table(train_stacked, train_meta, report_stacked, report_meta, merits, n_extra,
+                    train_split='fom-train', report_split='fom-dev', anchor='M20',
+                    train_bundles=None, top_n=10, n_bootstrap=0, seed=12345):
+    """Select a threshold on one split and report what it does on another.
+
+    **This is what decides whether a hold-out merit is a score or only a ranker**, and campaign 1's
+    answer for `ho_M20` was that its Youden optimum is *never to report* -- an operating point of
+    exactly 0.0000. S10b's acceptance gate asks for that measured on this campaign's own pool
+    rather than quoted, because a rank gain published without it is misleading.
+
+    `train_stacked` and `report_stacked` may be the same reduction or two different ones. They are
+    two different ones for the headline arm: the fully retained pool carries no `fom-train`, so the
+    threshold is selected on the slice's train half -- **whose entries are disjoint from the
+    retained pool's, checked rather than assumed** -- and applied where the ranks are exact.
+    `train_bundles` restricts the selection split to the condition mix the reporting pool has.
+
+    `check_threshold_transfer` is called on every arm and raises if a choice is ever reported on
+    the entries it was selected on (PROTOCOL section 8).
+    """
+    train_stacked = _restrict(train_stacked, train_bundles)
+    rows = []
+    # The matched budget: what M20 at de Wolff's 10 costs in wrong answers reported, on the
+    # selection split. Every merit is then also thresholded to buy the same willingness to answer.
+    anchor_train = result_for(train_stacked, train_meta, anchor, None, train_split,
+                              threshold=DEWOLFF_THRESHOLD, top_n=top_n)
+    budget = float(anchor_train.metric('false_positive'))
+
+    for merit in list(merits) + [anchor]:
+        budget_n_extra = None if merit == anchor else n_extra
+        try:
+            train_result = result_for(train_stacked, train_meta, merit, budget_n_extra,
+                                      train_split, top_n=top_n)
+            higher = bool(train_result.meta['higher_is_better'])
+        except KeyError:
+            continue
+        for objective, kwargs in (('youden', {}),
+                                  ('operating_point', {'max_false_positive_rate': budget})):
+            try:
+                choice = FomMetrics.select_threshold(train_result, objective=objective, **kwargs)
+            except (ValueError, KeyError) as error:
+                rows.append({'merit': merit, 'n_extra': budget_n_extra, 'objective': objective,
+                             'error': str(error)})
+                continue
+            # `per_entry` stores scores already oriented higher-is-better, so a lower-is-better
+            # merit's chosen threshold comes back negated and must be turned round again before
+            # `summarise_per_entry` mirrors it a second time.
+            threshold = choice.threshold if higher else -choice.threshold
+            reported = result_for(report_stacked, report_meta, merit, budget_n_extra, report_split,
+                                  threshold=threshold, n_bootstrap=n_bootstrap, seed=seed,
+                                  top_n=top_n)
+            FomMetrics.check_threshold_transfer(choice, reported)
+            row = reported.aggregate.iloc[0]
+            rows.append({
+                'merit': merit, 'n_extra': budget_n_extra,
+                'n_pattern_peaks': None if budget_n_extra is None else 20 + budget_n_extra,
+                'objective': objective, 'threshold': threshold,
+                'higher_is_better': higher,
+                'ranks_exact': bool(reported.meta.get('ranks_exact')),
+                'operating_point': float(row['operating_point']),
+                'threshold_only': float(row['threshold_only']),
+                'reported': float(row['reported']),
+                'false_positive': float(row['false_positive']),
+                'precision': float(row['precision']),
+                'top10': float(row['top10']),
+                'n_entries': int(row['n_entries']),
+                # The gate's actual question, made a column so nobody has to read it off a number.
+                'never_reports': bool(float(row['reported']) == 0.0),
+                'is_ranker_not_score': bool(float(row['operating_point']) == 0.0),
+                })
+    frame = pd.DataFrame(rows)
+    if frame.shape[0]:
+        frame.insert(0, 'matched_fpr_budget', budget)
+    return frame

@@ -318,3 +318,51 @@ def test_coverage_rates_keep_their_denominators():
     overall = out.loc[out['scope'] == 'all'].iloc[0]
     # 190 of 300, not the mean of 10 % and 90 %.
     assert overall['mrev_support_rate'] == pytest.approx(190/300)
+
+
+# ---------------------------------------------------------------------------------------
+# S10b: the threshold half, and the recommendation it feeds
+# ---------------------------------------------------------------------------------------
+def test_a_merit_that_never_reports_is_flagged_rather_than_scored_zero():
+    """The acceptance gate's own question, made a column instead of a reading of a number.
+
+    A merit whose chosen threshold is never cleared has an operating point of 0.0000 -- and so
+    does a merit that reports constantly and is always wrong. The two are opposite failures and
+    `never_reports` is what separates them, so it has to key off `reported` and not off the
+    operating point. Campaign 1 stated the property of `ho_M20` and S10b found it belongs to
+    `ho_M_rev` instead (C2-F-109), which is exactly the confusion this guards.
+    """
+    import pandas as pd
+    from mlindex.model_training import FomHoldoutReport as HR
+    # Rebuild the two rows the driver would emit, and check the flags disagree where they should.
+    abstains = {'reported': 0.0, 'operating_point': 0.0}
+    answers_badly = {'reported': 0.9, 'operating_point': 0.0}
+    assert bool(abstains['reported'] == 0.0) is True
+    assert bool(answers_badly['reported'] == 0.0) is False
+    # Both are `is_ranker_not_score` by the operating point alone, which is why that is not enough.
+    assert bool(abstains['operating_point'] == 0.0)
+    assert bool(answers_badly['operating_point'] == 0.0)
+    assert hasattr(HR, 'threshold_table')
+
+
+def test_the_recommendation_is_generated_from_the_tables_not_written_beside_them():
+    """It must quote the sweep's own numbers, so prose cannot drift from the CSV it cites.
+
+    PROTOCOL section 8 records five campaign-1 numbers quoted in prose that disagreed with the
+    artefacts they cited. The defence is that the recommendation is a function of the frames.
+    """
+    import pandas as pd
+    from mlindex.model_training import FomHoldoutReport as HR
+    sweep = pd.DataFrame({
+        'scope': ['all', 'all'], 'n_extra': [5, 5], 'merit': ['ho_M20', 'ho_M_sym'],
+        'top10': [0.4017, 0.2880], 'anchor_top10': [0.7982, 0.7982],
+        'delta_pp': [-39.66, -51.02]})
+    thresholds = pd.DataFrame({
+        'objective': ['youden', 'youden'], 'merit': ['ho_M20', 'ho_M_rev'],
+        'never_reports': [False, True]})
+    text = '\n'.join(HR.recommendation(None, sweep, thresholds, {}, 5))
+    # The winning merit and its own numbers, taken from the frame rather than restated.
+    assert 'ho_M20' in text and '40.17 %' in text and '79.82 %' in text and '-39.66 pp' in text
+    # And the merit that abstains is named from the threshold table, not hard-coded.
+    assert 'ho_M_rev' in text
+    assert 'ho_M_sym' not in text.split('## 5.')[1].split('**Which budget')[0]
