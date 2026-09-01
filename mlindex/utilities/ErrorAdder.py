@@ -9,12 +9,19 @@ class ContaminantPlacementError(RuntimeError):
 
 
 # Interior dropout is capped here, not left to the caller. Measured over the 5 955 S04 entries, the
-# median entry carries ~60 peaks, so the entry's own surplus almost never binds below 20 -- and at
+# median entry carries 60 stored peaks -- `GenerateDataset` truncates there, so 60 is a cap and
+# not a line count (C2-F-103); for this argument only the stored length matters, and it is what
+# refill draws from. So the entry's own surplus almost never binds below 20 -- and at
 # n_drop = 20 the mechanism removes 18.9 of the nominal 20 and refills from peaks 21-40. That is no
 # longer punching holes in the low-angle window; it is translating the window wholesale to high
 # angle, which is the distinct attack this function's docstring contrasts itself against. Ten keeps
 # half the nominal window, so what the mechanism does still matches what it claims to do.
 MAX_INTERIOR_DROPOUT = 10
+
+# Redraw budget for the surplus contaminant placement below. `FomPatterns` carries its own copy for
+# the window mechanism; this one is separate rather than imported because `FomPatterns` imports this
+# module, and the surplus draw is small enough that it never approaches the cap in practice.
+SURPLUS_CONTAMINANT_MAX_ATTEMPTS = 2000
 
 
 def q2_sigma_params(intercept=None, slope=None):
@@ -366,6 +373,87 @@ def add_second_phase(q2, hkl, partner_q2, n_lines, rng, low_angle_bias=1.0,
     if return_overflow:
         return result, overflow_q2, overflow_hkl
     return result
+
+
+def surplus_contaminant_rate(n_injected, n_window):
+    """Contaminants per peak in the window, which is the rate the surplus should carry too.
+
+    Taking the rate from the entry's own bundle rather than from a new parameter is what keeps a
+    clean bundle clean: `cont0` gives exactly 0.0 and nothing is drawn. `cont1` over a 20-peak
+    window gives 0.05, so a 20-line surplus expects one contaminant, which is DWMM's "maybe 1
+    here and there" (2026-09-01).
+    """
+    if n_window <= 0:
+        return 0.0
+    return float(n_injected)/float(n_window)
+
+
+def add_surplus_contaminants(q2_holdout, hkl_holdout, expected_count, rng,
+                             max_attempts=SURPLUS_CONTAMINANT_MAX_ATTEMPTS):
+    """Inject contaminant lines into the surplus peaks, which the generator cannot reach.
+
+    **This exists because `add_contaminants` draws in `[0.5*q2[0], q2[-1]]` -- always below the
+    *window* maximum -- so no contaminant is ever placed above the fitted window.** The only junk
+    lines that reach the surplus are real contaminants *displaced* out of the window when the list
+    is re-truncated to `n_peaks`, which is ~1 line per 22 patterns and only in the bundles that
+    inject at all. A real pattern's high-q2 tail is where unindexed junk is *most* likely, not
+    least, so the stored surplus is cleaner than reality and a hold-out merit measured on it is
+    optimistic. DWMM, 2026-09-01: "absolutely add error. Maybe 1 contaminant here and there."
+
+    **Applied offline, and that is sound rather than a shortcut.** The indexer only ever sees the
+    20-peak window, so the candidate pool is conditioned on the window alone; the surplus is stored
+    metadata that no candidate depends on. Contaminating it therefore changes not one row of the
+    880 M-candidate benchmark and needs no regeneration. Anything that touched the *window* would.
+
+    Draws Poisson(`expected_count`) lines uniformly across the surplus range, tags each `(0,0,0)`
+    exactly as the window mechanisms do, and re-sorts. Unlike the displaced lines already present
+    -- which all sit at surplus position 0, immediately above the truncated window edge -- these
+    land anywhere in the surplus, which is both more realistic and more searching for a merit
+    scored on a short prefix.
+
+    The half-breadth rejection is the window mechanism's, so an injected line is never placed on
+    top of a real one where no instrument could resolve the two. The whole set is redrawn on any
+    rejection, as `add_contaminants` does; `n` is small here so that cannot spin the way the window
+    version can, and an exhausted budget returns the surplus unchanged rather than raising, since
+    this runs over millions of entries in an analysis pass.
+
+    Returns `(q2_holdout, hkl_holdout, n_added)`. The inputs are not modified.
+    """
+    q2_holdout = np.asarray(q2_holdout, dtype=np.float64)
+    hkl_holdout = np.asarray(hkl_holdout).reshape(-1, 3)
+    if q2_holdout.size == 0 or expected_count <= 0:
+        return q2_holdout, hkl_holdout, 0
+
+    n_add = int(rng.poisson(expected_count))
+    if n_add <= 0:
+        return q2_holdout, hkl_holdout, 0
+
+    from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
+    q2_broadening_params = get_peak_generation_info()['broadening_params']
+    # Breadth is a linear model in q; the q2 breadth follows by error propagation. Same two lines
+    # as add_contaminants, deliberately -- a second breadth model here would be a second thing to
+    # keep in step with the generator.
+    breadth_q = q2_broadening_params[0] + q2_broadening_params[1]*np.sqrt(q2_holdout)
+    breadth = 2*breadth_q*np.sqrt(q2_holdout)
+
+    low, high = float(q2_holdout[0]), float(q2_holdout[-1])
+    if not high > low:
+        return q2_holdout, hkl_holdout, 0
+
+    placed = None
+    for _ in range(int(max_attempts)):
+        draw = rng.uniform(low=low, high=high, size=n_add)
+        separation = np.abs(draw[np.newaxis] - q2_holdout[:, np.newaxis]).min(axis=0)
+        if not np.any(separation[np.newaxis] < 0.5*breadth[:, np.newaxis]):
+            placed = draw
+            break
+    if placed is None:
+        return q2_holdout, hkl_holdout, 0
+
+    q2_new = np.concatenate([q2_holdout, placed])
+    hkl_new = np.concatenate([hkl_holdout, np.zeros((n_add, 3), dtype=hkl_holdout.dtype)], axis=0)
+    order = np.argsort(q2_new)
+    return q2_new[order], hkl_new[order], n_add
 
 
 def perturb_xnn(xnn_true, convergence_candidates, convergence_distances, minimum_uc, maximum_uc, lattice_system, rng):
