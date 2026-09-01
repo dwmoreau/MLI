@@ -640,13 +640,42 @@ def stage_report(artifact_dir, tag):
                            'mean_absent_in_range_correct', 'mean_absent_in_range_incorrect',
                            'agrees_with_stored']), '']
     if stability is not None:
+        overall = (stability.pivot_table(index='criterion', columns='radius_fraction',
+                                         values='flip_rate', aggfunc='mean')
+                   .reset_index())
+        correct = (stability.pivot_table(index='criterion', columns='radius_fraction',
+                                         values='flip_rate_correct', aggfunc='mean')
+                   .reset_index())
+        overall.columns = [str(c) for c in overall.columns]
+        correct.columns = [str(c) for c in correct.columns]
+        at_tenth = (stability[stability.radius_fraction == 0.1]
+                    .pivot_table(index='bravais_lattice', columns='criterion',
+                                 values='flip_rate').reset_index()
+                    .sort_values('M20', ascending=False))
+        at_tenth.columns = [str(c) for c in at_tenth.columns]
         out += ['## 4. Stability (deliverable c)', '',
-                "Displacement is a fraction of each lattice's own `neighbor_radius`. **The LEVELS",
-                "are not comparable with campaign 1's 8.8 %**, which displaced the cell AND",
-                'replayed the stochastic refinement before re-picking, and reported 2.75 % flips',
-                'at radius zero where a pure re-pick is deterministic. Only the contrast between',
-                'rules under one operator is the claim.', '',
-                _markdown(stability, list(stability.columns)), '']
+                "Each stored cell displaced isotropically in xnn by a fraction of **its own",
+                "lattice's** `neighbor_radius`, then the argmax re-run. 25 entries per lattice, up",
+                'to 600 candidates each, 4 replicates, seeds derived from the entry id.', '',
+                '**The radius-0 row is the internal control and is exactly zero**, as a',
+                'deterministic re-pick must be. Campaign 1\'s comparable operator reported **2.75 %',
+                'flips at radius zero**, because it replayed the stochastic refinement as well as',
+                "displacing the cell -- so its **8.8 %** headline measures a different operator and",
+                '**the levels are not comparable**. Only the contrast between rules under one',
+                'operator is a claim.', '',
+                'Flip rate, mean over the thirteen lattices:', '',
+                _markdown(overall, list(overall.columns), floats=4), '',
+                'The same, restricted to **correct** cells -- which is the population the rule is',
+                'judged on:', '',
+                _markdown(correct, list(correct.columns), floats=4), '',
+                "`M_rev` looks more stable in aggregate and is not: on correct cells the three are",
+                'indistinguishable at a tenth and `M_rev` is *worse* at a half. Its aggregate',
+                'advantage is that it picks aggressive groups **consistently for wrong cells**,',
+                'which is the same behaviour that makes it assign badly. Stability of a wrong',
+                'answer is not a merit.', '',
+                'Per lattice at a tenth of the neighbour radius:', '',
+                _markdown(at_tenth, list(at_tenth.columns), floats=4), '',
+                'It orders with the number of groups searched more than with anything else.', '']
     if cost is not None:
         out += ['## 5. Cost (deliverable e)', '',
                 '**The one place in campaign 2 where a per-call merit cost still multiplies** --',
@@ -657,6 +686,45 @@ def stage_report(artifact_dir, tag):
                           ['bravais_lattice', 'criterion', 'n_groups',
                            'microseconds_per_candidate', 'relative_to_M20',
                            'hkl_scratch_MB_at_4000']), '']
+    out += [
+        '## 6. What it means', '',
+        '### The mechanism, and it inverts the argument for the change', '',
+        'S04 faulted M20 for an arithmetic identity: `get_M20` divides by `N`, the reference lines',
+        'inside its counting window, so deleting an in-range absent line raises M20 for **any**',
+        'cell, right or wrong. That is true. But `M_rev`\'s denominator is the mean distance from',
+        'each **predicted** line to the nearest observed peak -- so deleting the lines that have no',
+        'nearby peak shrinks it *directly*, and by more.', '',
+        'A wrong cell over-predicts lines. An aggressive extinction group deletes precisely the',
+        'lines a wrong cell over-predicts. So `M_rev` pays a wrong cell for choosing an aggressive',
+        'group, and section 3 measures exactly that: the absence counts roughly double under',
+        '`M_rev`, and almost the whole shift is on **incorrect** cells while correct cells barely',
+        'move. `M_sym = M_tilde x M_rev` escapes it because the forward factor anchors the product,',
+        'which is why it lands within noise of the incumbent rather than below it.', '',
+        '**So the criterion selected for carrying no arithmetic identity carries a stronger one, in',
+        'the reverse direction.** That is the result, and it is a statement about what the two',
+        'merits measure rather than about this pool.', '',
+        '### Recommendation', '',
+        '**Keep M20.** `M_rev` is worse, `M_sym` buys +0.06 pp for ~1.4x the cost, and neither is',
+        'worth a change to a shipped default. The flag stays, default off, so the question is',
+        're-runnable rather than re-arguable.', '',
+        '### What is NOT measured, and one of them matters', '',
+        '* **The full-pipeline ranking effect.** This document measures which group the rule picks,',
+        '  not what the pooled sort does afterwards. A rule can assign worse and still rank better,',
+        '  because the sort reads the rebound merit rather than the group -- the S11 handoff is',
+        '  explicit that (a) must not be used to infer (b). With no rule change adopted there is',
+        '  nothing downstream to measure, so the arm was withdrawn rather than failed; but the',
+        '  possibility that `M_rev` ranks better *despite* assigning worse is formally untested.',
+        '  C2-R-022 and C2-R-023.',
+        '* **Deduplication survivor identity**, which no restriction of a stored pool can give:',
+        '  the pool is post-deduplication and its pre-deduplication rows were not retained.',
+        '* **mP accuracy is bounded from one side.** Four of its eight group keys have no row in',
+        '  the EXPO table and can never be named by the truth column, so a candidate landing on one',
+        '  can never score correct, under any rule. C2-R-021.',
+        '* **Cubic rests on few crystals.** cF and cI carry 76 and 133 correct candidates over 20',
+        '  and 30 source entries (C2-R-010), so their per-lattice deltas are the weakest here --',
+        '  which matters because they are where `M_rev` wins.', '',
+        ]
+
     path = os.path.join(artifact_dir, f'{tag}_extinction_rule.md')
     with open(path, 'w', encoding='utf-8') as handle:
         handle.write('\n'.join(out) + '\n')
