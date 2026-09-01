@@ -80,26 +80,31 @@ def dirty_tree():
         return None
 
 
-def load_sweep(pool, sweep_dir, criteria, columns=None):
-    """The sweep sidecar joined to the candidate columns the analysis needs.
+def sweep_files(pool, sweep_dir, columns, source_columns, correct_only=False):
+    """Yield (bravais_lattice, frame) one sidecar at a time, joined to the pool columns needed.
 
-    Only the columns that are actually read: the sidecar is one row per candidate over 43 M rows,
-    and the list-valued pool columns become one Python object per row in pandas.
+    A generator rather than one concatenated frame, and it matters: the sweep covers ~33 million
+    candidates and the join keys are strings, so materialising the whole thing costs tens of
+    gigabytes before anything is filtered. Every stage here reduces per file instead.
+
+    `correct_only` filters before the join, because the accuracy question is meaningless for a
+    wrong cell -- there is no true extinction group for a cell that is not the answer -- and the
+    correct candidates are 11 818 rows of the 33 million.
     """
-    keep = ['entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id', 'is_correct',
-            'spacegroup', 'M20', 'n_groups_searched', 'final_rank']
-    frames = []
     for path in sorted(Path(sweep_dir).glob('candidates*.parquet')):
         lattice = path.stem.split('_')[-1]
         if lattice in SKIP_LATTICES:
             continue
-        sidecar = pd.read_parquet(path, columns=columns)
-        source = pd.read_parquet(Path(pool)/path.name, columns=keep)
-        frames.append(sidecar.merge(
-            source, on=JOIN_KEYS, how='inner', validate='one_to_one'))
-    if not frames:
-        raise SystemExit(f'no sweep sidecars in {sweep_dir}; run run_fom_extinction_sweep.py first')
-    return pd.concat(frames, ignore_index=True)
+        source = pd.read_parquet(Path(pool)/path.name,
+                                 columns=list(dict.fromkeys(JOIN_KEYS + source_columns)))
+        if correct_only:
+            source = source[source['is_correct']]
+            if source.empty:
+                continue
+        sidecar = pd.read_parquet(path, columns=list(dict.fromkeys(JOIN_KEYS + columns)))
+        frame = source.merge(sidecar, on=JOIN_KEYS, how='inner', validate='one_to_one')
+        if not frame.empty:
+            yield lattice, frame
 
 
 def truth_for(entries):
@@ -119,80 +124,96 @@ def truth_for(entries):
 
 def stage_accuracy(pool, sweep_dir, criteria, artifact_dir, tag):
     """Deliverable (a): does the rule choose the true extinction group, on correct cells only."""
-    columns = (JOIN_KEYS + ['xg_n_floored_groups', 'xg_n_groups', 'xg_stored_group_index']
-               + [f'xg_{c}_group_index' for c in criteria])
-    frame = load_sweep(pool, sweep_dir, criteria, columns=columns)
     entries = FomBenchmark.load_entries(pool)
+    truth = truth_for(entries)
     meta = json.load(open(os.path.join(sweep_dir, '_meta.json'), encoding='utf-8'))
     group_keys = meta['group_keys']
 
-    correct = frame[frame['is_correct']].copy()
-    truth = truth_for(entries)
-    admissible = [truth.get((e, b)) for e, b in zip(correct['entry_id'],
-                                                    correct['condition_bundle'])]
-
-    rows = []
-    for criterion in criteria:
-        chosen = [group_keys[bl][i] for bl, i in
-                  zip(correct['bravais_lattice'], correct[f'xg_{criterion}_group_index'])]
-        hit = np.array([key in keys if keys else False
-                        for key, keys in zip(chosen, admissible)])
-        correct[f'hit_{criterion}'] = hit
-        for lattice, block in correct.groupby('bravais_lattice'):
-            mask = block[f'hit_{criterion}'].to_numpy()
+    columns = (['xg_n_floored_groups', 'xg_n_groups', 'xg_stored_group_index']
+               + [f'xg_{c}_group_index' for c in criteria])
+    rows, hits = [], []
+    for lattice, frame in sweep_files(pool, sweep_dir, columns,
+                                      ['is_correct', 'final_rank'], correct_only=True):
+        admissible = [truth[(e, b)] for e, b in zip(frame['entry_id'],
+                                                    frame['condition_bundle'])]
+        record = frame[JOIN_KEYS].copy()
+        for criterion in criteria:
+            chosen = [group_keys[lattice][i] for i in frame[f'xg_{criterion}_group_index']]
+            frame[f'hit_{criterion}'] = [key in keys for key, keys in zip(chosen, admissible)]
+            record[f'hit_{criterion}'] = frame[f'hit_{criterion}'].to_numpy()
+        hits.append(record)
+        for criterion in criteria:
             rows.append({
                 'bravais_lattice': lattice, 'criterion': criterion,
-                'n_groups_searched': int(block['xg_n_groups'].iloc[0]),
-                'n_correct_candidates': int(mask.size),
-                'n_source_entries': int(block['entry_id'].nunique()),
-                'accuracy': float(mask.mean()),
+                'n_groups_searched': int(frame['xg_n_groups'].iloc[0]),
+                'n_correct_candidates': int(frame.shape[0]),
+                'n_source_entries': int(frame['entry_id'].nunique()),
+                'accuracy': float(frame[f'hit_{criterion}'].mean()),
                 # The per-entry reduction: the top-ranked correct candidate of each pattern, which
-                # is what the pipeline would actually report, rather than a candidate average that
-                # a single prolific pattern can dominate.
+                # is what the pipeline would report, rather than a candidate average a single
+                # prolific pattern can dominate.
                 'accuracy_per_entry': float(
-                    block.sort_values('final_rank').groupby(
+                    frame.sort_values('final_rank').groupby(
                         ['entry_id', 'condition_bundle'])[f'hit_{criterion}'].first().mean()),
                 'share_floored_groups': float(
-                    (block['xg_n_floored_groups']/block['xg_n_groups']).mean()),
+                    (frame['xg_n_floored_groups']/frame['xg_n_groups']).mean()),
+                'agrees_with_stored': float(
+                    (frame[f'xg_{criterion}_group_index']
+                     == frame['xg_stored_group_index']).mean()),
                 'contrast_floor_pp': CONTRAST_FLOOR_PP[lattice],
                 })
-    table = pd.DataFrame(rows)
 
-    # Every delta against the incumbent, in standard errors of that lattice's own floor.
+    table = pd.DataFrame(rows)
+    # Aggregated per lattice first, then averaged unweighted across lattices -- PROTOCOL section 3
+    # rule 6. An aggregate over candidates would be dominated by whichever lattice happens to
+    # carry the most, which is mP at a fifth of them.
     baseline = table[table.criterion == 'M20'].set_index('bravais_lattice')['accuracy']
     table['delta_pp'] = (table['accuracy'] - table['bravais_lattice'].map(baseline))*100
     table['standard_errors'] = table['delta_pp']/table['contrast_floor_pp']
+    table = table.sort_values(['bravais_lattice', 'criterion'])
     table.to_csv(os.path.join(artifact_dir, f'{tag}_assignment_accuracy.csv'), index=False,
                  encoding='utf-8')
-    correct[['entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id']
-            + [f'hit_{c}' for c in criteria]].to_parquet(
+    pd.concat(hits, ignore_index=True).to_parquet(
         os.path.join(artifact_dir, f'{tag}_assignment_hits.parquet'), index=False)
+
+    summary = (table.groupby('criterion')
+               .agg(mean_accuracy_unweighted=('accuracy', 'mean'),
+                    mean_delta_pp=('delta_pp', 'mean'),
+                    n_lattices_better=('delta_pp', lambda d: int((d > 0).sum())),
+                    n_lattices_worse=('delta_pp', lambda d: int((d < 0).sum())))
+               .reset_index())
+    summary.to_csv(os.path.join(artifact_dir, f'{tag}_assignment_summary.csv'), index=False,
+                   encoding='utf-8')
     print(table.to_string(index=False))
+    print()
+    print(summary.to_string(index=False))
     return table
 
 
 def stage_features(pool, sweep_dir, criteria, artifact_dir, tag):
     """Deliverable (d): the absence count each rule implies, which S04's diagnostic reads."""
-    columns = (JOIN_KEYS + ['xg_stored_group_index']
+    columns = (['xg_stored_group_index']
                + [f'xg_{c}_n_absent_in_range' for c in criteria]
                + [f'xg_{c}_group_index' for c in criteria])
-    frame = load_sweep(pool, sweep_dir, criteria, columns=columns)
     rows = []
-    for lattice, block in frame.groupby('bravais_lattice'):
+    for lattice, frame in sweep_files(pool, sweep_dir, columns, ['is_correct']):
+        correct = frame['is_correct'].to_numpy()
         for criterion in criteria:
-            counts = block[f'xg_{criterion}_n_absent_in_range']
+            counts = frame[f'xg_{criterion}_n_absent_in_range'].to_numpy()
             rows.append({
                 'bravais_lattice': lattice, 'criterion': criterion,
-                'n_candidates': int(block.shape[0]),
+                'n_candidates': int(frame.shape[0]), 'n_correct': int(correct.sum()),
                 'mean_absent_in_range': float(counts.mean()),
-                'mean_absent_in_range_correct': float(counts[block['is_correct']].mean()),
-                'mean_absent_in_range_incorrect': float(counts[~block['is_correct']].mean()),
-                'share_generic_group': float((block[f'xg_{criterion}_group_index'] == 0).mean()),
+                'mean_absent_in_range_correct': float(counts[correct].mean())
+                if correct.any() else np.nan,
+                'mean_absent_in_range_incorrect': float(counts[~correct].mean())
+                if (~correct).any() else np.nan,
+                'share_generic_group': float((frame[f'xg_{criterion}_group_index'] == 0).mean()),
                 'agrees_with_stored': float(
-                    (block[f'xg_{criterion}_group_index']
-                     == block['xg_stored_group_index']).mean()),
+                    (frame[f'xg_{criterion}_group_index']
+                     == frame['xg_stored_group_index']).mean()),
                 })
-    table = pd.DataFrame(rows)
+    table = pd.DataFrame(rows).sort_values(['bravais_lattice', 'criterion'])
     table.to_csv(os.path.join(artifact_dir, f'{tag}_absence_counts.csv'), index=False,
                  encoding='utf-8')
     print(table.to_string(index=False))
@@ -397,6 +418,147 @@ def _neighbor_radii():
     return radii
 
 
+def _style():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({'figure.dpi': 200, 'savefig.dpi': 200, 'legend.frameon': False,
+                         'font.size': 9, 'axes.spines.top': False, 'axes.spines.right': False})
+    return plt
+
+
+def stage_figure(artifact_dir, tag):
+    """Assignment accuracy per lattice per rule. Publication quality from first production."""
+    plt = _style()
+    table = pd.read_csv(os.path.join(artifact_dir, f'{tag}_assignment_accuracy.csv'))
+    criteria = list(dict.fromkeys(table['criterion']))
+    lattices = (table[table.criterion == 'M20']
+                .sort_values('accuracy')['bravais_lattice'].tolist())
+    figure, axes = plt.subplots(figsize=(7.2, 4.0))
+    width = 0.8/len(criteria)
+    positions = np.arange(len(lattices))
+    for offset, criterion in enumerate(criteria):
+        block = table[table.criterion == criterion].set_index('bravais_lattice')
+        axes.bar(positions + offset*width, [block.loc[l, 'accuracy'] for l in lattices],
+                 width, label=criterion)
+    labels = [f"{l}\n{int(table[(table.bravais_lattice == l)]['n_groups_searched'].iloc[0])}"
+              for l in lattices]
+    axes.set_xticks(positions + width*(len(criteria)-1)/2)
+    axes.set_xticklabels(labels)
+    axes.set_xlabel('Bravais lattice, and the number of extinction groups its argmax searches')
+    axes.set_ylabel('share of correct cells given the true extinction group')
+    axes.set_title('S11: assignment accuracy by criterion, correct candidates only\n'
+                   'triclinic excluded -- one group, so every rule makes the same choice')
+    axes.legend(ncol=len(criteria), loc='upper left', fontsize=7)
+    axes.set_ylim(0, 1.0)
+    figure.tight_layout()
+    figure.savefig(os.path.join(artifact_dir, f'{tag}_assignment_accuracy.png'),
+                   bbox_inches='tight')
+    print(f'wrote {tag}_assignment_accuracy.png')
+
+
+def _markdown(frame, columns, floats=3):
+    head = '| ' + ' | '.join(columns) + ' |'
+    rule = '|' + '|'.join(['---']*len(columns)) + '|'
+    lines = [head, rule]
+    for row in frame[columns].itertuples(index=False):
+        cells = [f'{v:.{floats}f}' if isinstance(v, float) else str(v) for v in row]
+        lines.append('| ' + ' | '.join(cells) + ' |')
+    return '\n'.join(lines)
+
+
+def stage_report(artifact_dir, tag):
+    """Assemble the results document from the CSVs, so no number exists only in a notebook."""
+    def read(name):
+        path = os.path.join(artifact_dir, f'{tag}_{name}.csv')
+        return pd.read_csv(path) if os.path.exists(path) else None
+
+    gate = json.load(open(os.path.join(artifact_dir, f'{tag}_gate.json'), encoding='utf-8'))
+    g1 = read('gate_g1_reproduction')
+    g4 = read('gate_g4_support_floor')
+    accuracy = read('assignment_accuracy')
+    absence = read('absence_counts')
+    stability = read('stability')
+    cost = read('cost')
+
+    out = [f'# S11 -- the extinction-group assignment rule',
+           '',
+           f"**Pool:** `{gate['pool']}` -- the fully retained pool, 43 348 938 candidates, "
+           '1 590 cells (530 `fom-dev` entries x 3 condition bundles), nothing thinned.',
+           f"**Commit:** `{gate['commit'][:12]}` (dirty tree: {gate['dirty_tree']}) - "
+           f"**criteria:** {', '.join(gate['criteria'])} - **aP excluded** (one group).",
+           '',
+           '## Read this before any number below',
+           '',
+           '**The new rule can only LOWER the reported merit, by construction.** `best_M20` is the',
+           'maximum of M20 over groups under the incumbent, so any other argmax lands at a group',
+           'where M20 is no higher. A uniform drop is expected and is not a defect; the only',
+           'question is whether the drop is larger for wrong cells than for correct ones.',
+           '',
+           '**Accuracy and ranking are different questions, and only the first is answered here.**',
+           'A rule can assign more accurately and rank worse, because the pooled sort reads the',
+           'rebound merit and not the group. The ranking half is a second session.',
+           '']
+    out += ['## 1. The gates', '',
+            f"G0 {gate['passed']['G0']}, G2 {gate['passed']['G2']}, G1 {gate['passed']['G1']}, "
+            f"G3 {gate['passed']['G3']}.", '']
+    if g1 is not None:
+        out += [f"**G1, the gate that licenses everything else:** the offline argmax under M20 "
+                f"reproduces the stored `spacegroup` **and** the stored `M20` on "
+                f"**{g1.n_checked.sum():,} of {g1.n_checked.sum():,}** candidates, with `==` and "
+                f"not `isclose`, {gate['n_g1_offender_rows']} offending rows. C2-F-036 got "
+                f"310 807 on the PRE-deduplication stream; this is 6.7x that and runs on the "
+                f"post-deduplication pool, so the defect `14b13a9` fixed did not reach it.", '']
+    if g4 is not None:
+        out += ['### The `M_rev` support floor, reported before any argmax result', '',
+                "An extinction group's job is to delete predicted lines, and deleting them is what",
+                'drives `N_cal` under the floor -- so the argmax meets ties at zero, where a',
+                'floored `M_rev` is indistinguishable from "degenerate" and "no support". Ties are',
+                'broken on M20, which makes the degenerate case fall back to the incumbent.', '',
+                _markdown(g4.sort_values('share_below_floor', ascending=False),
+                          ['bravais_lattice', 'n_group_evaluations', 'share_below_floor',
+                           'n_candidates_with_no_supported_group']), '']
+    if accuracy is not None:
+        out += ['## 2. Assignment accuracy (deliverable a)', '',
+                'Correct candidates only -- the question is meaningless for a wrong cell.',
+                'Deltas are against M20 and are quoted in standard errors of **that lattice\'s',
+                "own** contrast floor (`S08_floor_by_lattice.csv`), per PROTOCOL section 8.", '',
+                _markdown(accuracy.sort_values(['bravais_lattice', 'criterion']),
+                          ['bravais_lattice', 'criterion', 'n_groups_searched',
+                           'n_correct_candidates', 'accuracy', 'accuracy_per_entry', 'delta_pp',
+                           'standard_errors']), '']
+    if absence is not None:
+        out += ['## 3. What it does to S04\'s absence counts (deliverable d)', '',
+                '`n_absent_extra_in_range` is a deterministic function of the chosen group, so a',
+                "change of rule changes S04's diagnostic input.", '',
+                _markdown(absence.sort_values(['bravais_lattice', 'criterion']),
+                          ['bravais_lattice', 'criterion', 'mean_absent_in_range',
+                           'mean_absent_in_range_correct', 'mean_absent_in_range_incorrect',
+                           'agrees_with_stored']), '']
+    if stability is not None:
+        out += ['## 4. Stability (deliverable c)', '',
+                "Displacement is a fraction of each lattice's own `neighbor_radius`. **The LEVELS",
+                "are not comparable with campaign 1's 8.8 %**, which displaced the cell AND",
+                'replayed the stochastic refinement before re-picking, and reported 2.75 % flips',
+                'at radius zero where a pure re-pick is deterministic. Only the contrast between',
+                'rules under one operator is the claim.', '',
+                _markdown(stability, list(stability.columns)), '']
+    if cost is not None:
+        out += ['## 5. Cost (deliverable e)', '',
+                '**The one place in campaign 2 where a per-call merit cost still multiplies** --',
+                'every other consumer reads a merit once per candidate; here it is once per',
+                'candidate per group, and oP searches 68. Cost decides nothing (DWMM,',
+                '2026-08-25); the arithmetic is recorded because this is where it exists.', '',
+                _markdown(cost.sort_values(['bravais_lattice', 'criterion']),
+                          ['bravais_lattice', 'criterion', 'n_groups',
+                           'microseconds_per_candidate', 'relative_to_M20',
+                           'hkl_scratch_MB_at_4000']), '']
+    path = os.path.join(artifact_dir, f'{tag}_extinction_rule.md')
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write('\n'.join(out) + '\n')
+    print(f'wrote {path}')
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Evaluate S11 extinction-rule arms')
     parser.add_argument('--pool', default=os.path.join('mlindex', 'data', 'fom_full_c2_pool'))
@@ -406,7 +568,7 @@ def _parse_args(argv=None):
                                                                'artifacts'))
     parser.add_argument('--tag', default='S11')
     parser.add_argument('--stage', required=True,
-                        choices=['accuracy', 'features', 'stability', 'cost', 'report'])
+                        choices=['accuracy', 'features', 'stability', 'cost', 'figure', 'report'])
     parser.add_argument('--processes', type=int, default=1)
     return parser.parse_args(argv)
 
@@ -425,6 +587,10 @@ def main(argv=None):
         stage_cost(args.pool, args.criteria, args.artifact_dir, args.tag)
     elif args.stage == 'stability':
         stage_stability(args.pool, args.criteria, args.artifact_dir, args.tag)
+    elif args.stage == 'figure':
+        stage_figure(args.artifact_dir, args.tag)
+    elif args.stage == 'report':
+        stage_report(args.artifact_dir, args.tag)
     else:
         raise SystemExit(f'stage {args.stage!r} is not implemented yet')
 
