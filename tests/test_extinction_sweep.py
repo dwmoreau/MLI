@@ -12,6 +12,7 @@ Position is the only label an index has, so these tests pin the round trip.
 """
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -143,3 +144,46 @@ def test_every_lattice_has_a_displacement_radius():
     radii = _neighbor_radii()
     assert set(radii) == set(LATTICE_SYSTEM)
     assert all(value > 0 for value in radii.values())
+
+
+@pytest.mark.skipif(not os.path.exists(POOL), reason='the retained pool is not on this machine')
+def test_verify_catches_a_short_sidecar_which_resume_would_keep(tmp_path):
+    """The resume hazard, pinned.
+
+    The sweep skips files that already exist, so a sidecar truncated by an interrupted run is kept
+    silently and never rewritten. This step's own first sweep WAS interrupted, at 30 of 39 files,
+    which is why this is a test and not a docstring.
+    """
+    import pandas as pd
+    import pyarrow.parquet as pq
+    from mlindex.scripts.run_fom_extinction_sweep import verify
+
+    source = sorted(Path(POOL).glob('candidates*_mC.parquet'))[0]
+    out_dir = tmp_path/'extinction_sweep'
+    out_dir.mkdir()
+
+    rows, problems = verify(POOL, out_dir, ('M20',), bravais_lattices=['mC'])
+    assert all(problem == 'missing' for _, problem in problems)
+
+    # A sidecar with the right columns but too few rows: the shape an interrupted write leaves.
+    short = pd.read_parquet(source, columns=list(JOIN_KEYS)).head(10)
+    short['xg_M20_group_index'] = 0
+    short.to_parquet(out_dir/source.name, index=False)
+    rows, problems = verify(POOL, out_dir, ('M20',), bravais_lattices=['mC'])
+    offender = [p for name, p in problems if name == source.name]
+    assert offender and 'rows against' in offender[0]
+
+    # And a full-length sidecar whose column is wholly null, which a swallowed failure leaves.
+    full = pd.read_parquet(source, columns=list(JOIN_KEYS))
+    full['xg_M20_group_index'] = pd.NA
+    full.to_parquet(out_dir/source.name, index=False)
+    rows, problems = verify(POOL, out_dir, ('M20',), bravais_lattices=['mC'])
+    offender = [p for name, p in problems if name == source.name]
+    assert offender and 'wholly null' in offender[0]
+
+    # And the typed shape: an int16 column of nulls, which does carry statistics.
+    full['xg_M20_group_index'] = pd.Series([pd.NA]*len(full), dtype='Int16')
+    full.to_parquet(out_dir/source.name, index=False)
+    rows, problems = verify(POOL, out_dir, ('M20',), bravais_lattices=['mC'])
+    offender = [p for name, p in problems if name == source.name]
+    assert offender and 'wholly null' in offender[0]

@@ -39,6 +39,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -166,6 +167,65 @@ def candidate_tasks(pool, out_dir, criteria, chunk_rows, sample_row_groups, brav
     return tasks
 
 
+def verify(pool, out_dir, criteria, bravais_lattices=None):
+    """Check the sidecars without reading their data. Returns (rows, problems).
+
+    Exit code 0 is not evidence the sweep worked -- C2-F-071 is an entire Bravais lattice lost
+    from Benchmark B while all 24 generation tasks exited 0. And this sweep resumes by SKIPPING
+    files that already exist, so a file truncated by an interrupted run would be kept silently and
+    never rewritten. That is the failure this exists to catch, and it is not hypothetical: this
+    step's own first sweep was killed at 30 of 39 files.
+
+    Three things go wrong quietly: a sidecar missing, a sidecar short of its candidate file, and a
+    column written wholly null because the sweep raised for one group and the failure was
+    swallowed. All three are visible in parquet METADATA, so this is seconds rather than minutes.
+    """
+    problems, rows = [], 0
+    for path in sorted(Path(pool).glob('candidates*.parquet')):
+        lattice = path.stem.split('_')[-1]
+        if lattice in SKIP_LATTICES:
+            continue
+        if bravais_lattices and lattice not in bravais_lattices:
+            continue
+        out_path = Path(out_dir)/path.name
+        if not out_path.exists():
+            problems.append((path.name, 'missing'))
+            continue
+        try:
+            sidecar = pq.ParquetFile(out_path)
+            source = pq.ParquetFile(path)
+        except Exception as error:
+            problems.append((path.name, f'unreadable: {error}'))
+            continue
+        if sidecar.metadata.num_rows != source.metadata.num_rows:
+            problems.append((path.name, f'{sidecar.metadata.num_rows} rows against '
+                                        f'{source.metadata.num_rows} in the candidate file'))
+            continue
+        expected = [f'xg_{criterion}_group_index' for criterion in criteria]
+        missing = [name for name in expected if name not in sidecar.schema_arrow.names]
+        if missing:
+            problems.append((path.name, f'no column {missing}'))
+            continue
+        # A column written wholly null, which a swallowed failure leaves behind. Two shapes, and
+        # only checking the second would miss the commoner one: a column that is null for every
+        # row loses its type entirely and arrives as arrow `null`, which carries NO statistics at
+        # all, so a null_count scan silently reports zero. Check the type first.
+        for column in expected:
+            index = sidecar.schema_arrow.names.index(column)
+            if pa.types.is_null(sidecar.schema_arrow.field(column).type):
+                problems.append((path.name, f'{column} is wholly null (untyped)'))
+                continue
+            statistics = [sidecar.metadata.row_group(g).column(index).statistics
+                          for g in range(sidecar.num_row_groups)]
+            if any(stat is None for stat in statistics):
+                continue
+            nulls = sum(stat.null_count for stat in statistics)
+            if nulls == sidecar.metadata.num_rows and sidecar.metadata.num_rows:
+                problems.append((path.name, f'{column} is wholly null'))
+        rows += sidecar.metadata.num_rows
+    return rows, problems
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='Re-run the extinction-group argmax under every criterion and persist it')
@@ -193,6 +253,11 @@ def _parse_args(argv=None):
     parser.add_argument('--artifact-dir', default=os.path.join('docs', 'fom_campaign2',
                                                                'artifacts'))
     parser.add_argument('--tag', default='S11')
+    parser.add_argument('--verify', action='store_true',
+                        help='Check an existing set of sidecars instead of writing any. Reads '
+                             'parquet metadata, not data. Catches the resume hazard: this script '
+                             'skips files that exist, so one truncated by an interrupted run '
+                             'would be kept silently')
     parser.add_argument('--overwrite', action='store_true',
                         help='Re-sweep files that already have a sidecar. Off by default, so an '
                              'interrupted run resumes instead of restarting')
@@ -207,6 +272,14 @@ def main(argv=None):
         raise SystemExit(
             '--sample-row-groups writes a partial sidecar; give it an explicit --out-dir so a '
             'resume can never mistake it for a finished one')
+
+    if args.verify:
+        rows, problems = verify(pool, out_dir, args.criteria, args.bravais_lattices)
+        print(f'{rows:,} candidates across intact sidecars')
+        for name, problem in problems:
+            print(f'  PROBLEM  {name}: {problem}')
+        print('all sidecars intact' if not problems else f'{len(problems)} problems')
+        return 0 if not problems else 1
 
     if args.gate:
         from mlindex.scripts.run_fom_extinction_gates import run_gates
