@@ -36,6 +36,7 @@ import os
 import subprocess
 import sys
 import time
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -123,7 +124,14 @@ def truth_for(entries):
 
 
 def stage_accuracy(pool, sweep_dir, criteria, artifact_dir, tag):
-    """Deliverable (a): does the rule choose the true extinction group, on correct cells only."""
+    """Deliverable (a): does the rule choose the true extinction group, on correct cells only.
+
+    The per-candidate hits are collected first and aggregated once, rather than aggregated per
+    file: the pool is partitioned by (bundle, lattice), so a per-file table carries three rows per
+    lattice and any per-lattice rate has to be formed from the pooled counts, not averaged over
+    bundles. The hits frame is 11 818 rows, so keeping it whole costs nothing and it is persisted
+    as the sufficient statistic for anything asked later (PROTOCOL section 3 rule 8).
+    """
     entries = FomBenchmark.load_entries(pool)
     truth = truth_for(entries)
     meta = json.load(open(os.path.join(sweep_dir, '_meta.json'), encoding='utf-8'))
@@ -131,57 +139,65 @@ def stage_accuracy(pool, sweep_dir, criteria, artifact_dir, tag):
 
     columns = (['xg_n_floored_groups', 'xg_n_groups', 'xg_stored_group_index']
                + [f'xg_{c}_group_index' for c in criteria])
-    rows, hits = [], []
+    records = []
     for lattice, frame in sweep_files(pool, sweep_dir, columns,
                                       ['is_correct', 'final_rank'], correct_only=True):
         admissible = [truth[(e, b)] for e, b in zip(frame['entry_id'],
                                                     frame['condition_bundle'])]
-        record = frame[JOIN_KEYS].copy()
+        record = frame[JOIN_KEYS + ['final_rank']].copy()
+        record['n_groups'] = frame['xg_n_groups'].to_numpy()
+        record['share_floored'] = (frame['xg_n_floored_groups']
+                                   / frame['xg_n_groups']).to_numpy()
         for criterion in criteria:
             chosen = [group_keys[lattice][i] for i in frame[f'xg_{criterion}_group_index']]
-            frame[f'hit_{criterion}'] = [key in keys for key, keys in zip(chosen, admissible)]
-            record[f'hit_{criterion}'] = frame[f'hit_{criterion}'].to_numpy()
-        hits.append(record)
+            record[f'hit_{criterion}'] = [key in keys for key, keys in zip(chosen, admissible)]
+            record[f'same_as_stored_{criterion}'] = (
+                frame[f'xg_{criterion}_group_index'] == frame['xg_stored_group_index']).to_numpy()
+        records.append(record)
+
+    hits = pd.concat(records, ignore_index=True)
+    hits.to_parquet(os.path.join(artifact_dir, f'{tag}_assignment_hits.parquet'), index=False)
+
+    # The top-ranked correct candidate of each pattern: what the pipeline would actually report,
+    # as opposed to a candidate average a single prolific pattern can dominate.
+    per_entry = (hits.sort_values('final_rank')
+                 .groupby(['entry_id', 'condition_bundle', 'bravais_lattice'], as_index=False)
+                 .first())
+
+    rows = []
+    for lattice, block in hits.groupby('bravais_lattice'):
+        entry_block = per_entry[per_entry.bravais_lattice == lattice]
         for criterion in criteria:
             rows.append({
                 'bravais_lattice': lattice, 'criterion': criterion,
-                'n_groups_searched': int(frame['xg_n_groups'].iloc[0]),
-                'n_correct_candidates': int(frame.shape[0]),
-                'n_source_entries': int(frame['entry_id'].nunique()),
-                'accuracy': float(frame[f'hit_{criterion}'].mean()),
-                # The per-entry reduction: the top-ranked correct candidate of each pattern, which
-                # is what the pipeline would report, rather than a candidate average a single
-                # prolific pattern can dominate.
-                'accuracy_per_entry': float(
-                    frame.sort_values('final_rank').groupby(
-                        ['entry_id', 'condition_bundle'])[f'hit_{criterion}'].first().mean()),
-                'share_floored_groups': float(
-                    (frame['xg_n_floored_groups']/frame['xg_n_groups']).mean()),
-                'agrees_with_stored': float(
-                    (frame[f'xg_{criterion}_group_index']
-                     == frame['xg_stored_group_index']).mean()),
+                'n_groups_searched': int(block['n_groups'].iloc[0]),
+                'n_correct_candidates': int(block.shape[0]),
+                'n_source_entries': int(block['entry_id'].nunique()),
+                'accuracy': float(block[f'hit_{criterion}'].mean()),
+                'accuracy_per_entry': float(entry_block[f'hit_{criterion}'].mean()),
+                'share_floored_groups': float(block['share_floored'].mean()),
+                'agrees_with_stored': float(block[f'same_as_stored_{criterion}'].mean()),
                 'contrast_floor_pp': CONTRAST_FLOOR_PP[lattice],
                 })
 
     table = pd.DataFrame(rows)
-    # Aggregated per lattice first, then averaged unweighted across lattices -- PROTOCOL section 3
-    # rule 6. An aggregate over candidates would be dominated by whichever lattice happens to
-    # carry the most, which is mP at a fifth of them.
     baseline = table[table.criterion == 'M20'].set_index('bravais_lattice')['accuracy']
+    assert baseline.index.is_unique, 'one M20 baseline per lattice'
     table['delta_pp'] = (table['accuracy'] - table['bravais_lattice'].map(baseline))*100
     table['standard_errors'] = table['delta_pp']/table['contrast_floor_pp']
     table = table.sort_values(['bravais_lattice', 'criterion'])
     table.to_csv(os.path.join(artifact_dir, f'{tag}_assignment_accuracy.csv'), index=False,
                  encoding='utf-8')
-    pd.concat(hits, ignore_index=True).to_parquet(
-        os.path.join(artifact_dir, f'{tag}_assignment_hits.parquet'), index=False)
 
-    summary = (table.groupby('criterion')
+    # Unweighted across lattices, per PROTOCOL section 3 rule 6: a candidate-weighted aggregate
+    # would let mP, at a fifth of the correct candidates, stand in for the answer.
+    summary = (table.groupby('criterion', as_index=False)
                .agg(mean_accuracy_unweighted=('accuracy', 'mean'),
                     mean_delta_pp=('delta_pp', 'mean'),
                     n_lattices_better=('delta_pp', lambda d: int((d > 0).sum())),
-                    n_lattices_worse=('delta_pp', lambda d: int((d < 0).sum())))
-               .reset_index())
+                    n_lattices_worse=('delta_pp', lambda d: int((d < 0).sum())),
+                    max_standard_errors=('standard_errors', 'max'),
+                    min_standard_errors=('standard_errors', 'min')))
     summary.to_csv(os.path.join(artifact_dir, f'{tag}_assignment_summary.csv'), index=False,
                    encoding='utf-8')
     print(table.to_string(index=False))
@@ -191,28 +207,47 @@ def stage_accuracy(pool, sweep_dir, criteria, artifact_dir, tag):
 
 
 def stage_features(pool, sweep_dir, criteria, artifact_dir, tag):
-    """Deliverable (d): the absence count each rule implies, which S04's diagnostic reads."""
+    """Deliverable (d): the absence count each rule implies, which S04's diagnostic reads.
+
+    Sums are accumulated per file and reduced once per lattice. The pool is partitioned by
+    (bundle, lattice), so a per-file row is a per-BUNDLE row, and averaging those would weight
+    three bundles equally regardless of how many candidates each carries.
+    """
     columns = (['xg_stored_group_index']
                + [f'xg_{c}_n_absent_in_range' for c in criteria]
                + [f'xg_{c}_group_index' for c in criteria])
-    rows = []
+    totals = {}
     for lattice, frame in sweep_files(pool, sweep_dir, columns, ['is_correct']):
         correct = frame['is_correct'].to_numpy()
         for criterion in criteria:
-            counts = frame[f'xg_{criterion}_n_absent_in_range'].to_numpy()
-            rows.append({
-                'bravais_lattice': lattice, 'criterion': criterion,
-                'n_candidates': int(frame.shape[0]), 'n_correct': int(correct.sum()),
-                'mean_absent_in_range': float(counts.mean()),
-                'mean_absent_in_range_correct': float(counts[correct].mean())
-                if correct.any() else np.nan,
-                'mean_absent_in_range_incorrect': float(counts[~correct].mean())
-                if (~correct).any() else np.nan,
-                'share_generic_group': float((frame[f'xg_{criterion}_group_index'] == 0).mean()),
-                'agrees_with_stored': float(
-                    (frame[f'xg_{criterion}_group_index']
-                     == frame['xg_stored_group_index']).mean()),
-                })
+            counts = frame[f'xg_{criterion}_n_absent_in_range'].to_numpy().astype(np.float64)
+            key = (lattice, criterion)
+            bucket = totals.setdefault(key, dict.fromkeys(
+                ['n', 'n_correct', 'sum', 'sum_correct', 'sum_incorrect', 'n_generic',
+                 'n_same_as_stored'], 0.0))
+            bucket['n'] += counts.size
+            bucket['n_correct'] += int(correct.sum())
+            bucket['sum'] += counts.sum()
+            bucket['sum_correct'] += counts[correct].sum()
+            bucket['sum_incorrect'] += counts[~correct].sum()
+            bucket['n_generic'] += int((frame[f'xg_{criterion}_group_index'] == 0).sum())
+            bucket['n_same_as_stored'] += int(
+                (frame[f'xg_{criterion}_group_index'] == frame['xg_stored_group_index']).sum())
+
+    rows = []
+    for (lattice, criterion), b in totals.items():
+        n_incorrect = b['n'] - b['n_correct']
+        rows.append({
+            'bravais_lattice': lattice, 'criterion': criterion,
+            'n_candidates': int(b['n']), 'n_correct': int(b['n_correct']),
+            'mean_absent_in_range': b['sum']/b['n'] if b['n'] else np.nan,
+            'mean_absent_in_range_correct':
+                b['sum_correct']/b['n_correct'] if b['n_correct'] else np.nan,
+            'mean_absent_in_range_incorrect':
+                b['sum_incorrect']/n_incorrect if n_incorrect else np.nan,
+            'share_generic_group': b['n_generic']/b['n'] if b['n'] else np.nan,
+            'agrees_with_stored': b['n_same_as_stored']/b['n'] if b['n'] else np.nan,
+            })
     table = pd.DataFrame(rows).sort_values(['bravais_lattice', 'criterion'])
     table.to_csv(os.path.join(artifact_dir, f'{tag}_absence_counts.csv'), index=False,
                  encoding='utf-8')
@@ -223,10 +258,10 @@ def stage_features(pool, sweep_dir, criteria, artifact_dir, tag):
 def perturb(xnn, radius, lattice_system, rng, minimum_uc=2.0, maximum_uc=60.0):
     """Isotropic displacement at a fixed radius, then the pipeline's own physicality repair.
 
-    `ErrorAdder.perturb_xnn`'s construction, batched over candidates. Taken from the `fom`
-    branch's `run_fom_floor.py` (recorded in CHERRY_PICK.md) with one change: its seed came from
+    `ErrorAdder.perturb_xnn`'s construction, batched over candidates. Taken from the `fom` branch's
+    `run_fom_floor.py` (recorded in CHERRY_PICK.md) with one change: its seed came from
     `abs(hash(...))`, which is salted per process, so nothing it produced could be regenerated.
-    The seed here is derived from the entry id, per PROTOCOL section 6.
+    The seed here derives from the entry id, per PROTOCOL section 6.
     """
     from mlindex.utilities.UnitCellTools import fix_unphysical
     if radius == 0.0:
@@ -244,75 +279,14 @@ def derived_seed(entry_id, bravais_lattice, base=20260901):
     return int.from_bytes(digest[:4], 'big') % (2**31 - 1)
 
 
-def stage_stability(pool, criteria, artifact_dir, tag, radii=(0.0, 0.1, 0.25, 0.5),
-                    replicates=4, n_entries=8, n_candidates=250):
-    """Deliverable (c): how often the chosen group flips when the cell is nudged.
-
-    No real run is needed -- the flip rate is a property of the argmax given a cell, so displacing
-    the stored cell and re-picking measures exactly the thing.
-
-    **The LEVELS here are not comparable with campaign 1's 8.8 %.** That figure displaced the cell
-    AND replayed the stochastic refinement loop before re-picking, and it reported 2.75 % flips at
-    radius zero, where a pure re-pick is deterministic and must be 0.00 %. What transfers is the
-    contrast BETWEEN rules under one operator, which is the claim this step makes; the absolute
-    rate is a property of the operator and is reported so the two are not confused.
-
-    Radii are fractions of the lattice's own `neighbor_radius`, so "a tenth" means the same
-    physical thing on cubic and on triclinic.
-    """
-    from mlindex.optimization.UtilitiesOptimizer import get_optimizers
-    entries = FomBenchmark.load_entries(pool).set_index(['entry_id', 'condition_bundle'])
-    radii_by_lattice = _neighbor_radii()
-    rows = []
-    for path in sorted(Path(pool).glob('candidates*.parquet')):
-        lattice = path.stem.split('_')[-1]
-        if lattice in SKIP_LATTICES:
-            continue
-        system = LATTICE_SYSTEM[lattice]
-        neighbor = radii_by_lattice[lattice]
-        block = pd.read_parquet(path, columns=['entry_id', 'condition_bundle', 'n_peaks', 'xnn',
-                                               'is_correct'])
-        seen = 0
-        for (entry_id, bundle, n_peaks), group in block.groupby(
-                ['entry_id', 'condition_bundle', 'n_peaks'], sort=False):
-            if seen >= n_entries:
-                break
-            seen += 1
-            q2_obs = np.asarray(entries.loc[(entry_id, bundle), 'q2_obs'],
-                                dtype=np.float64)[:int(n_peaks)]
-            xnn = np.stack([np.asarray(v, dtype=np.float64)
-                            for v in group['xnn'][:n_candidates]])
-            _, base_winner, _, _, _, _ = FomBenchmark.extinction_group_sweep(
-                q2_obs, xnn, system, lattice, criteria=tuple(criteria))
-            for radius in radii:
-                for replicate in range(replicates if radius else 1):
-                    rng = np.random.default_rng(
-                        derived_seed(entry_id, lattice) + replicate)
-                    moved = perturb(xnn, radius*neighbor, system, rng)
-                    _, winner, _, _, _, _ = FomBenchmark.extinction_group_sweep(
-                        q2_obs, moved, system, lattice, criteria=tuple(criteria))
-                    for criterion in criteria:
-                        rows.append({
-                            'bravais_lattice': lattice, 'criterion': criterion,
-                            'radius_fraction': radius, 'replicate': replicate,
-                            'entry_id': entry_id, 'n_candidates': int(xnn.shape[0]),
-                            'n_flipped': int((winner[criterion]
-                                              != base_winner[criterion]).sum()),
-                            })
-    detail = pd.DataFrame(rows)
-    table = (detail.groupby(['bravais_lattice', 'criterion', 'radius_fraction'])
-             .apply(lambda g: pd.Series({
-                 'n_candidates': int(g['n_candidates'].sum()),
-                 'flip_rate': float(g['n_flipped'].sum()/g['n_candidates'].sum()),
-                 }), include_groups=False).reset_index())
-    table.to_csv(os.path.join(artifact_dir, f'{tag}_stability.csv'), index=False,
-                 encoding='utf-8')
-    print(table.to_string(index=False))
-    return table
+def _time_sweep(q2_obs, xnn, lattice_system, bravais_lattice, criterion):
+    started = time.perf_counter()
+    FomBenchmark.extinction_group_sweep(q2_obs, xnn, lattice_system, bravais_lattice,
+                                        criteria=(criterion,))
+    return time.perf_counter() - started
 
 
-def stage_cost(pool, criteria, artifact_dir, tag, sizes=(250, 500, 1000, 2000),
-               repeats=3):
+def stage_cost(pool, criteria, artifact_dir, tag, sizes=(250, 500, 1000, 2000), repeats=3):
     """Deliverable (e): what each criterion costs inside the argmax, per lattice.
 
     **This is the one place in campaign 2 where a per-call merit cost still multiplies.** Every
@@ -321,12 +295,8 @@ def stage_cost(pool, criteria, artifact_dir, tag, sizes=(250, 500, 1000, 2000),
     nothing is decided on these numbers -- but the arithmetic is worth knowing, and only here.
 
     A line is fitted over several pool sizes rather than dividing one measurement, so the fixed
-    setup cost -- building the group lists, which is cctbx-backed and substantial -- is not
-    smeared into the per-candidate slope. Peak memory is reported as the `hkl` scratch allocation,
-    which is `n x n_peaks x 3 x n_groups` in float64 and is the largest single array the function
-    holds.
+    cost of building the cctbx-backed group lists is not smeared into the per-candidate slope.
     """
-    import tracemalloc
     entries = FomBenchmark.load_entries(pool).set_index(['entry_id', 'condition_bundle'])
     rows = []
     for path in sorted(Path(pool).glob('candidates_c2_error1_cont0_*.parquet')):
@@ -341,30 +311,28 @@ def stage_cost(pool, criteria, artifact_dir, tag, sizes=(250, 500, 1000, 2000),
                             dtype=np.float64)[:int(n_peaks)]
         available = np.stack([np.asarray(v, dtype=np.float64) for v in group['xnn']])
         n_groups = len(FomBenchmark.spacegroup_reference_sets(system, lattice))
-        # Warm the cctbx-backed group lists so the timed calls measure arithmetic, not the cache
-        # miss -- the cache is per process and production pays it once per pattern too.
+        # Warm the cctbx-backed group lists so the timed calls measure arithmetic rather than a
+        # cache miss -- production pays that once per pattern too.
         FomBenchmark.extinction_group_sweep(q2_obs, available[:2], system, lattice,
                                             criteria=('M20',))
         for criterion in criteria:
             timings = []
             for size in sizes:
                 if available.shape[0] < size:
-                    xnn = np.repeat(available, int(np.ceil(size/available.shape[0])), axis=0)[:size]
+                    xnn = np.repeat(available, int(np.ceil(size/available.shape[0])),
+                                    axis=0)[:size]
                 else:
                     xnn = available[:size]
-                best = min(
-                    _time_sweep(q2_obs, xnn, system, lattice, criterion) for _ in range(repeats))
-                timings.append((size, best))
-            sizes_array = np.array([t[0] for t in timings], dtype=float)
-            seconds = np.array([t[1] for t in timings], dtype=float)
-            slope, intercept = np.polyfit(sizes_array, seconds, 1)
+                timings.append((size, min(_time_sweep(q2_obs, xnn, system, lattice, criterion)
+                                          for _ in range(repeats))))
+            slope, intercept = np.polyfit(np.array([t[0] for t in timings], dtype=float),
+                                          np.array([t[1] for t in timings], dtype=float), 1)
             rows.append({
                 'bravais_lattice': lattice, 'criterion': criterion, 'n_groups': n_groups,
                 'microseconds_per_candidate': float(slope*1e6),
                 'fixed_seconds': float(intercept),
                 # The float64 `hkl` scratch production allocates, at 4 000 candidates. int16 would
-                # cut it fourfold and changes nothing numerically, which is why it is a separate
-                # commit rather than part of a rule change.
+                # cut it fourfold and is numerically inert, which is why it is a separate commit.
                 'hkl_scratch_MB_at_4000': 4000*int(n_peaks)*3*n_groups*8/1e6,
                 })
     table = pd.DataFrame(rows)
@@ -372,16 +340,107 @@ def stage_cost(pool, criteria, artifact_dir, tag, sizes=(250, 500, 1000, 2000),
         'microseconds_per_candidate']
     table['relative_to_M20'] = (table['microseconds_per_candidate']
                                 / table['bravais_lattice'].map(baseline))
+    table = table.sort_values(['bravais_lattice', 'criterion'])
     table.to_csv(os.path.join(artifact_dir, f'{tag}_cost.csv'), index=False, encoding='utf-8')
     print(table.to_string(index=False))
     return table
 
 
-def _time_sweep(q2_obs, xnn, lattice_system, bravais_lattice, criterion):
-    started = time.perf_counter()
-    FomBenchmark.extinction_group_sweep(q2_obs, xnn, lattice_system, bravais_lattice,
-                                        criteria=(criterion,))
-    return time.perf_counter() - started
+def _stability_worker(task):
+    """One (bundle, lattice) file's flip rates. Module-level and picklable: spawn-safe."""
+    (path, pool, criteria, radii, replicates, n_entries, n_candidates, seed_base) = task
+    lattice = Path(path).stem.split('_')[-1]
+    system = LATTICE_SYSTEM[lattice]
+    neighbor = _neighbor_radii()[lattice]
+    entries = FomBenchmark.load_entries(pool).set_index(['entry_id', 'condition_bundle'])
+    block = pd.read_parquet(path, columns=['entry_id', 'condition_bundle', 'n_peaks', 'xnn',
+                                           'is_correct'])
+    rows, seen = [], 0
+    for (entry_id, bundle, n_peaks), group in block.groupby(
+            ['entry_id', 'condition_bundle', 'n_peaks'], sort=False):
+        if seen >= n_entries:
+            break
+        seen += 1
+        q2_obs = np.asarray(entries.loc[(entry_id, bundle), 'q2_obs'],
+                            dtype=np.float64)[:int(n_peaks)]
+        # Correct cells first, then whatever else fills the quota: the flip rate on a cell that IS
+        # the answer is the one that bears on the rule, and correct cells are rare.
+        ordered = pd.concat([group[group['is_correct']], group[~group['is_correct']]])
+        xnn = np.stack([np.asarray(v, dtype=np.float64)
+                        for v in ordered['xnn'][:n_candidates]])
+        correct = ordered['is_correct'].to_numpy()[:xnn.shape[0]]
+        _, base, _, _, _, _ = FomBenchmark.extinction_group_sweep(
+            q2_obs, xnn, system, lattice, criteria=tuple(criteria))
+        for radius in radii:
+            for replicate in range(replicates if radius else 1):
+                rng = np.random.default_rng(
+                    derived_seed(entry_id, lattice, seed_base) + replicate)
+                moved = perturb(xnn, radius*neighbor, system, rng)
+                _, winner, _, _, _, _ = FomBenchmark.extinction_group_sweep(
+                    q2_obs, moved, system, lattice, criteria=tuple(criteria))
+                for criterion in criteria:
+                    flipped = winner[criterion] != base[criterion]
+                    rows.append({
+                        'bravais_lattice': lattice, 'criterion': criterion,
+                        'radius_fraction': radius, 'replicate': replicate,
+                        'entry_id': entry_id, 'n_candidates': int(xnn.shape[0]),
+                        'n_flipped': int(flipped.sum()),
+                        'n_correct': int(correct.sum()),
+                        'n_flipped_correct': int(flipped[correct].sum()),
+                        })
+    return rows
+
+
+def stage_stability(pool, criteria, artifact_dir, tag, radii=(0.0, 0.1, 0.25, 0.5),
+                    replicates=4, n_entries=25, n_candidates=600, processes=1,
+                    seed_base=20260901):
+    """Deliverable (c): how often the chosen group flips when the cell is nudged.
+
+    No real run is needed -- the flip rate is a property of the argmax given a cell, so displacing
+    the stored cell and re-picking measures exactly the thing.
+
+    **The LEVELS here are not comparable with campaign 1's 8.8 %.** That figure displaced the cell
+    AND replayed the stochastic refinement loop before re-picking, and reported 2.75 % flips at
+    radius zero -- where a pure re-pick is deterministic and must be exactly 0.00 %, which is this
+    arm's own internal control. Only the contrast BETWEEN rules under one operator is the claim;
+    the absolute rate is a property of the operator and is reported so the two are not confused.
+
+    Radii are fractions of each lattice's own `neighbor_radius`, so "a tenth" means the same
+    physical thing on cubic and on monoclinic.
+    """
+    tasks = []
+    for path in sorted(Path(pool).glob('candidates_c2_error1_cont0_*.parquet')):
+        if path.stem.split('_')[-1] in SKIP_LATTICES:
+            continue
+        tasks.append((str(path), pool, tuple(criteria), tuple(radii), replicates, n_entries,
+                      n_candidates, seed_base))
+    if processes > 1:
+        with Pool(processes) as workers:
+            collected = workers.map(_stability_worker, tasks)
+    else:
+        collected = [_stability_worker(task) for task in tasks]
+    detail = pd.DataFrame([row for rows in collected for row in rows])
+    detail.to_csv(os.path.join(artifact_dir, f'{tag}_stability_detail.csv'), index=False,
+                  encoding='utf-8')
+
+    table = (detail.groupby(['bravais_lattice', 'criterion', 'radius_fraction'], as_index=False)
+             .agg(n_candidates=('n_candidates', 'sum'), n_flipped=('n_flipped', 'sum'),
+                  n_correct=('n_correct', 'sum'),
+                  n_flipped_correct=('n_flipped_correct', 'sum')))
+    table['flip_rate'] = table['n_flipped']/table['n_candidates']
+    table['flip_rate_correct'] = np.where(
+        table['n_correct'] > 0, table['n_flipped_correct']/table['n_correct'], np.nan)
+    table.to_csv(os.path.join(artifact_dir, f'{tag}_stability.csv'), index=False,
+                 encoding='utf-8')
+
+    zero = table[table.radius_fraction == 0.0]
+    if not zero.empty and zero['n_flipped'].sum() != 0:
+        print(f"WARNING: {zero['n_flipped'].sum()} flips at radius 0, where a pure re-pick is "
+              f'deterministic. The operator is not doing what it claims.')
+    else:
+        print('control: 0 flips at radius 0, as a deterministic re-pick must give')
+    print(table.to_string(index=False))
+    return table
 
 
 def _neighbor_radii():
@@ -586,7 +645,8 @@ def main(argv=None):
     elif args.stage == 'cost':
         stage_cost(args.pool, args.criteria, args.artifact_dir, args.tag)
     elif args.stage == 'stability':
-        stage_stability(args.pool, args.criteria, args.artifact_dir, args.tag)
+        stage_stability(args.pool, args.criteria, args.artifact_dir, args.tag,
+                        processes=args.processes)
     elif args.stage == 'figure':
         stage_figure(args.artifact_dir, args.tag)
     elif args.stage == 'report':
