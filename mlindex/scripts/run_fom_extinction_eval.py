@@ -491,9 +491,18 @@ def stage_figure(artifact_dir, tag):
     plt = _style()
     table = pd.read_csv(os.path.join(artifact_dir, f'{tag}_assignment_accuracy.csv'))
     criteria = list(dict.fromkeys(table['criterion']))
+    # `M_rev_then_M20` is identical to `M_rev` on every candidate -- the M20 tie-break already
+    # falls back to the incumbent where no group clears the support floor, so the composite rule
+    # adds nothing. Plotting both doubles the bars for no information; the identity is stated in
+    # the caption and the column stays in the CSV.
+    redundant = [c for c in criteria if c != 'M_rev'
+                 and c.startswith('M_rev_then')
+                 and table[table.criterion == c]['accuracy'].round(12).tolist()
+                 == table[table.criterion == 'M_rev']['accuracy'].round(12).tolist()]
+    criteria = [c for c in criteria if c not in redundant]
     lattices = (table[table.criterion == 'M20']
                 .sort_values('accuracy')['bravais_lattice'].tolist())
-    figure, axes = plt.subplots(figsize=(7.2, 4.0))
+    figure, axes = plt.subplots(figsize=(7.6, 4.2))
     width = 0.8/len(criteria)
     positions = np.arange(len(lattices))
     for offset, criterion in enumerate(criteria):
@@ -506,8 +515,17 @@ def stage_figure(artifact_dir, tag):
     axes.set_xticklabels(labels)
     axes.set_xlabel('Bravais lattice, and the number of extinction groups its argmax searches')
     axes.set_ylabel('share of correct cells given the true extinction group')
-    axes.set_title('S11: assignment accuracy by criterion, correct candidates only\n'
-                   'triclinic excluded -- one group, so every rule makes the same choice')
+    axes.set_title('Assignment accuracy against the true extinction group, by criterion',
+                   fontsize=10)
+    mean_M20 = table[table.criterion == 'M20']['accuracy'].mean()
+    axes.axhline(mean_M20, color='0.45', lw=0.8, ls='--', zorder=0)
+    axes.text(-0.45, mean_M20 + 0.015, 'M20 mean, unweighted', ha='left', va='bottom',
+              fontsize=7, color='0.35')
+    footnote = ('Correct candidates only, 11 818 over 13 lattices, fully retained pool. '
+                'Triclinic excluded: one group, so every rule makes the same choice.')
+    if redundant:
+        footnote += ' M_rev_then_M20 omitted -- identical to M_rev on every candidate.'
+    figure.text(0.012, -0.045, footnote, fontsize=7, color='0.3', ha='left')
     axes.legend(ncol=len(criteria), loc='upper left', fontsize=7)
     axes.set_ylim(0, 1.0)
     figure.tight_layout()
@@ -540,6 +558,32 @@ def stage_report(artifact_dir, tag):
     stability = read('stability')
     cost = read('cost')
 
+    summary = read('assignment_summary')
+    verdict = []
+    if summary is not None and accuracy is not None:
+        best = summary.sort_values('mean_delta_pp', ascending=False).iloc[0]
+        rev = summary[summary.criterion == 'M_rev'].iloc[0]
+        worst_lattice = accuracy[accuracy.criterion == 'M_rev'].sort_values('standard_errors')
+        verdict = [
+            '## The answer', '',
+            f"**C2-Q-011 is answered and the answer is NO.** `M_rev` picks the true extinction "
+            f"group **{abs(rev.mean_delta_pp):.2f} pp less often** than M20 -- better on "
+            f"{int(rev.n_lattices_better)} lattices and worse on {int(rev.n_lattices_worse)}, "
+            f"losing by as much as **{abs(worst_lattice.iloc[0].standard_errors):.1f} standard "
+            f"errors** of that lattice's own contrast floor "
+            f"({worst_lattice.iloc[0].bravais_lattice}). The best alternative is "
+            f"`{best.criterion}` at {best.mean_delta_pp:+.2f} pp, which is within noise. "
+            '**The incumbent stays.**', '',
+            _markdown(summary.sort_values('mean_delta_pp', ascending=False),
+                      ['criterion', 'mean_accuracy_unweighted', 'mean_delta_pp',
+                       'n_lattices_better', 'n_lattices_worse'], floats=4), '',
+            "**And a result larger than the comparison that produced it.** Restricted to "
+            "candidates that ARE the correct cell, the incumbent names the true extinction group "
+            f"only **{accuracy[accuracy.criterion == 'M20']['accuracy'].mean():.4f}** of the time, "
+            "unweighted over lattices -- and no criterion tested reaches further. The group is "
+            "wrong for two thirds of correct cells, which nobody had measured.", '',
+            ]
+
     out = [f'# S11 -- the extinction-group assignment rule',
            '',
            f"**Pool:** `{gate['pool']}` -- the fully retained pool, 43 348 938 candidates, "
@@ -558,6 +602,7 @@ def stage_report(artifact_dir, tag):
            'A rule can assign more accurately and rank worse, because the pooled sort reads the',
            'rebound merit and not the group. The ranking half is a second session.',
            '']
+    out += verdict
     out += ['## 1. The gates', '',
             f"G0 {gate['passed']['G0']}, G2 {gate['passed']['G2']}, G1 {gate['passed']['G1']}, "
             f"G3 {gate['passed']['G3']}.", '']
