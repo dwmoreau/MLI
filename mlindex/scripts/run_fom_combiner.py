@@ -161,6 +161,55 @@ def search_arms():
     return tuple(arms)
 
 
+# ---------------------------------------------------------------------------------------------
+# Cycle 2: joint removal. "Each is free alone" and "all are free together" are different claims.
+# ---------------------------------------------------------------------------------------------
+# Cycle 1 removed one column at a time from `lean` and settled five results at three seeds. Two
+# columns are actively HARMFUL -- dropping `M20` gains +1.93 pp of operating point and dropping
+# `M_tilde` +1.72 -- so `core` is `lean` less those two. Three are load-bearing:
+# `ctx_M_sym_gap_to_best` (-4.86), `bravais_lattice` (-4.05) and the absence counts AS A GROUP
+# (-1.99, while no individual count matters).
+#
+# The other eleven came back with no reliable effect either way, and that is the whole reason this
+# cycle exists. **A column with no individual effect is not the same as a column that can be
+# removed**, because these features are correlated by construction -- `M_sym` IS `M_tilde` x
+# `M_rev`, and the four context columns are the same statistic over four merits. Removing any one
+# leaves the information in its neighbours; removing them together may not. So cycle 2 tests the
+# joint drops, and the smallest candidate set, directly.
+CORE_DROP = LEAN_DROP + ('M20', 'M_tilde')
+
+# Individually null in cycle 1, grouped by what they are.
+WEAK_MERITS = ('M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
+WEAK_CONTEXT = ('ctx_M20_gap_to_best', 'ctx_n_over_gap_to_best', 'ctx_max_gap_gap_to_best')
+WEAK_COUNTS = ('n_absent_extra', 'f_absent_extra', 'n_groups_searched')
+
+
+def search2_arms():
+    """`core`, the three joint family drops, and the minimal set they imply."""
+    arms = [
+        ('core', (), CORE_DROP,
+         'lean less M20 and M_tilde, the two cycle 1 found actively harmful'),
+        ('core_minus_weak_merits', (), CORE_DROP + WEAK_MERITS,
+         'all five individually-null merits at once -- leaves no classical merit at all'),
+        ('core_minus_weak_context', (), CORE_DROP + WEAK_CONTEXT,
+         'the three context columns that are not ctx_M_sym'),
+        ('core_minus_weak_counts', (), CORE_DROP + WEAK_COUNTS,
+         'three of the four absence counts, keeping n_absent_extra_in_range'),
+        ('core_minus_weak_merits_context', (), CORE_DROP + WEAK_MERITS + WEAK_CONTEXT,
+         'both merit and context tails together'),
+        ('minimal', (), CORE_DROP + WEAK_MERITS + WEAK_CONTEXT + WEAK_COUNTS,
+         'everything cycle 1 could not show carries anything: the smallest defensible set'),
+        # Keep one classical merit against the minimal set, since dropping every merit from a
+        # figure-of-merit model is the kind of result that deserves its own control.
+        ('minimal_plus_M_sym', (), CORE_DROP + tuple(
+            name for name in WEAK_MERITS if name != 'M_sym') + WEAK_CONTEXT + WEAK_COUNTS,
+         'the minimal set with M_sym restored -- is any classical merit needed at all'),
+        ('minimal_plus_counts', (), CORE_DROP + WEAK_MERITS + WEAK_CONTEXT,
+         'the minimal set with all four counts restored'),
+        ]
+    return tuple(arms)
+
+
 # Fitted with the labels destroyed, so they measure the harness rather than the model. They are not
 # in ARMS because they need a transform applied to the frames rather than a feature-set change.
 CONTROL_ARMS = (
@@ -294,7 +343,8 @@ def run_fit(args):
     # selection of columns from the frame -- `design_matrix` reads the names `feature_specification`
     # returns -- so assembling per group set would re-read the same 9 M rows five times to produce
     # frames that differ only in which columns are present.
-    ladder = search_arms() if args.ladder == 'search' else ARMS
+    ladder = {'search': search_arms, 'search2': search2_arms}.get(
+        args.ladder, lambda: ARMS)()
     union = tuple(dict.fromkeys(
         tuple(FomCombiner.DEFAULT_GROUPS)
         + tuple(group for _, extra, _, _ in ladder for group in extra)))
@@ -658,7 +708,8 @@ def _write_contrasts(results, artifact_dir, tag, suffix):
     for name, result in sorted(results.items()):
         for metric in ('operating_point', 'top10'):
             for scope in (None, 'hard'):
-                reference = 'lean' if 'lean' in results else 'base'
+                reference = next((name for name in ('core', 'lean', 'base') if name in results),
+                                 'base')
                 if reference in results and name != reference:
                     contrasts.append(
                         _pair(results[reference], result, reference, name, metric, scope))
@@ -814,6 +865,7 @@ def run_skew(args):
 # it was estimating. An arm verdict from one seed is a hypothesis.
 SEED_SUFFIXES = ('', '_seed777', '_seed20260826')
 SEARCH_SEED_SUFFIXES = ('_search_seed12345', '_search_seed777', '_search_seed20260826')
+SEARCH2_SEED_SUFFIXES = ('_search2_seed12345', '_search2_seed777', '_search2_seed20260826')
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1042,7 +1094,8 @@ def run_combine(args):
     evidence; an arm that is neither is noise, however large its mean.
     """
     artifact_dir = Path(args.artifact_dir)
-    suffixes = SEARCH_SEED_SUFFIXES if args.ladder == 'search' else SEED_SUFFIXES
+    suffixes = {'search': SEARCH_SEED_SUFFIXES, 'search2': SEARCH2_SEED_SUFFIXES}.get(
+        args.ladder, SEED_SUFFIXES)
     frames = []
     for suffix in suffixes:
         path = artifact_dir/f'{args.tag}_contrasts{suffix}.csv'
@@ -1075,12 +1128,14 @@ def run_combine(args):
                               if np.mean(deltas) else np.nan),
             ))
     table = pd.DataFrame(rows).sort_values(['metric', 'scope', 'delta_mean'], ascending=False)
-    path = artifact_dir/f'{args.tag}_seed_summary{"_search" if args.ladder == "search" else ""}.csv'
+    path = artifact_dir/(f'{args.tag}_seed_summary'
+                         + ('' if args.ladder == 'main' else f'_{args.ladder}') + '.csv')
     table.to_csv(path, index=False)
 
     settled = table[(table.scope == 'aggregate') & (table.metric == 'operating_point')
                     & table.same_sign_all_seeds & table.significant_all_seeds]
-    print(f'(reference arm: {"lean" if args.ladder == "search" else "base"})')
+    reference_arm = {'search': 'lean', 'search2': 'core'}.get(args.ladder, 'base')
+    print(f'(reference arm: {reference_arm})')
     print(f'\n{len(frames)} seeds combined -> {path}')
     print(f'\narms settled on the operating point (same sign AND p < 0.05 at every seed):')
     if settled.empty:
@@ -1269,7 +1324,7 @@ def _parse_args(argv=None):
                         help='Path to a `*_fit_frame.parquet` written by --stage export-fit. Its '
                              '`_cal_frame` sibling is read beside it. Given this, --stage fit does '
                              'not touch a pool at all')
-    parser.add_argument('--ladder', choices=('main', 'search'), default='main',
+    parser.add_argument('--ladder', choices=('main', 'search', 'search2'), default='main',
                         help="'main' asks whether each feature FAMILY earns its place; 'search' "
                              'starts from the answer -- the sixteen features left once the '
                              'structural family is dropped -- and removes one column at a time, '
