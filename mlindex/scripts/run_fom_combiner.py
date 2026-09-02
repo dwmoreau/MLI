@@ -112,6 +112,55 @@ ARMS = (
      'base with no sampling weight. A null closes the weighting question for S14'),
     )
 
+# ---------------------------------------------------------------------------------------------
+# The search ladder: backward elimination from what three seeds have already settled.
+# ---------------------------------------------------------------------------------------------
+# The main ladder above asks "does this family earn its place". Three seeds answered that for two
+# of them and left twelve arms unsettled (C2-F-132), so a second ladder starts from the answer
+# rather than from `base`: the **structural family is out**, robustly, at +8.74 pp of operating
+# point across every seed. That leaves sixteen features, and the question becomes which of THOSE
+# sixteen can go -- which is the acceptance gate's "at most ~25 features, every cut justified by a
+# retrained paired arm".
+#
+# One column at a time, because a group drop cannot say which of its members carried the group.
+# `drop_structural` removes thirteen at once and the main ladder could not tell whether all
+# thirteen were harmful or one was and the rest were inert.
+#
+# `bravais_lattice` IS tested here, against campaign 1's instruction to keep it regardless. That
+# instruction was wrong about the mechanism: `fit_calibrators` and `score` read the lattice from
+# the FRAME, not from the design matrix, so dropping it as a *feature* leaves the per-lattice
+# isotonic key intact. Whether it earns a place as a feature is therefore a measurable question and
+# not a structural requirement.
+LEAN_DROP = BASE_DROP + FomCombiner.STRUCTURAL_NUMERIC
+
+
+def _lean_features():
+    """The sixteen the search starts from: seven merits, four counts, four context, one lattice."""
+    names, _ = FomCombiner.feature_specification(FomCombiner.DEFAULT_GROUPS, drop=LEAN_DROP)
+    return names
+
+
+def search_arms():
+    """`lean`, then `lean` less each of its own columns, one at a time.
+
+    Declared as a function rather than a constant because the column list is derived from
+    `feature_specification` -- writing it out would be a second copy of the feature set that could
+    drift from the first, which is how `merit_at_prune` came to be mislabelled (C2-F-067).
+    """
+    arms = [('lean', (), LEAN_DROP,
+             'the 16 features that survive dropping the structural family (C2-F-132)')]
+    for column in _lean_features():
+        arms.append((f'lean_minus_{column}', (), LEAN_DROP + (column,),
+                     f'is {column} carrying anything once the structural family is gone'))
+    # Two group drops for reference, so a single-column result can be read against the family's.
+    arms.append(('lean_minus_counts', (), LEAN_DROP + FomCombiner.SYMMETRY_COUNTS,
+                 'all four absence counts at once'))
+    arms.append(('lean_minus_context', (), LEAN_DROP + tuple(
+        name for name in FomCombiner.context_names() if name not in CONTEXT_SKEWED),
+        'all four context columns at once'))
+    return tuple(arms)
+
+
 # Fitted with the labels destroyed, so they measure the harness rather than the model. They are not
 # in ARMS because they need a transform applied to the frames rather than a feature-set change.
 CONTROL_ARMS = (
@@ -245,9 +294,10 @@ def run_fit(args):
     # selection of columns from the frame -- `design_matrix` reads the names `feature_specification`
     # returns -- so assembling per group set would re-read the same 9 M rows five times to produce
     # frames that differ only in which columns are present.
+    ladder = search_arms() if args.ladder == 'search' else ARMS
     union = tuple(dict.fromkeys(
         tuple(FomCombiner.DEFAULT_GROUPS)
-        + tuple(group for _, extra, _, _ in ARMS for group in extra)))
+        + tuple(group for _, extra, _, _ in ladder for group in extra)))
     started = time.perf_counter()
     if args.fit_frame:
         # Built elsewhere by `--stage export-fit`, which is how a fit on Benchmark B's ~11 000
@@ -274,11 +324,11 @@ def run_fit(args):
 
     models_dir = Path(args.models_dir)
     rows = []
-    for name, extra, drop, purpose in ARMS:
+    for name, extra, drop, purpose in ladder:
         rows.append(_fit_or_record(name, arm_groups(extra), drop, fit_frames, cal_frames,
                                    models_dir, args.fit_seed, purpose,
                                    None if name == 'unweighted_fit' else 'sampling_weight'))
-    for name, purpose in CONTROL_ARMS:
+    for name, purpose in (CONTROL_ARMS if args.ladder == 'main' else ()):
         # The label-shuffled control destroys the association on BOTH splits; the prior-only
         # control shuffles the fit labels and keeps the calibration ones real, so the per-lattice
         # isotonic is the only thing left that knows anything. Isotonic is monotone, so it cannot
@@ -608,8 +658,10 @@ def _write_contrasts(results, artifact_dir, tag, suffix):
     for name, result in sorted(results.items()):
         for metric in ('operating_point', 'top10'):
             for scope in (None, 'hard'):
-                if 'base' in results and name != 'base':
-                    contrasts.append(_pair(results['base'], result, 'base', name, metric, scope))
+                reference = 'lean' if 'lean' in results else 'base'
+                if reference in results and name != reference:
+                    contrasts.append(
+                        _pair(results[reference], result, reference, name, metric, scope))
                 for baseline in ('M20', 'M_sym'):
                     if baseline in results and name not in ('M20', 'M_sym'):
                         headline.append(
@@ -761,6 +813,7 @@ def run_skew(args):
 # swapping significance between seeds, with each half's seed-to-seed spread wider than the effect
 # it was estimating. An arm verdict from one seed is a hypothesis.
 SEED_SUFFIXES = ('', '_seed777', '_seed20260826')
+SEARCH_SEED_SUFFIXES = ('_search_seed12345', '_search_seed777', '_search_seed20260826')
 
 
 # ---------------------------------------------------------------------------------------------
@@ -989,8 +1042,9 @@ def run_combine(args):
     evidence; an arm that is neither is noise, however large its mean.
     """
     artifact_dir = Path(args.artifact_dir)
+    suffixes = SEARCH_SEED_SUFFIXES if args.ladder == 'search' else SEED_SUFFIXES
     frames = []
-    for suffix in SEED_SUFFIXES:
+    for suffix in suffixes:
         path = artifact_dir/f'{args.tag}_contrasts{suffix}.csv'
         if not path.exists():
             print(f'  missing {path.name} -- skipping this seed')
@@ -1000,8 +1054,8 @@ def run_combine(args):
         frames.append(frame)
     if not frames:
         raise SystemExit(f'no per-seed contrast tables under {artifact_dir}')
-    if len(frames) < len(SEED_SUFFIXES):
-        print(f'WARNING: combining {len(frames)} seeds of {len(SEED_SUFFIXES)}. A verdict from '
+    if len(frames) < len(suffixes):
+        print(f'WARNING: combining {len(frames)} seeds of {len(suffixes)}. A verdict from '
               f'fewer than three is not what C2-F-061 asks for.')
 
     everything = pd.concat(frames, ignore_index=True)
@@ -1021,11 +1075,12 @@ def run_combine(args):
                               if np.mean(deltas) else np.nan),
             ))
     table = pd.DataFrame(rows).sort_values(['metric', 'scope', 'delta_mean'], ascending=False)
-    path = artifact_dir/f'{args.tag}_seed_summary.csv'
+    path = artifact_dir/f'{args.tag}_seed_summary{"_search" if args.ladder == "search" else ""}.csv'
     table.to_csv(path, index=False)
 
     settled = table[(table.scope == 'aggregate') & (table.metric == 'operating_point')
                     & table.same_sign_all_seeds & table.significant_all_seeds]
+    print(f'(reference arm: {"lean" if args.ladder == "search" else "base"})')
     print(f'\n{len(frames)} seeds combined -> {path}')
     print(f'\narms settled on the operating point (same sign AND p < 0.05 at every seed):')
     if settled.empty:
@@ -1214,6 +1269,11 @@ def _parse_args(argv=None):
                         help='Path to a `*_fit_frame.parquet` written by --stage export-fit. Its '
                              '`_cal_frame` sibling is read beside it. Given this, --stage fit does '
                              'not touch a pool at all')
+    parser.add_argument('--ladder', choices=('main', 'search'), default='main',
+                        help="'main' asks whether each feature FAMILY earns its place; 'search' "
+                             'starts from the answer -- the sixteen features left once the '
+                             'structural family is dropped -- and removes one column at a time, '
+                             'which is what the acceptance gate means by justifying a cut')
     parser.add_argument('--report-pool', default=None,
                         help='Pool the cost stage prices on. Defaults to the report pool')
     parser.add_argument('--cost-lattice', default='mP',
