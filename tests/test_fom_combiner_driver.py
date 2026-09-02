@@ -222,3 +222,64 @@ def test_the_two_weights_imply_different_positive_rates_which_is_the_whole_point
     assert shares['fit_weight'] < shares['sampling_weight'] < unweighted, (
         f'expected fit_weight to push the positive share back down towards the pool rate; '
         f'got {shares} against an unweighted {unweighted:.4f}')
+
+
+# ---------------------------------------------------------------------------------------------
+# the two-machine split: build the design matrix where the pool is, fit where the report pool is
+# ---------------------------------------------------------------------------------------------
+def test_export_fit_names_its_calibration_sibling_and_refuses_a_lone_frame():
+    """The calibrator must be fitted on rows the model was not fitted on, so the pair travels
+    together. A `--fit-frame` with no `_cal_frame` beside it would otherwise calibrate on the fit
+    rows and report an expected calibration error that means nothing."""
+    import inspect
+    source = inspect.getsource(driver.run_fit)
+    assert "_cal_frame" in source
+    assert 'SystemExit' in source
+
+
+def test_the_fit_and_the_calibrator_use_different_weights_on_purpose():
+    """C2-F-127's asymmetry, and it is the whole reason `fit_weight` is still written.
+
+    The fit must not undo its own negative subsampling -- that rebalancing is the only reason a
+    tree can learn from a 0.03 % base rate. The calibrator must undo it, because stating the prior
+    the rebalancing removed is its entire job. `subsample_negatives` makes the two weights equal
+    when nothing was thinned, so this is a no-op on an unsubsampled calibration split.
+    """
+    import inspect
+    source = inspect.getsource(driver.fit_one)
+    assert "fit_calibrators" in source and "'fit_weight'" in source
+    assert inspect.signature(driver.fit_one).parameters['weight_column'].default == \
+        'sampling_weight'
+
+
+def test_the_hard_stratum_draw_takes_every_entry_rather_than_a_sample():
+    """360 crystals is the whole hard stratum of `fom-dev` and generating all of them fully
+    retained is under half a node-hour, so sampling would cost the claim and buy nothing."""
+    from mlindex.scripts import run_fom_floor_entries as entries_script
+    manifest = pd.DataFrame({
+        'identifier': [f'X{index:03d}' for index in range(300)],
+        'split': ['fom-dev']*150 + ['fom-train']*150,
+        'bravais_lattice': ['mP', 'mC', 'aP', 'oP', 'cF']*60,
+        # The decile advances once per block of five, so every lattice meets every decile. A
+        # cycle of ten against a cycle of five stays in lockstep and puts the hard lattices only
+        # at low deciles, which made an earlier version of this fixture describe an empty stratum.
+        'volume_decile': [(index//5) % 10 for index in range(300)],
+        })
+    hard = entries_script.draw_hard_stratum(manifest, 'fom-dev')
+    assert set(hard['bravais_lattice']) <= set(entries_script.HARD_LATTICES)
+    assert (hard['volume_decile'] >= entries_script.HARD_MIN_DECILE).all()
+    assert (hard['split'] == 'fom-dev').all()
+    # Every qualifying entry, not a draw from them.
+    expected = manifest[(manifest.split == 'fom-dev')
+                        & manifest.bravais_lattice.isin(entries_script.HARD_LATTICES)
+                        & (manifest.volume_decile >= entries_script.HARD_MIN_DECILE)]
+    assert len(hard) == len(expected)
+
+
+def test_the_hard_predicate_matches_the_metrics_modules_own():
+    """A second copy of the definition is how the two drift, and S08 already had to refuse one
+    redefinition of this stratum (C2-F-078)."""
+    from mlindex.model_training import FomMetrics as metrics
+    from mlindex.scripts import run_fom_floor_entries as entries_script
+    assert set(entries_script.HARD_LATTICES) == set(metrics.HARD_LATTICES)
+    assert entries_script.HARD_MIN_DECILE == metrics.HARD_MIN_DECILE

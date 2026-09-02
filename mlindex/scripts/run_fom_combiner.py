@@ -249,9 +249,24 @@ def run_fit(args):
         tuple(FomCombiner.DEFAULT_GROUPS)
         + tuple(group for _, extra, _, _ in ARMS for group in extra)))
     started = time.perf_counter()
-    fit_frames = load_fit_frames(FIT_POOL, entries, fit_ids, union, args.n_negatives, SEED,
-                                 covariates)
-    cal_frames = load_fit_frames(FIT_POOL, entries, cal_ids, union, None, SEED, covariates)
+    if args.fit_frame:
+        # Built elsewhere by `--stage export-fit`, which is how a fit on Benchmark B's ~11 000
+        # `fom-train` crystals reaches a laptop that cannot hold the pool they came from.
+        fit_path = Path(args.fit_frame)
+        cal_path = fit_path.with_name(fit_path.name.replace('_fit_frame', '_cal_frame'))
+        if cal_path == fit_path or not cal_path.exists():
+            raise SystemExit(
+                f'--fit-frame must name a `*_fit_frame*.parquet` with its `_cal_frame` sibling '
+                f'beside it; looked for {cal_path}. The calibrator has to be fitted on rows the '
+                f'model was not fitted on, so the pair travels together or neither does.')
+        fit_frames = [pd.read_parquet(fit_path)]
+        cal_frames = [pd.read_parquet(cal_path)]
+        print(f'read {sum(f.shape[0] for f in fit_frames):,} fit rows and '
+              f'{sum(f.shape[0] for f in cal_frames):,} calibration rows from {fit_path.parent}')
+    else:
+        fit_frames = load_fit_frames(FIT_POOL, entries, fit_ids, union, args.n_negatives, SEED,
+                                     covariates)
+        cal_frames = load_fit_frames(FIT_POOL, entries, cal_ids, union, None, SEED, covariates)
     print(f'assembled {"+".join(union)}: {sum(f.shape[0] for f in fit_frames):,} fit rows '
           f'({sum(int(FomMetrics.as_bool(f["is_correct"]).sum()) for f in fit_frames):,} correct), '
           f'{sum(f.shape[0] for f in cal_frames):,} calibration rows '
@@ -312,7 +327,15 @@ def fit_one(name, groups, drop, fit_frames, cal_frames, models_dir, seed, purpos
     combiner = FomCombiner.FomCombiner.fit(
         fit_frames, groups=groups, seed=seed, drop=drop, weight_column=weight_column,
         **MODEL_PARAMS)
-    combiner.fit_calibrators(cal_frames, weight_column=weight_column)
+    # Calibrate on `fit_weight`, never on `sampling_weight`, and the asymmetry with the fit is the
+    # point. The fit must NOT undo its own negative subsampling (C2-F-127) because it wants a
+    # discriminative model; the calibrator MUST undo it, because its entire job is to state the
+    # prior the subsampling removed. `subsample_negatives` sets `fit_weight` equal to
+    # `sampling_weight` when nothing was thinned, so this is a no-op for an unsubsampled
+    # calibration split and is correct for a subsampled one -- which is what a full-scale fit on
+    # the cluster has to use, since an unsubsampled `fom-train` calibration split is 164 M rows.
+    combiner.fit_calibrators(cal_frames,
+                             weight_column=None if weight_column is None else 'fit_weight')
     combiner.meta['arm'] = name
     combiner.meta['purpose'] = purpose
     directory = models_dir/f'{name}_seed{seed}'
@@ -685,6 +708,80 @@ def run_skew(args):
 
 
 # ---------------------------------------------------------------------------------------------
+# stage: export-fit -- build the training frame where the pool is, carry it to where the model is
+# ---------------------------------------------------------------------------------------------
+def run_export_fit(args):
+    """Assemble and subsample a fit frame from a pool, and write it as one parquet.
+
+    **This is what makes a full-scale fit possible without moving 122 GB.** S12 session 1 fitted on
+    the Benchmark B *slice*, which is 196 `fom-train` crystals; the benchmark itself has about
+    11 000, and the difference is the leading explanation for C2-F-130 -- the arm that drops the
+    whole structural family winning by 7.30 pp, against C2-F-040's −1.675 pp. The pool cannot come
+    to the laptop and the report pool cannot go to the cluster, so the *design matrix* travels:
+    assembled and subsampled where the candidates are, fitted and reported where the retained pool
+    is.
+
+    Two frames, subsampled differently and for different reasons:
+
+    * the **fit** rows keep `--n-negatives` incorrect candidates a pattern, to rebalance a 0.03 %
+      base rate into something a tree can learn from;
+    * the **calibration** rows keep `--calibration-negatives`, many more, because the calibrator's
+      job is to state a prior and it needs the negative tail to state it from. Both carry
+      `sampling_weight` and `fit_weight`, and `fit_one` uses the first for the fit and the second
+      for the calibrator (C2-F-127).
+
+    At Benchmark B's scale this is about 4 M fit rows and 8 M calibration rows -- a couple of
+    gigabytes, against 122.
+    """
+    pool = Path(args.fit_pool)
+    entries = FomBenchmark.load_entries(pool)
+    covariates = FomCombiner.entry_covariates(entries)
+    fit_ids, cal_ids = split_ids(entries, args.train_split, HOLDOUT_FRACTION, SEED)
+    print(f'{len(fit_ids)} fit crystals, {len(cal_ids)} calibration crystals from {pool}')
+
+    union = tuple(dict.fromkeys(
+        tuple(FomCombiner.DEFAULT_GROUPS)
+        + tuple(group for _, extra, _, _ in ARMS for group in extra)))
+    if args.groups:
+        # An escape hatch for a pool whose optional sidecars are not written yet. The arms that
+        # need a missing group then skip themselves and say so in the fit table, which is a stated
+        # absence rather than a gap -- but the arms that decide the structural question
+        # (`base` against `drop_structural`) need only the default groups, so a core-only export is
+        # a useful thing to be able to produce.
+        union = tuple(name.strip() for name in args.groups.split(',') if name.strip())
+        unknown = [name for name in union if name not in FomCombiner.FEATURE_GROUPS]
+        if unknown:
+            raise SystemExit(f'unknown feature group(s) {unknown}; '
+                             f'known: {list(FomCombiner.FEATURE_GROUPS)}')
+    print(f'groups: {"+".join(union)}')
+    out_dir = Path(args.out_dir or args.artifact_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = {}
+    for label, ids, negatives in (('fit', fit_ids, args.n_negatives),
+                                  ('cal', cal_ids, args.calibration_negatives)):
+        started = time.perf_counter()
+        frames = load_fit_frames(pool, entries, ids, union, negatives, SEED, covariates)
+        frame = pd.concat(frames, ignore_index=True)
+        path = out_dir/f'{args.tag}_{label}_frame{args.suffix}.parquet'
+        frame.to_parquet(path, index=False)
+        correct = int(FomMetrics.as_bool(frame['is_correct']).sum())
+        written[label] = dict(path=str(path), rows=int(frame.shape[0]), correct=correct,
+                              negatives_per_cell=negatives,
+                              megabytes=round(path.stat().st_size/1e6, 1))
+        print(f'  {label:4s} {frame.shape[0]:>10,} rows, {correct:>7,} correct, '
+              f'{written[label]["megabytes"]:.0f} MB ({time.perf_counter() - started:.0f} s)',
+              flush=True)
+        del frames, frame
+
+    (out_dir/f'{args.tag}_export_meta{args.suffix}.json').write_text(json.dumps(dict(
+        pool=str(pool), commit=_commit(), groups=list(union), train_split=args.train_split,
+        holdout_fraction=HOLDOUT_FRACTION, split_seed=SEED, frames=written,
+        ), indent=2, sort_keys=True), encoding='utf-8')
+    print(f'\nwrote {len(written)} frames to {out_dir}')
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
 # stage: calibration -- is the score a probability, on the pool it is reported on
 # ---------------------------------------------------------------------------------------------
 def run_calibration(args):
@@ -756,7 +853,8 @@ def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='S12: fit the learned combiner on the slice, report on the retained pool')
     parser.add_argument('--stage', required=True,
-                        choices=('fit', 'reduce', 'analyse', 'skew', 'calibration'))
+                        choices=('fit', 'reduce', 'analyse', 'skew', 'calibration',
+                                 'export-fit'))
     parser.add_argument('--models-dir', default=str(MODELS_DIR))
     parser.add_argument('--artifact-dir', default=str(ARTIFACT_DIR))
     parser.add_argument('--tag', default=TAG)
@@ -771,6 +869,23 @@ def _parse_args(argv=None):
     parser.add_argument('--n-negatives', type=int, default=N_NEGATIVES,
                         help='Incorrect candidates kept per (entry, bundle) for the fit')
     parser.add_argument('--n-bootstrap', type=int, default=1000)
+    parser.add_argument('--fit-pool', default=str(FIT_POOL),
+                        help='Which pool export-fit assembles from. Defaults to the Benchmark B '
+                             'slice; point it at the full benchmark on the cluster')
+    parser.add_argument('--fit-frame', default=None,
+                        help='Path to a `*_fit_frame.parquet` written by --stage export-fit. Its '
+                             '`_cal_frame` sibling is read beside it. Given this, --stage fit does '
+                             'not touch a pool at all')
+    parser.add_argument('--groups', default=None,
+                        help='Comma-separated feature groups for export-fit, overriding the union '
+                             'every arm needs. Use it when a pool lacks an optional sidecar; the '
+                             'arms needing that group then skip themselves and record why')
+    parser.add_argument('--out-dir', default=None,
+                        help='Where export-fit writes. Defaults to --artifact-dir')
+    parser.add_argument('--calibration-negatives', type=int, default=400,
+                        help='Incorrect candidates a pattern kept in the CALIBRATION frame. Larger '
+                             'than --n-negatives because a calibrator states a prior and needs the '
+                             'negative tail to state it from')
     parser.add_argument('--calibration-rate', type=float, default=0.10,
                         help='Uniform sampling rate for the calibration stage. Uniform, not '
                              'positive-enriched: an ECE computed on an enriched sample is the '
@@ -788,7 +903,8 @@ def main(argv=None):
     Path(args.artifact_dir).mkdir(parents=True, exist_ok=True)
     print(f'S12 --stage {args.stage}  commit {_commit()}  seed {args.fit_seed}')
     return {'fit': run_fit, 'reduce': run_reduce, 'analyse': run_analyse,
-            'skew': run_skew, 'calibration': run_calibration}[args.stage](args)
+            'skew': run_skew, 'calibration': run_calibration,
+            'export-fit': run_export_fit}[args.stage](args)
 
 
 if __name__ == '__main__':

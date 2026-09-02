@@ -45,6 +45,11 @@ DEFAULT_CONDITIONS = ('nominal', 'noisy', 'control')
 # Benchmark B's own search seed is the first arm, so only the others have to be generated.
 DEFAULT_ARM_SEEDS = (202, 303, 404)
 
+# The hard stratum's predicate, from `FomMetrics`. Imported rather than restated: the definition
+# moved once already (S08 refused a redefinition, C2-F-078) and a second copy is how the two drift.
+HARD_LATTICES = ('mP', 'mC', 'aP')
+HARD_MIN_DECILE = 8
+
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
@@ -62,6 +67,12 @@ def _parse_args(argv=None):
     parser.add_argument('--conditions', type=str, default=','.join(DEFAULT_CONDITIONS))
     parser.add_argument('--seed', type=int, default=12345)
     parser.add_argument('--tag', type=str, default='S08_floor')
+    parser.add_argument('--stratum', choices=('balanced', 'hard'), default='balanced',
+                        help="Which patterns to cover. 'balanced' draws --entries-per-lattice from "
+                             "each Bravais lattice, which is what a reproducibility floor needs. "
+                             "'hard' takes EVERY hard-stratum entry of the split -- 360 crystals "
+                             'in fom-dev -- and ignores --entries-per-lattice, because the point '
+                             'is to make a hard-stratum claim possible rather than to sample')
     return parser.parse_args(argv)
 
 
@@ -84,6 +95,32 @@ def draw_sample(manifest, entries_per_lattice, split, seed):
         positions = np.sort(rng.choice(group.shape[0], size=take, replace=False))
         drawn.append(group.iloc[positions])
     return pd.concat(drawn, ignore_index=True).sort_values('identifier').reset_index(drop=True)
+
+
+def draw_hard_stratum(manifest, split):
+    """**Every** hard-stratum entry of `split`, not a sample of them. Returns the rows.
+
+    A different job from `draw_sample` and worth keeping in the same script, because both answer
+    "which patterns does a generation run cover". The floor sample is drawn balanced and small,
+    because a floor is a spread and 40 patterns a lattice estimate one. This is not a sample at
+    all: the whole hard stratum of `fom-dev` is 360 crystals and generating all of them fully
+    retained is under half a node-hour, so drawing a subset would buy nothing and cost the claim.
+
+    **Why this exists.** The fully retained pool on the laptop is S08's floor sample, and its hard
+    stratum is 20 (entry, condition) cells over 20 crystals of which 6 are reachable -- where M20
+    itself scores exactly 0.0000 (C2-R-019). Every hard-stratum number in S12 is computed on that
+    and says nothing. Benchmark B has the crystals; what it does not have is them **fully
+    retained**, which is what a learned score needs for its rank to be exact at all (C2-R-013).
+    One run fixes both, for S12 and S14 together.
+    """
+    pool = manifest.loc[manifest['split'] == split]
+    hard = pool.loc[pool['bravais_lattice'].isin(HARD_LATTICES)
+                    & (pool['volume_decile'] >= HARD_MIN_DECILE)]
+    if hard.empty:
+        raise SystemExit(
+            f'No {split} entry satisfies the hard predicate (lattice in {HARD_LATTICES}, '
+            f'volume_decile >= {HARD_MIN_DECILE}). Check the manifest is the frozen one.')
+    return hard.sort_values('identifier').reset_index(drop=True)
 
 
 def composition(manifest, sample, split):
@@ -115,7 +152,8 @@ def main(argv=None):
     args = _parse_args(argv)
     conditions = [name.strip() for name in args.conditions.split(',') if name.strip()]
     manifest = pd.read_parquet(args.split_manifest)
-    sample = draw_sample(manifest, args.entries_per_lattice, args.split, args.seed)
+    sample = (draw_hard_stratum(manifest, args.split) if args.stratum == 'hard'
+              else draw_sample(manifest, args.entries_per_lattice, args.split, args.seed))
     table = composition(manifest, sample, args.split)
 
     artifact_dir = args.artifact_dir
