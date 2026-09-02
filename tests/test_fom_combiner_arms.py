@@ -88,16 +88,41 @@ def test_dropping_a_column_that_is_not_there_is_an_error():
         FomCombiner.feature_specification(FomCombiner.DEFAULT_GROUPS, drop=('no_such_feature',))
 
 
-def test_the_structural_family_is_sixteen_features():
+def test_campaign_ones_structural_family_is_sixteen_features():
     """C2-F-039: campaign 1's `drop_structural` removes sixteen features, not the symmetry prior.
 
     This is the number the whole of C2-Q-013 turns on -- its 2.23 pp of operating point was read as
     the cost of the extinction group -- so it is pinned here rather than recounted by hand.
+
+    Pinned against campaign 1's own column tuples rather than against the live group, because S12
+    added two columns to the family (`N_cal_full` and `pool_size_full`) and the sixteen is a fact
+    about the arm that produced the 2.23 pp, not about whatever the family holds today.
+    """
+    campaign1 = (('n_peaks', 'n_indexed', 'hkl_ref_length', 'n_entering', 'final_rank')
+                 + ('N_cal', 'zone_dominance', 'V_over_Vcrit', 'delta_dewolff61', 'n_dewolff61',
+                    'M_werner_max')
+                 + ('log_volume', 'q2_max', 'n_peaks_available')
+                 + ('bravais_lattice', 'spacegroup'))
+    assert len(campaign1) == 16
+    full, _ = FomCombiner.feature_specification(('raw', 'structural', 'context'))
+    assert set(campaign1) <= set(full)
+
+
+def test_S12_added_two_columns_to_the_structural_family_and_said_which():
+    """`N_cal_full` and `pool_size_full`, each replacing something that was silently wrong.
+
+    `N_cal_full` is `compute_all`'s count over [0, q_N]; the family's existing `N_cal` now comes
+    from the merit sidecar and is `get_M_rev_sym`'s support over [q_I, q_N]. They agree on 0.07 %
+    of real rows, so before the rename the family carried whichever one the loader happened to
+    join. `pool_size_full` replaces the context group's `ctx_pool_size`, which counts RETAINED
+    candidates and so means different things on the fit and report pools.
     """
     full, _ = FomCombiner.feature_specification(('raw', 'structural', 'context'))
     without, _ = FomCombiner.feature_specification(('raw', 'context'))
-    assert len(full) - len(without) == 16
-    assert {'spacegroup', 'bravais_lattice', 'final_rank', 'n_entering', 'log_volume'} <= set(full)
+    assert len(full) - len(without) == 18
+    assert {'N_cal', 'N_cal_full', 'pool_size_full'} <= set(full)
+    assert 'ctx_pool_size' not in full
+    assert 'ctx_pool_size' in FomCombiner.FORBIDDEN_COLUMNS
 
 
 # ---------------------------------------------------------------------------------------------
@@ -115,11 +140,23 @@ def test_counts_and_delta_are_separate_droppable_groups():
     assert shared == {'n_groups_searched'}
 
 
-def test_symmetry_features_never_reach_the_matrix_by_default():
-    """Neither encoding is in DEFAULT_GROUPS, so no earlier number silently changes meaning."""
-    names, _ = FomCombiner.feature_specification(FomCombiner.DEFAULT_GROUPS)
-    assert not (set(FomCombiner.SYMMETRY_COUNTS) - {'n_groups_searched'}) & set(names)
-    assert not set(FomCombiner.SYMMETRY_DELTA) & set(names)
+def test_the_counts_encoding_is_now_the_default_and_delta_is_not():
+    """S12 reverses S04's deliberate default, on S04's own evidence.
+
+    S04 kept both encodings out of `DEFAULT_GROUPS` so that no campaign-1 number silently changed
+    meaning while it was measuring them. It then measured: the absence counts beat the 158-level
+    categorical by +0.522 pp of operating point at p <= 0.004 at every fit seed (C2-F-041), and
+    `delta_merit_extinction` reached +0.364 pp, significant at one seed of three, never beating
+    counts. So `counts` joins the default and `delta` does not, and a campaign-2 model that omitted
+    the counts would be an ablation rather than the headline.
+
+    `spacegroup` is still IN the base space and is dropped by column in the arms, so
+    `plus_spacegroup` is the absence of a drop rather than a second feature-set definition.
+    """
+    names, categorical = FomCombiner.feature_specification(FomCombiner.DEFAULT_GROUPS)
+    assert set(FomCombiner.SYMMETRY_COUNTS) <= set(names)
+    assert not (set(FomCombiner.SYMMETRY_DELTA) - {'n_groups_searched'}) & set(names)
+    assert 'spacegroup' in categorical
 
 
 def test_no_leakage_check_still_rejects_truth_columns():

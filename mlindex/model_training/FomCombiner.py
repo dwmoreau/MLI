@@ -60,11 +60,54 @@ from mlindex.model_training import FomMetrics
 # backwards cross-lattice, but F-074 then measured 0.4407 within a lattice, so its uselessness is a
 # scale artefact on top of a weak ranker rather than an absence of signal. A tree can use it or
 # ignore it, and the importance table says which.
-RAW_MERITS = (
-    'M20', 'Minfo', 'M_tilde', 'M_rev', 'M_sym', 'M_wu', 'M_star', 'M_star_corrected', 'M_1',
+# ---------------------------------------------------------------------------------------
+# S12's cut, 2026-09-01. Seventeen raw merits become seven.
+# ---------------------------------------------------------------------------------------
+# These are exactly `FomBenchmark.REDUCED_MERIT_COLUMNS`, and that identity is worth stating: they
+# are the seven the negative subsampler ranked on, so they are the only merits whose input
+# distribution Benchmark B's retention rule was built to preserve (C2-F-077).
+#
+# The cut is DWMM's instruction -- "there are also too many traditional FOMs used; we should just
+# use what was effective and discard the rest as noise" -- and its evidence is S00's merit audit,
+# which reached it from per-entry outcomes rather than from an importance table: ten merits rank
+# below a constant score, `M_nn` is analytically M20, and three calls reach 99.5 % of the
+# twenty-two-merit union oracle. **But an audit is a prior, not a verdict.** PROTOCOL section 8
+# settles a merit cut with a retrained paired arm and nothing else, so the arm that restores the
+# dropped seven (`plus_dropped_merits`) is what licenses this tuple, and until it has run this is
+# a hypothesis with a comment attached.
+RAW_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
+
+# What campaign 1's `raw` group held, kept so the restoring arm is a one-line change and so the
+# cut is legible as a decision rather than as an absence. `Minfo` is NOT here: SCHEMA.md forbids
+# ranking, fitting or reporting on the stored column outright, so it cannot enter any arm.
+CAMPAIGN1_RAW_MERITS = (
+    'M20', 'M_tilde', 'M_rev', 'M_sym', 'M_wu', 'M_star', 'M_star_corrected', 'M_1',
     'M_info_clipped', 'null_tail_nll', 'F_N_q', 'M_werner_frac', 'X_N', 'n_over', 'max_gap',
     'nll_exponential',
     )
+
+# S00 left three merits on probation and S09 declined to decide them: they are outside
+# `RANK_EXACT_MERITS`, so their rank on Benchmark B is optimistic by an unmeasured amount, and its
+# decision of 2026-08-31 records the drop as reversible on a fully retained pool. That pool exists,
+# and `FomBenchmark.structural_features` emits all three for 42 microseconds a candidate because
+# they need reference lines it has already built. One arm settles all three.
+PROBATION_MERITS = ('M_wu', 'M_1', 'F_N_q')
+
+# C2-F-102: `X_N` rebuilt on S13's per-peak assignment posterior goes from 0.2252 to 0.6164 of
+# top-10 and its ties collapse from 3 832 to 1. The same treatment made `n_over` and `max_gap`
+# WORSE -- a predicted line need not be observed at all, so normalising over peaks forces a
+# distribution where "none" is the right answer -- and the hard counts still add more union-oracle
+# headroom than the soft ones (+0.692 pp against +0.377, both together +0.818). So the soft form
+# is an addition to the hard three, never a replacement, and only `X_N_soft` is carried.
+SOFT_MERITS = ('X_N_soft',)
+
+# S10c's recommendation, and the only hold-out column that survived it. All three posterior columns
+# were beaten within narrow M20 bands by `ho_M20` (0.682 against 0.587-0.593) and none ships
+# (C2-F-112). `ho_M20` itself loses to in-sample M20 as a RANKER by 39.66 pp (C2-F-104), which is
+# a statement about it as a score and not about it as a feature -- that is a complementarity
+# question and this step's `plus_ho_M20` arm is what answers it. `n5` is a 25-peak pattern, the
+# budget real instruments supply (C2-F-103, C2-R-016).
+HOLDOUT_MERITS = ('ho_M20__n5',)
 
 # PROTOCOL section 3 rule 4: sigma is never assumed known, but an in-sample estimate is allowed if
 # the estimator is validated. Q7 has not validated one, so these are reported with and without
@@ -75,6 +118,19 @@ IN_SAMPLE_MERITS = ('bic', 'chi2_entrywise')
 # having to reconstruct it from a diff.
 EXCLUDED_MERITS = {
     'M_nn': 'reproduces M20 exactly at s = 1 (S01); a collinear pair, not two features',
+    # Campaign 2's cut, from S00's merit audit sections 3 and 4. Each of these ranks BELOW a
+    # constant score on per-entry outcomes, and nine of the ten win no entry any other merit
+    # misses (C2-F-012). Listed rather than omitted so the reason survives the diff.
+    'Minfo': 'below a constant score, 0.041 top-10 against a 0.2352 tie-break floor; and '
+             'SCHEMA.md forbids ranking, fitting or reporting on the stored column at all',
+    'M_star': 'below a constant score (S00 section 3)',
+    'M_star_corrected': 'below a constant score (S00 section 3)',
+    'M_info_clipped': 'below a constant score, and redundant with Minfo (S00 section 3)',
+    'null_tail_nll': 'below a constant score (S00 section 3)',
+    'M_werner_frac': 'below a constant score (S00 section 3); the Werner quantity that carries '
+                     'signal is V_over_Vcrit, which is in the structural group',
+    'nll_exponential': 'a negative control, never a feature (S00 section 6)',
+    'werner_strict': 'M20 with a strictness gate; strictly worse, not a distinct merit',
     'chi2_fixed': "the repo's global sigma model -- the generator's own, so F-008's leakage path",
     'chi2_taupin_scale': 'an in-sample sigma estimate, not a merit',
     'chi2_fixed_pvalue': 'monotone in chi2_fixed; same leakage',
@@ -86,10 +142,20 @@ EXCLUDED_MERITS = {
 # loader has to ask three different parquets for them and asking the wrong one is an ArrowInvalid
 # rather than a wrong number -- but only if the split is explicit.
 POOL_STRUCTURAL = ('n_peaks', 'n_indexed', 'hkl_ref_length', 'n_entering', 'final_rank')
+#
+# `N_cal` and `N_cal_full` are two different counts and are carried under two names deliberately.
+# `N_cal` is `get_M_rev_sym`'s support -- reference lines in [q_I, q_N], the quantity the M_rev
+# floor tests, which fires on 63 % of cP group evaluations (C2-F-114) -- and comes from the merit
+# sidecar. `N_cal_full` is `compute_all`'s, over [0, q_N], and is what campaign 1's feature of that
+# name was. Measured on real mP candidates they agree on 0.07 % of rows, so a feature set that
+# joins the sidecar and calls it `N_cal` is not carrying campaign 1's column.
 FEATURE_MATRIX_STRUCTURAL = (
-    'N_cal', 'zone_dominance', 'V_over_Vcrit', 'delta_dewolff61', 'n_dewolff61', 'M_werner_max',
+    'N_cal', 'N_cal_full', 'zone_dominance', 'V_over_Vcrit', 'delta_dewolff61', 'n_dewolff61',
+    'M_werner_max',
     )
-DERIVED_STRUCTURAL = ('log_volume', 'q2_max', 'n_peaks_available')
+# `pool_size_full` replaces `ctx_pool_size`: the survivor count before subsampling, which is the
+# same number on a thinned pool and a fully retained one. See FORBIDDEN_COLUMNS.
+DERIVED_STRUCTURAL = ('log_volume', 'q2_max', 'n_peaks_available', 'pool_size_full')
 STRUCTURAL_NUMERIC = POOL_STRUCTURAL + FEATURE_MATRIX_STRUCTURAL + DERIVED_STRUCTURAL
 
 # `spacegroup` holds a diffraction symbol -- an extinction group, ~151 of them -- not a single
@@ -182,8 +248,14 @@ SYMMETRY_COUNTS = ('n_absent_extra', 'n_absent_extra_in_range', 'f_absent_extra'
 SYMMETRY_DELTA = ('delta_M20', 'delta_M_rev', 'n_groups_searched')
 
 FEATURE_GROUPS = ('raw', 'structural', 'context', 'in_sample', 'cv', 'assignment',
-                  'prior', 'counts', 'delta')
-DEFAULT_GROUPS = ('raw', 'structural', 'context')
+                  'prior', 'counts', 'delta', 'probation', 'soft', 'holdout', 'campaign1_raw')
+# S12's base feature space. `counts` joins the default because S04 Phase 2 settled the symmetry
+# question in its favour -- the absence counts beat the 158-level categorical by +0.522 pp of
+# operating point at p <= 0.004 at every fit seed (C2-F-041) -- so a campaign-2 model that omitted
+# them would be an ablation rather than the headline. `spacegroup` is still reachable, and is
+# dropped by column in the arms rather than deleted here, so `plus_spacegroup` is the absence of a
+# drop rather than a second definition of the feature set.
+DEFAULT_GROUPS = ('raw', 'structural', 'context', 'counts')
 
 # The groups whose columns are joined in from a directory of per-bundle parquets rather than read
 # out of the pool or the feature matrix. Kept as one map so `combiner_frames` has a single join
@@ -205,6 +277,25 @@ FORBIDDEN_COLUMNS = frozenset({
     'q2_error_multiplier', 'n_contaminants', 'contaminant_bias', 'n_dropout',
     'n_dropout_achieved', 'second_phase_lines', 'second_phase_bias', 'second_phase_partner',
     'cluster', 'is_hard', 'volume_decile',
+    # A leakage class campaign 2 has and campaign 1 did not: everything describing the RETENTION
+    # RULE. Benchmark B keeps every correct candidate, the union of seven top-200 lists and 5 % of
+    # the rest; the fully retained pool keeps everything. So `retained_reason` is very nearly the
+    # label, `sampling_weight` is 1.0 for every correct row, and a model reading either learns the
+    # subsampler and transfers to no pool at all -- including the one it is reported on.
+    'sampling_weight', 'fit_weight', 'retained_reason', 'retained_by',
+    # `ctx_pool_size` counts the candidates that SURVIVED RETENTION, so it is 8 206 on Benchmark B
+    # where it is 26 734 on a fully retained pool of the same patterns -- a 3.3x shift between the
+    # pool a model is fitted on and the pool it is scored on, in a feature, which no weight
+    # repairs. Campaign 1 measured it as the worst feature of 78 and "actively harmful"; here it
+    # is a correctness problem rather than a weak one. `pool_size_full` is the same quantity
+    # without the skew -- the survivor count BEFORE subsampling, identical on both pools by
+    # construction, and available at inference -- so it is carried in its place.
+    'ctx_pool_size',
+    # And the quantities that describe the generation run rather than the candidate: the prune
+    # tested `m20_at_prune` and stored what it tested, `in_top_n` is a threshold on `final_rank`
+    # that the dump applied, and the last three are constants of the run.
+    'm20_at_prune', 'merit_at_prune', 'in_top_n', 'prune_threshold', 'downsample_radius',
+    'assignment_threshold', 'q2_digest',
     })
 FORBIDDEN_SUFFIX = '_true'
 
@@ -214,6 +305,10 @@ FORBIDDEN_SUFFIX = '_true'
 POOL_COLUMNS = tuple(FomMetrics.SCORE_INDEPENDENT_COLUMNS) + (
     'Minfo', 'M20', 'volume', 'n_peaks', 'spacegroup', 'n_entering', 'n_indexed',
     'hkl_ref_length', 'final_rank',
+    # The two absence columns the pool DOES store. SCHEMA.md keeps these on the candidate row and
+    # leaves `n_absent_extra_in_range` to be recomputed, so the counts group is half a projection
+    # and half a sidecar -- which is easy to half-fix and then find a column silently absent.
+    'n_absent_extra', 'n_groups_searched',
     )
 
 # Entry-level covariates. `q2_max` is stored nowhere and is the largest observed q^2 the candidate
@@ -237,9 +332,17 @@ def active_merits(groups):
     merits = []
     if 'raw' in groups:
         merits.extend(RAW_MERITS)
+    if 'campaign1_raw' in groups:
+        merits.extend(CAMPAIGN1_RAW_MERITS)
     if 'in_sample' in groups:
         merits.extend(IN_SAMPLE_MERITS)
-    return tuple(merits)
+    if 'probation' in groups:
+        merits.extend(PROBATION_MERITS)
+    if 'soft' in groups:
+        merits.extend(SOFT_MERITS)
+    if 'holdout' in groups:
+        merits.extend(HOLDOUT_MERITS)
+    return tuple(dict.fromkeys(merits))
 
 
 # NOT PORTED (S04 Phase 2, 2026-08-26): `load_scalers` and `scaled_names`, and with them the
@@ -254,8 +357,18 @@ def active_merits(groups):
 
 
 def context_names():
-    """The per-entry context columns `add_context` appends."""
-    names = ['ctx_pool_size']
+    """The per-entry context FEATURES. Not everything `add_context` appends.
+
+    `ctx_pool_size` is computed and is deliberately not a feature: it counts the candidates that
+    survived retention, which is a different number on a thinned pool and a fully retained one, so
+    it cannot be fitted on one and scored on the other. It stays in the frame as a diagnostic --
+    the retention shift is worth being able to look at -- and `FORBIDDEN_COLUMNS` stops it being
+    fitted on by accident. `pool_size_full` is the unskewed version and is in the structural group.
+
+    **This changes S04 Phase 2's feature set by one column if its arms are ever re-run.** Its
+    published contrasts are unaffected, being ablations of a common base that all carried it.
+    """
+    names = []
     for merit, _ in CONTEXT_MERITS:
         names.extend(f'ctx_{merit}_{statistic}' for statistic in CONTEXT_STATISTICS)
     return tuple(names)
@@ -294,6 +407,16 @@ def feature_specification(groups=DEFAULT_GROUPS, scalers=(), drop=()):
         names.extend(SYMMETRY_COUNTS)
     if 'delta' in groups:
         names.extend(SYMMETRY_DELTA)
+    if 'probation' in groups:
+        names.extend(PROBATION_MERITS)
+    if 'soft' in groups:
+        names.extend(SOFT_MERITS)
+    if 'holdout' in groups:
+        names.extend(HOLDOUT_MERITS)
+    if 'campaign1_raw' in groups:
+        # The restoring arm. Everything campaign 1's `raw` group held, so the seven-merit cut is
+        # licensed by a retrained paired arm rather than by S00's audit alone (PROTOCOL section 8).
+        names.extend(CAMPAIGN1_RAW_MERITS)
     categorical = ()
     if 'structural' in groups:
         names.extend(STRUCTURAL_NUMERIC)
@@ -350,6 +473,46 @@ def affordable_features(names, allowed_merits):
     return tuple(kept)
 
 
+# The only two columns a fit may be weighted by, and the guard is the point rather than the list.
+#
+# `tests/test_fom_combiner_arms.py::test_no_public_entry_point_takes_a_weight` forbids a weight on
+# `FomMetrics.evaluate`, `entry_context`, `threshold_curve` and `select_threshold`. That guard is
+# about **reweighting entries to a target lattice distribution** -- campaign 1 defaulted
+# `evaluate(weights='cnrs')`, so a caller who omitted the argument silently reweighted every
+# aggregate to the sealed benchmark's shape and discarded 43 % of its effective sample. PROTOCOL
+# section 3 rules 1 and 6.
+#
+# This is the opposite object: a per-row **inverse retention probability** written by the generator,
+# which undoes a thinning rather than imposing a population. `SCHEMA.md` requires it in bold and
+# `METRICS.md` section 1 repeats it. Keeping the two apart structurally -- a fit may take a weight,
+# nothing on the scoring or metrics path may -- is what stops the guard and the requirement being
+# read as contradicting each other.
+ALLOWED_WEIGHT_COLUMNS = ('sampling_weight', 'fit_weight')
+
+
+def fit_weights(frame, column='fit_weight'):
+    """The per-row fit weight, refusing any column that is not an inclusion probability.
+
+    Raises rather than defaulting, on both an unknown column name and an absent one. A silently
+    unweighted fit on a subsampled pool is the failure this exists to prevent, and it is invisible
+    in every downstream number.
+    """
+    if column not in ALLOWED_WEIGHT_COLUMNS:
+        raise ValueError(
+            f'{column!r} is not an inclusion-probability weight; allowed: '
+            f'{list(ALLOWED_WEIGHT_COLUMNS)}. A per-lattice or per-entry weight would be a '
+            'reweighting of the population, which PROTOCOL section 3 rule 6 forbids.')
+    if column not in frame.columns:
+        raise ValueError(
+            f'{column!r} is not in the frame. Project it in the loader rather than fitting '
+            'unweighted: on a negatively subsampled pool an unweighted fit is biased and nothing '
+            'downstream shows it.')
+    values = frame[column].to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all() or (values <= 0).any():
+        raise ValueError(f'{column!r} carries a non-positive or non-finite weight')
+    return values
+
+
 def check_no_leakage(names):
     """Raise if any proposed feature is truth-derived or is a property of the generator.
 
@@ -382,13 +545,19 @@ def entry_covariates(entries):
         peaks = np.asarray(values, dtype=np.float64)
         cubic[index] = peaks[:10].max() if peaks.size else np.nan
         full[index] = peaks[:20].max() if peaks.size else np.nan
-    return pd.DataFrame({
+    covariates = pd.DataFrame({
         'entry_id': entries['entry_id'].to_numpy(),
         'condition_bundle': entries['condition_bundle'].to_numpy(),
         'q2_max_cubic': cubic,
         'q2_max_full': full,
         'n_peaks_available': entries['n_peaks_available'].to_numpy(),
         })
+    # The survivor count BEFORE subsampling, which is why it is read here rather than counted from
+    # the rows: counting gives `ctx_pool_size`, which is the retained count and means different
+    # things on a thinned pool and a full one. See FORBIDDEN_COLUMNS.
+    if 'pool_size_full' in entries.columns:
+        covariates['pool_size_full'] = entries['pool_size_full'].to_numpy(dtype=np.float64)
+    return covariates
 
 
 def add_context(frame):
@@ -406,6 +575,7 @@ def add_context(frame):
     lattice_order = pd.Categorical(frame['bravais_lattice'].to_numpy(),
                                    categories=FomMetrics.BRAVAIS_LATTICES).codes.astype(np.int64)
     candidate_id = frame['candidate_id'].to_numpy(dtype=np.int64)
+    # Computed, never fitted on: see `context_names`.
     columns = {'ctx_pool_size': np.bincount(codes, minlength=n_groups)[codes].astype(np.float64)}
     for merit, higher_is_better in CONTEXT_MERITS:
         values = frame[merit].to_numpy(dtype=np.float64)
@@ -501,15 +671,137 @@ def combiner_frames(benchmark_dir, feature_dir, bundles, keep_entry_ids, covaria
             yield pool.reset_index(drop=True)
 
 
-def subsample_negatives(frame, n_negatives, seed):
+# Which sidecar directory under a Benchmark B pool supplies each feature group. `merits` and
+# `structural` are unconditional -- the raw merits and the structural family are in every arm --
+# and the rest are joined only when their group is active, because a hold-out sidecar is 88 columns
+# and 11 GB and no arm but one reads a single column of it.
+SIDECAR_DIRS = {
+    'raw': 'merits',
+    'structural': 'structural',
+    'counts': 'structural',
+    'probation': 'structural',
+    'soft': 'merits_soft',
+    'holdout': 'holdout_merits',
+    }
+
+# Read from the pool but not fitted on: the labels, the keys the reduction groups by, and the two
+# weights. `check_no_leakage` forbids every one of them as a feature, which is the point -- they
+# have to be in the frame and must not be in the design matrix.
+CARRIED_NOT_FITTED = ('is_correct', 'is_off_by_two', 'sampling_weight', 'retained_reason',
+                      'in_top_n', 'volume', 'spacegroup', 'lattice_system')
+
+
+def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_entry_ids=None,
+                       covariates=None, holdout_n_extra=5, downcast=True):
+    """One assembled frame per condition bundle, for a **Benchmark B** pool. A generator.
+
+    `combiner_frames` reads campaign 1's layout -- a `features_{bundle}.parquet` matrix beside a
+    single-file pool -- which Benchmark B does not have. This reads the campaign-2 layout instead:
+    one candidate parquet per (bundle, lattice) with the features in sidecar directories beside
+    them, joined by `FomBenchmark.bundle_frames` on the four zoo keys. Everything after the join is
+    the same as `combiner_frames` does and is deliberately so, because a context feature computed
+    one way at fit time and another at score time is the classic silent failure here.
+
+    **One frame per bundle, all fourteen lattices together, and that is not negotiable.** The
+    context features and the ranking are cross-lattice -- that is the problem `run.py` actually
+    solves -- so a per-lattice frame would compute a different feature and reduce a different
+    ranking (PROTOCOL section 10's worst anti-pattern).
+
+    `downcast` puts the float columns in float32 after the context features are computed, which
+    roughly halves a 14.5 M-row bundle. The context statistics are computed in float64 first, so
+    this costs precision in the design matrix and none in the feature definition.
+    """
+    from mlindex.model_training import FomBenchmark
+
+    merits = list(active_merits(groups))
+    wanted = set(merits) | set(FEATURE_MATRIX_STRUCTURAL) | {merit for merit, _ in CONTEXT_MERITS}
+    if 'counts' in groups:
+        wanted |= set(FomBenchmark.ABSENCE_COLUMNS)
+    if 'holdout' in groups:
+        wanted |= {FomBenchmark.holdout_column('ho_M20', holdout_n_extra)}
+    # NOT `wanted -= EXCLUDED_MERITS`. That set documents which merits campaign 2 cut from the
+    # default feature space, and six of them are exactly what the `campaign1_raw` group restores --
+    # so subtracting it here silently emptied the projection for the one arm that licenses the cut.
+    # `_sidecar_projection` already drops a name no sidecar carries, which is the right place for
+    # that decision: it is a fact about the data, not about the feature policy.
+
+    directories = []
+    for group in ('raw', 'structural', 'counts', 'probation', 'soft', 'holdout'):
+        if group in groups or group in ('raw', 'structural'):
+            directory = Path(pool)/SIDECAR_DIRS[group]
+            if directory not in directories:
+                directories.append(directory)
+
+    pool_columns = [name for name in
+                    tuple(FomMetrics.SCORE_INDEPENDENT_COLUMNS) + POOL_COLUMNS + CARRIED_NOT_FITTED
+                    if name is not None]
+    if covariates is None:
+        covariates = entry_covariates(entries)
+
+    for frame in FomBenchmark.bundle_frames(
+            pool, merit_dir=directories, columns=list(dict.fromkeys(pool_columns)),
+            require_merits=True, merit_columns=sorted(wanted)):
+        if bundles is not None and frame['condition_bundle'].iloc[0] not in set(bundles):
+            continue
+        if keep_entry_ids is not None:
+            frame = frame.loc[frame['entry_id'].isin(keep_entry_ids)]
+        if not frame.shape[0]:
+            continue
+        frame = frame.reset_index(drop=True)
+        frame = frame.merge(covariates, on=['entry_id', 'condition_bundle'], how='left',
+                            validate='m:1')
+        frame['log_volume'] = np.log(frame['volume'].to_numpy(dtype=np.float64))
+        frame['q2_max'] = np.where(frame['n_peaks'].to_numpy() <= 10,
+                                   frame['q2_max_cubic'].to_numpy(),
+                                   frame['q2_max_full'].to_numpy())
+        if 'counts' in groups:
+            # Derived here rather than stored: a stored ratio is a third column that can disagree
+            # with its own numerator, and both of its operands are already on the row.
+            in_range = frame['n_ref_in_range'].to_numpy(dtype=np.float64)
+            frame['f_absent_extra'] = np.where(
+                in_range > 0,
+                frame['n_absent_extra_in_range'].to_numpy(dtype=np.float64)/np.maximum(in_range, 1),
+                np.nan)
+        if 'holdout' in groups:
+            frame['ho_M20__n5'] = frame[
+                FomBenchmark.holdout_column('ho_M20', holdout_n_extra)].to_numpy(dtype=np.float64)
+        frame = add_context(frame)
+        if downcast:
+            floats = frame.select_dtypes(include=['float64']).columns
+            frame[floats] = frame[floats].astype(np.float32)
+        yield frame
+
+
+def subsample_negatives(frame, n_negatives, seed, weight_column='sampling_weight'):
     """Every positive, and at most `n_negatives` incorrect candidates per (entry, bundle).
 
     Each entry has of order one correct candidate among several hundred, so an unthinned fit
     spends almost all of its capacity on negatives that no threshold will ever reach. The prior
     shift this introduces is undone by the isotonic step, which is fitted on an *unsubsampled*
     calibration split -- which is why the two must not be the same rows.
+
+    **Writes `fit_weight`, and a fit must NOT use it.** It is the composition of two thinnings:
+    the generator's, recorded in `sampling_weight`, and this one. It is the correct inverse-
+    inclusion weight for estimating a pool-level quantity from the subsample, and it is verified
+    unbiased -- over 20 seeds it recovers the true negative weight mass to +0.44 % with a standard
+    deviation of 2.78 %.
+
+    It is the wrong weight for a **fit**, and measurably so. The two thinnings are not the same
+    kind of thing. The generator's is a bias to correct: it kept the highest-scoring wrong
+    candidates preferentially, and `sampling_weight` undoes that. This one is a deliberate
+    **rebalancing** -- the pool is 0.026 % correct and no gradient-boosted tree learns anything
+    useful at that rate, so the negatives are thinned to bring it to about 1.7 %. Weighting it back
+    restores 0.026 % and undoes the only reason the subsample exists. Measured on this pool:
+    fitting on `fit_weight` costs **17.7 pp of top-10 and 43.1 pp of top-1** against fitting on
+    `sampling_weight`, and drops the model below raw M20 (C2-F-127).
+
+    So: **fit on `sampling_weight`, calibrate on `sampling_weight` over an unsubsampled split,
+    and keep `fit_weight` for pool-level estimators.** The prior the rebalancing removes is what
+    the isotonic step puts back, which is why the calibration rows must not be the fit rows.
     """
     if n_negatives is None:
+        if weight_column is not None and weight_column in frame.columns:
+            return frame.assign(fit_weight=frame[weight_column].to_numpy(dtype=np.float64))
         return frame
     correct = FomMetrics.as_bool(frame['is_correct'])
     codes, keys = FomMetrics._group_codes(frame['entry_id'].to_numpy(),
@@ -526,7 +818,16 @@ def subsample_negatives(frame, n_negatives, seed):
     within[order] = position
     n_correct = np.bincount(codes[correct], minlength=len(keys))
     keep = correct | (within - n_correct[codes] < n_negatives)
-    return frame.loc[keep].reset_index(drop=True)
+
+    if weight_column is None or weight_column not in frame.columns:
+        return frame.loc[keep].reset_index(drop=True)
+    base = frame[weight_column].to_numpy(dtype=np.float64)
+    n_negative = np.bincount(codes[~correct], minlength=len(keys))
+    n_kept = np.bincount(codes[keep & ~correct], minlength=len(keys))
+    # Positives are kept whole, so they carry the generator's weight unchanged.
+    inflation = np.where(n_kept > 0, n_negative/np.maximum(n_kept, 1), 1.0)[codes]
+    fit_weight = np.where(correct, base, base*inflation)
+    return frame.loc[keep].assign(fit_weight=fit_weight[keep]).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------------------
@@ -578,8 +879,13 @@ class FomCombiner:
     # -- fitting ----------------------------------------------------------------------
     @classmethod
     def fit(cls, frames, groups=DEFAULT_GROUPS, scalers=(), objective='pointwise', seed=12345,
-            drop=(), **params):
-        """Fit on an iterable of assembled frames. `objective` is 'pointwise' or 'lambdarank'."""
+            drop=(), weight_column=None, **params):
+        """Fit on an iterable of assembled frames. `objective` is 'pointwise' or 'lambdarank'.
+
+        `weight_column` names a per-row weight in the frames, and on a negatively subsampled pool
+        it is not optional -- see `fit_weights`. `None` fits unweighted, which is right for a fully
+        retained pool and is also the `unweighted_fit` control arm.
+        """
         frames = [frames] if isinstance(frames, pd.DataFrame) else list(frames)
         if not frames:
             raise ValueError('no frames to fit on')
@@ -594,21 +900,24 @@ class FomCombiner:
         frame = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
         matrix = combiner.design_matrix(frame)
         target = FomMetrics.as_bool(frame['is_correct']).astype(np.int32)
+        weights = None if weight_column is None else fit_weights(frame, weight_column)
         if objective == 'pointwise':
             combiner.model = _fit_pointwise(matrix, target, combiner.categorical_indices, seed,
-                                            **params)
+                                            sample_weight=weights, **params)
         elif objective == 'lambdarank':
             combiner.model = _fit_lambdarank(matrix, target, frame,
-                                             combiner.categorical_indices, seed, **params)
+                                             combiner.categorical_indices, seed,
+                                             sample_weight=weights, **params)
         else:
             raise ValueError(f"objective must be 'pointwise' or 'lambdarank', got {objective!r}")
         combiner.meta = dict(objective=objective, seed=int(seed), groups=list(groups),
-                             dropped=sorted(drop),
+                             dropped=sorted(drop), weight_column=weight_column,
+                             weight_sum=None if weights is None else float(weights.sum()),
                              n_rows=int(frame.shape[0]), n_positive=int(target.sum()),
                              n_features=len(names), params={k: v for k, v in params.items()})
         return combiner
 
-    def fit_calibrators(self, frames, minimum=200):
+    def fit_calibrators(self, frames, minimum=200, weight_column=None):
         """Per-Bravais-lattice isotonic regression, on rows the model was not fitted on.
 
         The S08 handoff says to calibrate on `fom-dev`; PROTOCOL section 8 forbids reporting a
@@ -618,6 +927,12 @@ class FomCombiner:
 
         A lattice with fewer than `minimum` rows falls back to the pooled calibrator rather than
         fitting noise -- oF has two entries in the whole CNRS benchmark.
+
+        `weight_column` matters here for the same reason it matters in `fit`, and more sharply: the
+        calibrator's whole job is to state a prior, and on a subsampled pool an unweighted isotonic
+        states the *retained* prior rather than the pool's. The calibration rows are not negatively
+        subsampled by this module, but on Benchmark B they still arrive already thinned by the
+        generator, so they still carry `sampling_weight` of 1 or 20.
         """
         from sklearn.isotonic import IsotonicRegression
 
@@ -626,20 +941,23 @@ class FomCombiner:
         raw = self.raw_score(frame)
         target = FomMetrics.as_bool(frame['is_correct']).astype(np.float64)
         lattice = frame['bravais_lattice'].to_numpy()
+        weights = None if weight_column is None else fit_weights(frame, weight_column)
 
-        def knots(values, labels):
+        def knots(values, labels, sample_weight=None):
             fitted = IsotonicRegression(out_of_bounds='clip', y_min=0.0, y_max=1.0)
-            fitted.fit(values, labels)
+            fitted.fit(values, labels, sample_weight=sample_weight)
             return (np.asarray(fitted.X_thresholds_, dtype=np.float64),
                     np.asarray(fitted.y_thresholds_, dtype=np.float64))
 
-        calibrators = {'__pooled__': knots(raw, target)}
+        calibrators = {'__pooled__': knots(raw, target, weights)}
         for name in np.unique(lattice):
             mask = lattice == name
             if int(mask.sum()) >= minimum and np.unique(target[mask]).size > 1:
-                calibrators[str(name)] = knots(raw[mask], target[mask])
+                calibrators[str(name)] = knots(raw[mask], target[mask],
+                                               None if weights is None else weights[mask])
         self.calibrators = calibrators
         self.meta['n_calibration_rows'] = int(frame.shape[0])
+        self.meta['calibration_weight_column'] = weight_column
         self.meta['calibrated_lattices'] = sorted(set(calibrators) - {'__pooled__'})
         return self
 
@@ -941,8 +1259,15 @@ def _undo(standardised, centre, scale):
     return standardised*scale + centre
 
 
-def _fit_pointwise(matrix, target, categorical_indices, seed, **params):
-    """The headline model: gradient-boosted trees, not a network (S08 handoff, "Model choice")."""
+def _fit_pointwise(matrix, target, categorical_indices, seed, sample_weight=None, **params):
+    """The headline model: gradient-boosted trees, not a network (S08 handoff, "Model choice").
+
+    `sample_weight` is the inverse retention probability of each row. Campaign 1's pool kept every
+    candidate, so omitting it there was correct; Benchmark B keeps every correct candidate, the
+    union of seven top-200 lists, and 5 % of everything else, so a fit that ignores it is fitted to
+    a negative set enriched twentyfold in the highest-scoring wrong candidates. `SCHEMA.md` says
+    "Every fit must use it" and `METRICS.md` section 1 says the same. See `fit_weights`.
+    """
     from sklearn.ensemble import HistGradientBoostingClassifier
 
     settings = dict(max_iter=400, learning_rate=0.06, max_leaf_nodes=63, min_samples_leaf=40,
@@ -951,11 +1276,12 @@ def _fit_pointwise(matrix, target, categorical_indices, seed, **params):
     settings.update(params)
     model = HistGradientBoostingClassifier(
         categorical_features=categorical_indices or None, **settings)
-    model.fit(matrix, target)
+    model.fit(matrix, target, sample_weight=sample_weight)
     return model
 
 
-def _fit_lambdarank(matrix, target, frame, categorical_indices, seed, **params):
+def _fit_lambdarank(matrix, target, frame, categorical_indices, seed, sample_weight=None,
+                    **params):
     """PLAN section 4's assumption A11: is per-entry ranking a better objective than pointwise?
 
     lightgbm is an optional, training-only dependency and is imported here rather than at module
@@ -979,5 +1305,6 @@ def _fit_lambdarank(matrix, target, frame, categorical_indices, seed, **params):
     settings.update({translation.get(key, key): value for key, value in params.items()})
     model = lightgbm.LGBMRanker(**settings)
     model.fit(matrix[order], target[order], group=sizes[sizes > 0],
+              sample_weight=None if sample_weight is None else np.asarray(sample_weight)[order],
               categorical_feature=categorical_indices or 'auto')
     return model

@@ -832,6 +832,214 @@ def with_reduced_merits(candidates, entries, models_directory=None):
     return pd.concat([candidates, merits], axis=1)
 
 
+# S12's structural feature block: what the learned combiner needs from the reference lines and
+# does not get from `reduced_merits`, the stored columns or the extinction sweep.
+#
+# Deliberately NOT `zoo_features`. That is the right function when the whole zoo is wanted, but it
+# pays `compute_all` -- measured on this branch at 558 us/candidate against 237 us for the block
+# below -- to produce twenty-odd merits S00's audit put below a constant score and which no
+# campaign-2 feature set may contain. The five Werner/de Wolff columns themselves cost 2 us; the
+# entire price of either route is `assign_lines`. So the saving comes from computing fewer merits,
+# not from computing them differently: every column here is the SAME call `compute_all` makes with
+# the same arguments, and `tests/test_fom_structural_features.py` pins the two value for value.
+#
+# `M_wu`, `M_1` and `F_N_q` ride along for 42 us because they need reference lines this block has
+# already built. They are S00's three probation merits, which S09 dropped from its zoo for a reason
+# that does not apply here -- their rank on the subsampled pool is optimistic (C2-F-077) -- and
+# whose decision of 2026-08-31 records the drop as reversible on a fully retained pool. Carrying
+# them costs one flag and settles all three in one retrained arm.
+STRUCTURAL_COLUMNS = ('zone_dominance', 'V_over_Vcrit', 'M_werner_max', 'N_cal_full',
+                      'delta_dewolff61', 'n_dewolff61')
+PROBATION_MERIT_COLUMNS = ('M_wu', 'M_1', 'F_N_q')
+
+# The six merits S00's audit cut, emitted for the same reason and at a marginal 1 microsecond a
+# candidate: S12's `plus_dropped_merits` arm restores them, and that arm is the retrained paired
+# arm that LICENSES the cut from seventeen merits to seven. Without these columns the cut would
+# rest on the audit alone, which is a per-entry outcome table and not a retrained arm -- exactly
+# the substitution PROTOCOL section 8 forbids.
+#
+# They are emitted unconditionally rather than behind a flag. Everything here is reachable from an
+# `assign_lines` pass that costs 193 microseconds and has already been paid, so leaving one out and
+# needing it later means paying that pass again over 43 M candidates -- which is what happened, and
+# is PROTOCOL section 3 rule 8 in miniature.
+DROPPED_MERIT_COLUMNS = ('M_star', 'M_star_corrected', 'M_info_clipped', 'null_tail_nll',
+                         'nll_exponential', 'M_werner_frac')
+
+# The two absence quantities S04 Phase 2 adopted that the pool does not store. `n_absent_extra` and
+# `n_groups_searched` ARE stored candidate columns, so only these two are computed; `f_absent_extra`
+# is their ratio and is derived where it is consumed rather than stored, because a stored ratio is a
+# third column that can disagree with its own numerator.
+#
+# SCHEMA.md removed `n_absent_extra_in_range` from the schema on 2026-08-27 on the grounds that it
+# is recomputable offline. This is that recomputation, and it is the only one: the extinction
+# sweep's `xg_M20_n_absent_in_range` is the same quantity reached by a different route, which is
+# what makes it a gate rather than a shortcut (`run_fom_structural_features.py --verify`).
+ABSENCE_COLUMNS = ('n_absent_extra_in_range', 'n_ref_in_range')
+
+# The Werner precision floor. `zoo_features` uses 1.0 and so does this: g_min enters V_crit
+# multiplicatively, so `V_over_Vcrit` scales linearly in it uniformly across candidates, any other
+# floor is a rescale of the stored column, and no ranking depends on the choice (Q14).
+STRUCTURAL_G_MIN = 1.0
+
+# Reference-line blocks are (n_candidates, n_ref) float64 and a generic triclinic list runs to tens
+# of thousands of lines, so the generic pass is chunked to a fixed element budget rather than a
+# fixed row count. 8e6 elements is 64 MB a block, which is what `run_fom_symmetry_arms` uses.
+MAX_BLOCK_ELEMENTS = 8_000_000
+
+
+def structural_features(candidates, entries, models_directory=None, probation=True,
+                        absences=True, dropped=True, g_min=STRUCTURAL_G_MIN):
+    """S12's structural columns, aligned to `candidates`' own index.
+
+    Returns a frame carrying `STRUCTURAL_COLUMNS`, plus `PROBATION_MERIT_COLUMNS` when `probation`,
+    `DROPPED_MERIT_COLUMNS` when `dropped`, and `ABSENCE_COLUMNS` when `absences`.
+
+    **Two reference lists, and they are not interchangeable.** The structural columns and the
+    probation merits are computed against the candidate's OWN extinction group's list, which is
+    what `compute_all` does and so what campaign 1's columns of the same name mean. The absence
+    counts are computed against the lattice's GENERIC list with that list's own cutoff, which is
+    what `run_fom_symmetry_arms` and `extinction_group_sweep` both do -- the count is of lines the
+    group REMOVES, so it is undefined against a list they have already been removed from. The
+    grouping therefore nests: the generic pass runs once per (entry, lattice), the group pass once
+    per (entry, lattice, extinction group). A lattice with a single extinction group needs no
+    generic pass at all, because its one group IS the generic one.
+
+    `N_cal_full` is `compute_all`'s `N_cal` and is a DIFFERENT quantity from the `N_cal` in the
+    merit sidecar, which is `get_M_rev_sym`'s support count: this one counts reference lines in
+    [0, q_N], that one counts them in [q_I, q_N]. They are named apart here because they were named
+    apart nowhere else, and a feature set that joins the sidecar and calls it `N_cal` hands the
+    model a different column from the one every campaign-1 number of that name describes.
+    """
+    from mlindex.utilities.ExtinctionCounts import get_n_groups_searched
+    from mlindex.utilities.FigureOfMerits import (
+        _sorted_lines_in_range, get_delta_dewolff61, get_F_N, get_M_1, get_M_info_clipped,
+        get_M_star, get_multiplicity_taupin88, get_M20, get_M_wu, get_n_dewolff61, get_N_cal,
+        get_nll_exponential, get_null_tail_nll, get_V_over_Vcrit, get_zone_dominance,
+        )
+    from mlindex.utilities.UnitCellTools import (
+        get_reciprocal_unit_cell_from_xnn, get_unit_cell_volume,
+        )
+
+    names = list(STRUCTURAL_COLUMNS)
+    if probation:
+        names += list(PROBATION_MERIT_COLUMNS)
+    if dropped:
+        names += list(DROPPED_MERIT_COLUMNS)
+    if absences:
+        names += list(ABSENCE_COLUMNS)
+    out = pd.DataFrame(np.nan, index=candidates.index, columns=names, dtype=float)
+
+    join_keys = _join_keys(candidates, entries)
+    peaks = entries.set_index(join_keys)['q2_obs']
+    outer_keys = list(join_keys) + ['lattice_system', 'bravais_lattice', 'n_peaks']
+
+    for outer, entry_group in candidates.groupby(outer_keys, sort=False):
+        peak_key = outer[0] if len(join_keys) == 1 else outer[:len(join_keys)]
+        lattice_system, bravais_lattice, n_peaks = outer[len(join_keys):]
+        # The optimizer truncates the peak list with a plain prefix slice; cut it the same way.
+        q2_obs = np.asarray(peaks.loc[peak_key], dtype=np.float64)[:int(n_peaks)]
+        single_group = get_n_groups_searched(bravais_lattice) == 1
+
+        if absences and not single_group:
+            _absence_block(out, entry_group, q2_obs, lattice_system, bravais_lattice,
+                           models_directory)
+
+        for spacegroup, group in entry_group.groupby('spacegroup', sort=False):
+            xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
+            q2_ref_calc, _, _, q2_calc = assign_lines(
+                q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory)
+            cutoff = q2_calc[:, -1]
+
+            # Derived from `xnn` rather than read from the stored `volume` column, so this
+            # reproduces `compute_all` exactly rather than merely closely.
+            reciprocal_cell = get_reciprocal_unit_cell_from_xnn(
+                xnn, partial_unit_cell=True, lattice_system=lattice_system)
+            volume = 1/np.maximum(get_unit_cell_volume(
+                reciprocal_cell, partial_unit_cell=True, lattice_system=lattice_system), 1e-300)
+            d_n = 1/np.sqrt(np.maximum(cutoff, 1e-300))
+            over_critical, m_max = get_V_over_Vcrit(
+                volume, d_n, g_min, get_multiplicity_taupin88(bravais_lattice)[0])
+
+            values = {
+                'zone_dominance': get_zone_dominance(xnn, lattice_system),
+                'V_over_Vcrit': over_critical,
+                'M_werner_max': m_max,
+                'N_cal_full': get_N_cal(q2_ref_calc, np.zeros(xnn.shape[0]), cutoff),
+                'delta_dewolff61': np.mean(
+                    get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice), axis=1),
+                'n_dewolff61': get_n_dewolff61(
+                    q2_obs, xnn, lattice_system, bravais_lattice)[:, -1],
+                }
+            if probation:
+                # One sort of the in-range lines shared by both merits that need it, exactly as
+                # `compute_all` shares it. `get_F_N` does its own.
+                sorted_lines = _sorted_lines_in_range(q2_ref_calc, cutoff)
+                values['M_wu'] = get_M_wu(q2_obs, q2_calc, q2_ref_calc,
+                                          sorted_lines=sorted_lines)
+                values['M_1'] = get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
+                values['F_N_q'] = get_F_N(q2_obs, q2_calc, q2_ref_calc)[1]
+            if dropped:
+                values['M_star'] = get_M_star(q2_obs, q2_calc, volume, lattice_system)
+                values['M_star_corrected'] = get_M_star(q2_obs, q2_calc, volume, lattice_system,
+                                                        corrected=True)
+                values['M_info_clipped'] = get_M_info_clipped(
+                    q2_obs, q2_calc, xnn, lattice_system, bravais_lattice)
+                values['nll_exponential'] = get_nll_exponential(
+                    q2_obs, q2_calc, xnn, lattice_system, bravais_lattice)
+                values['null_tail_nll'] = get_null_tail_nll(
+                    q2_obs, q2_calc, xnn, lattice_system, bravais_lattice)
+                # `get_M20` mutates `q2_ref_calc` in place, so it goes last and on a copy -- three
+                # places on the `fom` branch say so and it is still the easiest way to corrupt
+                # every other column in this block.
+                merit = get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
+                values['M_werner_frac'] = np.where(m_max > 0, merit/m_max, 0.0)
+            if absences and single_group:
+                # The one group removes nothing, so the count is zero by construction -- S04's
+                # built-in negative control -- and the group's own list is the generic one, so the
+                # denominator comes from this pass rather than from a second, identical one.
+                values['n_absent_extra_in_range'] = np.zeros(xnn.shape[0])
+                values['n_ref_in_range'] = (q2_ref_calc < cutoff[:, np.newaxis]).sum(axis=1)
+            for name, column in values.items():
+                out.loc[group.index, name] = np.asarray(column, dtype=float)
+
+    if absences:
+        for name in ABSENCE_COLUMNS:
+            out[name] = out[name].astype(np.int64)
+    return out
+
+
+def _absence_block(out, entry_group, q2_obs, lattice_system, bravais_lattice, models_directory):
+    """Fill `ABSENCE_COLUMNS` for one (entry, lattice) block, against the generic reference list.
+
+    Exactly one extinction group per lattice removes no lines, so the generic group's list is the
+    model's own `hkl_ref` and the masks index into it directly (C2-F-034). Chunked over candidates
+    because the block is (n_candidates, n_ref) and n_ref is large for the low-symmetry lattices.
+    """
+    from mlindex.utilities.ExtinctionCounts import absent_in_range, build_group_masks, \
+        get_generic_group
+
+    hkl_ref = hkl_ref_for(lattice_system, bravais_lattice,
+                          get_generic_group(bravais_lattice), models_directory)
+    masks = build_group_masks(hkl_ref, bravais_lattice)
+    xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in entry_group['xnn']])
+    spacegroups = entry_group['spacegroup'].to_numpy()
+    calculator = Q2Calculator(lattice_system=lattice_system, hkl=hkl_ref, tensorflow=False,
+                              representation='xnn')
+    chunk = max(1, MAX_BLOCK_ELEMENTS // max(hkl_ref.shape[0], 1))
+    for start in range(0, entry_group.shape[0], chunk):
+        stop = min(start + chunk, entry_group.shape[0])
+        block = entry_group.index[start:stop]
+        q2_ref_calc = calculator.get_q2(xnn[start:stop])
+        cutoff = np.take_along_axis(
+            q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)[:, -1]
+        for spacegroup in pd.unique(spacegroups[start:stop]):
+            local = np.flatnonzero(spacegroups[start:stop] == spacegroup)
+            dropped, in_range = absent_in_range(
+                q2_ref_calc[local], masks[spacegroup], cutoff[local])
+            out.loc[block[local], 'n_absent_extra_in_range'] = dropped
+            out.loc[block[local], 'n_ref_in_range'] = in_range
+
+
 # The peak budgets the S10 sweep reports. `n_extra` IS the total peak budget minus the 20-peak
 # window, so 5 is a 25-peak pattern and 10 a 30-peak one -- which is the range real data actually
 # occupies (DWMM, 2026-09-01: "In many of the experimental data cases, only 20 - 25 peaks are
@@ -1791,7 +1999,23 @@ def load_candidates(root, split=None, bravais_lattices=None, columns=None, bundl
     return frame.reset_index(drop=True)
 
 
-def bundle_frames(root, merit_dir=None, columns=None, require_merits=False):
+def _sidecar_projection(path, merit_columns):
+    """The join keys plus whatever of `merit_columns` this sidecar actually carries.
+
+    Returns None -- read everything -- when no projection was asked for. Silently dropping a name
+    the sidecar does not have is right here: a pool carries several sidecar sets and a caller asks
+    for its columns once, against all of them.
+    """
+    if merit_columns is None:
+        return None
+    import pyarrow.parquet as _pq
+    available = set(_pq.ParquetFile(path).schema_arrow.names)
+    wanted = [name for name in merit_columns if name in available]
+    return [key for key in ZOO_KEY_COLUMNS if key in available] + wanted
+
+
+def bundle_frames(root, merit_dir=None, columns=None, require_merits=False,
+                  merit_columns=None):
     """Candidate frames for a pool, one condition bundle at a time, merit sidecars joined on.
 
     The route to `FomMetrics.evaluate` for any pool whose merits live in sidecars. `evaluate` given
@@ -1813,6 +2037,11 @@ def bundle_frames(root, merit_dir=None, columns=None, require_merits=False):
     expensive, one Python object per row per column, and none is needed once the merits are
     recomputed.
 
+    `merit_columns` projects the SIDECAR read the same way `columns` projects the candidate read,
+    and it is not cosmetic: a hold-out sidecar carries one column per merit per peak budget -- 84
+    of them -- and a feature set wants one. Without it, joining `holdout_merits/` costs more than
+    reading the pool. `None` reads whole sidecars, which is the previous behaviour.
+
     `require_merits` turns the silent failure into a loud one. A missing sidecar, or a join that
     matches nothing, leaves the merit columns null -- and NaN sorts *last*, so the merit does not
     raise, it simply reports as the worst score in the zoo. That is indistinguishable from a real
@@ -1830,7 +2059,8 @@ def bundle_frames(root, merit_dir=None, columns=None, require_merits=False):
         merit_dirs = [Path(one) for one in merit_dir]
     available = candidate_columns_present(root)
     projection = None if columns is None else [name for name in columns if name in available]
-    known = set(RECOMPUTED_MERIT_COLUMNS) | set(SOFT_MERIT_COLUMNS)
+    known = (set(RECOMPUTED_MERIT_COLUMNS) | set(SOFT_MERIT_COLUMNS)
+             | set(STRUCTURAL_COLUMNS) | set(PROBATION_MERIT_COLUMNS) | set(ABSENCE_COLUMNS))
     wanted_merits = [] if columns is None else [name for name in columns if name in known]
 
     by_bundle = {}
@@ -1848,7 +2078,8 @@ def bundle_frames(root, merit_dir=None, columns=None, require_merits=False):
                 sidecar = one/path.name
                 if not sidecar.exists():
                     continue
-                merits = pd.read_parquet(sidecar)
+                merits = pd.read_parquet(sidecar, columns=_sidecar_projection(
+                    sidecar, merit_columns))
                 keys = [key for key in ZOO_KEY_COLUMNS if key in merits.columns]
                 frame = frame.merge(merits, on=keys, how='left', validate='1:1')
                 found = True

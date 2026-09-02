@@ -479,6 +479,134 @@ def reduce_to_per_entry(candidates, score='M20', higher_is_better=True, pool='cr
     return per_entry, calibration_rows, reduce_meta
 
 
+def reduce_many(candidates, scores, entries=None, splits=None, higher_is_better=None,
+                pool='cross_bl', top_n=DEFAULT_TOP_N, bundles=None, bravais_lattices=None,
+                include_control=False, hard_min_decile=HARD_MIN_DECILE, subsample_top_k='auto',
+                allow_inexact_ranks=False, on_shard=None):
+    """`reduce_to_per_entry` for many scores and many splits, in **one** pass over the pool.
+
+    Returns `{(score_name, split): (per_entry, reduce_meta)}`, each entry identical to what
+    `reduce_to_per_entry` returns for that pair. Nothing is re-implemented: this calls
+    `_prepare_shard`, `_shard_scores`, `reduce_pool` and `_combine_reductions`, and runs
+    `rank_exactness` per score independently, so every guard fires exactly as it does there.
+
+    **This is C2-Q-027.** `reduce_to_per_entry` reads the pool once per score, which is right for
+    one merit and wrong for many: S10b would have paid 37 reads of a 43 M-candidate pool instead of
+    one, so it wrote this loop in a script instead, and S10c then copied it. S12 is the fourth
+    consumer -- it scores a dozen retrained arms over the same pool -- so the loop is folded in
+    here rather than copied a third time. The single-score signature is untouched.
+
+    `scores` maps a name to a column name or to a callable taking the shard and returning one value
+    per row, which is how a learned score reaches this: a fitted combiner is not a stored column.
+
+    `higher_is_better` maps a name to its orientation; a name absent from it is looked up in
+    `HIGHER_IS_BETTER` via `orientation_of`, which raises on an unknown merit rather than defaulting
+    to True -- an omitted orientation is a silently reversed ranking that looks like a bad merit
+    (C2-F-085).
+
+    `splits` maps a label to the entry ids reported under it; `None` reduces every entry under the
+    single label `None`. `on_shard` is called with each prepared shard before scoring, for a
+    diagnostic that would otherwise need its own pass over the pool.
+    """
+    if not scores:
+        raise ValueError('no scores to reduce')
+    # `split=None`: the splits are applied per shard below, because a multi-split reduce is the
+    # whole reason this exists and `_resolve_inputs` can only filter to one.
+    entries, shards, source = _resolve_inputs(
+        candidates, entries, bundles=bundles, split=None, bravais_lattices=bravais_lattices,
+        score=next(iter(scores.values())), score_columns=(),
+        )
+    top_k, subsampled = _resolve_subsampling(candidates, subsample_top_k)
+
+    orientation, exactness = {}, {}
+    for name, score in scores.items():
+        if higher_is_better is not None and name in higher_is_better:
+            orientation[name] = bool(higher_is_better[name])
+        else:
+            orientation[name] = orientation_of(name)
+        # Certified on the NAME, not on the column it reads. The key is the merit's identity --
+        # `{'M20': 'M20_recomputed'}` is still M20 -- and `{'learned': 'M_sym'}` is not `M_sym`
+        # however it is computed. Keying on the column would let a learned score inherit an
+        # exactness certificate from whatever column it happened to be stored in, which is the
+        # exact confusion C2-R-013 exists to prevent.
+        exact, reason = rank_exactness(name, top_n, top_k, subsampled)
+        exactness[name] = (exact, reason)
+        if not exact and not allow_inexact_ranks:
+            raise ValueError(
+                f'Refusing to report a rank metric on this pool for {name!r}. {reason} '
+                f'Pass allow_inexact_ranks=True to proceed with the reason recorded in meta.'
+                )
+
+    if splits is None:
+        splits = {None: None}
+    context = entry_context(entries, hard_min_decile=hard_min_decile)
+    degenerate_entries = _degenerate_entries(entries)
+    excluded = ([bundle for bundle in CONTROL_BUNDLES
+                 if (context['condition_bundle'] == bundle).any()] if not include_control else [])
+
+    accumulated = {(name, label): [] for name in scores for label in splits}
+    diagnostics = {name: dict(n_candidates_seen=0, n_non_finite_score=0, n_score_above_1e9=0)
+                   for name in scores}
+    for frame in shards:
+        frame = _prepare_shard(frame, include_control, degenerate_entries)
+        if frame is None:
+            continue
+        if on_shard is not None:
+            on_shard(frame)
+        # The split masks are computed once and the scores one at a time. Holding every score's
+        # values at once would be one float64 array per score per shard -- twenty-one of them over
+        # a 14 M-row bundle is 2.3 GB on top of a 5.3 GB frame, which is the difference between
+        # fitting in memory and not.
+        masks = {}
+        for label, ids in splits.items():
+            if ids is None:
+                masks[label] = None
+            else:
+                mask = frame['entry_id'].isin(ids).to_numpy()
+                if mask.any():
+                    masks[label] = mask
+        shards = {label: (frame if mask is None else frame.loc[mask])
+                  for label, mask in masks.items()}
+        for name, score in scores.items():
+            values = _shard_scores(frame, score, orientation[name])
+            diagnostics[name]['n_candidates_seen'] += int(values.size)
+            diagnostics[name]['n_non_finite_score'] += int(np.sum(~np.isfinite(values)))
+            diagnostics[name]['n_score_above_1e9'] += int(np.sum(np.abs(values) > 1e9))
+            for label, mask in masks.items():
+                accumulated[(name, label)].append(
+                    reduce_pool(shards[label], values if mask is None else values[mask],
+                                pool=pool))
+            del values
+
+    out = {}
+    for (name, label), reductions in accumulated.items():
+        if not reductions:
+            continue
+        per_entry = context.merge(_combine_reductions(reductions),
+                                  on=['entry_id', 'condition_bundle'], how='inner',
+                                  validate='1:1')
+        score = scores[name]
+        meta = dict(
+            score=score if isinstance(score, str) else name,
+            higher_is_better=bool(orientation[name]),
+            pool=pool,
+            reduced_top_n=int(top_n),
+            split=label,
+            bundles_excluded=sorted(excluded),
+            hard_min_decile=int(hard_min_decile),
+            subsample_top_k=(None if top_k is None else int(top_k)),
+            subsampled=subsampled,
+            ranks_exact=bool(exactness[name][0]),
+            rank_exactness=exactness[name][1],
+            source=source,
+            )
+        meta.update(diagnostics[name])
+        out[(name, label)] = (per_entry, meta)
+    if not out:
+        raise ValueError('No candidates to evaluate after filtering')
+    return out
+
+
 def summarise_per_entry(per_entry, reduce_meta, threshold=None, top_n=DEFAULT_TOP_N,
                         strata=DEFAULT_STRATA, pool_subset='all', degenerates='exclude',
                         n_bootstrap=1000, seed=12345, calibration=False, calibration_rows=None):

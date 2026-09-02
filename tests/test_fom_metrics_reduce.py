@@ -119,3 +119,71 @@ def test_a_fully_retained_reduction_may_be_summarised_at_any_depth():
     reduced, _, meta = FomMetrics.reduce_to_per_entry(candidates, score='score', entries=entries)
     assert meta['subsampled'] is False
     FomMetrics.summarise_per_entry(reduced, meta, top_n=50, n_bootstrap=0)
+
+
+# ---------------------------------------------------------------------------------------------
+# reduce_many -- C2-Q-027. One pool pass for many scores.
+# ---------------------------------------------------------------------------------------------
+def test_reduce_many_is_the_single_score_path_run_many_times():
+    """Exactly, column for column. It shares `reduce_pool` and `_combine_reductions` with
+    `reduce_to_per_entry`, so any difference would mean it had grown its own arithmetic."""
+    candidates, entries = _pool()
+    many = FomMetrics.reduce_many(
+        [candidates], {'M20': 'score', 'M_sym': 'score'}, entries=entries,
+        subsample_top_k=None, allow_inexact_ranks=True)
+    for name in ('M20', 'M_sym'):
+        one, _, meta = FomMetrics.reduce_to_per_entry(
+            [candidates], score='score', higher_is_better=FomMetrics.orientation_of(name),
+            entries=entries, subsample_top_k=None, allow_inexact_ranks=True)
+        got, got_meta = many[(name, None)]
+        pd.testing.assert_frame_equal(got, one)
+        for key in ('higher_is_better', 'ranks_exact', 'n_candidates_seen', 'reduced_top_n'):
+            assert got_meta[key] == meta[key]
+
+
+def test_reduce_many_certifies_each_score_on_its_own():
+    """A pool can be exact for one score and not for another, which is the whole of C2-R-013.
+    Reducing them together must not let the certifiable one launder the other."""
+    candidates, entries = _pool()
+    with pytest.raises(ValueError, match='learned'):
+        FomMetrics.reduce_many([candidates], {'M20': 'score', 'learned': 'score'},
+                               entries=entries, higher_is_better={'learned': True},
+                               subsample_top_k=200)
+    out = FomMetrics.reduce_many([candidates], {'M20': 'score', 'learned': 'score'},
+                                 entries=entries, higher_is_better={'learned': True},
+                                 subsample_top_k=200, allow_inexact_ranks=True)
+    assert out[('M20', None)][1]['ranks_exact'] is True
+    assert out[('learned', None)][1]['ranks_exact'] is False
+    assert 'not one of the merits' in out[('learned', None)][1]['rank_exactness']
+
+
+def test_reduce_many_takes_a_callable_which_is_how_a_learned_score_arrives():
+    """A fitted model is not a stored column, so the callable path is the only one S12 can use."""
+    candidates, entries = _pool()
+    out = FomMetrics.reduce_many(
+        [candidates], {'negated_M20': lambda frame: -frame['score'].to_numpy()},
+        entries=entries, higher_is_better={'negated_M20': False},
+        subsample_top_k=None, allow_inexact_ranks=True)
+    got, _ = out[('negated_M20', None)]
+    one, _, _ = FomMetrics.reduce_to_per_entry(
+        [candidates], score='score', entries=entries, subsample_top_k=None,
+        allow_inexact_ranks=True)
+    pd.testing.assert_frame_equal(got, one)
+
+
+def test_reduce_many_splits_are_row_subsets_of_one_pass():
+    """Two splits must give what two separate reductions restricted to those ids would."""
+    candidates, entries = _pool()
+    ids = sorted(set(entries['entry_id']))
+    left, right = set(ids[:len(ids)//2]), set(ids[len(ids)//2:])
+    out = FomMetrics.reduce_many([candidates], {'M20': 'score'}, entries=entries,
+                                 splits={'a': left, 'b': right},
+                                 subsample_top_k=None, allow_inexact_ranks=True)
+    whole, _, _ = FomMetrics.reduce_to_per_entry([candidates], score='score', entries=entries,
+                                                 subsample_top_k=None, allow_inexact_ranks=True)
+    rebuilt = pd.concat([out[('M20', 'a')][0], out[('M20', 'b')][0]], ignore_index=True)
+    assert len(rebuilt) == len(whole)
+    key = ['entry_id', 'condition_bundle']
+    pd.testing.assert_frame_equal(
+        rebuilt.sort_values(key).reset_index(drop=True)[whole.columns],
+        whole.sort_values(key).reset_index(drop=True))
