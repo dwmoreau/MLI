@@ -187,3 +187,50 @@ def test_reduce_many_splits_are_row_subsets_of_one_pass():
     pd.testing.assert_frame_equal(
         rebuilt.sort_values(key).reset_index(drop=True)[whole.columns],
         whole.sort_values(key).reset_index(drop=True))
+
+
+# ---------------------------------------------------------------------------------------------
+# the candidate-level guard -- C2-Q-028
+# ---------------------------------------------------------------------------------------------
+def test_a_candidate_level_statistic_is_refused_on_a_subsampled_pool():
+    """`rank_exactness` guards ranks; this guards everything else computed over candidate rows.
+
+    The rank guard was only the case that happened to be guarded. The retention rule keeps every
+    correct candidate and a top-K-enriched sample of the wrong ones, so its negative set is harder
+    than the pool it stands for -- and that biases an AUC, a calibration curve and an importance
+    table just as surely as it biases a rank.
+    """
+    ok, reason = FomMetrics.candidate_statistic_exactness(False)
+    assert ok and reason is None
+    ok, reason = FomMetrics.candidate_statistic_exactness(True, 'an ECE')
+    assert not ok and 'an ECE' in reason and 'sampling_weight' in reason
+    # An unreadable manifest is not evidence of a full pool, exactly as for ranks.
+    ok, reason = FomMetrics.candidate_statistic_exactness(None)
+    assert not ok and 'no readable manifest' in reason
+
+
+def test_the_candidate_guard_refuses_rather_than_warns_and_can_be_overridden_on_purpose():
+    with pytest.raises(ValueError, match='Refusing to compute'):
+        FomMetrics.check_candidate_statistic([_pool()[0]], 'an AUC', subsample_top_k=200)
+    # Proceeding is allowed, but only deliberately, and the reason comes back to be recorded.
+    reason = FomMetrics.check_candidate_statistic(
+        [_pool()[0]], 'an AUC', subsample_top_k=200, allow_subsampled=True)
+    assert reason and 'top-K-enriched' in reason
+    assert FomMetrics.check_candidate_statistic([_pool()[0]], 'an AUC',
+                                                subsample_top_k=None) is None
+
+
+def test_the_two_guards_agree_about_what_a_full_pool_is():
+    """They must not disagree: a pool that certifies a rank must certify an AUC and the reverse,
+    because both refusals are about the same retention rule."""
+    for subsampled in (False, True, None):
+        rank_ok, _ = FomMetrics.rank_exactness('M20', 10, None if subsampled is not True else 200,
+                                               subsampled)
+        candidate_ok, _ = FomMetrics.candidate_statistic_exactness(subsampled)
+        if subsampled is not True:
+            assert rank_ok == candidate_ok
+        else:
+            # For a merit the subsampler ranked on, a RANK stays exact where a candidate-level
+            # statistic does not -- the top-K union is what preserves the rank and nothing
+            # preserves the negative distribution. That asymmetry is the point of having two.
+            assert rank_ok and not candidate_ok

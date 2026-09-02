@@ -434,8 +434,8 @@ def run_reduce(args):
         higher_is_better=orientation, subsample_top_k=_pool_depth(FIT_POOL),
         allow_inexact_ranks=True,
         )
-    metas.update(_write_reductions(calibration, artifact_dir, args.tag, args.suffix + '_cal',
-                                   require_exact=False))
+    metas.update(_write_reductions(calibration, artifact_dir, args.tag, args.suffix,
+                                   require_exact=False, kind='_cal'))
     (artifact_dir/f'{args.tag}_reduced_meta{args.suffix}.json').write_text(
         json.dumps(metas, indent=2, sort_keys=True, default=str), encoding='utf-8')
     print(f'\n{seen["n"]:,} candidates reduced -> {artifact_dir}')
@@ -456,16 +456,26 @@ def _pool_depth(pool):
     return depth if subsampled else None
 
 
-def _write_reductions(reduced, artifact_dir, tag, suffix, require_exact):
+def _write_reductions(reduced, artifact_dir, tag, run_suffix, require_exact, kind=''):
+    """Write one reduction per (score, split) and return their metas.
+
+    **`kind` and `run_suffix` are different things and were briefly the same one.** `kind` labels
+    what the reduction IS -- '' for the report split, '_cal' for the calibration rows a threshold is
+    chosen on -- and belongs in the meta key, because `run_analyse` looks the two up by split.
+    `run_suffix` namespaces a whole RUN, which is how three fit seeds coexist in one artifact
+    directory, and belongs only in the filename. Folding the second into the meta key made every
+    split label read `fom-dev_seed777`, so the analyse stage matched nothing and a two-hour run
+    ended in a stage that could not find its own output.
+    """
     metas = {}
     for (name, split), (per_entry, meta) in sorted(reduced.items()):
         if require_exact and not meta['ranks_exact']:
             # Asserted rather than trusted: a reduction that silently lost its exactness
             # certificate is the one thing that cannot be detected downstream.
             raise SystemExit(f'{name} on {split} is not rank-exact: {meta["rank_exactness"]}')
-        path = artifact_dir/f'{tag}_reduced_{name}_{split}{suffix}.parquet'
+        path = artifact_dir/f'{tag}_reduced_{name}_{split}{kind}{run_suffix}.parquet'
         per_entry.to_parquet(path, index=False)
-        metas[f'{name}|{split}{suffix}'] = meta
+        metas[f'{name}|{split}{kind}'] = meta
         print(f'  {name:24s} {split:10s} {per_entry.shape[0]:>6,} cells from '
               f'{meta["n_candidates_seen"]:,} candidates', flush=True)
     return metas
@@ -480,7 +490,7 @@ def load_reductions(artifact_dir, tag, suffix):
     out = {}
     for key, meta in metas.items():
         name, split = key.split('|')
-        path = Path(artifact_dir)/f'{tag}_reduced_{name}_{split}.parquet'
+        path = Path(artifact_dir)/f'{tag}_reduced_{name}_{split}{suffix}.parquet'
         out[(name, split)] = (pd.read_parquet(path), meta)
     return out
 
@@ -608,15 +618,55 @@ def _write_contrasts(results, artifact_dir, tag, suffix):
         artifact_dir/f'{tag}_contrasts{suffix}.csv', index=False)
     pd.DataFrame([row for row in headline if row]).to_csv(
         artifact_dir/f'{tag}_mcnemar{suffix}.csv', index=False)
+    _write_per_lattice(results, artifact_dir, tag, suffix)
 
 
-def _pair(reference, arm, reference_name, arm_name, metric, scope):
+def _write_per_lattice(results, artifact_dir, tag, suffix):
+    """One PAIRED test per lattice, for the arms a per-lattice claim is made about.
+
+    The per-lattice table in the main table is a difference of two rates. A difference of rates is
+    not a paired comparison and carries no interval, which is exactly the defect campaign 1 shipped
+    -- every per-lattice claim in its zoo and null packages was an unpaired delta, because its
+    McNemar routine's mask argument raised on every call (F-087, Q34). S09 was the first step in
+    the project to run one paired, and a gate that FAILS on a per-lattice condition had better be
+    failing on the same evidence a passing one would need.
+
+    `stratum_mask` rather than a mask off `per_entry`: `mcnemar` sorts both results by
+    (entry_id, condition_bundle) and applies the mask positionally, so a mask built in the pool's
+    own order lines up with the wrong rows and nothing raises.
+    """
+    rows = []
+    for arm in sorted(results):
+        if arm in ('constant', 'uniform_random'):
+            continue
+        for baseline in ('M_sym', 'M20', 'base'):
+            if baseline not in results or arm == baseline:
+                continue
+            for lattice in FomMetrics.BRAVAIS_LATTICES:
+                try:
+                    mask = FomMetrics.stratum_mask(results[arm], 'bravais_lattice', lattice)
+                except KeyError:
+                    continue
+                if mask.sum() < 2:
+                    continue
+                for metric in ('top10', 'operating_point'):
+                    row = _pair(results[baseline], results[arm], baseline, arm, metric, None,
+                                mask=mask)
+                    if row:
+                        row['scope'] = f'lattice={lattice}'
+                        row['n_entries'] = int(mask.sum())
+                        rows.append(row)
+    pd.DataFrame(rows).to_csv(artifact_dir/f'{tag}_by_lattice_mcnemar{suffix}.csv', index=False)
+
+
+def _pair(reference, arm, reference_name, arm_name, metric, scope, mask=None):
     """One McNemar row plus its paired interval, or None where the stratum is empty."""
     try:
         # `is_hard` is a boolean per-entry column, so the mask is built the same way a
         # per-lattice one is -- through `stratum_mask`, which sorts to `mcnemar`'s own order. A
         # mask taken straight off `per_entry` lines up with the wrong rows and nothing raises.
-        mask = None if scope is None else FomMetrics.stratum_mask(arm, 'is_hard', True)
+        if mask is None:
+            mask = None if scope is None else FomMetrics.stratum_mask(arm, 'is_hard', True)
         # `mcnemar(reference, arm)` reports `n_b_only` as the arm's own wins, so the delta has to
         # be signed the same way or the table contradicts itself: `paired_delta_ci(a, b)` returns
         # `a - b`, which is reference MINUS arm. Passing (arm, reference) makes a positive delta
@@ -704,6 +754,289 @@ def run_skew(args):
     table.to_csv(path, index=False)
     print(table.to_string(index=False))
     print(f'\nwrote {path}')
+    return 0
+
+
+# The three fit seeds. One is not enough: C2-F-061 measured two halves of one feature group
+# swapping significance between seeds, with each half's seed-to-seed spread wider than the effect
+# it was estimating. An arm verdict from one seed is a hypothesis.
+SEED_SUFFIXES = ('', '_seed777', '_seed20260826')
+
+
+# ---------------------------------------------------------------------------------------------
+# stage: transfer -- does a model that never saw a condition still work on it
+# ---------------------------------------------------------------------------------------------
+def run_transfer(args):
+    """Leave-one-condition-bundle-out: fit without a bundle, report on it.
+
+    **This is NOT the error-law transfer the S12 handoff asks for, and that check cannot be run on
+    this benchmark at all.** The handoff says "Benchmark B's error-law bundles make the real check
+    possible for the first time". There are no error-law bundles: DWMM's decision of 2026-08-26 is
+    Gaussian only, with severity (the multiplier) and shape (the sigma intercept) as the axes, and
+    what that leaves untested is carried as **C2-R-008** rather than discharged. Reconfirmed
+    2026-09-01. So this measures transfer across **conditions**, which is the check campaign 1
+    already ran (leave-one-condition-out, 1.6 pp average and 2.7 pp worst), and it must be labelled
+    as that wherever it is quoted. C2-R-008 stands unreduced.
+
+    **And it can only cover three of the nine bundles.** A transfer claim needs the model reported
+    on the condition it did not see, with exact ranks -- which means the fully retained pool, which
+    carries the three severity bundles and none of the sparsity, contaminant or second-phase ones
+    (C2-R-024). So what is measured is transfer across error *severity*: fit without 0.1x, or
+    without 1x, or without 2x, and report on the one left out.
+    """
+    fit_entries = FomBenchmark.load_entries(FIT_POOL)
+    report_entries = FomBenchmark.load_entries(REPORT_POOL)
+    fit_ids, cal_ids = split_ids(fit_entries, args.train_split, HOLDOUT_FRACTION, SEED)
+    assert_disjoint(set(fit_ids) | set(cal_ids), set(report_entries['entry_id']))
+    covariates = FomCombiner.entry_covariates(fit_entries)
+
+    shared = sorted(set(FomBenchmark.available_bundles(FIT_POOL))
+                    & set(FomBenchmark.available_bundles(REPORT_POOL)))
+    all_bundles = sorted(FomBenchmark.available_bundles(FIT_POOL))
+    print(f'{len(all_bundles)} fit bundles, {len(shared)} of them reportable with exact ranks: '
+          f'{", ".join(shared)}')
+
+    groups = arm_groups(())
+    models = {}
+    for held_out in shared:
+        keep = [bundle for bundle in all_bundles if bundle != held_out]
+        started = time.perf_counter()
+        fit_frames = [frame for frame in FomCombiner.combiner_frames_c2(
+            FIT_POOL, fit_entries, groups=groups, bundles=keep, keep_entry_ids=fit_ids,
+            covariates=covariates)]
+        fit_frames = [FomCombiner.subsample_negatives(frame, args.n_negatives, SEED)
+                      for frame in fit_frames]
+        cal_frames = [FomCombiner.subsample_negatives(frame, None, SEED)
+                      for frame in FomCombiner.combiner_frames_c2(
+                          FIT_POOL, fit_entries, groups=groups, bundles=keep,
+                          keep_entry_ids=cal_ids, covariates=covariates)]
+        combiner = FomCombiner.FomCombiner.fit(
+            fit_frames, groups=groups, seed=args.fit_seed, drop=BASE_DROP,
+            weight_column='sampling_weight', **MODEL_PARAMS)
+        combiner.fit_calibrators(cal_frames, weight_column='fit_weight')
+        models[f'without_{held_out}'] = combiner
+        print(f'  fitted without {held_out}: {sum(f.shape[0] for f in fit_frames):,} rows '
+              f'({time.perf_counter() - started:.0f} s)', flush=True)
+        del fit_frames, cal_frames
+
+    # The incumbent, which saw everything, scored in the same pass so the comparison is paired.
+    models['all_bundles'] = FomCombiner.FomCombiner.load(
+        Path(args.models_dir)/f'base_seed{args.fit_seed}')
+    scores = {name: model.score for name, model in models.items()}
+    scores['M_sym'] = 'M_sym'
+
+    reduced = FomMetrics.reduce_many(
+        FomCombiner.combiner_frames_c2(REPORT_POOL, report_entries,
+                                       groups=_union_groups(models)),
+        scores, entries=report_entries, splits={args.report_split: None},
+        higher_is_better={name: True for name in scores},
+        subsample_top_k=_pool_depth(REPORT_POOL))
+
+    rows = []
+    for held_out in shared:
+        name = f'without_{held_out}'
+        for scope_bundle in shared:
+            for label, source in (('held_out', name), ('all_bundles', 'all_bundles')):
+                per_entry, meta = reduced[(source, args.report_split)]
+                mask = per_entry['condition_bundle'] == scope_bundle
+                if not mask.any():
+                    continue
+                result = FomMetrics.summarise_per_entry(
+                    per_entry.loc[mask].reset_index(drop=True), meta, n_bootstrap=0)
+                rows.append(dict(
+                    fitted_without=held_out, reported_on=scope_bundle, arm=label,
+                    is_the_unseen_condition=(scope_bundle == held_out),
+                    n_entries=int(mask.sum()),
+                    top10=float(result.metric('top10')),
+                    top1=float(result.metric('top1')),
+                    rank_only=float(result.metric('rank_only'))))
+    table = pd.DataFrame(rows)
+    wide = table.pivot_table(index=['fitted_without', 'reported_on', 'is_the_unseen_condition'],
+                             columns='arm', values='top10').reset_index()
+    wide['delta_pp'] = 100*(wide['held_out'] - wide['all_bundles'])
+    path = Path(args.artifact_dir)/f'{args.tag}_condition_transfer{args.suffix}.csv'
+    wide.to_csv(path, index=False)
+    unseen = wide[wide['is_the_unseen_condition']]
+    print('\ntop-10 when the model never saw the condition it is reported on:')
+    print(unseen[['fitted_without', 'held_out', 'all_bundles', 'delta_pp']].to_string(index=False))
+    print(f'\nwrote {path}')
+    print('Transfer across CONDITIONS, not across error laws -- no error-law bundle exists '
+          '(C2-R-008), and only 3 of 9 bundles are reportable with exact ranks (C2-R-024).')
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
+# stage: cost -- what the score costs, in get_M20 units, for the record
+# ---------------------------------------------------------------------------------------------
+def run_cost(args):
+    """Price the feature stack and the model against `get_M20`, on a real candidate block.
+
+    **Nothing here decides anything.** Cost stopped being an exclusion criterion in campaign 2 on
+    2026-08-25 -- a merit that outperforms the rest is kept whatever it costs -- and the reason is
+    structural rather than generous: this campaign does not change the inner loop, and the prune and
+    the final ranking each read a merit once per candidate, so a threefold difference is invisible
+    against the Gauss-Newton refinement that produced the candidate. The table exists because the
+    arithmetic is worth knowing and because campaign 1 excluded merits on prices that were wrong by
+    ten to twenty times (C2-F-001).
+
+    Priced per candidate on a real (entry, lattice) block rather than on synthetic input, because
+    every one of these costs is dominated by the reference-line pass and its size is a property of
+    the lattice. A low-symmetry block is the honest place to measure.
+    """
+    import time as _time
+    from mlindex.utilities.FigureOfMerits import get_M20
+    import pyarrow.parquet as pq
+
+    pool = Path(args.report_pool or REPORT_POOL)
+    path = sorted(pool.glob(f'candidates*_{args.cost_lattice}.parquet'))
+    if not path:
+        raise SystemExit(f'no {args.cost_lattice} candidate file under {pool}')
+    frame = pd.DataFrame(
+        next(pq.ParquetFile(path[0]).iter_batches(batch_size=args.cost_rows)).to_pydict())
+    entries = FomBenchmark.load_entries(pool)
+    bundle = frame['condition_bundle'].iloc[0]
+    entries = entries.loc[entries['condition_bundle'] == bundle]
+    n = frame.shape[0]
+    print(f'{n:,} {args.cost_lattice} candidates from {path[0].name}')
+
+    def timed(label, call, repeats=3):
+        """Median of `repeats` timed calls, per candidate. Median rather than best-of: this is a
+        cost for the record, not a benchmark, and the median is what a run actually pays."""
+        samples = []
+        for _ in range(repeats):
+            started = _time.perf_counter()
+            call()
+            samples.append(_time.perf_counter() - started)
+        rows_scored = getattr(call, 'rows', n)
+        return dict(step=label, seconds=float(np.median(samples)), rows=int(rows_scored),
+                    microseconds_per_candidate=float(np.median(samples)/rows_scored*1e6))
+
+    # The unit. Everything else is quoted against this, and it is measured here rather than taken
+    # from S02 so the ratio is internally consistent on one machine at one block size.
+    blocks = []
+    for key, group in frame.groupby(['entry_id', 'lattice_system', 'bravais_lattice',
+                                     'spacegroup', 'n_peaks'], sort=False):
+        entry_id, lattice_system, bravais_lattice, spacegroup, n_peaks = key
+        q2_obs = np.asarray(entries.set_index('entry_id').loc[entry_id, 'q2_obs'],
+                            dtype=np.float64)[:int(n_peaks)]
+        xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
+        blocks.append((q2_obs, xnn, lattice_system, bravais_lattice, spacegroup))
+
+    def assign_all():
+        return [FomBenchmark.assign_lines(*block) for block in blocks]
+
+    prepared = assign_all()
+
+    def m20_only():
+        for (q2_obs, *_), (q2_ref_calc, _, _, q2_calc) in zip(blocks, prepared):
+            get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
+
+    rows = [timed('get_M20 (the unit), reference lines already built', m20_only),
+            timed('assign_lines: build the reference lines', assign_all),
+            timed('reduced_merits: the seven ranking merits',
+                  lambda: FomBenchmark.reduced_merits(frame, entries)),
+            timed('structural_features: the S12 design-matrix columns',
+                  lambda: FomBenchmark.structural_features(frame, entries))]
+
+    combiner = FomCombiner.FomCombiner.load(Path(args.models_dir)/f'base_seed{args.fit_seed}')
+    assembled = next(FomCombiner.combiner_frames_c2(
+        pool, entries, bundles=[bundle], keep_entry_ids=set(frame['entry_id'])))
+    rows.append(timed('design_matrix: assemble the model input',
+                      lambda: combiner.design_matrix(assembled)))
+    matrix = combiner.design_matrix(assembled)
+    rows.append(timed('predict_batch: the tree, at this block size', lambda:
+                      combiner.predict_batch(matrix)))
+    rows.append(timed('score: tree plus per-lattice isotonic, at this block size',
+                      lambda: combiner.score(assembled)))
+
+    # **And the same two at a realistic batch, which is a different number by two orders of
+    # magnitude.** A gradient-boosted tree carries a fixed per-CALL cost that a few thousand rows
+    # do not amortise, and scoring happens over a whole pool: the reduce stage hands it a 14 M-row
+    # bundle. Quoting the small-block figure would price the model at ~34x `get_M20` where it is
+    # nearer 0.1x, which is exactly the kind of error that excluded merits in campaign 1.
+    tiles = max(1, int(np.ceil(args.cost_batch/max(matrix.shape[0], 1))))
+    large = np.repeat(matrix, tiles, axis=0) if tiles > 1 else matrix
+    large_call = (lambda: combiner.predict_batch(large))
+    large_call.rows = large.shape[0]
+    rows.append(timed(f'predict_batch: the tree, at {large.shape[0]:,} rows', large_call,
+                      repeats=2))
+
+    table = pd.DataFrame(rows)
+    unit = table.loc[0, 'microseconds_per_candidate']
+    table['get_M20_units'] = table['microseconds_per_candidate']/unit
+    table.insert(0, 'lattice', args.cost_lattice)
+    table.insert(0, 'n_candidates', n)
+    path_out = Path(args.artifact_dir)/f'{args.tag}_cost.csv'
+    table.to_csv(path_out, index=False)
+    print(table[['step', 'microseconds_per_candidate', 'get_M20_units']].to_string(index=False))
+    print(f'\nwrote {path_out}')
+    print('Cost decides nothing in campaign 2 (decision 2026-08-25); this is for the record.')
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
+# stage: combine -- an arm verdict is what survives every seed
+# ---------------------------------------------------------------------------------------------
+def run_combine(args):
+    """Pool the per-seed contrast tables into one verdict per arm.
+
+    Reports the spread, not just the mean, and two booleans: whether every seed agreed on the
+    **sign**, and whether every seed reached p < 0.05. Both are needed. C2-F-061's decomposition
+    failed precisely because its two halves swapped which of them was significant between seeds
+    while both means stayed positive -- a mean-of-three would have called it settled.
+
+    An arm that is `same_sign_all_seeds` but not `significant_all_seeds` is a direction with weak
+    evidence; an arm that is neither is noise, however large its mean.
+    """
+    artifact_dir = Path(args.artifact_dir)
+    frames = []
+    for suffix in SEED_SUFFIXES:
+        path = artifact_dir/f'{args.tag}_contrasts{suffix}.csv'
+        if not path.exists():
+            print(f'  missing {path.name} -- skipping this seed')
+            continue
+        frame = pd.read_csv(path)
+        frame['seed_suffix'] = suffix or '_seed12345'
+        frames.append(frame)
+    if not frames:
+        raise SystemExit(f'no per-seed contrast tables under {artifact_dir}')
+    if len(frames) < len(SEED_SUFFIXES):
+        print(f'WARNING: combining {len(frames)} seeds of {len(SEED_SUFFIXES)}. A verdict from '
+              f'fewer than three is not what C2-F-061 asks for.')
+
+    everything = pd.concat(frames, ignore_index=True)
+    rows = []
+    for (arm, metric, scope), group in everything.groupby(['arm', 'metric', 'scope'], sort=True):
+        deltas = group['delta_pp'].to_numpy(dtype=float)
+        pvalues = group['p_value'].to_numpy(dtype=float)
+        rows.append(dict(
+            arm=arm, metric=metric, scope=scope, n_seeds=int(group.shape[0]),
+            delta_mean=float(np.mean(deltas)), delta_min=float(np.min(deltas)),
+            delta_max=float(np.max(deltas)), p_max=float(np.max(pvalues)),
+            same_sign_all_seeds=bool(np.all(deltas > 0) or np.all(deltas < 0)),
+            significant_all_seeds=bool(np.all(pvalues < 0.05)),
+            # The spread against the effect. C2-F-061's halves had spreads 6.6x and 8x the quantity
+            # they estimated, which is the shape of a contrast that is not there.
+            spread_over_mean=(float(np.ptp(deltas)/abs(np.mean(deltas)))
+                              if np.mean(deltas) else np.nan),
+            ))
+    table = pd.DataFrame(rows).sort_values(['metric', 'scope', 'delta_mean'], ascending=False)
+    path = artifact_dir/f'{args.tag}_seed_summary.csv'
+    table.to_csv(path, index=False)
+
+    settled = table[(table.scope == 'aggregate') & (table.metric == 'operating_point')
+                    & table.same_sign_all_seeds & table.significant_all_seeds]
+    print(f'\n{len(frames)} seeds combined -> {path}')
+    print(f'\narms settled on the operating point (same sign AND p < 0.05 at every seed):')
+    if settled.empty:
+        print('  none')
+    for _, row in settled.sort_values('delta_mean', ascending=False).iterrows():
+        print(f'  {row["arm"]:24s} {row["delta_mean"]:+7.2f} pp  '
+              f'[{row["delta_min"]:+.2f}, {row["delta_max"]:+.2f}]  p <= {row["p_max"]:.3g}')
+    unsettled = table[(table.scope == 'aggregate') & (table.metric == 'operating_point')
+                      & ~(table.same_sign_all_seeds & table.significant_all_seeds)]
+    print(f'\narms NOT settled ({len(unsettled)}): '
+          f'{", ".join(sorted(unsettled["arm"])) if len(unsettled) else "none"}')
     return 0
 
 
@@ -801,6 +1134,11 @@ def run_calibration(args):
     rate the top bin is the thin one, and a reader has to be able to see how thin.
     """
     arms = load_arms(args.models_dir, args.fit_seed, args.arms)
+    # C2-Q-028's guard, in the one place in this driver that computes a per-candidate statistic.
+    # An ECE on a subsampled pool is the calibration of a population that does not exist, and the
+    # failure is silent -- S10c's within-band control read either side of chance depending on which
+    # pool it was computed on (C2-F-111).
+    FomMetrics.check_candidate_statistic(REPORT_POOL, 'a reliability table and its ECE')
     entries = FomBenchmark.load_entries(REPORT_POOL)
     rng = np.random.default_rng(args.fit_seed)
     collected = {name: [] for name in arms}
@@ -854,7 +1192,7 @@ def _parse_args(argv=None):
         description='S12: fit the learned combiner on the slice, report on the retained pool')
     parser.add_argument('--stage', required=True,
                         choices=('fit', 'reduce', 'analyse', 'skew', 'calibration',
-                                 'export-fit'))
+                                 'export-fit', 'combine', 'cost', 'transfer'))
     parser.add_argument('--models-dir', default=str(MODELS_DIR))
     parser.add_argument('--artifact-dir', default=str(ARTIFACT_DIR))
     parser.add_argument('--tag', default=TAG)
@@ -876,6 +1214,17 @@ def _parse_args(argv=None):
                         help='Path to a `*_fit_frame.parquet` written by --stage export-fit. Its '
                              '`_cal_frame` sibling is read beside it. Given this, --stage fit does '
                              'not touch a pool at all')
+    parser.add_argument('--report-pool', default=None,
+                        help='Pool the cost stage prices on. Defaults to the report pool')
+    parser.add_argument('--cost-lattice', default='mP',
+                        help='Which lattice to price on. Low-symmetry by default: these costs are '
+                             'dominated by the reference-line pass and its size is a property of '
+                             'the lattice, so a cubic block would flatter every row')
+    parser.add_argument('--cost-rows', type=int, default=4000)
+    parser.add_argument('--cost-batch', type=int, default=2_000_000,
+                        help='Rows the model is priced on for the amortised figure. A tree has a '
+                             'fixed per-call cost that a small block does not amortise, and '
+                             'scoring runs over whole pools')
     parser.add_argument('--groups', default=None,
                         help='Comma-separated feature groups for export-fit, overriding the union '
                              'every arm needs. Use it when a pool lacks an optional sidecar; the '
@@ -904,7 +1253,8 @@ def main(argv=None):
     print(f'S12 --stage {args.stage}  commit {_commit()}  seed {args.fit_seed}')
     return {'fit': run_fit, 'reduce': run_reduce, 'analyse': run_analyse,
             'skew': run_skew, 'calibration': run_calibration,
-            'export-fit': run_export_fit}[args.stage](args)
+            'export-fit': run_export_fit, 'combine': run_combine,
+            'cost': run_cost, 'transfer': run_transfer}[args.stage](args)
 
 
 if __name__ == '__main__':

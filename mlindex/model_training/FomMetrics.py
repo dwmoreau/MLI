@@ -253,6 +253,64 @@ def rank_exactness(score, top_n, top_k, subsampled, mrr=True):
             )
     return True, None
 
+def candidate_statistic_exactness(subsampled, statistic='a candidate-level statistic'):
+    """Whether a PER-CANDIDATE statistic on this pool means what it says, and if not, why not.
+
+    Returns `(ok, reason)`, the same shape as `rank_exactness` and for the same purpose: so a number
+    computed anyway carries the statement of what it is.
+
+    **This is C2-Q-028, and it exists because the rank guard was only the case that happened to be
+    guarded.** `rank_exactness` refuses a rank metric on a subsampled pool because the candidates
+    that would have outranked a correct one were kept at 5 %. But the retention rule keeps every
+    correct candidate and only a top-*K*-enriched sample of the wrong ones, so it distorts **any**
+    statistic computed over candidate rows -- every AUC, every calibration curve, every within-band
+    control, every feature-importance table. The negatives it keeps are the hardest ones.
+
+    Measured, and this is why the guard is not hypothetical: S10c's within-M20-band control read
+    **0.4558 on the subsampled slice and 0.5865 on the fully retained pool** -- a sign flip either
+    side of chance, which reversed whether campaign 1's F-131 reproduced (C2-F-111, C2-R-020).
+    Without a guard that number ships.
+
+    `sampling_weight` does not repair it in general. A weight makes a *mean over candidates*
+    unbiased; it does not restore a comparison against candidates that were never written, and a
+    calibration curve or an AUC is not a mean over candidates.
+    """
+    if subsampled is False:
+        return True, None
+    if subsampled is None:
+        return False, ('The pool has no readable manifest, so whether it was negatively subsampled '
+                       'is unknown and no candidate-level statistic can be certified. Pass '
+                       'subsample_top_k explicitly.')
+    return False, (
+        f'{statistic} is computed over candidate rows, and this pool keeps every correct candidate '
+        f'but only a top-K-enriched sample of the incorrect ones -- so its negative set is harder '
+        f'than the pool it stands for and the statistic is biased by an unmeasured amount. '
+        f'`sampling_weight` does not repair this: it makes a mean over candidates unbiased, and a '
+        f'calibration curve, an AUC or an importance table is not a mean over candidates. Compute '
+        f'it on a fully retained pool, or pass allow_subsampled=True with the reason recorded.'
+        )
+
+
+def check_candidate_statistic(candidates, statistic='a candidate-level statistic',
+                              subsample_top_k='auto', allow_subsampled=False):
+    """Raise unless a per-candidate statistic can be certified on `candidates`. Returns the reason.
+
+    The sibling of `reduce_to_per_entry`'s refusal, and deliberately a **refusal** rather than a
+    warning, for the reason that guard gives: a biased statistic is indistinguishable from a real
+    one, and a warning is read once and then not.
+
+    Note the same trap `_resolve_subsampling` carries for ranks: `'auto'` reads a manifest for a
+    pool root and **assumes a full pool for a frame or an iterable**, because a caller who
+    assembled its own frame knows what went into it. So a caller holding frames must pass the depth
+    explicitly, exactly as the reduce stages do.
+    """
+    _, subsampled = _resolve_subsampling(candidates, subsample_top_k)
+    ok, reason = candidate_statistic_exactness(subsampled, statistic)
+    if not ok and not allow_subsampled:
+        raise ValueError(f'Refusing to compute {statistic} on this pool. {reason}')
+    return reason
+
+
 # The columns the metrics need, whatever the score. One bundle of fourteen lattices is 0.3 s
 # and 222 MB projected this way, against ~2 GB with `xnn` and `unit_cell` attached.
 SCORE_INDEPENDENT_COLUMNS = (

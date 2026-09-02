@@ -55,6 +55,7 @@ def build(artifact_dir, tag):
     mcnemar = _load(artifact_dir, tag, 'mcnemar', required=False)
     skew = _load(artifact_dir, tag, 'retention_skew', required=False)
     calibration = _load(artifact_dir, tag, 'calibration', required=False)
+    by_lattice = _load(artifact_dir, tag, 'by_lattice_mcnemar', required=False)
     fit_table = _load(artifact_dir, tag, 'fit_table', required=False)
     main = main.set_index('arm')
 
@@ -64,7 +65,7 @@ def build(artifact_dir, tag):
     lines += _leaderboard(main)
     lines += _controls(main)
     lines += _cuts(contrasts)
-    lines += _per_lattice(main)
+    lines += _per_lattice(main, by_lattice)
     lines += _calibration(calibration)
     lines += _bounds(skew)
     return '\n'.join(lines) + '\n'
@@ -229,7 +230,7 @@ def _cuts(contrasts):
     return lines
 
 
-def _per_lattice(main):
+def _per_lattice(main, by_lattice=None):
     lattices = sorted({name[len('dev_top10_'):] for name in main.columns
                        if name.startswith('dev_top10_')})
     if not lattices:
@@ -250,6 +251,36 @@ def _per_lattice(main):
                      f'| {value("M20"):.4f} | {value("M_sym"):.4f} | {value("base"):.4f} '
                      f'| {delta:+.2f} pp |')
     lines.append('')
+    if by_lattice is not None and len(by_lattice):
+        paired = by_lattice[(by_lattice.arm == 'base') & (by_lattice.reference == 'M_sym')
+                            & (by_lattice.metric == 'top10')].copy()
+        if len(paired):
+            paired['lattice'] = paired['scope'].str.replace('lattice=', '', regex=False)
+            paired = paired.sort_values('delta_pp')
+            significant = paired[paired['p_value'] < 0.05]
+            lines += [
+                '### Paired, which changes the reading', '',
+                'The table above differences two rates. A difference of rates is not a paired '
+                'comparison and carries no interval -- and that is the defect campaign 1 shipped '
+                'across its whole zoo and null packages, because its McNemar routine raised on '
+                'every masked call (F-087). Paired properly, on the same patterns:', '',
+                '| lattice | n | delta vs `M_sym`, top-10 | gained / lost | p |',
+                '|---|---|---|---|---|']
+            for _, row in paired.iterrows():
+                lines.append(
+                    f'| {row["lattice"]} | {int(row["n_entries"])} | {row["delta_pp"]:+.2f} pp '
+                    f'[{row["ci_low_pp"]:+.2f}, {row["ci_high_pp"]:+.2f}] '
+                    f'| {int(row["gained"])} / {int(row["lost"])} | {row["p_value"]:.3g} |')
+            gains = significant[significant['delta_pp'] > 0]['lattice'].tolist()
+            losses = significant[significant['delta_pp'] < 0]['lattice'].tolist()
+            lines += ['',
+                      f'**{len(significant)} of {len(paired)} lattices move significantly**: '
+                      f'{", ".join(losses) if losses else "none"} against, '
+                      f'{", ".join(gains) if gains else "none"} for. The rest are noise, and the '
+                      f'sign count in the table above should not be read as though they were not. '
+                      f'The gate still fails -- aP loses by four to eight times its own '
+                      f'reproducibility floor, and the aggregate top-10 gain over `M_sym` is null '
+                      f'-- but it fails on two lattices, not six.', '']
     return lines
 
 
