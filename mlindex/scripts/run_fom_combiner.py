@@ -1140,15 +1140,38 @@ def run_cost(args):
         for (q2_obs, *_), (q2_ref_calc, _, _, q2_calc) in zip(blocks, prepared):
             get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
 
+    priced = FomCombiner.FomCombiner.load(
+        Path(args.models_dir)/f'{args.transfer_arm}_seed{args.fit_seed}')
+    wanted = set(priced.names)
+
+    def _needs(columns):
+        """Does the arm being priced read any column this group of the sidecar produces?"""
+        return bool(wanted & set(columns))
+
     rows = [timed('get_M20 (the unit), reference lines already built', m20_only),
             timed('assign_lines: build the reference lines', assign_all),
             timed('reduced_merits: the seven ranking merits',
                   lambda: FomBenchmark.reduced_merits(frame, entries)),
-            timed('structural_features: the S12 design-matrix columns',
-                  lambda: FomBenchmark.structural_features(frame, entries))]
+            timed('structural_features: every column the sidecar carries',
+                  lambda: FomBenchmark.structural_features(frame, entries)),
+            # **The same pass with the optional groups this arm does not read switched off.**
+            # Pricing the whole sidecar against a model that reads a fifteenth of it overstates the
+            # serve-time cost, and S15 needs the smaller number: the full pass is a build-time cost
+            # paid once over a pool, this one is closer to what an indexing run pays per candidate.
+            #
+            # **It is still an over-estimate, and by construction.** `structural_features` has flags
+            # for the probation, dropped and absence groups and NONE for the six structural columns
+            # that give it its name -- they are always computed. `core` reads exactly one column of
+            # the fifteen, `n_absent_extra_in_range`, so its true floor is below this row and
+            # reaching it needs a narrower producer than this function. That is S15's to build if
+            # the cost ever matters; here it is recorded so nobody quotes this as the floor.
+            timed('structural_features: this arms optional groups only',
+                  lambda: FomBenchmark.structural_features(
+                      frame, entries, probation=_needs(FomBenchmark.PROBATION_MERIT_COLUMNS),
+                      dropped=_needs(FomBenchmark.DROPPED_MERIT_COLUMNS),
+                      absences=_needs(FomBenchmark.ABSENCE_COLUMNS)))]
 
-    combiner = FomCombiner.FomCombiner.load(
-        Path(args.models_dir)/f'{args.transfer_arm}_seed{args.fit_seed}')
+    combiner = priced
     assembled = next(FomCombiner.combiner_frames_c2(
         pool, entries, bundles=[bundle], keep_entry_ids=set(frame['entry_id'])))
     rows.append(timed('design_matrix: assemble the model input',
