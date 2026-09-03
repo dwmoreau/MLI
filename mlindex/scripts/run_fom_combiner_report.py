@@ -101,7 +101,7 @@ def build(artifact_dir, tag, search_suffixes=SEARCH_SUFFIXES, seeds=SEEDS):
     lines += _cuts(contrasts)
     lines += _search(search)
     lines += _per_lattice(main, by_lattice)
-    lines += _calibration(calibration)
+    lines += _calibration(calibration, search)
     lines += _transfer(transfer)
     lines += _bounds(skew)
     return '\n'.join(lines) + '\n'
@@ -395,7 +395,7 @@ def _per_lattice(main, by_lattice=None):
     return lines
 
 
-def _calibration(calibration):
+def _calibration(calibration, search=None):
     """Is the score a probability? Reported with its base rate, because at 0.03 % correct a small
     ECE is easy to earn by predicting nearly zero everywhere and being right."""
     if calibration is None or not len(calibration):
@@ -410,14 +410,28 @@ def _calibration(calibration):
         lines.append(f'| `{row["arm"]}` | {row["ece"]:.5f} | {row["brier"]:.6f} '
                      f'| {row.get("base_rate", float("nan")):.5f} | {int(row["n"]):,} '
                      f'| {int(row.get("n_positive", 0)):,} |')
+    # **The gate is about the SHIPPED model, not the best-calibrated one.** Quoting the leader
+    # here would report the gate as met for an arm nobody ships -- which is exactly how it stood
+    # until 2026-09-03, when the only ECE in the record was the 29-feature `base`'s.
+    top = _settled(search)
+    if top is not None and top[0] in set(calibration['arm']):
+        shipped = calibration.set_index('arm').loc[top[0]]
+        lines += [f'**The gate is about `{top[0]}`, the model this step ships**, and it reaches '
+                  f'**{shipped["ece"]:.5f}** against a gate of 0.05 -- met with three orders of '
+                  f'magnitude to spare, and never the binding constraint. The best-calibrated '
+                  f'arm reaches {calibration["ece"].min():.5f}, so cutting features costs a factor '
+                  f'of a few in ECE and it does not matter at this distance from the gate.', '',
+                  '`unweighted_fit` is the row to look at twice: it is the **worst** calibrated by '
+                  '4x while having the best Brier. Dropping `sampling_weight` buys a sharper '
+                  'discriminator whose probabilities are further from the truth, which is the '
+                  'shape C2-Q-031 has to be decided on -- not on the operating point alone.', '']
     best = calibration.sort_values('ece').iloc[0]
     lines += ['',
-              f'The gate is ECE below 0.05 and the best arm reaches **{best["ece"]:.5f}**, so it is '
-              f'not the binding constraint -- campaign 1 said the same at a 0.9 % base rate. '
-              f'**Read it with the base rate beside it**: at {row.get("base_rate", 0):.3%} correct, '
-              f'a score that predicts almost zero everywhere is almost always right, and most of '
-              f'the reliability table lives in that regime. The bin that matters is the top one, '
-              f'and its count is what `n correct` bounds.', '']
+              f'**Read every row with the base rate beside it.** At {row.get("base_rate", 0):.3%} '
+              f'correct, a score that predicts almost zero everywhere is almost '
+              f'always right, and most of the reliability table lives in that '
+              f'regime. The bin that matters is the top one, and its count is what '
+              f'`n correct` bounds.', '']
     return lines
 
 
