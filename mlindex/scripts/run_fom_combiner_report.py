@@ -467,42 +467,63 @@ def _load_transfer(artifact_dir, tag):
 
 
 def _transfer(transfer):
-    """Acceptance condition 5, and the two things it is NOT."""
+    """Acceptance condition 5, its size-matched control, and the two things it is NOT."""
     lines = ['## Transfer to a condition the model never saw', '']
     if transfer is None:
         return lines + ['Not run. Acceptance condition 5 is open.', '']
     arm = transfer['arm_features'].iloc[0] if 'arm_features' in transfer else 'unknown'
     unseen = transfer[transfer['is_the_unseen_condition']]
+    controlled = 'condition_effect_pp' in unseen
     lines += [f'Leave-one-condition-bundle-out on the `{arm}` feature set: fit without one error '
               'severity, report on the one left out, against the incumbent that saw all three. '
-              'Both arms are scored in ONE reduction pass over identical rows, so nothing here '
-              'is a population difference.', '',
-              '| fitted without | reported on | crystals | held-out arm | saw everything '
-              '| delta |',
-              '|---|---|---|---|---|---|']
+              'Every arm is scored in ONE reduction pass over identical rows, so nothing here is a '
+              'population difference.', '',
+              '| fitted without | crystals | held-out arm | size-matched | saw everything '
+              '| rows lost | condition lost |',
+              '|---|---|---|---|---|---|---|']
     for _, row in unseen.iterrows():
         n = f'{int(row["n_entries"])}' if 'n_entries' in row and pd.notna(row['n_entries']) else '--'
-        lines.append(f'| `{row["fitted_without"]}` | `{row["reported_on"]}` | {n} '
-                     f'| {_pp(row["held_out"])} | {_pp(row["all_bundles"])} '
-                     f'| **{row["delta_pp"]:+.2f} pp** |')
-    worst = unseen.loc[unseen['delta_pp'].idxmin()]
-    lines += ['', f'**Worst case {worst["delta_pp"]:+.2f} pp**, dropping the `'
-              f'{worst["fitted_without"]}` bundle. Campaign 1\'s leave-one-condition-out measured '
+        matched = _pp(row['size_matched']) if controlled else '--'
+        size = f'{row["size_effect_pp"]:+.2f} pp' if controlled else '--'
+        effect = (f'**{row["condition_effect_pp"]:+.2f} pp**' if controlled
+                  else f'**{row["delta_pp"]:+.2f} pp** (uncontrolled)')
+        lines.append(f'| `{row["fitted_without"]}` | {n} | {_pp(row["held_out"])} | {matched} '
+                     f'| {_pp(row["all_bundles"])} | {size} | {effect} |')
+    column = 'condition_effect_pp' if controlled else 'delta_pp'
+    worst = unseen.loc[unseen[column].idxmin()]
+    lines += ['', f'**Worst case {worst[column]:+.2f} pp**, dropping the '
+              f'`{worst["fitted_without"]}` bundle. Campaign 1\'s leave-one-condition-out measured '
               '1.6 pp average and 2.7 pp worst, on a different arm and a different pool; the '
-              'comparison is indicative, not paired.', '',
-              '**Read as top-10, not as an operating point.** This stage selects no threshold, so '
+              'comparison is indicative, not paired.', '']
+    if controlled:
+        lines += ['**Why there is a size-matched column, and why the last one is the answer.** '
+                  'Withholding a bundle withholds a condition *and* the rows that came with it, '
+                  'and this campaign has already measured that fit size is the binding constraint '
+                  'here -- 14 features beat 29 by 8.6 pp at 157 training crystals. So a loss on '
+                  'the unseen condition is not evidence of failed transfer until the same loss of '
+                  'rows, spread across the conditions the model does see, has been shown to cost '
+                  'less. The control is fitted on the same number of rows, with whole (crystal, '
+                  'bundle) cells drawn at random from all nine bundles, and calibrated on the same '
+                  'rows as the incumbent -- so it differs from the incumbent in row count and in '
+                  'nothing else. **"Condition lost" is the held-out arm against that control**, '
+                  'and it is the only column that is a transfer claim.', '']
+    else:
+        lines += ['**Uncontrolled.** This table carries no size-matched arm, so its delta '
+                  'confounds the condition the model never saw with the rows that condition took '
+                  'with it. Re-run the stage for the controlled contrast.', '']
+    lines += ['**Read as top-10, not as an operating point.** This stage selects no threshold, so '
               'an operating point is undefined for it, and these deltas are not on the same scale '
               'as the ones everywhere else in this document. They are also **differences of rates '
               'on the same crystals, not McNemar contrasts** -- the right quantity for a bound on '
               'what transfer costs, and not a significance claim. No p-value belongs on this '
               'table.', '',
-              '**Two things this is not.** It is **not transfer across error laws** — no error-law '
-              'bundle exists and none is generated (C2-R-008, reaffirmed 2026-09-01), so the '
-              'handoff\'s `S12_error_law_transfer.csv` cannot be produced by any run on this '
-              'benchmark. And it covers **three of nine condition bundles**: a transfer claim needs '
-              'exact ranks, which needs the fully retained pool, which carries the severity axis '
-              'and none of the sparsity, contaminant or second-phase bundles (C2-R-024). So what '
-              'is measured is transfer across error **severity**.', '']
+              '**Two things this is not.** It is **not transfer across error laws** \u2014 no '
+              'error-law bundle exists and none is generated (C2-R-008, reaffirmed 2026-09-01), so '
+              "the handoff's `S12_error_law_transfer.csv` cannot be produced by any run on this "
+              'benchmark. And it covers **three of nine condition bundles**: a transfer claim '
+              'needs exact ranks, which needs the fully retained pool, which carries the severity '
+              'axis and none of the sparsity, contaminant or second-phase bundles (C2-R-024). So '
+              'what is measured is transfer across error **severity**.', '']
     return lines
 
 

@@ -877,6 +877,37 @@ SEARCH2_SEED_SUFFIXES = ('_search2_seed12345', '_search2_seed777', '_search2_see
 # ---------------------------------------------------------------------------------------------
 # stage: transfer -- does a model that never saw a condition still work on it
 # ---------------------------------------------------------------------------------------------
+def _transfer_drop_cells(frames, n_rows, seed):
+    """Remove whole (entry, bundle) cells at random until at least `n_rows` rows are gone.
+
+    **Whole cells, not rows.** One crystal appears under nine bundles with correlated noise, and a
+    pattern's candidates are one unit; thinning rows inside a cell would change what the fit sees
+    ABOUT each pattern rather than HOW MANY patterns it sees -- which is the wrong control for
+    "one bundle fewer", since withholding a bundle also removes whole cells. PROTOCOL section 3
+    rule 5 is the same rule one level up.
+
+    Returns the surviving frames and the row count actually removed, which overshoots `n_rows` by
+    at most one cell.
+    """
+    cells = [(i, entry) for i, frame in enumerate(frames)
+             for entry in sorted(set(frame['entry_id']))]
+    order = np.random.default_rng(seed).permutation(len(cells))
+    removed, dropped = 0, {}
+    for position in order:
+        if removed >= n_rows:
+            break
+        i, entry = cells[position]
+        removed += int((frames[i]['entry_id'] == entry).sum())
+        dropped.setdefault(i, []).append(entry)
+    out = []
+    for i, frame in enumerate(frames):
+        if i in dropped:
+            frame = frame.loc[~frame['entry_id'].isin(dropped[i])]
+        if frame.shape[0]:
+            out.append(frame.reset_index(drop=True))
+    return out, removed
+
+
 def run_transfer(args):
     """Leave-one-condition-bundle-out: fit without a bundle, report on it.
 
@@ -909,27 +940,63 @@ def run_transfer(args):
 
     groups = arm_groups(())
     drop = DROP_SETS[args.transfer_arm]
-    models = {}
-    for held_out in shared:
-        keep = [bundle for bundle in all_bundles if bundle != held_out]
-        started = time.perf_counter()
-        fit_frames = [frame for frame in FomCombiner.combiner_frames_c2(
-            FIT_POOL, fit_entries, groups=groups, bundles=keep, keep_entry_ids=fit_ids,
-            covariates=covariates)]
-        fit_frames = [FomCombiner.subsample_negatives(frame, args.n_negatives, SEED)
-                      for frame in fit_frames]
-        cal_frames = [FomCombiner.subsample_negatives(frame, None, SEED)
-                      for frame in FomCombiner.combiner_frames_c2(
-                          FIT_POOL, fit_entries, groups=groups, bundles=keep,
-                          keep_entry_ids=cal_ids, covariates=covariates)]
+
+    # Assembled ONCE over all nine bundles and then partitioned, rather than re-read per held-out
+    # bundle. Three reads of the fit pool cost three times the I/O for the same rows, and holding
+    # them lets the size-matched control below be built from exactly the same subsample.
+    started = time.perf_counter()
+    all_fit = [FomCombiner.subsample_negatives(frame, args.n_negatives, SEED)
+               for frame in FomCombiner.combiner_frames_c2(
+                   FIT_POOL, fit_entries, groups=groups, bundles=all_bundles,
+                   keep_entry_ids=fit_ids, covariates=covariates)]
+    all_cal = [FomCombiner.subsample_negatives(frame, None, SEED)
+               for frame in FomCombiner.combiner_frames_c2(
+                   FIT_POOL, fit_entries, groups=groups, bundles=all_bundles,
+                   keep_entry_ids=cal_ids, covariates=covariates)]
+    print(f'  assembled {sum(f.shape[0] for f in all_fit):,} fit rows over {len(all_bundles)} '
+          f'bundles ({time.perf_counter() - started:.0f} s)', flush=True)
+
+    def _bundle_of(frame):
+        return frame['condition_bundle'].iloc[0]
+
+    def _fit(fit_frames, cal_frames):
         combiner = FomCombiner.FomCombiner.fit(
             fit_frames, groups=groups, seed=args.fit_seed, drop=drop,
             weight_column='sampling_weight', **MODEL_PARAMS)
         combiner.fit_calibrators(cal_frames, weight_column='fit_weight')
-        models[f'without_{held_out}'] = combiner
-        print(f'  fitted without {held_out}: {sum(f.shape[0] for f in fit_frames):,} rows '
+        return combiner
+
+    models = {}
+    for index, held_out in enumerate(shared):
+        started = time.perf_counter()
+        fit_frames = [f for f in all_fit if _bundle_of(f) != held_out]
+        cal_frames = [f for f in all_cal if _bundle_of(f) != held_out]
+        models[f'without_{held_out}'] = _fit(fit_frames, cal_frames)
+        n_rows = sum(f.shape[0] for f in fit_frames)
+        print(f'  fitted without {held_out}: {n_rows:,} rows '
               f'({time.perf_counter() - started:.0f} s)', flush=True)
-        del fit_frames, cal_frames
+
+        # **The control the contrast is worthless without.** Withholding a bundle withholds a
+        # CONDITION and, at the same time, a slice of the fit set -- and this campaign has already
+        # measured that fit size is the binding constraint here, 14 features beating 29 by 8.6 pp
+        # at 157 crystals (C2-F-134). So a loss on the unseen condition is not evidence of failed
+        # transfer until the same loss of rows, spread across the conditions the model DOES see,
+        # has been shown to cost less. Same row count, same seed, cells drawn from all nine bundles.
+        started = time.perf_counter()
+        # A per-bundle seed, so the three controls are three independent draws rather than nested
+        # prefixes of one permutation -- and derived from the bundle's POSITION, not `hash()`,
+        # which is salted per process in Python 3 and would make this un-rerunnable. The
+        # CALIBRATION rows are left whole and cover all nine bundles, matching the incumbent's:
+        # the control must differ from the incumbent in row count and in nothing else, which is
+        # what makes `held_out` against `control` the condition effect alone.
+        control_fit, removed = _transfer_drop_cells(
+            all_fit, sum(f.shape[0] for f in all_fit) - n_rows, SEED + 1 + index)
+        models[f'size_matched_{held_out}'] = _fit(control_fit, all_cal)
+        print(f'  size-matched control: {sum(f.shape[0] for f in control_fit):,} rows, '
+              f'{removed:,} removed from all bundles ({time.perf_counter() - started:.0f} s)',
+              flush=True)
+        del fit_frames, cal_frames, control_fit
+    del all_fit, all_cal
 
     # The incumbent, which saw everything, scored in the same pass so the comparison is paired.
     incumbent = Path(args.models_dir)/f'{args.transfer_arm}_seed{args.fit_seed}'
@@ -954,7 +1021,8 @@ def run_transfer(args):
     for held_out in shared:
         name = f'without_{held_out}'
         for scope_bundle in shared:
-            for label, source in (('held_out', name), ('all_bundles', 'all_bundles')):
+            for label, source in (('held_out', name), ('all_bundles', 'all_bundles'),
+                                  ('size_matched', f'size_matched_{held_out}')):
                 per_entry, meta = reduced[(source, args.report_split)]
                 mask = per_entry['condition_bundle'] == scope_bundle
                 if not mask.any():
@@ -971,7 +1039,14 @@ def run_transfer(args):
     table = pd.DataFrame(rows)
     index = ['fitted_without', 'reported_on', 'is_the_unseen_condition']
     wide = table.pivot_table(index=index, columns='arm', values='top10').reset_index()
+    # Three quantities, and only the last of them is the transfer claim:
+    #   delta_pp             held-out arm against the incumbent = condition lost AND rows lost
+    #   size_effect_pp       size-matched control against the incumbent = rows lost alone
+    #   condition_effect_pp  held-out arm against the control    = CONDITION lost alone
     wide['delta_pp'] = 100*(wide['held_out'] - wide['all_bundles'])
+    if 'size_matched' in wide:
+        wide['size_effect_pp'] = 100*(wide['size_matched'] - wide['all_bundles'])
+        wide['condition_effect_pp'] = 100*(wide['held_out'] - wide['size_matched'])
     # The crystal count, so a reader can size the delta: on this pool 530 entries make one bundle,
     # so 3.4 pp is eighteen crystals. **The delta is a difference of RATES on the same crystals,
     # not a McNemar** -- which is the right quantity for a transfer bound (how much is lost) and
@@ -984,7 +1059,12 @@ def run_transfer(args):
     unseen = wide[wide['is_the_unseen_condition']]
     print(f'\ntop-10 when the {args.transfer_arm} model never saw the condition it is '
           'reported on:')
-    print(unseen[['fitted_without', 'held_out', 'all_bundles', 'delta_pp']].to_string(index=False))
+    columns = [c for c in ('fitted_without', 'held_out', 'size_matched', 'all_bundles',
+                           'delta_pp', 'size_effect_pp', 'condition_effect_pp') if c in unseen]
+    print(unseen[columns].to_string(index=False))
+    if 'condition_effect_pp' in unseen:
+        print('\ncondition_effect_pp is the transfer claim. delta_pp confounds it with the rows '
+              'the withheld bundle took with it, and size_effect_pp is that confound measured.')
     print(f'\nwrote {path}')
     print('Transfer across CONDITIONS, not across error laws -- no error-law bundle exists '
           '(C2-R-008), and only 3 of 9 bundles are reportable with exact ranks (C2-R-024).')

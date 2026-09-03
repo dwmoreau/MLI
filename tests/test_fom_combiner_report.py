@@ -151,3 +151,71 @@ def test_the_arm_comes_from_the_file_name_when_the_table_predates_the_column(tmp
     loaded = report._load_transfer(tmp_path, 'S12_combiner')
     assert loaded['arm_features'].iloc[0] == 'core'
     assert '`core` feature set' in '\n'.join(report._transfer(loaded))
+
+
+# ---------------------------------------------------------------------------------------------
+# the size-matched control
+# ---------------------------------------------------------------------------------------------
+def _controlled_table(tmp_path):
+    frame = pd.DataFrame([
+        dict(fitted_without='c2_error0.1_cont0', reported_on='c2_error0.1_cont0',
+             is_the_unseen_condition=True, all_bundles=0.9434, held_out=0.9094,
+             size_matched=0.9245, n_entries=530, delta_pp=-3.40,
+             size_effect_pp=-1.89, condition_effect_pp=-1.51, arm_features='core'),
+        dict(fitted_without='c2_error2_cont0', reported_on='c2_error2_cont0',
+             is_the_unseen_condition=True, all_bundles=0.7811, held_out=0.7849,
+             size_matched=0.7736, n_entries=530, delta_pp=0.38,
+             size_effect_pp=-0.75, condition_effect_pp=1.13, arm_features='core'),
+    ])
+    frame.to_csv(tmp_path/'S12_combiner_condition_transfer_core.csv', index=False)
+    return frame
+
+
+def test_the_worst_case_is_read_off_the_CONTROLLED_contrast(tmp_path):
+    """The uncontrolled delta and the transfer claim can name different bundles.
+
+    Here `c2_error0.1_cont0` is worst on both, but its uncontrolled −3.40 pp is mostly the rows the
+    withheld bundle took with it: the transfer claim is −1.51 pp. Quoting −3.40 would overstate the
+    cost of an unseen condition by more than a factor of two.
+    """
+    _controlled_table(tmp_path)
+    text = '\n'.join(report._transfer(report._load_transfer(tmp_path, 'S12_combiner')))
+    assert 'Worst case -1.51 pp' in text
+    assert 'uncontrolled' not in text
+    assert 'only column that is a transfer claim' in text
+    assert '| 530 |' in text
+
+
+def test_an_uncontrolled_table_says_so_rather_than_passing_its_delta_off_as_transfer(tmp_path):
+    """A table from before the control existed must not read as if it had one."""
+    pd.DataFrame([dict(fitted_without='c2_error1_cont0', reported_on='c2_error1_cont0',
+                       is_the_unseen_condition=True, all_bundles=0.84, held_out=0.80,
+                       delta_pp=-4.0)]).to_csv(
+        tmp_path/'S12_combiner_condition_transfer_core.csv', index=False)
+    text = '\n'.join(report._transfer(report._load_transfer(tmp_path, 'S12_combiner')))
+    assert '(uncontrolled)' in text
+    assert 'confounds the condition' in text
+
+
+def test_the_control_removes_whole_crystals_and_hits_the_row_target(tmp_path):
+    """One crystal's candidates are one unit -- thinning inside a cell is the wrong control.
+
+    Whole (crystal, bundle) cells go, so the control differs from the incumbent in HOW MANY
+    patterns it saw, not in what it saw about each. That is what makes it comparable to dropping
+    a bundle, which also removes whole cells.
+    """
+    import numpy as np
+    rng = np.random.default_rng(0)
+    frames = [pd.DataFrame({'entry_id': np.repeat(np.arange(10), 20) + 100*b,
+                            'condition_bundle': f'bundle{b}',
+                            'value': rng.random(200)}) for b in range(3)]
+    kept, removed = driver._transfer_drop_cells(frames, 150, seed=7)
+    assert removed >= 150
+    total = sum(f.shape[0] for f in kept)
+    assert total == 600 - removed
+    # No crystal is half-present.
+    for frame in kept:
+        assert set(frame.groupby('entry_id').size()) == {20}
+    # And the removals are spread over bundles rather than taken from one.
+    surviving = {f['condition_bundle'].iloc[0] for f in kept}
+    assert len(surviving) >= 2
