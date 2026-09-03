@@ -30,12 +30,22 @@ PER_LATTICE_FLOOR_PP = (1.38, 2.85)
 
 
 def _load(artifact_dir, tag, name, required=True):
+    """One artefact table, or None when an optional one is absent.
+
+    **A file with no columns counts as absent**, not as a crash. An interrupted write leaves a
+    zero-byte one behind and an empty frame writes a bare newline; `read_csv` raises
+    `EmptyDataError` on both, which would take down the whole document over a section that is
+    optional anyway.
+    """
     path = Path(artifact_dir)/f'{tag}_{name}.csv'
-    if not path.exists():
-        if required:
-            raise SystemExit(f'{path} is missing; run the analyse stage first')
-        return None
-    return pd.read_csv(path)
+    if path.exists():
+        try:
+            return pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            pass
+    if required:
+        raise SystemExit(f'{path} is missing or empty; run the analyse stage first')
+    return None
 
 
 def _pp(value):
@@ -49,7 +59,24 @@ def _significance(row):
             f'{int(row["gained"])} gained / {int(row["lost"])} lost, p = {row["p_value"]:.2g}')
 
 
-def build(artifact_dir, tag):
+SEARCH_SUFFIXES = ('_search', '_search2')
+SEEDS = (12345, 777, 20260826)
+
+# What each ladder was asking, in the order they were run. The main ladder asks whether each
+# feature FAMILY earns its place; the search ladders start from that answer and cut columns.
+LADDER_TITLES = {
+    '_search': ('Cycle 1 -- one column at a time',
+                'Starting from `lean`, the sixteen features left once the structural family is '
+                'dropped, remove each column singly and refit.'),
+    '_search2': ('Cycle 2 -- the joint drops cycle 1 implies',
+                 'A column with no individual effect is not the same as a column that can be '
+                 'removed: these features are correlated by construction, so removing any one '
+                 'leaves the information in its neighbours. Cycle 2 removes them together.'),
+}
+
+
+
+def build(artifact_dir, tag, search_suffixes=SEARCH_SUFFIXES, seeds=SEEDS):
     main = _load(artifact_dir, tag, 'main_table')
     contrasts = _load(artifact_dir, tag, 'contrasts', required=False)
     mcnemar = _load(artifact_dir, tag, 'mcnemar', required=False)
@@ -58,6 +85,8 @@ def build(artifact_dir, tag):
     by_lattice = _load(artifact_dir, tag, 'by_lattice_mcnemar', required=False)
     seeds = _load(artifact_dir, tag, 'seed_summary', required=False)
     fit_table = _load(artifact_dir, tag, 'fit_table', required=False)
+    transfer = _load_transfer(artifact_dir, tag)
+    search = _load_search(artifact_dir, tag, search_suffixes, seeds)
     main = main.set_index('arm')
 
     lines = ['# S12 — the learned combiner, cut hard', '']
@@ -67,8 +96,10 @@ def build(artifact_dir, tag):
     lines += _controls(main)
     lines += _seeds(seeds)
     lines += _cuts(contrasts)
+    lines += _search(search)
     lines += _per_lattice(main, by_lattice)
     lines += _calibration(calibration)
+    lines += _transfer(transfer)
     lines += _bounds(skew)
     return '\n'.join(lines) + '\n'
 
@@ -350,6 +381,122 @@ def _calibration(calibration):
     return lines
 
 
+
+
+def _load_search(artifact_dir, tag, suffixes, seeds):
+    """Per-ladder levels averaged over fit seeds, with each arm's per-seed spread.
+
+    Levels come from the per-seed `main_table`s and the settled/unsettled call comes from the
+    `seed_summary`, because an arm is only settled if its contrast holds the SAME SIGN at every
+    seed (C2-F-061: a single-seed contrast can invert, and `m20_only` was significant at every
+    seed in OPPOSITE directions).
+    """
+    out = []
+    for suffix in suffixes:
+        frames = [t for t in (_load(artifact_dir, tag, f'main_table{suffix}_seed{seed}',
+                                    required=False) for seed in seeds) if t is not None]
+        if not frames:
+            continue
+        levels = pd.concat(frames, ignore_index=True)
+        agg = levels.groupby('arm').agg(
+            operating_point=('operating_point', 'mean'),
+            top10=('top10', 'mean'),
+            n_features=('n_features', 'max'),
+            n_seeds=('operating_point', 'size')).reset_index()
+        summary = _load(artifact_dir, tag, f'seed_summary{suffix}', required=False)
+        settled = {}
+        if summary is not None and len(summary):
+            block = summary[(summary['metric'] == 'operating_point')
+                            & (summary['scope'] == 'aggregate')]
+            for _, row in block.iterrows():
+                settled[row['arm']] = (row['delta_mean'], row['delta_min'], row['delta_max'])
+        out.append((suffix, agg.sort_values('operating_point', ascending=False), settled))
+    return out
+
+
+def _search(search):
+    """The backward elimination, and the model the campaign actually settled on."""
+    lines = ['## The feature search', '']
+    if not search:
+        return lines + ['Not run.', '']
+    lines += ['Every cut below is a **retrained paired arm**: the model is refitted from scratch '
+              'without the column, and the two arms are compared on the same crystals. No cut '
+              'rests on an importance table -- permuting campaign 1\'s extinction-group feature '
+              'cost 7.28 pp while retraining without it cost 0.004 pp, and that gap is the reason '
+              'this step exists. Levels are the mean over three fit seeds; an arm is **settled** '
+              'only if its contrast keeps the same sign at all three.', '']
+    for suffix, agg, settled in search:
+        title, blurb = LADDER_TITLES.get(suffix, (suffix.lstrip('_'), ''))
+        lines += [f'### {title}', '', blurb, '',
+                  '| arm | features | operating point | top-10 | contrast, mean [min, max] |',
+                  '|---|---|---|---|---|']
+        for _, row in agg.iterrows():
+            features = '--' if pd.isna(row['n_features']) else f'{int(row["n_features"])}'
+            if row['arm'] in settled:
+                mean, low, high = settled[row['arm']]
+                mark = '' if (low > 0) == (high > 0) else ' *(sign flips)*'
+                contrast = f'{mean:+.2f} pp [{low:+.2f}, {high:+.2f}]{mark}'
+            else:
+                contrast = 'reference'
+            lines.append(f'| `{row["arm"]}` | {features} | {_pp(row["operating_point"])} '
+                         f'| {_pp(row["top10"])} | {contrast} |')
+        lines.append('')
+    return lines
+
+
+def _load_transfer(artifact_dir, tag):
+    """The condition-transfer table, whichever arm produced it.
+
+    Named by arm (`_condition_transfer_core.csv`) because the stage can be pointed at any feature
+    set and a transfer number quoted for the wrong one is a number for a model nobody ships. The
+    settled arm is preferred; the older unsuffixed name is read as a fallback so a table written
+    before the stage was parameterised is not silently dropped.
+    """
+    for name in ('condition_transfer_core', 'condition_transfer_lean',
+                 'condition_transfer_base', 'condition_transfer'):
+        table = _load(artifact_dir, tag, name, required=False)
+        if table is not None and len(table):
+            # The FILE NAME is the authority on which arm this is, not a column inside it: the
+            # stage was parameterised after its first run, so an early table carries the name and
+            # not the column, and a column is the thing a hand-edit can make disagree.
+            if 'arm_features' not in table:
+                table = table.assign(
+                    arm_features=name[len('condition_transfer'):].lstrip('_') or 'unknown')
+            return table
+    return None
+
+
+def _transfer(transfer):
+    """Acceptance condition 5, and the two things it is NOT."""
+    lines = ['## Transfer to a condition the model never saw', '']
+    if transfer is None:
+        return lines + ['Not run. Acceptance condition 5 is open.', '']
+    arm = transfer['arm_features'].iloc[0] if 'arm_features' in transfer else 'unknown'
+    unseen = transfer[transfer['is_the_unseen_condition']]
+    lines += [f'Leave-one-condition-bundle-out on the `{arm}` feature set: fit without one error '
+              'severity, report on the one left out, against the incumbent that saw all three. '
+              'Paired in one reduction pass, so the two arms are scored on identical rows.', '',
+              '| fitted without | reported on | held-out arm | saw everything | delta |',
+              '|---|---|---|---|---|']
+    for _, row in unseen.iterrows():
+        lines.append(f'| `{row["fitted_without"]}` | `{row["reported_on"]}` '
+                     f'| {_pp(row["held_out"])} | {_pp(row["all_bundles"])} '
+                     f'| **{row["delta_pp"]:+.2f} pp** |')
+    worst = unseen.loc[unseen['delta_pp'].idxmin()]
+    lines += ['', f'**Worst case {worst["delta_pp"]:+.2f} pp**, dropping the `'
+              f'{worst["fitted_without"]}` bundle. Campaign 1\'s leave-one-condition-out measured '
+              '1.6 pp average and 2.7 pp worst, on a different arm and a different pool; the '
+              'comparison is indicative, not paired.', '',
+              '**Two things this is not.** It is **not transfer across error laws** — no error-law '
+              'bundle exists and none is generated (C2-R-008, reaffirmed 2026-09-01), so the '
+              'handoff\'s `S12_error_law_transfer.csv` cannot be produced by any run on this '
+              'benchmark. And it covers **three of nine condition bundles**: a transfer claim needs '
+              'exact ranks, which needs the fully retained pool, which carries the severity axis '
+              'and none of the sparsity, contaminant or second-phase bundles (C2-R-024). So what '
+              'is measured is transfer across error **severity**.', '']
+    return lines
+
+
 def _bounds(skew):
     lines = ['## What this does not measure', '',
              '- **The hard stratum.** 20 cells over 20 crystals, 6 reachable (C2-R-019). The fix '
@@ -427,9 +574,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate S12's results document and figure")
     parser.add_argument('--artifact-dir', default=str(ARTIFACT_DIR))
     parser.add_argument('--tag', default='S12_combiner')
+    parser.add_argument('--search-suffix', nargs='*', default=list(SEARCH_SUFFIXES),
+                        help='Ladder suffixes whose per-seed tables the feature-'
+                             'search section reads')
+    parser.add_argument('--seed', nargs='*', type=int, default=list(SEEDS),
+                        help='Fit seeds the levels are averaged over')
     args = parser.parse_args(argv)
 
-    document = build(args.artifact_dir, args.tag)
+    document = build(args.artifact_dir, args.tag,
+                     search_suffixes=tuple(args.search_suffix),
+                     seeds=tuple(args.seed))
     path = Path(args.artifact_dir)/f'{args.tag}.md'
     path.write_text(document, encoding='utf-8')
     table = pd.read_csv(Path(args.artifact_dir)/f'{args.tag}_main_table.csv').set_index('arm')

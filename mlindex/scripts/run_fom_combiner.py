@@ -183,6 +183,12 @@ WEAK_MERITS = ('M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
 WEAK_CONTEXT = ('ctx_M20_gap_to_best', 'ctx_n_over_gap_to_best', 'ctx_max_gap_gap_to_best')
 WEAK_COUNTS = ('n_absent_extra', 'f_absent_extra', 'n_groups_searched')
 
+# The three ladders' surviving arms, by name, so `--stage transfer` and `--stage cost` can be
+# pointed at the model the campaign actually settled on. Both stages hardcoded `base` while `base`
+# was the only fitted arm; `core` is 14 features and 8.6 pp better, so a transfer or cost number
+# quoted for `base` is a number for a model nobody is going to ship.
+DROP_SETS = {'base': BASE_DROP, 'lean': LEAN_DROP, 'core': CORE_DROP}
+
 
 def search2_arms():
     """`core`, the three joint family drops, and the minimal set they imply."""
@@ -902,6 +908,7 @@ def run_transfer(args):
           f'{", ".join(shared)}')
 
     groups = arm_groups(())
+    drop = DROP_SETS[args.transfer_arm]
     models = {}
     for held_out in shared:
         keep = [bundle for bundle in all_bundles if bundle != held_out]
@@ -916,7 +923,7 @@ def run_transfer(args):
                           FIT_POOL, fit_entries, groups=groups, bundles=keep,
                           keep_entry_ids=cal_ids, covariates=covariates)]
         combiner = FomCombiner.FomCombiner.fit(
-            fit_frames, groups=groups, seed=args.fit_seed, drop=BASE_DROP,
+            fit_frames, groups=groups, seed=args.fit_seed, drop=drop,
             weight_column='sampling_weight', **MODEL_PARAMS)
         combiner.fit_calibrators(cal_frames, weight_column='fit_weight')
         models[f'without_{held_out}'] = combiner
@@ -925,8 +932,14 @@ def run_transfer(args):
         del fit_frames, cal_frames
 
     # The incumbent, which saw everything, scored in the same pass so the comparison is paired.
-    models['all_bundles'] = FomCombiner.FomCombiner.load(
-        Path(args.models_dir)/f'base_seed{args.fit_seed}')
+    incumbent = Path(args.models_dir)/f'{args.transfer_arm}_seed{args.fit_seed}'
+    if not incumbent.is_dir():
+        raise SystemExit(
+            f'no fitted {args.transfer_arm} arm at {incumbent}. The incumbent must be the SAME\n'
+            f'model the held-out arms are, refit only without a bundle -- refitting it here\n'
+            f'instead would confound the transfer contrast with fit noise. Point --models-dir\n'
+            f'at the ladder that fitted it (core lives under fom_combiner_c2_search2).')
+    models['all_bundles'] = FomCombiner.FomCombiner.load(incumbent)
     scores = {name: model.score for name, model in models.items()}
     scores['M_sym'] = 'M_sym'
 
@@ -959,10 +972,13 @@ def run_transfer(args):
     wide = table.pivot_table(index=['fitted_without', 'reported_on', 'is_the_unseen_condition'],
                              columns='arm', values='top10').reset_index()
     wide['delta_pp'] = 100*(wide['held_out'] - wide['all_bundles'])
-    path = Path(args.artifact_dir)/f'{args.tag}_condition_transfer{args.suffix}.csv'
+    wide['arm_features'] = args.transfer_arm
+    path = (Path(args.artifact_dir)
+            / f'{args.tag}_condition_transfer_{args.transfer_arm}{args.suffix}.csv')
     wide.to_csv(path, index=False)
     unseen = wide[wide['is_the_unseen_condition']]
-    print('\ntop-10 when the model never saw the condition it is reported on:')
+    print(f'\ntop-10 when the {args.transfer_arm} model never saw the condition it is '
+          'reported on:')
     print(unseen[['fitted_without', 'held_out', 'all_bundles', 'delta_pp']].to_string(index=False))
     print(f'\nwrote {path}')
     print('Transfer across CONDITIONS, not across error laws -- no error-law bundle exists '
@@ -1043,7 +1059,8 @@ def run_cost(args):
             timed('structural_features: the S12 design-matrix columns',
                   lambda: FomBenchmark.structural_features(frame, entries))]
 
-    combiner = FomCombiner.FomCombiner.load(Path(args.models_dir)/f'base_seed{args.fit_seed}')
+    combiner = FomCombiner.FomCombiner.load(
+        Path(args.models_dir)/f'{args.transfer_arm}_seed{args.fit_seed}')
     assembled = next(FomCombiner.combiner_frames_c2(
         pool, entries, bundles=[bundle], keep_entry_ids=set(frame['entry_id'])))
     rows.append(timed('design_matrix: assemble the model input',
@@ -1243,7 +1260,19 @@ def run_calibration(args):
     sample is a faithful miniature and `n_positive` is reported beside every row -- at a 0.03 % base
     rate the top bin is the thin one, and a reader has to be able to see how thin.
     """
-    arms = load_arms(args.models_dir, args.fit_seed, args.arms)
+    # Arms from more than one ladder in ONE pool pass. `core` and `lean` were fitted by the
+    # search ladders and live under their own model directories, and the shipped model is `core`
+    # -- so a calibration table that can only see `fom_combiner_c2/` reports the ECE of a 29-feature
+    # model nobody will ship. A second pass over 43 M candidates to add one arm is 30 minutes for
+    # nothing; loading both directories costs one glob.
+    arms = {}
+    for directory in [args.models_dir] + list(args.also_models_dir or ()):
+        for name, combiner in load_arms(directory, args.fit_seed, args.arms).items():
+            if name in arms:
+                raise SystemExit(
+                    f'arm {name!r} was fitted in two of the given model directories. They would '
+                    f'be different models under one label; pass --arms to pick one.')
+            arms[name] = combiner
     # C2-Q-028's guard, in the one place in this driver that computes a per-candidate statistic.
     # An ECE on a subsampled pool is the calibration of a population that does not exist, and the
     # failure is silent -- S10c's within-band control read either side of chance depending on which
@@ -1304,6 +1333,9 @@ def _parse_args(argv=None):
                         choices=('fit', 'reduce', 'analyse', 'skew', 'calibration',
                                  'export-fit', 'combine', 'cost', 'transfer'))
     parser.add_argument('--models-dir', default=str(MODELS_DIR))
+    parser.add_argument('--also-models-dir', nargs='*', default=None,
+                        help='Further model directories the calibration stage loads arms from, '
+                             'so one pool pass covers arms fitted by different ladders')
     parser.add_argument('--artifact-dir', default=str(ARTIFACT_DIR))
     parser.add_argument('--tag', default=TAG)
     parser.add_argument('--suffix', default='',
@@ -1329,6 +1361,10 @@ def _parse_args(argv=None):
                              'starts from the answer -- the sixteen features left once the '
                              'structural family is dropped -- and removes one column at a time, '
                              'which is what the acceptance gate means by justifying a cut')
+    parser.add_argument('--transfer-arm', choices=tuple(DROP_SETS), default='core',
+                        help='Which feature set the transfer and cost stages measure. Defaults\n'
+                             'to the 14-feature core the search settled on, NOT the 29-feature\n'
+                             'base -- pass --models-dir the ladder that holds it')
     parser.add_argument('--report-pool', default=None,
                         help='Pool the cost stage prices on. Defaults to the report pool')
     parser.add_argument('--cost-lattice', default='mP',
