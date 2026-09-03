@@ -83,18 +83,21 @@ def build(artifact_dir, tag, search_suffixes=SEARCH_SUFFIXES, seeds=SEEDS):
     skew = _load(artifact_dir, tag, 'retention_skew', required=False)
     calibration = _load(artifact_dir, tag, 'calibration', required=False)
     by_lattice = _load(artifact_dir, tag, 'by_lattice_mcnemar', required=False)
-    seeds = _load(artifact_dir, tag, 'seed_summary', required=False)
+    # NOT `seeds`, which is this function's own parameter: shadowing it here handed
+    # `_load_search` a DataFrame where it wanted the seed numbers, and it silently found no
+    # ladder tables and reported the feature search as "Not run."
+    seed_summary = _load(artifact_dir, tag, 'seed_summary', required=False)
     fit_table = _load(artifact_dir, tag, 'fit_table', required=False)
     transfer = _load_transfer(artifact_dir, tag)
     search = _load_search(artifact_dir, tag, search_suffixes, seeds)
     main = main.set_index('arm')
 
     lines = ['# S12 — the learned combiner, cut hard', '']
-    lines += _verdict(main, mcnemar)
+    lines += _verdict(main, mcnemar, search)
     lines += _how(main, fit_table)
     lines += _leaderboard(main)
     lines += _controls(main)
-    lines += _seeds(seeds)
+    lines += _seeds(seed_summary)
     lines += _cuts(contrasts)
     lines += _search(search)
     lines += _per_lattice(main, by_lattice)
@@ -104,11 +107,46 @@ def build(artifact_dir, tag, search_suffixes=SEARCH_SUFFIXES, seeds=SEEDS):
     return '\n'.join(lines) + '\n'
 
 
-def _verdict(main, mcnemar):
+def _settled(search):
+    """The last ladder's reference arm and its contrasts: the model this step actually settled on.
+
+    Returned as (name, level row, {arm: (mean, min, max)}) or None. The LAST ladder is the settled
+    one by construction -- each cycle starts from the previous cycle's answer -- and its reference
+    arm is the one row carrying no contrast against itself.
+    """
+    if not search:
+        return None
+    _, agg, settled = search[-1]
+    reference = [name for name in agg['arm'] if name not in settled]
+    if len(reference) != 1:
+        return None
+    name = reference[0]
+    return name, agg.set_index('arm').loc[name], settled
+
+
+def _verdict(main, mcnemar, search=None):
     """The answer, first, in one paragraph and one table."""
     lines = ['## The verdict', '']
+    top = _settled(search)
+    if top is not None:
+        name, row, settled = top
+        features = '--' if pd.isna(row['n_features']) else f'{int(row["n_features"])}'
+        lines += [f'**The model this step settled on is `{name}`, at {features} features**, and it '
+                  f'reaches **{_pp(row["operating_point"])}** of operating point over three fit '
+                  f'seeds.']
+        against = [f'**{-mean:+.2f} pp** against `{arm}`'
+                   for arm, (mean, low, high) in sorted(settled.items(), key=lambda kv: kv[1][0])
+                   if arm in ('M20', 'M_sym') and (low > 0) == (high > 0)]
+        if against:
+            lines[-1] += ' That is ' + ', and '.join(reversed(against)) + \
+                         ', the same sign at every seed.'
+        lines += ['', 'Everything below the next table is the road to it: the family ladder first, '
+                  'which asks whether each GROUP of features earns its place, then the two '
+                  'backward-elimination cycles that cut columns. **The family ladder\'s reference '
+                  'arm `base` is not the answer** -- it is 29 features and the search beat it by '
+                  'cutting fifteen of them.', '']
     if 'base' not in main.index:
-        return lines + ['The base arm did not fit; there is no verdict to state.', '']
+        return lines + ['The family ladder did not fit; there is no ladder to report.', '']
     base = main.loc['base']
     rows = []
     for name in ('M20', 'M_sym', 'base', 'no_symmetry', 'constant', 'uniform_random'):
@@ -116,24 +154,26 @@ def _verdict(main, mcnemar):
             row = main.loc[name]
             rows.append(f'| `{name}` | {row["operating_point"]:.4f} | {row["top10"]:.4f} | '
                         f'{row["top1"]:.4f} | {row["precision"]:.4f} | {row["reported"]:.4f} |')
-    lines += ['| score | operating point | top-10 | top-1 | precision | reported on |',
+    lines += ['### The family ladder, at one fit seed', '',
+              '| score | operating point | top-10 | top-1 | precision | reported on |',
               '|---|---|---|---|---|---|'] + rows + ['']
     if mcnemar is not None and len(mcnemar):
         against = mcnemar[(mcnemar.arm == 'base') & (mcnemar.scope == 'aggregate')]
         for _, row in against.iterrows():
-            lines.append(f'**Against `{row["reference"]}` on {row["metric"]}:** '
+            lines.append(f'**`base` against `{row["reference"]}` on {row["metric"]}:** '
                          f'{_significance(row)}.')
         lines.append('')
     lines += [
         f'Read every rank number against the tie-break floor S08 measured for this population, '
         f'**{TIEBREAK_FLOOR:.4f}** of top-10, and every contrast against the contrast floor, '
         f'**{CONTRAST_FLOOR_PP:.3f} pp** aggregate and '
-        f'{PER_LATTICE_FLOOR_PP[0]:.2f}–{PER_LATTICE_FLOOR_PP[1]:.2f} pp per lattice. '
+        f'{PER_LATTICE_FLOOR_PP[0]:.2f}\u2013{PER_LATTICE_FLOOR_PP[1]:.2f} pp per lattice. '
         f'A constant score reaching {TIEBREAK_FLOOR:.4f} is not a merit doing anything; it is '
         f'ties breaking cubic-first while the dominant failure is symmetry lowering.', '',
-        f'The base arm carries **{int(base["n_features"]) if "n_features" in base else 0} '
+        f'`base` carries **{int(base["n_features"]) if "n_features" in base else 0} '
         f'features** where campaign 1 carried 65.', '']
     return lines
+
 
 
 def _how(main, fit_table):

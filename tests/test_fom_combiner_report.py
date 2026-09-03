@@ -219,3 +219,28 @@ def test_the_control_removes_whole_crystals_and_hits_the_row_target(tmp_path):
     # And the removals are spread over bundles rather than taken from one.
     surviving = {f['condition_bundle'].iloc[0] for f in kept}
     assert len(surviving) >= 2
+
+
+def test_build_passes_the_seed_numbers_to_the_search_loader_not_the_seed_summary(tmp_path):
+    """`build` had a local named `seeds` shadowing its own parameter of that name.
+
+    The symptom was silent: `_load_search` iterated a DataFrame's column names instead of the fit
+    seeds, found no ladder table, and the document reported the whole feature search as "Not run."
+    -- with the 14-feature result simply absent rather than wrong.
+    """
+    pd.DataFrame([dict(arm='base', operating_point=0.76, top10=0.86, top1=0.66,
+                       precision=0.72, reported=0.91, n_features=29, threshold=0.2374,
+                       threshold_rule='matched_fpr', hard_n_entries=20, hard_top10=0.05)]).to_csv(
+        tmp_path/'S12_combiner_main_table.csv', index=False)
+    pd.DataFrame([dict(arm='M20', metric='operating_point', scope='aggregate', n_seeds=3,
+                       delta_mean=-17.67, delta_min=-17.92, delta_max=-17.30,
+                       p_max=1e-30, same_sign_all_seeds=True, significant_all_seeds=True,
+                       spread_over_mean=0.03)]).to_csv(
+        tmp_path/'S12_combiner_seed_summary.csv', index=False)
+    _search_ladder(tmp_path, '_search2', (12345,),
+                   [('core', 0.8478, 14), ('M20', 0.6711, None)],
+                   [dict(arm='M20', metric='operating_point', scope='aggregate',
+                         delta_mean=-17.67, delta_min=-17.92, delta_max=-17.30)])
+    document = report.build(tmp_path, 'S12_combiner', search_suffixes=('_search2',), seeds=(12345,))
+    assert 'settled on is `core`, at 14 features' in document
+    assert 'Not run.' not in document.split('## Transfer')[0]
