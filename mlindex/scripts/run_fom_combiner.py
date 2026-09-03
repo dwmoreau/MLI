@@ -969,9 +969,14 @@ def run_transfer(args):
                     top1=float(result.metric('top1')),
                     rank_only=float(result.metric('rank_only'))))
     table = pd.DataFrame(rows)
-    wide = table.pivot_table(index=['fitted_without', 'reported_on', 'is_the_unseen_condition'],
-                             columns='arm', values='top10').reset_index()
+    index = ['fitted_without', 'reported_on', 'is_the_unseen_condition']
+    wide = table.pivot_table(index=index, columns='arm', values='top10').reset_index()
     wide['delta_pp'] = 100*(wide['held_out'] - wide['all_bundles'])
+    # The crystal count, so a reader can size the delta: on this pool 530 entries make one bundle,
+    # so 3.4 pp is eighteen crystals. **The delta is a difference of RATES on the same crystals,
+    # not a McNemar** -- which is the right quantity for a transfer bound (how much is lost) and
+    # is NOT a significance claim. Nothing here should be quoted with a p-value.
+    wide = wide.merge(table.groupby(index, as_index=False)['n_entries'].max(), on=index)
     wide['arm_features'] = args.transfer_arm
     path = (Path(args.artifact_dir)
             / f'{args.tag}_condition_transfer_{args.transfer_arm}{args.suffix}.csv')
@@ -983,6 +988,9 @@ def run_transfer(args):
     print(f'\nwrote {path}')
     print('Transfer across CONDITIONS, not across error laws -- no error-law bundle exists '
           '(C2-R-008), and only 3 of 9 bundles are reportable with exact ranks (C2-R-024).')
+    print('Reported as top-10, not as the operating point: this stage selects no threshold, so '
+          'an operating point is undefined here. Do not compare these deltas with the '
+          'operating-point deltas everywhere else in S12.')
     return 0
 
 

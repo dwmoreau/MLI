@@ -475,11 +475,14 @@ def _transfer(transfer):
     unseen = transfer[transfer['is_the_unseen_condition']]
     lines += [f'Leave-one-condition-bundle-out on the `{arm}` feature set: fit without one error '
               'severity, report on the one left out, against the incumbent that saw all three. '
-              'Paired in one reduction pass, so the two arms are scored on identical rows.', '',
-              '| fitted without | reported on | held-out arm | saw everything | delta |',
-              '|---|---|---|---|---|']
+              'Both arms are scored in ONE reduction pass over identical rows, so nothing here '
+              'is a population difference.', '',
+              '| fitted without | reported on | crystals | held-out arm | saw everything '
+              '| delta |',
+              '|---|---|---|---|---|---|']
     for _, row in unseen.iterrows():
-        lines.append(f'| `{row["fitted_without"]}` | `{row["reported_on"]}` '
+        n = f'{int(row["n_entries"])}' if 'n_entries' in row and pd.notna(row['n_entries']) else '--'
+        lines.append(f'| `{row["fitted_without"]}` | `{row["reported_on"]}` | {n} '
                      f'| {_pp(row["held_out"])} | {_pp(row["all_bundles"])} '
                      f'| **{row["delta_pp"]:+.2f} pp** |')
     worst = unseen.loc[unseen['delta_pp'].idxmin()]
@@ -487,6 +490,12 @@ def _transfer(transfer):
               f'{worst["fitted_without"]}` bundle. Campaign 1\'s leave-one-condition-out measured '
               '1.6 pp average and 2.7 pp worst, on a different arm and a different pool; the '
               'comparison is indicative, not paired.', '',
+              '**Read as top-10, not as an operating point.** This stage selects no threshold, so '
+              'an operating point is undefined for it, and these deltas are not on the same scale '
+              'as the ones everywhere else in this document. They are also **differences of rates '
+              'on the same crystals, not McNemar contrasts** -- the right quantity for a bound on '
+              'what transfer costs, and not a significance claim. No p-value belongs on this '
+              'table.', '',
               '**Two things this is not.** It is **not transfer across error laws** — no error-law '
               'bundle exists and none is generated (C2-R-008, reaffirmed 2026-09-01), so the '
               'handoff\'s `S12_error_law_transfer.csv` cannot be produced by any run on this '

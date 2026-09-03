@@ -14,9 +14,10 @@
 # S12 session 1 fitted on the Benchmark B **slice**: 157 `fom-train` crystals. The benchmark holds
 # about 11 000. That difference is the leading explanation for the one result in the step that
 # contradicts an earlier finding -- **C2-F-130**, where dropping the entire eighteen-column
-# structural family is the BEST arm at +7.30 pp of operating point, against C2-F-040's −1.675 pp
-# on Benchmark A. It is not a train/test shift: every structural column is bit-identical across the
-# two pools. But several of them (`final_rank`, `n_entering`, `pool_size_full`, `log_volume`) are
+# structural family is the BEST arm at +8.74 pp [+6.92, +12.01] of operating point, settled at
+# all three fit seeds, against C2-F-040's −1.675 pp on Benchmark A. It is not a train/test
+# shift: every structural column is bit-identical across the two pools. But several of them
+# (`final_rank`, `n_entering`, `pool_size_full`, `log_volume`) are
 # effectively per-pattern constants, and with 157 training crystals a tree can key on individual
 # patterns rather than learn a rule. **Until this runs, the structural family is not cut.**
 #
@@ -38,7 +39,7 @@
 # Walltime 6 h against ~3.5 h expected. `merits/` already exists from submit_fom_zoo_merits.sh and
 # MUST NOT be rebuilt -- it cost 33 core-hours and is verified.
 #
-# IF YOU WANT ONLY THE STRUCTURAL ANSWER, set GROUPS below to the core four and skip the two
+# IF YOU WANT ONLY THE STRUCTURAL ANSWER, set FEATURE_GROUPS below to the core four and skip the two
 # optional sidecars: that is a ~1.5 h job. The arms that need the missing groups then skip
 # themselves and record the reason in the fit table.
 #
@@ -97,13 +98,25 @@ if [ ! -d "$POOL/merits" ]; then
 fi
 
 # Checked BEFORE the hour-long pass, not after: the driver rejects an unknown group, but it is the
-# last step here and a typo would cost the whole job's compute before saying so.
-case "$FEATURE_GROUPS" in
-    *raw*structural*) ;;
-    *) echo "FATAL: FEATURE_GROUPS looks wrong: '$FEATURE_GROUPS'" >&2
-       echo "Expected a comma-separated list of feature groups starting raw,structural,..." >&2
-       exit 1 ;;
-esac
+# last step here and a typo would cost the whole job's compute before saying so. Checked against
+# the real list rather than by substring, because a substring test passes anything CONTAINING the
+# words -- and the value that broke this job, bash's own "97050", would also have been caught by a
+# weak test while a plausible typo like "structrual" would not.
+if ! "$PYTHON" -c "
+import sys
+from mlindex.model_training import FomCombiner
+known = set(FomCombiner.FEATURE_GROUPS)
+asked = [g for g in sys.argv[1].split(',') if g]
+unknown = [g for g in asked if g not in known]
+if unknown or not asked:
+    print('unknown feature group(s) %r; known: %s' % (unknown, sorted(known)), file=sys.stderr)
+    raise SystemExit(1)
+" "$FEATURE_GROUPS"; then
+    echo "FATAL: FEATURE_GROUPS is '$FEATURE_GROUPS', which is not a valid group list." >&2
+    echo "If that value looks like a number, you have hit the C2-F-135 defect: some names are" >&2
+    echo "bash built-ins and assignment to them is silently discarded. Rename the variable." >&2
+    exit 1
+fi
 
 set -e
 
