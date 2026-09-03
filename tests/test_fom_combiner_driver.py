@@ -298,3 +298,59 @@ def test_every_artifact_path_carries_the_suffix_that_namespaces_a_run(tmp_path):
     unsuffixed = [line.strip() for line in source.splitlines()
                   if re.search(r"f'\{args\.tag\}_[a-z_]+\.(csv|json|parquet)'", line)]
     assert not unsuffixed, f'artifact paths that ignore --suffix: {unsuffixed}'
+
+
+# ---------------------------------------------------------------------------------------------
+# the sharded export
+# ---------------------------------------------------------------------------------------------
+def _shard(tmp_path, bundle, in_pool, rows=3):
+    """One (fit, cal, meta) shard triple as an array task writes it.
+
+    `in_pool` is the POOL's full bundle list, which every shard records. A per-shard list of what
+    that shard covered cannot reveal a task that never ran -- see `_assert_shards_complete`.
+    """
+    import json
+    for label in ('fit', 'cal'):
+        pd.DataFrame({'condition_bundle': [bundle]*rows,
+                      'entry_id': list(range(rows)),
+                      'is_correct': [True] + [False]*(rows-1)}).to_parquet(
+            tmp_path/f'S12_combiner_{label}_frame_fullscale_{bundle}.parquet', index=False)
+    (tmp_path/f'S12_combiner_export_meta_fullscale_{bundle}.json').write_text(
+        json.dumps({'bundles': [bundle], 'bundles_in_pool': in_pool}), encoding='utf-8')
+
+
+def test_a_missing_array_task_is_refused_rather_than_fitted_around(tmp_path):
+    """A SLURM array loses a task quietly and the survivors still glob into a usable frame.
+
+    The failure is a model fitted on fewer conditions than its write-up claims, with no symptom
+    but a slightly wrong number. Each shard's meta records the bundle list its invocation was
+    given, so the union of those is what must be present.
+    """
+    pool = ['c2_error0.1_cont0', 'c2_error1_cont0', 'c2_error2_cont0']
+    _shard(tmp_path, 'c2_error1_cont0', pool)
+    _shard(tmp_path, 'c2_error2_cont0', pool)
+    pairs = [(tmp_path/f'S12_combiner_fit_frame_fullscale_{b}.parquet',
+              tmp_path/f'S12_combiner_cal_frame_fullscale_{b}.parquet')
+             for b in ('c2_error1_cont0', 'c2_error2_cont0')]
+    covered = ['c2_error1_cont0', 'c2_error2_cont0']
+    with pytest.raises(SystemExit) as problem:
+        driver._assert_shards_complete(pairs, covered)
+    assert 'c2_error0.1_cont0' in str(problem.value)
+    # And a deliberate subset is allowed through, loudly.
+    driver._assert_shards_complete(pairs, covered, allow_partial=True)
+
+
+def test_a_complete_set_of_shards_passes(tmp_path):
+    pool = ['c2_error1_cont0', 'c2_error2_cont0']
+    _shard(tmp_path, 'c2_error1_cont0', pool)
+    _shard(tmp_path, 'c2_error2_cont0', pool)
+    pairs = [(tmp_path/f'S12_combiner_fit_frame_fullscale_{b}.parquet',
+              tmp_path/f'S12_combiner_cal_frame_fullscale_{b}.parquet')
+             for b in ('c2_error1_cont0', 'c2_error2_cont0')]
+    driver._assert_shards_complete(pairs, ['c2_error1_cont0', 'c2_error2_cont0'])
+
+
+def test_shards_with_no_meta_do_not_raise(tmp_path):
+    """An export from before sharding wrote no bundle list; absence is not evidence of a gap."""
+    driver._assert_shards_complete([(tmp_path/'S12_combiner_fit_frame.parquet', tmp_path/'x')],
+                                   ['c2_error1_cont0'])

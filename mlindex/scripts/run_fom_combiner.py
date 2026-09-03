@@ -310,7 +310,8 @@ def _commit():
 # ---------------------------------------------------------------------------------------------
 # stage: fit -- on the slice's fom-train, weighted
 # ---------------------------------------------------------------------------------------------
-def load_fit_frames(pool, entries, keep_ids, groups, n_negatives, seed, covariates=None):
+def load_fit_frames(pool, entries, keep_ids, groups, n_negatives, seed, covariates=None,
+                    bundles=None):
     """Assembled frames for one set of entries, held in memory rather than streamed.
 
     Held because every arm makes another pass over the same rows and re-reading the slice per arm
@@ -319,7 +320,7 @@ def load_fit_frames(pool, entries, keep_ids, groups, n_negatives, seed, covariat
     writes `fit_weight`, which composes that draw with the generator's own `sampling_weight`.
     """
     frames = []
-    for frame in FomCombiner.combiner_frames_c2(pool, entries, groups=groups,
+    for frame in FomCombiner.combiner_frames_c2(pool, entries, groups=groups, bundles=bundles,
                                                 keep_entry_ids=keep_ids, covariates=covariates):
         if n_negatives is not None:
             frame = FomCombiner.subsample_negatives(frame, n_negatives, seed)
@@ -329,6 +330,44 @@ def load_fit_frames(pool, entries, keep_ids, groups, n_negatives, seed, covariat
     if not frames:
         raise SystemExit(f'no frames assembled from {pool} for {len(keep_ids)} entries')
     return frames
+
+
+def _assert_shards_complete(pairs, covered, allow_partial=False):
+    """Every condition bundle the POOL holds is present among the shards read back.
+
+    A SLURM array loses a task quietly -- one node OOMs, one hits the walltime -- and the survivors
+    still glob into a frame that loads, fits and reports. The only symptom is a model fitted on
+    seven conditions while its write-up says nine.
+
+    **Checked against the pool's bundle list, not against the shards' own.** With one bundle per
+    array task, a per-shard list can never reveal a task that never ran: every survivor would say
+    "I covered mine" and the set would look complete. Each shard records `bundles_in_pool`, so any
+    one survivor is enough to notice the others are missing. This was caught by a smoke test that
+    dropped a shard and watched the first version of this function pass it.
+    """
+    intended = set()
+    for fit_path, _ in pairs:
+        meta_path = fit_path.with_name(
+            fit_path.name.replace('_fit_frame', '_export_meta').replace('.parquet', '.json'))
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text(encoding='utf-8'))
+        in_pool = meta.get('bundles_in_pool')
+        if isinstance(in_pool, list):
+            intended.update(in_pool)
+    missing = sorted(intended - set(covered))
+    if missing and not allow_partial:
+        raise SystemExit(
+            f'{len(missing)} of the pool\'s condition bundle(s) are missing from the shards read '
+            f'back: {missing}. An array task that died leaves exactly this -- the survivors still '
+            f'load and fit, and the only symptom is a model fitted on fewer conditions than its '
+            f'write-up claims. Check `sacct -j <jobid> --format=JobID,State,MaxRSS`, re-export what '
+            f'is missing, and widen the --fit-frame glob. Pass --allow-partial-bundles only if '
+            f'fitting on a subset of conditions is what you actually intend.')
+    if missing:
+        print(f'  WARNING: fitting on {len(covered)} of {len(intended)} condition bundles; '
+              f'missing {missing}. --allow-partial-bundles was passed, so this is deliberate.')
+
 
 
 def arm_groups(extra):
@@ -358,17 +397,35 @@ def run_fit(args):
     if args.fit_frame:
         # Built elsewhere by `--stage export-fit`, which is how a fit on Benchmark B's ~11 000
         # `fom-train` crystals reaches a laptop that cannot hold the pool they came from.
-        fit_path = Path(args.fit_frame)
-        cal_path = fit_path.with_name(fit_path.name.replace('_fit_frame', '_cal_frame'))
-        if cal_path == fit_path or not cal_path.exists():
-            raise SystemExit(
-                f'--fit-frame must name a `*_fit_frame*.parquet` with its `_cal_frame` sibling '
-                f'beside it; looked for {cal_path}. The calibrator has to be fitted on rows the '
-                f'model was not fitted on, so the pair travels together or neither does.')
-        fit_frames = [pd.read_parquet(fit_path)]
-        cal_frames = [pd.read_parquet(cal_path)]
-        print(f'read {sum(f.shape[0] for f in fit_frames):,} fit rows and '
-              f'{sum(f.shape[0] for f in cal_frames):,} calibration rows from {fit_path.parent}')
+        # A path, or a glob over the per-bundle shards an array export writes. Both halves of
+        # each shard must be present: the calibrator has to be fitted on rows the model was not,
+        # so the pair travels together or neither does.
+        fit_paths = sorted(Path().glob(args.fit_frame)) if any(c in args.fit_frame
+                                                               for c in '*?[') \
+            else [Path(args.fit_frame)]
+        if not fit_paths:
+            raise SystemExit(f'--fit-frame matched nothing: {args.fit_frame}')
+        pairs = []
+        for fit_path in fit_paths:
+            cal_path = fit_path.with_name(fit_path.name.replace('_fit_frame', '_cal_frame'))
+            if cal_path == fit_path or not cal_path.exists():
+                raise SystemExit(
+                    f'--fit-frame must name a `*_fit_frame*.parquet` with its `_cal_frame` sibling '
+                    f'beside it; looked for {cal_path}. The calibrator has to be fitted on rows the '
+                    f'model was not fitted on, so the pair travels together or neither does.')
+            pairs.append((fit_path, cal_path))
+        fit_frames = [pd.read_parquet(fit_path) for fit_path, _ in pairs]
+        cal_frames = [pd.read_parquet(cal_path) for _, cal_path in pairs]
+        # **Every bundle the export covered, or none of them.** A shard missing from a glob is a
+        # fit on a narrower set of conditions than the run believes, and the only symptom is a
+        # number that is slightly wrong -- so the bundles present are counted against what the
+        # shards' own metas say the export set out to write.
+        covered = sorted({str(frame['condition_bundle'].iloc[0]) for frame in fit_frames
+                          if frame.shape[0]})
+        print(f'read {len(pairs)} shard(s), {sum(f.shape[0] for f in fit_frames):,} fit rows and '
+              f'{sum(f.shape[0] for f in cal_frames):,} calibration rows over '
+              f'{len(covered)} bundle(s) from {pairs[0][0].parent}')
+        _assert_shards_complete(pairs, covered, args.allow_partial_bundles)
     else:
         fit_frames = load_fit_frames(FIT_POOL, entries, fit_ids, union, args.n_negatives, SEED,
                                      covariates)
@@ -1332,12 +1389,30 @@ def run_export_fit(args):
     out_dir = Path(args.out_dir or args.artifact_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     written = {}
+    # **One shard per bundle, so nine array tasks can do in parallel what one task cannot do at
+    # all.** `bundle_frames` yields one frame per condition bundle with all fourteen lattices
+    # together -- non-negotiable, the ranking is cross-lattice -- which at Benchmark B's scale is
+    # ~98 M rows joined against four sidecar directories. Nine of those, then the whole thing again
+    # for the calibration frame, single-process, is what ran out of a 6 h walltime having finished
+    # neither. Given --bundles this exports only those, named for them, and `--stage fit` reads the
+    # shards back with a glob.
+    bundles = [name.strip() for name in args.bundles.split(',') if name.strip()] \
+        if args.bundles else None
+    if bundles:
+        available = set(FomBenchmark.available_bundles(pool))
+        unknown = [name for name in bundles if name not in available]
+        if unknown:
+            raise SystemExit(f'unknown condition bundle(s) {unknown}; '
+                             f'{pool} has {sorted(available)}')
+        print(f'bundles: {"+".join(bundles)} of {len(available)}')
+    shard = f'_{"-".join(bundles)}' if bundles else ''
     for label, ids, negatives in (('fit', fit_ids, args.n_negatives),
                                   ('cal', cal_ids, args.calibration_negatives)):
         started = time.perf_counter()
-        frames = load_fit_frames(pool, entries, ids, union, negatives, SEED, covariates)
+        frames = load_fit_frames(pool, entries, ids, union, negatives, SEED, covariates,
+                                 bundles=bundles)
         frame = pd.concat(frames, ignore_index=True)
-        path = out_dir/f'{args.tag}_{label}_frame{args.suffix}.parquet'
+        path = out_dir/f'{args.tag}_{label}_frame{args.suffix}{shard}.parquet'
         frame.to_parquet(path, index=False)
         correct = int(FomMetrics.as_bool(frame['is_correct']).sum())
         written[label] = dict(path=str(path), rows=int(frame.shape[0]), correct=correct,
@@ -1348,9 +1423,16 @@ def run_export_fit(args):
               flush=True)
         del frames, frame
 
-    (out_dir/f'{args.tag}_export_meta{args.suffix}.json').write_text(json.dumps(dict(
+    (out_dir/f'{args.tag}_export_meta{args.suffix}{shard}.json').write_text(json.dumps(dict(
         pool=str(pool), commit=_commit(), groups=list(union), train_split=args.train_split,
         holdout_fraction=HOLDOUT_FRACTION, split_seed=SEED, frames=written,
+        # BOTH lists, and the second is the one that matters. `bundles` is what this invocation
+        # covered; `bundles_in_pool` is what the pool holds. With one bundle per array task a
+        # per-shard list can never reveal a task that never ran -- every surviving shard would say
+        # "I covered mine" and the set would look complete. Recording the pool's own list in every
+        # shard means any ONE survivor is enough to notice the others are missing.
+        bundles=bundles or sorted(FomBenchmark.available_bundles(pool)),
+        bundles_in_pool=sorted(FomBenchmark.available_bundles(pool)),
         ), indent=2, sort_keys=True), encoding='utf-8')
     print(f'\nwrote {len(written)} frames to {out_dir}')
     return 0
@@ -1495,6 +1577,14 @@ def _parse_args(argv=None):
                         help='Comma-separated feature groups for export-fit, overriding the union '
                              'every arm needs. Use it when a pool lacks an optional sidecar; the '
                              'arms needing that group then skip themselves and record why')
+    parser.add_argument('--allow-partial-bundles', action='store_true',
+                        help='Fit even though the shards cover fewer condition bundles than the '
+                             'pool holds. Only for a deliberate subset -- the usual cause is a '
+                             'dead array task')
+    parser.add_argument('--bundles', default=None,
+                        help='Comma-separated condition bundles for export-fit. One shard per '
+                             'invocation, named for them, so a SLURM array can export the pool in '
+                             'parallel; --stage fit globs the shards back together')
     parser.add_argument('--out-dir', default=None,
                         help='Where export-fit writes. Defaults to --artifact-dir')
     parser.add_argument('--calibration-negatives', type=int, default=400,
