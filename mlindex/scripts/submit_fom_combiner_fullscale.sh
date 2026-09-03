@@ -59,12 +59,31 @@ REPO=/global/cfs/cdirs/m4064/dwmoreau/MLI
 cd "$REPO/mlindex/scripts" || exit 1
 
 POOL="$SCRATCH/fom_campaign2/pool"
-OUTDIR="$REPO/docs/fom_campaign2/artifacts"
+# $SCRATCH, NOT the repo's docs/ tree, and both halves of that matter.
+#
+# `docs/sync_record.sh pull-artifacts` reads $SCRATCH/$CAMPAIGN/artifacts and nothing else, so
+# a job that writes anywhere else is a job whose output cannot be fetched by the documented
+# route -- which is how the first run of this script produced 1.5 GB of frames that
+# `pull-artifacts` silently did not see. And `sync_record.sh` says in as many words that $CFS
+# is not where a batch job should write at volume.
+#
+# PURGE RISK comes with it, and it is C2-R-014: nothing on $SCRATCH is backed up. Pull these
+# the day the job finishes and run `snapshot` afterwards.
+OUTDIR="$SCRATCH/fom_campaign2/artifacts"
+mkdir -p "$OUTDIR"
 PROCESSES=64
 
-# Every group any arm needs. Drop to 'raw,structural,context,counts' to answer the structural
-# question alone and skip the two optional sidecar passes below.
-GROUPS="raw,structural,context,counts,campaign1_raw,probation,soft,holdout"
+# Every feature group any arm needs. Drop to 'raw,structural,context,counts' to answer the
+# structural question alone and skip the two optional sidecar passes below.
+#
+# **NOT named GROUPS.** `GROUPS` is a bash BUILT-IN array holding the current user's Unix group
+# ids, and bash silently IGNORES assignments to it -- so `GROUPS="raw,..."` had no effect and
+# `"$GROUPS"` expanded to the primary gid. The first run of this script therefore spent an hour
+# building the structural sidecars and then died with `unknown feature group(s) ['97050']`, and the
+# two `case` tests below matched nothing, so the soft and hold-out passes were skipped without a
+# word. Nothing was lost, because the expensive pass had already written its output -- but the
+# lesson is to keep shell variables out of bash's reserved namespace.
+FEATURE_GROUPS="raw,structural,context,counts,campaign1_raw,probation,soft,holdout"
 
 if [ ! -d "$POOL" ]; then
     echo "FATAL: Benchmark B is not at $POOL" >&2
@@ -77,6 +96,15 @@ if [ ! -d "$POOL/merits" ]; then
     exit 1
 fi
 
+# Checked BEFORE the hour-long pass, not after: the driver rejects an unknown group, but it is the
+# last step here and a typo would cost the whole job's compute before saying so.
+case "$FEATURE_GROUPS" in
+    *raw*structural*) ;;
+    *) echo "FATAL: FEATURE_GROUPS looks wrong: '$FEATURE_GROUPS'" >&2
+       echo "Expected a comma-separated list of feature groups starting raw,structural,..." >&2
+       exit 1 ;;
+esac
+
 set -e
 
 echo "=== structural features: the columns the design matrix needs and the pool does not store ==="
@@ -84,14 +112,14 @@ echo "=== structural features: the columns the design matrix needs and the pool 
 "$PYTHON" run_fom_structural_features.py --pool "$POOL" --verify \
     --sweep-dir "$POOL/extinction_sweep"
 
-case "$GROUPS" in
+case "$FEATURE_GROUPS" in
   *soft*)
     echo "=== soft counting merits (C2-F-102), for the plus_X_N_soft arm ==="
     "$PYTHON" run_fom_floor_merits.py --pool "$POOL" --soft \
         --out-dir "$POOL/merits_soft" --processes "$PROCESSES"
     ;;
 esac
-case "$GROUPS" in
+case "$FEATURE_GROUPS" in
   *holdout*)
     echo "=== hold-out merits (S10), for the plus_ho_M20 arm ==="
     "$PYTHON" run_fom_holdout_merits.py --pool "$POOL" --processes "$PROCESSES"
@@ -101,7 +129,7 @@ esac
 echo "=== export the fit and calibration frames ==="
 "$PYTHON" run_fom_combiner.py --stage export-fit \
     --fit-pool "$POOL" \
-    --groups "$GROUPS" \
+    --groups "$FEATURE_GROUPS" \
     --n-negatives 40 \
     --calibration-negatives 400 \
     --out-dir "$OUTDIR" \
@@ -109,7 +137,9 @@ echo "=== export the fit and calibration frames ==="
 
 echo
 echo "DONE. Now, from the laptop:"
-echo "  docs/sync_record.sh pull-artifacts     # brings back the two *_frame_fullscale.parquet"
+echo "  docs/sync_record.sh pull-artifacts 'S12_combiner_*fullscale*'"
+echo "     -- both frames must arrive: the calibrator has to be fitted on rows the model was"
+echo "        not, so --stage fit refuses a fit frame whose _cal_frame sibling is missing"
 echo "  run_fom_combiner.py --stage fit     --fit-frame <the fit frame> --suffix _fullscale"
 echo "  run_fom_combiner.py --stage reduce  --suffix _fullscale"
 echo "  run_fom_combiner.py --stage analyse --suffix _fullscale"

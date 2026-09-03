@@ -115,17 +115,17 @@ echo "    360 fom-dev crystals of mP/mC/aP at volume decile >= 8, every candidat
     --predownsample-entries 0 \
     --out-dir "$OUTDIR"
 
-# AFTERWARDS, still on NERSC, in this order. The sidecars are what make the pool scoreable; without
-# them `bundle_frames(require_merits=True)` raises rather than silently leaving merits null.
+# AFTERWARDS: `sbatch submit_fom_hard_postprocess.sh`.
 #
-#   $PYTHON run_fom_dump_consolidate.py --root $OUTROOT --out-dir $SCRATCH/fom_campaign2/hard_pool
-#   $PYTHON run_fom_floor_merits.py         --pool $SCRATCH/fom_campaign2/hard_pool --processes 64
-#   $PYTHON run_fom_floor_merits.py         --pool $SCRATCH/fom_campaign2/hard_pool --soft \
-#                                           --out-dir $SCRATCH/fom_campaign2/hard_pool/merits_soft \
-#                                           --processes 64
-#   $PYTHON run_fom_structural_features.py  --pool $SCRATCH/fom_campaign2/hard_pool --processes 64
-#   $PYTHON run_fom_holdout_merits.py       --pool $SCRATCH/fom_campaign2/hard_pool --processes 64
-#   $PYTHON run_fom_structural_features.py  --pool $SCRATCH/fom_campaign2/hard_pool --verify
+# That is a SCRIPT, not a list of commands in this comment, and the difference is not cosmetic --
+# the first run of this job left the six post-processing steps unrun because they were prose here,
+# so the array produced candidates and no pool. The consolidation cannot live inside the array
+# either: it reads all three condition tags at once and an array task only knows its own.
 #
-# Then rsync the pool back (~4-6 GB) and point S12's reduce stage at it. It is small enough for the
-# laptop, which is the whole reason for generating a stratum rather than the split.
+# To make the ordering impossible to get wrong:
+#
+#   JOB=$(sbatch --parsable submit_fom_hard_retained.sh)
+#   sbatch --dependency=afterok:$JOB submit_fom_hard_postprocess.sh
+#
+# What it does: consolidates $OUTROOT into $SCRATCH/fom_campaign2/hard_pool, writes the four
+# sidecar sets a pool needs before anything can score it, and verifies them. ~40 min.
