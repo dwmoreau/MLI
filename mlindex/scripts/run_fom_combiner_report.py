@@ -546,7 +546,13 @@ def _transfer(transfer):
                   'bundle) cells drawn at random from all nine bundles, and calibrated on the same '
                   'rows as the incumbent -- so it differs from the incumbent in row count and in '
                   'nothing else. **"Condition lost" is the held-out arm against that control**, '
-                  'and it is the only column that is a transfer claim.', '']
+                  'and it is the only column that is a transfer claim.', '',
+                  'One residual, stated because it runs one way and not the other: the '
+                  'control drops cells uniformly, so it also loses about a sixth of '
+                  'the reported condition. The contrast is therefore *no exposure* '
+                  'against *five sixths of the exposure*, not against all of it, which '
+                  'makes "condition lost" a slight UNDER-estimate of the full effect '
+                  'rather than an over-estimate.', '']
     else:
         lines += ['**Uncontrolled.** This table carries no size-matched arm, so its delta '
                   'confounds the condition the model never saw with the rows that condition took '
