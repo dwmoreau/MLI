@@ -60,16 +60,25 @@ BUNDLES=(c2_error0.1_cont0 c2_error1_cont0 c2_error1_cont0_icept4 c2_error1_cont
          c2_error2_cont0)
 BUNDLE="${BUNDLES[$SLURM_ARRAY_TASK_ID]}"
 
-# All four sidecar families. `campaign1_raw` and `probation` come out of the `structural` sidecar
-# rather than a directory of their own, so they are free; `soft` and `holdout` each cost a pass.
+# **`holdout` is deliberately NOT here, and this export should not wait for it.**
 #
-# `holdout` serves one arm, `plus_ho_M20`, which is NOT in the settled 14-feature model and was
-# unsettled across three fit seeds (p = 0.092 at its worst, C2-F-132) -- so if its sidecars are not
-# ready, drop it from this list rather than waiting. Everything this export exists to decide --
-# C2-F-130, whether dropping the whole structural family still wins at 70x the fit size -- needs
-# only the first four groups. The precondition check below refuses rather than letting a missing
-# sidecar surface as a null column.
-FEATURE_GROUPS="raw,structural,context,counts,campaign1_raw,probation,soft,holdout"
+# `campaign1_raw` and `probation` come out of the `structural` sidecar rather than a directory of
+# their own, so they are free. `soft` cost a pass and is complete and verified. `holdout` cost a
+# pass that has now failed twice: nine files remain, they are the nine largest, and each is an
+# all-or-nothing unit of work because the worker holds a whole file's output in memory and writes
+# once at the end. Three hours on nine processes produced not one of them (C2-F-139).
+#
+# It serves ONE arm, `plus_ho_M20`, which is not in the settled 14-feature model and was unsettled
+# across three fit seeds -- it kept its sign but reached p = 0.092 at its worst (C2-F-132).
+# Everything this export exists to decide -- C2-F-130, whether dropping the whole structural family
+# still wins at 70x the fit size, and whether 14 features is minimal or only minimal at 157
+# crystals -- needs the four groups below and nothing else.
+#
+# So: export now, and let `submit_fom_holdout_finish.sh` run on its own clock. If the arm is wanted
+# later, add `holdout` here and re-export; the precondition below refuses to start until its
+# sidecars verify clean, because a missing sidecar joins as a NULL COLUMN and would fit that arm on
+# a feature that is silently absent.
+FEATURE_GROUPS="raw,structural,context,counts,campaign1_raw,probation,soft"
 
 if [ -z "$BUNDLE" ]; then
     echo "FATAL: no bundle for array index '$SLURM_ARRAY_TASK_ID'" >&2
