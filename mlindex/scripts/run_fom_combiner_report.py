@@ -56,6 +56,7 @@ def build(artifact_dir, tag):
     skew = _load(artifact_dir, tag, 'retention_skew', required=False)
     calibration = _load(artifact_dir, tag, 'calibration', required=False)
     by_lattice = _load(artifact_dir, tag, 'by_lattice_mcnemar', required=False)
+    seeds = _load(artifact_dir, tag, 'seed_summary', required=False)
     fit_table = _load(artifact_dir, tag, 'fit_table', required=False)
     main = main.set_index('arm')
 
@@ -64,6 +65,7 @@ def build(artifact_dir, tag):
     lines += _how(main, fit_table)
     lines += _leaderboard(main)
     lines += _controls(main)
+    lines += _seeds(seeds)
     lines += _cuts(contrasts)
     lines += _per_lattice(main, by_lattice)
     lines += _calibration(calibration)
@@ -210,6 +212,42 @@ def _controls(main):
     return lines
 
 
+def _seeds(seeds):
+    """What survives three fit seeds, which is the only thing an arm verdict may be read from."""
+    if seeds is None or not len(seeds):
+        return []
+    frame = seeds[(seeds.scope == 'aggregate') & (seeds.metric == 'operating_point')].copy()
+    if not len(frame):
+        return []
+    settled = frame[frame.same_sign_all_seeds & frame.significant_all_seeds]
+    unsettled = frame[~(frame.same_sign_all_seeds & frame.significant_all_seeds)]
+    lines = ['## What survives three fit seeds', '',
+             'Every arm is refitted from scratch at three seeds and reduced over the whole pool at '
+             'each. An arm counts as settled only if every seed agreed on the **sign** and every '
+             'seed reached p < 0.05 -- both, because C2-F-061 failed by having two halves of one '
+             'group swap which was significant while both means stayed positive. **Read arm '
+             'verdicts here and nowhere else in this document.**', '',
+             '| arm | mean | range over seeds | p at the worst seed | settled |',
+             '|---|---|---|---|---|']
+    for _, row in frame.sort_values('delta_mean', ascending=False).iterrows():
+        mark = '**yes**' if row['same_sign_all_seeds'] and row['significant_all_seeds'] else (
+            'no, sign flips' if not row['same_sign_all_seeds'] else 'no, not significant')
+        lines.append(f'| `{row["arm"]}` | {row["delta_mean"]:+.2f} pp '
+                     f'| [{row["delta_min"]:+.2f}, {row["delta_max"]:+.2f}] '
+                     f'| {row["p_max"]:.3g} | {mark} |')
+    flips = frame[frame.significant_all_seeds & ~frame.same_sign_all_seeds]
+    lines += ['', f'**{len(settled)} of {len(frame)} arms are settled; {len(unsettled)} are not.**']
+    if len(flips):
+        for _, row in flips.iterrows():
+            lines.append(
+                f'`{row["arm"]}` is worth keeping as the illustration: it clears p < 0.05 at every '
+                f'seed and its sign is **not the same at all three** '
+                f'([{row["delta_min"]:+.2f}, {row["delta_max"]:+.2f}] pp). A reader shown any one '
+                f'seed would have had a significant result and a confident wrong conclusion.')
+    lines.append('')
+    return lines
+
+
 def _cuts(contrasts):
     if contrasts is None or not len(contrasts):
         return []
@@ -219,6 +257,8 @@ def _cuts(contrasts):
              '7.28 pp of top-10 while retraining without it cost 0.004 pp — a factor of 1 800 — '
              'because permutation pushes a high-cardinality feature out of distribution and '
              'measures the corruption. **There is no permutation importance in this step.**', '',
+             '**These are one seed.** The table above is what an arm verdict may be read from; '
+             'this one is the detail behind a single fit of it.', '',
              '| arm | metric | scope | delta vs `base` | gained / lost | p |',
              '|---|---|---|---|---|---|']
     for _, row in contrasts.sort_values(['scope', 'metric', 'delta_pp']).iterrows():
