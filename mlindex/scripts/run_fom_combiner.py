@@ -859,7 +859,7 @@ def run_skew(args):
     table = pd.DataFrame(rows)
     table.insert(0, 'n_paired_candidates', len(joined))
     table.insert(0, 'n_shared_entries', len(shared))
-    path = Path(args.artifact_dir)/f'{args.tag}_retention_skew.csv'
+    path = Path(args.artifact_dir)/f'{args.tag}_retention_skew{args.suffix}.csv'
     table.to_csv(path, index=False)
     print(table.to_string(index=False))
     print(f'\nwrote {path}')
@@ -1176,7 +1176,11 @@ def run_cost(args):
     table['get_M20_units'] = table['microseconds_per_candidate']/unit
     table.insert(0, 'lattice', args.cost_lattice)
     table.insert(0, 'n_candidates', n)
-    path_out = Path(args.artifact_dir)/f'{args.tag}_cost.csv'
+    # `--suffix`, which this line ignored. The flag exists so a second run cannot overwrite
+    # a first, and the cost stage is exactly where that matters: it is run once per ARM, so
+    # pricing `core` silently destroyed the `base` table that the record cites. An output
+    # path that drops its own namespacing flag is a data-loss bug, not a cosmetic one.
+    path_out = Path(args.artifact_dir)/f'{args.tag}_cost{args.suffix}.csv'
     table.to_csv(path_out, index=False)
     print(table[['step', 'microseconds_per_candidate', 'get_M20_units']].to_string(index=False))
     print(f'\nwrote {path_out}')

@@ -575,10 +575,11 @@ def _transfer(transfer):
 
 def _bounds(skew):
     lines = ['## What this does not measure', '',
-             '- **The hard stratum.** 20 cells over 20 crystals, 6 reachable (C2-R-019). The fix '
-             'is one short cluster job: 360 hard `fom-dev` crystals exist in the frozen split and '
-             'regenerating them fully retained over the same three bundles is under half a '
-             'node-hour.',
+             '- **The hard stratum.** Every hard number here is 20 cells over 20 crystals, 6 of '
+             'them reachable (C2-R-019), which is too few to carry a claim. The cluster job that '
+             'fixes it has RUN -- 360 hard `fom-dev` crystals over the same three bundles, three '
+             'array tasks, 0 failures -- and what remains is to consolidate its output into a pool '
+             'and re-reduce against it (C2-F-135).',
              '- **Six of the nine condition bundles.** The report pool carries the severity axis '
              '(0.1x, 1x, 2x error) and none of the sparsity, contaminant or second-phase bundles, '
              'so the aggregate is over a narrower population than the fit.',

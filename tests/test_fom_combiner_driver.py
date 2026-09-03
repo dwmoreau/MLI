@@ -283,3 +283,18 @@ def test_the_hard_predicate_matches_the_metrics_modules_own():
     from mlindex.scripts import run_fom_floor_entries as entries_script
     assert set(entries_script.HARD_LATTICES) == set(metrics.HARD_LATTICES)
     assert entries_script.HARD_MIN_DECILE == metrics.HARD_MIN_DECILE
+
+
+def test_every_artifact_path_carries_the_suffix_that_namespaces_a_run(tmp_path):
+    """`--suffix` exists so a second run cannot overwrite a first, and two paths dropped it.
+
+    The cost stage is run once per ARM, so pricing `core` wrote over the `base` table the record
+    cites -- silently, with a success message naming the file it had just destroyed. This is a
+    source-level check because reproducing it needs a pool.
+    """
+    import re
+    from pathlib import Path
+    source = Path(driver.__file__).read_text(encoding='utf-8')
+    unsuffixed = [line.strip() for line in source.splitlines()
+                  if re.search(r"f'\{args\.tag\}_[a-z_]+\.(csv|json|parquet)'", line)]
+    assert not unsuffixed, f'artifact paths that ignore --suffix: {unsuffixed}'
