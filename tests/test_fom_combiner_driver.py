@@ -354,3 +354,42 @@ def test_shards_with_no_meta_do_not_raise(tmp_path):
     """An export from before sharding wrote no bundle list; absence is not evidence of a gap."""
     driver._assert_shards_complete([(tmp_path/'S12_combiner_fit_frame.parquet', tmp_path/'x')],
                                    ['c2_error1_cont0'])
+
+
+# ---------------------------------------------------------------------------------------------
+# a column the frame does not carry
+# ---------------------------------------------------------------------------------------------
+def test_an_absent_design_matrix_column_is_named_at_export_time(capsys):
+    """`_sidecar_projection` drops a name no sidecar carries, silently and by design.
+
+    Right per sidecar -- a pool has several and a caller asks once against all of them -- but a
+    column present in NONE of them vanishes without a word. The full-scale export then shipped
+    nine shards with no `N_cal`, and the failure surfaced as sixteen arms skipping themselves on a
+    laptop hours later. The export has to say it where the job that could re-run cheaply is.
+    """
+    groups = driver.arm_groups(())
+    wanted, _ = FomCombiner.feature_specification(groups, drop=())
+    frame = pd.DataFrame({name: [0.0] for name in wanted if name != 'N_cal'})
+    absent = driver._report_absent_features(frame, groups)
+    assert absent == ['N_cal']
+    assert 'N_cal' in capsys.readouterr().out
+
+
+def test_a_complete_frame_says_nothing(capsys):
+    groups = driver.arm_groups(())
+    wanted, _ = FomCombiner.feature_specification(groups, drop=())
+    frame = pd.DataFrame({name: [0.0] for name in wanted})
+    assert driver._report_absent_features(frame, groups) == []
+    assert capsys.readouterr().out == ''
+
+
+def test_drop_columns_costs_one_feature_rather_than_every_arm():
+    """One absent column skipped sixteen of seventeen arms. `--drop-columns` makes it cost one."""
+    args = driver._parse_args(['--stage', 'fit', '--drop-columns', 'N_cal'])
+    assert args.drop_columns == 'N_cal'
+    extra = tuple(n.strip() for n in args.drop_columns.split(',') if n.strip())
+    groups = driver.arm_groups(())
+    full, _ = FomCombiner.feature_specification(groups, drop=driver.BASE_DROP)
+    cut, _ = FomCombiner.feature_specification(groups, drop=driver.BASE_DROP + extra)
+    assert len(cut) == len(full) - 1
+    assert 'N_cal' in full and 'N_cal' not in cut

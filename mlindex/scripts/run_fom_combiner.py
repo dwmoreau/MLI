@@ -332,6 +332,31 @@ def load_fit_frames(pool, entries, keep_ids, groups, n_negatives, seed, covariat
     return frames
 
 
+def _report_absent_features(frame, groups):
+    """Name every design-matrix column the assembled frame does not carry, at EXPORT time.
+
+    `FomBenchmark._sidecar_projection` drops a name the sidecar it is reading does not have, which
+    is right per sidecar -- a pool carries several and a caller asks for its columns once against
+    all of them -- but a column present in NONE of them then vanishes without a word. The export
+    succeeds, nine array tasks' output is shipped, and the failure surfaces as
+    `SKIPPED -- frame is missing 1 feature column(s)` on a laptop hours later, which is where
+    `N_cal` actually turned up (C2-F-140).
+
+    Printed rather than raised: an export deliberately narrowed with `--groups` is expected to be
+    missing the columns of the groups it left out, and refusing would make that flag unusable. The
+    point is that it is SAID, on the cluster, next to the job that could re-run cheaply.
+    """
+    wanted, _ = FomCombiner.feature_specification(groups, drop=())
+    absent = [name for name in wanted if name not in frame.columns]
+    if absent:
+        print(f'  WARNING: {len(absent)} design-matrix column(s) are NOT in this frame: '
+              f'{absent}. Every arm that reads one will skip itself at fit time. If that is not '
+              f'what you intended, the sidecar carrying them is missing or was built before the '
+              f'column existed -- check before shipping these frames.', flush=True)
+    return absent
+
+
+
 def _assert_shards_complete(pairs, covered, allow_partial=False):
     """Every condition bundle the POOL holds is present among the shards read back.
 
@@ -381,8 +406,17 @@ def run_fit(args):
     fit_ids, cal_ids = split_ids(entries, args.train_split, HOLDOUT_FRACTION, SEED)
     report_entries = FomBenchmark.load_entries(REPORT_POOL)
     assert_disjoint(set(fit_ids) | set(cal_ids), set(report_entries['entry_id']))
-    print(f'fit {len(fit_ids)} crystals, calibrate {len(cal_ids)}, '
-          f'report on {report_entries["entry_id"].nunique()} disjoint crystals')
+    # **These counts describe the SLICE, and are wrong for a `--fit-frame` run.** The frames an
+    # export writes come from Benchmark B, whose `fom-train` is ~11 000 crystals against the
+    # slice's 157 -- and printing "fit 157 crystals" above a full-scale fit is exactly the line
+    # someone quotes into a write-up. So it is only printed when it is true; the frame branch
+    # prints its own counts from the frame.
+    if not args.fit_frame:
+        print(f'fit {len(fit_ids)} crystals, calibrate {len(cal_ids)}, '
+              f'report on {report_entries["entry_id"].nunique()} disjoint crystals')
+    else:
+        print(f'report on {report_entries["entry_id"].nunique()} disjoint crystals; the fit and '
+              f'calibration crystals are whatever --fit-frame carries, counted below')
 
     # ONE assembly, with the union of every group any arm needs. An arm's feature set is a
     # selection of columns from the frame -- `design_matrix` reads the names `feature_specification`
@@ -422,9 +456,16 @@ def run_fit(args):
         # shards' own metas say the export set out to write.
         covered = sorted({str(frame['condition_bundle'].iloc[0]) for frame in fit_frames
                           if frame.shape[0]})
-        print(f'read {len(pairs)} shard(s), {sum(f.shape[0] for f in fit_frames):,} fit rows and '
-              f'{sum(f.shape[0] for f in cal_frames):,} calibration rows over '
-              f'{len(covered)} bundle(s) from {pairs[0][0].parent}')
+        fit_crystals = len({e for f in fit_frames for e in f['entry_id'].unique()})
+        cal_crystals = len({e for f in cal_frames for e in f['entry_id'].unique()})
+        print(f'read {len(pairs)} shard(s): {sum(f.shape[0] for f in fit_frames):,} fit rows over '
+              f'{fit_crystals:,} crystals and {sum(f.shape[0] for f in cal_frames):,} calibration '
+              f'rows over {cal_crystals:,} crystals, {len(covered)} bundle(s), '
+              f'from {pairs[0][0].parent}')
+        # The two must not share a crystal however the frames were built: a calibrator fitted on
+        # rows the model saw states a prior it already knows (PROTOCOL section 3 rule 5).
+        assert_disjoint({e for f in fit_frames for e in f['entry_id'].unique()},
+                        {e for f in cal_frames for e in f['entry_id'].unique()})
         _assert_shards_complete(pairs, covered, args.allow_partial_bundles)
     else:
         fit_frames = load_fit_frames(FIT_POOL, entries, fit_ids, union, args.n_negatives, SEED,
@@ -435,9 +476,18 @@ def run_fit(args):
           f'{sum(f.shape[0] for f in cal_frames):,} calibration rows '
           f'({time.perf_counter() - started:.0f} s)', flush=True)
 
+    # **A column absent from the frame costs one feature, not sixteen arms.** Without this a
+    # single missing sidecar column skips every arm that names it -- which is what `N_cal` did to
+    # the full-scale fit, sixteen of seventeen arms gone for one column of twenty-nine. The drop is
+    # recorded in each arm's `dropped` field, so the fit is a stated 28-feature arm rather than a
+    # silent one.
+    extra_drop = tuple(name.strip() for name in (args.drop_columns or '').split(',') if name.strip())
+    if extra_drop:
+        print(f'dropping {list(extra_drop)} from every arm, by --drop-columns')
     models_dir = Path(args.models_dir)
     rows = []
     for name, extra, drop, purpose in ladder:
+        drop = tuple(dict.fromkeys(drop + extra_drop))
         rows.append(_fit_or_record(name, arm_groups(extra), drop, fit_frames, cal_frames,
                                    models_dir, args.fit_seed, purpose,
                                    None if name == 'unweighted_fit' else 'sampling_weight'))
@@ -1414,6 +1464,8 @@ def run_export_fit(args):
         frame = pd.concat(frames, ignore_index=True)
         path = out_dir/f'{args.tag}_{label}_frame{args.suffix}{shard}.parquet'
         frame.to_parquet(path, index=False)
+        if label == 'fit':
+            _report_absent_features(frame, union)
         correct = int(FomMetrics.as_bool(frame['is_correct']).sum())
         written[label] = dict(path=str(path), rows=int(frame.shape[0]), correct=correct,
                               negatives_per_cell=negatives,
@@ -1577,6 +1629,10 @@ def _parse_args(argv=None):
                         help='Comma-separated feature groups for export-fit, overriding the union '
                              'every arm needs. Use it when a pool lacks an optional sidecar; the '
                              'arms needing that group then skip themselves and record why')
+    parser.add_argument('--drop-columns', default=None,
+                        help='Comma-separated feature columns removed from EVERY arm. For a frame '
+                             'that is missing a column no arm can do without: one absent column '
+                             'otherwise skips every arm that names it. Recorded per arm')
     parser.add_argument('--allow-partial-bundles', action='store_true',
                         help='Fit even though the shards cover fewer condition bundles than the '
                              'pool holds. Only for a deliberate subset -- the usual cause is a '
