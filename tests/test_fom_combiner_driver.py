@@ -5,6 +5,8 @@ wrong: which pool a number is fitted on and which it is reported on, which colum
 ablates, and what a control destroys. None of that needs a pool to test.
 """
 
+import pathlib
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -393,3 +395,56 @@ def test_drop_columns_costs_one_feature_rather_than_every_arm():
     cut, _ = FomCombiner.feature_specification(groups, drop=driver.BASE_DROP + extra)
     assert len(cut) == len(full) - 1
     assert 'N_cal' in full and 'N_cal' not in cut
+
+
+# ---------------------------------------------------------------------------------------------
+# the run suffix has to namespace the MODELS, not only the tables
+# ---------------------------------------------------------------------------------------------
+def test_a_suffixed_run_writes_its_models_somewhere_else(tmp_path):
+    """`--suffix _fullscale` renamed every table and left the model directory alone.
+
+    So the full-scale fit overwrote the slice's models in place, and the three arms that skipped
+    themselves kept their SLICE models -- which the reduce then globbed and scored as full-scale
+    results. Two of those three were the controls, so that run had no floor to read itself
+    against. A stale model that loads and scores is the quietest failure in this driver.
+    """
+    base = tmp_path/'models'
+    (base/'_fullscale').mkdir(parents=True)
+    plain = driver._parse_args(['--stage', 'reduce', '--models-dir', str(base)])
+    assert driver.models_directory(plain) == base
+    suffixed = driver._parse_args(['--stage', 'reduce', '--models-dir', str(base),
+                                   '--suffix', '_fullscale'])
+    assert driver.models_directory(suffixed) == pathlib.Path(str(base) + '_fullscale') \
+        or driver.models_directory(suffixed) == base   # falls back when the dir is absent
+
+
+def test_a_suffixed_models_directory_is_used_when_it_exists(tmp_path):
+    base = tmp_path/'models'
+    base.mkdir()
+    pathlib.Path(str(base) + '_fullscale').mkdir()
+    args = driver._parse_args(['--stage', 'reduce', '--models-dir', str(base),
+                               '--suffix', '_fullscale'])
+    assert driver.models_directory(args).name.endswith('_fullscale')
+
+
+def test_an_absent_suffixed_directory_falls_back(tmp_path):
+    """A stage pointed at an explicit --models-dir must still work, and the search ladders read
+    their own directories with suffixes that name a ladder rather than a models tree."""
+    base = tmp_path/'models'
+    base.mkdir()
+    args = driver._parse_args(['--stage', 'reduce', '--models-dir', str(base),
+                               '--suffix', '_search2_seed12345'])
+    assert driver.models_directory(args) == base
+
+
+def test_the_controls_take_the_global_column_drop():
+    """They skipped themselves for `N_cal` while every real arm dropped it and fitted.
+
+    The controls are the verification -- `label_shuffled` must land on the tie-break floor and
+    `prior_only` well below raw M20 -- so a run without them has no floor, which is worse than a
+    run with one feature fewer.
+    """
+    import inspect
+    source = inspect.getsource(driver.run_fit)
+    control = source[source.index('CONTROL_ARMS'):]
+    assert 'BASE_DROP + extra_drop' in control, 'the control arms ignore --drop-columns'

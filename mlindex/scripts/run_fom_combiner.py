@@ -484,7 +484,15 @@ def run_fit(args):
     extra_drop = tuple(name.strip() for name in (args.drop_columns or '').split(',') if name.strip())
     if extra_drop:
         print(f'dropping {list(extra_drop)} from every arm, by --drop-columns')
-    models_dir = Path(args.models_dir)
+    # **The suffix namespaces the MODELS too, and it did not.** `--suffix _fullscale` renamed every
+    # table and left the model directory alone, so fitting at full scale overwrote the slice's
+    # models in place -- and the three arms that skipped themselves kept their slice models, which
+    # the reduce then globbed and scored as though they were full-scale results. Two of those three
+    # were the controls. A stale model that loads and scores is the quietest failure in this driver.
+    models_dir = Path(args.models_dir + args.suffix) if args.suffix else Path(args.models_dir)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    if args.suffix:
+        print(f'models -> {models_dir}')
     rows = []
     for name, extra, drop, purpose in ladder:
         drop = tuple(dict.fromkeys(drop + extra_drop))
@@ -500,7 +508,12 @@ def run_fit(args):
         shuffled_fit = [_shuffle_labels(frame, args.fit_seed) for frame in fit_frames]
         shuffled_cal = ([_shuffle_labels(frame, args.fit_seed + 1) for frame in cal_frames]
                         if name == 'label_shuffled' else cal_frames)
-        rows.append(_fit_or_record(name, arm_groups(()), BASE_DROP, shuffled_fit, shuffled_cal,
+        # `+ extra_drop`, which it did not have and cost the full-scale run its controls: the two
+        # of them skipped themselves for `N_cal` while every real arm dropped it and fitted. A run
+        # whose controls are missing has no floor to read its numbers against, which is worse than
+        # a run with one feature fewer.
+        rows.append(_fit_or_record(name, arm_groups(()), BASE_DROP + extra_drop,
+                                   shuffled_fit, shuffled_cal,
                                    models_dir, args.fit_seed, purpose, 'sampling_weight'))
 
     table = pd.DataFrame(rows)
@@ -570,6 +583,24 @@ def fit_one(name, groups, drop, fit_frames, cal_frames, models_dir, seed, purpos
 # ---------------------------------------------------------------------------------------------
 # stage: reduce -- the only stage that touches the 43 M-candidate report pool
 # ---------------------------------------------------------------------------------------------
+def models_directory(args):
+    """Where this run's models live: `--models-dir` plus the run suffix.
+
+    **The suffix namespaces the models, not only the tables.** `--suffix _fullscale` used to rename
+    every CSV and leave the model directory alone, so a full-scale fit overwrote the slice's models
+    in place, and the arms that skipped themselves kept their slice models for the reduce to glob
+    and score as full-scale results. Two of those were the controls (C2-F-141).
+
+    A suffixed directory that does not exist falls back to the unsuffixed one, so a stage pointed
+    at an explicit `--models-dir` still works and the search ladders keep reading their own.
+    """
+    if not args.suffix:
+        return Path(args.models_dir)
+    suffixed = Path(args.models_dir + args.suffix)
+    return suffixed if suffixed.is_dir() else Path(args.models_dir)
+
+
+
 def load_arms(models_dir, seed, names=None):
     """Every saved arm for one fit seed, as {name: combiner}."""
     arms = {}
@@ -602,7 +633,7 @@ def reference_scores(seed):
 
 
 def run_reduce(args):
-    arms = load_arms(args.models_dir, args.fit_seed, args.arms)
+    arms = load_arms(models_directory(args), args.fit_seed, args.arms)
     report_entries = FomBenchmark.load_entries(REPORT_POOL)
     fit_entries = FomBenchmark.load_entries(FIT_POOL)
     _, cal_ids = split_ids(fit_entries, args.train_split, HOLDOUT_FRACTION, SEED)
@@ -1106,7 +1137,7 @@ def run_transfer(args):
     del all_fit, all_cal
 
     # The incumbent, which saw everything, scored in the same pass so the comparison is paired.
-    incumbent = Path(args.models_dir)/f'{args.transfer_arm}_seed{args.fit_seed}'
+    incumbent = models_directory(args)/f'{args.transfer_arm}_seed{args.fit_seed}'
     if not incumbent.is_dir():
         raise SystemExit(
             f'no fitted {args.transfer_arm} arm at {incumbent}. The incumbent must be the SAME\n'
@@ -1248,7 +1279,7 @@ def run_cost(args):
             get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
 
     priced = FomCombiner.FomCombiner.load(
-        Path(args.models_dir)/f'{args.transfer_arm}_seed{args.fit_seed}')
+        models_directory(args)/f'{args.transfer_arm}_seed{args.fit_seed}')
     wanted = set(priced.names)
 
     def _needs(columns):
@@ -1515,7 +1546,7 @@ def run_calibration(args):
     # model nobody will ship. A second pass over 43 M candidates to add one arm is 30 minutes for
     # nothing; loading both directories costs one glob.
     arms = {}
-    for directory in [args.models_dir] + list(args.also_models_dir or ()):
+    for directory in [models_directory(args)] + list(args.also_models_dir or ()):
         for name, combiner in load_arms(directory, args.fit_seed, args.arms).items():
             if name in arms:
                 raise SystemExit(
