@@ -632,9 +632,26 @@ def reference_scores(seed):
         }
 
 
+def report_pool(args):
+    """The pool a rank claim is reported on: `--report-pool` when given, else the retained pool.
+
+    **The pool travels, not the candidates.** The contaminated pool is 45 GB against a laptop with
+    22 GB free, and a reduction is 0.1 MB an arm -- so the honest move is to ship the models to the
+    cluster, reduce there, and bring the per-entry reductions back. This flag is what makes that
+    possible without a second copy of the driver.
+
+    Whatever it points at must be FULLY RETAINED. `_pool_depth` reads the pool's own manifest and
+    `reduce_many` refuses a rank claim it cannot certify, so a thinned pool fails here rather than
+    reporting an optimistic rank (C2-R-013).
+    """
+    return Path(args.report_pool) if args.report_pool else REPORT_POOL
+
+
+
 def run_reduce(args):
     arms = load_arms(models_directory(args), args.fit_seed, args.arms)
-    report_entries = FomBenchmark.load_entries(REPORT_POOL)
+    pool = report_pool(args)
+    report_entries = FomBenchmark.load_entries(pool)
     fit_entries = FomBenchmark.load_entries(FIT_POOL)
     _, cal_ids = split_ids(fit_entries, args.train_split, HOLDOUT_FRACTION, SEED)
     assert_disjoint(cal_ids, set(report_entries['entry_id']))
@@ -654,15 +671,17 @@ def run_reduce(args):
         print(f'  {frame["condition_bundle"].iloc[0]:24s} {frame.shape[0]:>10,} candidates '
               f'({time.perf_counter() - started:.0f} s)', flush=True)
 
-    print(f'reducing {len(scores)} scores over the fully retained pool')
+    print(f'reducing {len(scores)} scores over {pool} '
+          f'({report_entries["entry_id"].nunique()} crystals, '
+          f'{len(FomBenchmark.available_bundles(pool))} bundles)')
     reduced = FomMetrics.reduce_many(
-        FomCombiner.combiner_frames_c2(REPORT_POOL, report_entries,
+        FomCombiner.combiner_frames_c2(pool, report_entries,
                                        groups=_union_groups(arms)),
         scores, entries=report_entries, splits={args.report_split: None},
         higher_is_better=orientation,
         # Explicit, never 'auto': `_resolve_subsampling` takes an iterable of frames for a full
         # pool, so 'auto' would certify a thinned one. The pool's own manifest is the authority.
-        subsample_top_k=_pool_depth(REPORT_POOL), on_shard=announce,
+        subsample_top_k=_pool_depth(pool), on_shard=announce,
         )
     metas = _write_reductions(reduced, artifact_dir, args.tag, args.suffix, require_exact=True)
 
@@ -1646,7 +1665,10 @@ def _parse_args(argv=None):
                              'to the 14-feature core the search settled on, NOT the 29-feature\n'
                              'base -- pass --models-dir the ladder that holds it')
     parser.add_argument('--report-pool', default=None,
-                        help='Pool the cost stage prices on. Defaults to the report pool')
+                        help='Pool the reduce and cost stages read. Defaults to the fully retained '
+                             'pool. Point it at another FULLY RETAINED pool to report on different '
+                             'condition bundles -- the contaminated pool is 45 GB, so the models go '
+                             'to it rather than it coming to the models')
     parser.add_argument('--cost-lattice', default='mP',
                         help='Which lattice to price on. Low-symmetry by default: these costs are '
                              'dominated by the reference-line pass and its size is a property of '

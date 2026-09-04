@@ -448,3 +448,29 @@ def test_the_controls_take_the_global_column_drop():
     source = inspect.getsource(driver.run_fit)
     control = source[source.index('CONTROL_ARMS'):]
     assert 'BASE_DROP + extra_drop' in control, 'the control arms ignore --drop-columns'
+
+
+def test_the_reduce_can_be_pointed_at_another_fully_retained_pool():
+    """The pool travels to the models, not the other way round.
+
+    The contaminated pool is 45 GB against a laptop with 22 GB free, and a reduction is 0.1 MB an
+    arm -- so the models are shipped to the cluster and the per-entry reductions come back. Without
+    this the only options were a partial copy or no contaminant result at all.
+    """
+    default = driver._parse_args(['--stage', 'reduce'])
+    assert driver.report_pool(default) == driver.REPORT_POOL
+    override = driver._parse_args(['--stage', 'reduce', '--report-pool', '/tmp/contaminant_pool'])
+    assert str(driver.report_pool(override)) == '/tmp/contaminant_pool'
+
+
+def test_a_pool_given_to_the_reduce_still_has_to_certify_its_ranks():
+    """`--report-pool` must not become a way round C2-R-013.
+
+    `_pool_depth` reads the pool's own manifest and `reduce_many` refuses a rank claim it cannot
+    certify, so a thinned pool has to FAIL here rather than report an optimistic rank. This checks
+    the depth is read from the pool the flag names, not from the default.
+    """
+    import inspect
+    source = inspect.getsource(driver.run_reduce)
+    assert 'subsample_top_k=_pool_depth(pool)' in source
+    assert 'REPORT_POOL' not in source, 'run_reduce still reaches past --report-pool'
