@@ -474,3 +474,42 @@ def test_a_pool_given_to_the_reduce_still_has_to_certify_its_ranks():
     source = inspect.getsource(driver.run_reduce)
     assert 'subsample_top_k=_pool_depth(pool)' in source
     assert 'REPORT_POOL' not in source, 'run_reduce still reaches past --report-pool'
+
+
+def test_a_threshold_reduction_can_be_reused_and_is_copied_not_referenced(tmp_path):
+    """Reporting the same models on a second pool must hold the THRESHOLD fixed.
+
+    A threshold belongs to the model and the rows it was chosen on, not to the pool being reported.
+    So when the contaminated bundles are compared with the clean ones, recomputing the threshold
+    would make part of the difference a difference of thresholds -- and the comparison would not be
+    paired in the way it claims.
+    """
+    import json
+    tag = 'S12_combiner'
+    (tmp_path/f'{tag}_reduced_meta_fullscale.json').write_text(json.dumps({
+        'base_cal': {'split': 'fom-train', 'ranks_exact': False},
+        'base': {'split': 'fom-dev', 'ranks_exact': True}}), encoding='utf-8')
+    pd.DataFrame({'entry_id': [1]}).to_parquet(
+        tmp_path/f'{tag}_reduced_base_fom-train_cal_fullscale.parquet', index=False)
+    metas = {}
+    copied = driver._reuse_calibration(tmp_path, tag, '_fullscale', '_contam', metas)
+    assert copied == 1
+    assert 'base_cal' in metas
+    # Copied, not referenced: a meta pointing into another suffix dangles the moment either run is
+    # regenerated.
+    assert (tmp_path/f'{tag}_reduced_base_fom-train_cal_contam.parquet').exists()
+
+
+def test_reusing_a_calibration_that_is_not_there_refuses(tmp_path):
+    with pytest.raises(SystemExit) as problem:
+        driver._reuse_calibration(tmp_path, 'S12_combiner', '_nope', '_contam', {})
+    assert 'does not exist' in str(problem.value)
+
+
+def test_reusing_a_calibration_with_no_cal_entries_refuses(tmp_path):
+    import json
+    (tmp_path/'S12_combiner_reduced_meta_empty.json').write_text(
+        json.dumps({'base': {'split': 'fom-dev'}}), encoding='utf-8')
+    with pytest.raises(SystemExit) as problem:
+        driver._reuse_calibration(tmp_path, 'S12_combiner', '_empty', '_contam', {})
+    assert 'half a table' in str(problem.value)

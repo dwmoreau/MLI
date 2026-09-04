@@ -649,8 +649,14 @@ def report_pool(args):
 
 
 def run_reduce(args):
-    arms = load_arms(models_directory(args), args.fit_seed, args.arms)
+    # **Both of these are printed, and neither used to be.** A reduce that loads the wrong models
+    # or reads the wrong pool produces a table that looks entirely normal -- which is exactly how
+    # three slice-fitted models were reported as full-scale results (C2-F-141). Say which models
+    # and which pool, every run, so the log answers the question without a forensic step.
+    directory = models_directory(args)
+    arms = load_arms(directory, args.fit_seed, args.arms)
     pool = report_pool(args)
+    print(f'models: {directory} -> {", ".join(sorted(arms))}')
     report_entries = FomBenchmark.load_entries(pool)
     fit_entries = FomBenchmark.load_entries(FIT_POOL)
     _, cal_ids = split_ids(fit_entries, args.train_split, HOLDOUT_FRACTION, SEED)
@@ -689,6 +695,24 @@ def run_reduce(args):
     # fom-train crystals at all. So a second, much smaller reduction over the slice's calibration
     # entries, with the inexactness recorded rather than hidden: these rows feed a THRESHOLD and
     # never a rank claim.
+    #
+    # **`--calibration-from` reuses another run's, and for a second REPORT pool that is the correct
+    # thing rather than a shortcut.** A threshold is a property of the MODEL and of the rows it was
+    # chosen on; it is not a property of the pool being reported. So when the same models are
+    # reported on a second pool -- the contaminated bundles against the clean ones -- the threshold
+    # must be held FIXED, or a difference between pools is partly a difference between thresholds
+    # and the comparison is not paired in the way it claims to be. It also means the fit pool need
+    # not exist wherever the reduce runs, which is what lets a 45 GB pool be reduced where it sits.
+    if args.calibration_from is not None:
+        source = args.calibration_from
+        copied = _reuse_calibration(artifact_dir, args.tag, source, args.suffix, metas)
+        print(f'\nthreshold reduction reused from {source or "(no suffix)"}: '
+              f'{copied} score(s), held fixed so this pool is compared at the same threshold')
+        (artifact_dir/f'{args.tag}_reduced_meta{args.suffix}.json').write_text(
+            json.dumps(metas, indent=2, sort_keys=True, default=str), encoding='utf-8')
+        print(f'\n{seen["n"]:,} candidates reduced -> {artifact_dir}')
+        return 0
+
     print('\nreducing the calibration split for threshold selection (ranks inexact by design)')
     calibration = FomMetrics.reduce_many(
         FomCombiner.combiner_frames_c2(FIT_POOL, fit_entries, groups=_union_groups(arms),
@@ -703,6 +727,45 @@ def run_reduce(args):
         json.dumps(metas, indent=2, sort_keys=True, default=str), encoding='utf-8')
     print(f'\n{seen["n"]:,} candidates reduced -> {artifact_dir}')
     return 0
+
+
+def _reuse_calibration(artifact_dir, tag, source_suffix, suffix, metas):
+    """Copy another run's calibration reductions and their metas into this run.
+
+    Copied, not referenced: a meta that points at a file under a different suffix is a dangling
+    reference the moment either run is regenerated, and this record has already been bitten by an
+    artefact that outlived the run that made it.
+    """
+    import shutil
+
+    artifact_dir = Path(artifact_dir)
+    source_meta = artifact_dir/f'{tag}_reduced_meta{source_suffix}.json'
+    if not source_meta.exists():
+        raise SystemExit(
+            f'--calibration-from {source_suffix!r} needs {source_meta}, which does not exist. '
+            f'Run the reduce for that suffix first, or drop the flag to compute a fresh '
+            f'threshold reduction here.')
+    source = json.loads(source_meta.read_text(encoding='utf-8'))
+    copied = 0
+    for key, meta in source.items():
+        if not key.endswith('_cal'):
+            continue
+        name = key[:-len('_cal')]
+        for split in (meta.get('split'), None):
+            if split is None:
+                continue
+            src = artifact_dir/f'{tag}_reduced_{name}_{split}_cal{source_suffix}.parquet'
+            if src.exists():
+                shutil.copyfile(src, artifact_dir/f'{tag}_reduced_{name}_{split}_cal{suffix}.parquet')
+                metas[key] = meta
+                copied += 1
+    if not copied:
+        raise SystemExit(
+            f'--calibration-from {source_suffix!r} matched no calibration reductions in '
+            f'{source_meta}. Without a threshold the analyse stage can report ranks and nothing '
+            f'else, so this refuses rather than producing half a table.')
+    return copied
+
 
 
 def _union_groups(arms):
@@ -1664,6 +1727,13 @@ def _parse_args(argv=None):
                         help='Which feature set the transfer and cost stages measure. Defaults\n'
                              'to the 14-feature core the search settled on, NOT the 29-feature\n'
                              'base -- pass --models-dir the ladder that holds it')
+    parser.add_argument('--calibration-from', default=None,
+                        help='Reuse the threshold reduction from another run suffix instead of '
+                             'recomputing it. Correct whenever the same models are reported on a '
+                             'second pool: a threshold belongs to the model, so holding it fixed '
+                             'is what makes the two pools comparable. Also means the fit pool need '
+                             'not exist where the reduce runs. Pass an empty string for the '
+                             'unsuffixed run')
     parser.add_argument('--report-pool', default=None,
                         help='Pool the reduce and cost stages read. Defaults to the fully retained '
                              'pool. Point it at another FULLY RETAINED pool to report on different '
