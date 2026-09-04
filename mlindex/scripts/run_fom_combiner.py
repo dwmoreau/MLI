@@ -658,9 +658,27 @@ def run_reduce(args):
     pool = report_pool(args)
     print(f'models: {directory} -> {", ".join(sorted(arms))}')
     report_entries = FomBenchmark.load_entries(pool)
-    fit_entries = FomBenchmark.load_entries(FIT_POOL)
-    _, cal_ids = split_ids(fit_entries, args.train_split, HOLDOUT_FRACTION, SEED)
-    assert_disjoint(cal_ids, set(report_entries['entry_id']))
+
+    # **The fit pool is only needed to CHOOSE a threshold, so `--calibration-from` must not need
+    # it.** It was loaded unconditionally here, which made the flag useless on the one machine it
+    # exists for -- the contaminated pool sits where the fit pool does not.
+    #
+    # The check being skipped is that no crystal the threshold was chosen on is in the report pool.
+    # What replaces it is stronger on the evidence actually available: the report pool must contain
+    # no `--train-split` crystals AT ALL. The threshold rows are drawn from that split, so a report
+    # pool with none of it cannot share one, and this is checkable from the report pool alone.
+    if args.calibration_from is None:
+        fit_entries = FomBenchmark.load_entries(FIT_POOL)
+        _, cal_ids = split_ids(fit_entries, args.train_split, HOLDOUT_FRACTION, SEED)
+        assert_disjoint(cal_ids, set(report_entries['entry_id']))
+    else:
+        leaked = report_entries.loc[report_entries['split'] == args.train_split, 'entry_id']
+        if len(leaked):
+            raise SystemExit(
+                f'{leaked.nunique()} {args.train_split} crystals are in the report pool, so a '
+                f'threshold reused from another run may have been chosen on rows being reported. '
+                f'Reduce this pool without --calibration-from, or report a split the thresholds '
+                f'were not chosen on.')
 
     # A combiner's `score` is a bound method over a frame, which is exactly the callable shape
     # `reduce_many` takes -- a fitted model is not a stored column and never can be.

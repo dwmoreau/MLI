@@ -513,3 +513,18 @@ def test_reusing_a_calibration_with_no_cal_entries_refuses(tmp_path):
     with pytest.raises(SystemExit) as problem:
         driver._reuse_calibration(tmp_path, 'S12_combiner', '_empty', '_contam', {})
     assert 'half a table' in str(problem.value)
+
+
+def test_calibration_from_does_not_need_the_fit_pool():
+    """The fit pool is only needed to CHOOSE a threshold, so reusing one must not require it.
+
+    It was loaded unconditionally at the top of run_reduce, which made `--calibration-from` useless
+    on the one machine it exists for: the contaminated pool sits where the fit pool does not.
+    """
+    import inspect
+    source = inspect.getsource(driver.run_reduce)
+    head = source[:source.index('reduce_many')]
+    assert 'if args.calibration_from is None:' in head
+    load = head.index('FomBenchmark.load_entries(FIT_POOL)')
+    guard = head.index('if args.calibration_from is None:')
+    assert guard < load, 'FIT_POOL is still loaded before the guard that makes it optional'
