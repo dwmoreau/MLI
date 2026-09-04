@@ -58,8 +58,14 @@ fi
 set -e
 
 echo "=== reduce over the contaminated pool ==="
+# `--models-dir` explicitly, because the run suffix and the models' suffix are DIFFERENT things
+# here: `_contam` names the pool being reported, `_fullscale` names the fit the models came from.
+# `models_directory` appends the run suffix and falls back when that directory is absent, so
+# without this it looks for fom_combiner_c2_contam, does not find it, and falls back to the
+# unsuffixed fom_combiner_c2 -- which on this machine holds no arms at all.
 "$PYTHON" mlindex/scripts/run_fom_combiner.py --stage reduce \
     --report-pool "$POOL" \
+    --models-dir "$MODELS" \
     --calibration-from _fullscale \
     --suffix _contam \
     --arms base drop_structural plus_probation
