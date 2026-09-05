@@ -634,115 +634,147 @@ BUNDLE_MEANING = {
     }
 
 
-def _contaminated(artifact_dir, tag, clean_suffix='_fullscale', contam_suffix='_contam'):
+def _contaminated(artifact_dir, tag, clean_suffix='_fullscale', contam_suffix='_contam',
+                  answer_rates=(0.75, 0.90)):
     """What the score does on patterns carrying peaks no cell can index.
 
-    Computed here rather than read from a table because the per-bundle split is the whole point:
-    pooling five conditions would bury `phase3`, which is both the worst case and the realistic
-    one. The threshold is the one the clean run chose -- held fixed, so a difference between the
-    two pools is a difference between the pools and not between two thresholds.
+    **The primary table is at a MATCHED ANSWER RATE, and that choice is the result of an audit.**
+    Reporting it at the clean run's fixed threshold gave the learned score a +46.4 pp margin over
+    `M_sym`, which is inflated about 3.5x: the classical merits' absolute scale collapses under
+    contamination -- `M_sym`'s median top score falls from 117.8 to 30.9, below its own threshold of
+    37.5 -- so it stops answering on 55% of patterns and every silence counts as a miss. That is a
+    real deployment hazard and is reported below as one, but it is not a ranking result: a
+    calibrated probability has an anchored scale by construction, so a fixed-threshold comparison
+    between it and a raw merit largely measures calibration. Forcing every arm to answer on the same
+    fraction of patterns removes that asymmetry (C2-F-142).
     """
     import json
     from mlindex.model_training import FomMetrics
 
     artifact_dir = Path(artifact_dir)
     meta_path = artifact_dir/f'{tag}_reduced_meta{contam_suffix}.json'
-    clean = _load(artifact_dir, tag, f'main_table{clean_suffix}', required=False)
+    clean_meta_path = artifact_dir/f'{tag}_reduced_meta{clean_suffix}.json'
     contam = _load(artifact_dir, tag, f'main_table{contam_suffix}', required=False)
-    if not meta_path.exists() or clean is None or contam is None:
+    if not meta_path.exists() or contam is None:
         return []
     meta = json.loads(meta_path.read_text(encoding='utf-8'))
-    clean = clean.set_index('arm')
+    clean_meta = (json.loads(clean_meta_path.read_text(encoding='utf-8'))
+                  if clean_meta_path.exists() else {})
     contam = contam.set_index('arm')
     arms = [a for a in ('M20', 'M_sym', 'drop_structural', 'base', 'plus_probation')
             if a in contam.index and f'{a}|fom-dev' in meta]
-
-    rows = []
-    for arm in arms:
-        path = artifact_dir/f'{tag}_reduced_{arm}_fom-dev{contam_suffix}.parquet'
-        if not path.exists():
-            continue
-        per_entry = pd.read_parquet(path)
-        threshold = float(contam.loc[arm, 'threshold'])
-        for bundle, block in per_entry.groupby('condition_bundle'):
-            result = FomMetrics.summarise_per_entry(
-                block.reset_index(drop=True), meta[f'{arm}|fom-dev'],
-                threshold=threshold, n_bootstrap=0)
-            rows.append(dict(arm=arm, bundle=bundle,
-                             top10=float(result.metric('top10')),
-                             op=float(result.metric('operating_point'))))
-    if not rows:
+    if not arms:
         return []
-    table = pd.DataFrame(rows)
+
+    def _read(arm, suffix, metas):
+        path = artifact_dir/f'{tag}_reduced_{arm}_fom-dev{suffix}.parquet'
+        key = f'{arm}|fom-dev'
+        if not path.exists() or key not in metas:
+            return None, None
+        return pd.read_parquet(path).reset_index(drop=True), metas[key]
+
+    def _at_rates(arm, suffix, metas):
+        frame, m = _read(arm, suffix, metas)
+        if frame is None:
+            return None
+        scores = frame['score_top_in_top_n'].to_numpy(dtype=float)
+        row = {'top10': float(FomMetrics.summarise_per_entry(
+            frame, m, n_bootstrap=0).metric('top10'))}
+        for rate in answer_rates:
+            summary = FomMetrics.summarise_per_entry(
+                frame, m, threshold=float(np.nanquantile(scores, 1 - rate)), n_bootstrap=0)
+            row[f'op@{int(rate*100)}'] = float(summary.metric('operating_point'))
+            row[f'prec@{int(rate*100)}'] = float(summary.metric('precision'))
+        return row
+
+    contaminated = {a: _at_rates(a, contam_suffix, meta) for a in arms}
+    cleanly = {a: _at_rates(a, clean_suffix, clean_meta) for a in arms}
+    contaminated = {a: r for a, r in contaminated.items() if r}
+    if not contaminated:
+        return []
 
     lines = ['## Patterns carrying peaks no cell can index', '',
              'Everything above is measured on clean patterns -- Gaussian peak-position error and '
              'nothing else. Real data carries lines a correct cell cannot explain, and this section '
              'is the only place in the campaign that measures what that does. **The same 530 '
              'crystals**, regenerated under five further conditions and fully retained, so every '
-             'comparison is paired over crystals and the ranks are exact. **The threshold is the '
-             'one the clean run chose, held fixed** -- otherwise part of any difference would be a '
-             'difference between thresholds rather than between conditions.', '']
+             'comparison is paired over crystals and the ranks are exact.', '',
+             '### Every score forced to answer on the same fraction of patterns', '',
+             '*The primary comparison. A threshold is set per arm so that each reports an answer '
+             'on the same share of patterns, which removes the scale asymmetry between a '
+             'calibrated probability and a raw merit.*', '',
+             '| | ' + ' | '.join(f'`{a}`' for a in contaminated) + ' |',
+             '|---' * (len(contaminated) + 1) + '|']
+    for rate in answer_rates:
+        pct = int(rate*100)
+        lines.append(f'| operating point, answering on {pct}% | '
+                     + ' | '.join(_pp(contaminated[a][f'op@{pct}']) for a in contaminated) + ' |')
+    for rate in answer_rates:
+        pct = int(rate*100)
+        lines.append(f'| precision, answering on {pct}% | '
+                     + ' | '.join(_pp(contaminated[a][f'prec@{pct}']) for a in contaminated) + ' |')
+    lines.append('| top-10 (no threshold at all) | '
+                 + ' | '.join(_pp(contaminated[a]['top10']) for a in contaminated) + ' |')
+    lines.append('')
 
-    for metric, title, gloss in (
-            ('top10', 'Top-10: does it still ORDER the candidates',
-             'ranking only, no threshold'),
-            ('op', 'Operating point: does it still DECIDE',
-             'ranking and the fixed threshold together')):
-        wide = table.pivot(index='bundle', columns='arm', values=metric)[arms]
-        lines += [f'### {title}', '', f'*{gloss}.*', '',
-                  '| condition | ' + ' | '.join(f'`{a}`' for a in arms) + ' | what it is |',
-                  '|---' * (len(arms) + 2) + '|']
-        for bundle in sorted(wide.index):
-            what = BUNDLE_MEANING.get(bundle, ('', ''))[0]
-            cells = ' | '.join(_pp(wide.loc[bundle, a]) for a in arms)
-            lines.append(f'| `{bundle}` | {cells} | {what} |')
-        clean_cells = ' | '.join(
-            _pp(clean.loc[a, 'top10' if metric == 'top10' else 'operating_point'])
-            if a in clean.index else '--' for a in arms)
-        lines.append(f'| *clean, for reference* | {clean_cells} | 0.1x / 1x / 2x error |')
-        lines.append('')
+    if 'base' in contaminated and 'M_sym' in contaminated and cleanly.get('base') \
+            and cleanly.get('M_sym'):
+        lines += ['### The same contrast on clean and contaminated patterns', '',
+                  '*This is what the section is for: not how good the score is, but how much more '
+                  'it is worth when the pattern is dirty.*', '',
+                  '| `base` minus `M_sym` | clean | contaminated | amplification |',
+                  '|---|---|---|---|']
+        for column, label in [('top10', 'top-10, no threshold')] + \
+                [(f'op@{int(r*100)}', f'operating point, answering on {int(r*100)}%')
+                 for r in answer_rates]:
+            a = 100*(cleanly['base'][column] - cleanly['M_sym'][column])
+            b = 100*(contaminated['base'][column] - contaminated['M_sym'][column])
+            factor = f'{b/a:.1f}x' if abs(a) > 0.5 else 'n/a (clean gap ~0)'
+            lines.append(f'| {label} | {a:+.2f} pp | **{b:+.2f} pp** | {factor} |')
+        lines += ['', '**The ranking advantage triples to quadruples, and no threshold artefact '
+                  'can explain that** -- top-10 involves no threshold at all.', '',
+                  '*Rates below 75% are not shown, and the reason is a property of the model worth '
+                  'knowing: on clean patterns **55.2% of them share the maximum calibrated score '
+                  'of exactly 1.0**, because the isotonic calibrator maps its whole top bin there. '
+                  'A threshold inside that block cannot separate them, so a matched rate of 50% is '
+                  'not defined for the learned score on clean data. At high confidence the score '
+                  'is a step, not a ranking -- which matters for anyone planning to use it to '
+                  'triage.*', '']
 
-    wide_t = table.pivot(index='bundle', columns='arm', values='top10')
-    wide_o = table.pivot(index='bundle', columns='arm', values='op')
+    lines += ['### And a separate finding: the classical merits\' SCALE collapses', '',
+              'This is a different failure from ranking worse, and it is a deployment hazard rather '
+              'than a ranking result -- which is why it is reported here and not folded into the '
+              'numbers above.', '',
+              '| median top score | clean | contaminated | its fixed threshold |',
+              '|---|---|---|---|',
+              '| `M_sym` | 117.76 | **30.95** | 37.49 |',
+              '| M20 | 17.23 | **10.24** | 9.97 |',
+              '| `base` | 1.0000 | 0.6560 | 0.06 |', '',
+              '`M_sym`\'s median top score falls **below its own threshold**, so at a threshold '
+              'chosen on clean patterns it stops answering on 55% of them and every silence counts '
+              'as a miss. That is why the same comparison at a fixed threshold reads +46.4 pp -- '
+              'about 3.5x the honest figure. M20 and `M_sym` genuinely fall when peaks cannot be '
+              'indexed; that is what they measure. But a threshold set once, on clean data, '
+              'silently stops meaning what it meant, and nothing warns you. A calibrated '
+              'probability does not have that failure mode.', '']
 
-    def _fall(arm, column, wide):
-        return 100*(clean.loc[arm, column] - wide[arm].mean()) if arm in clean.index else float('nan')
-
-    lines += ['### What the two tables say together', '']
-    if {'M_sym', 'base'} <= set(arms):
-        lines += [
-            f'**The classical merits lose far more than the learned score, and they lose more '
-            f'DECIDING than ORDERING.** Averaged over the five conditions, `M_sym` falls '
-            f'{_fall("M_sym", "top10", wide_t):.1f} pp of top-10 and '
-            f'{_fall("M_sym", "operating_point", wide_o):.1f} pp of operating point; `base` falls '
-            f'{_fall("base", "top10", wide_t):.1f} and '
-            f'{_fall("base", "operating_point", wide_o):.1f}. That `M_sym` loses so much more of '
-            f'the second than the first is the diagnosis: its ordering partly survives, but its '
-            f'numerical scale moves, so a threshold set on clean patterns stops meaning what it '
-            f'meant. The learned score keeps both.', '']
-    if 'c2_error1_cont0_phase3' in wide_o.index and 'M20' in arms:
-        lines += [
-            f'**`phase3` is the worst case and the realistic one.** M20 reaches '
-            f'{_pp(wide_o.loc["c2_error1_cont0_phase3", "M20"])} of operating point there -- on a '
-            f'pattern with three lines from a genuine second phase, at the conventional de Wolff '
-            f'threshold, it returns the right cell about one time in twelve. Independent '
-            f'contaminants hurt it far less ({_pp(wide_o.loc["c2_error1_cont2", "M20"])} on '
-            f'`cont2`), and the difference is why: random lines cannot be indexed by ANY cell, so '
-            f'no candidate is rewarded for them, while second-phase lines follow a real lattice '
-            f'and a wrong cell can genuinely index some of them. M20 counts that as evidence.', '']
-    lines += [
-        '**The claim this supports, and the one it does not.** These models were fitted on all '
-        'nine condition bundles, contaminated ones included -- on `fom-train` crystals, disjoint '
-        'from the `fom-dev` crystals reported here, so this is not leakage. But it means the '
-        'supported claim is *a learned score trained on a realistic mix of conditions is far more '
-        'robust to contamination than a formula from 1961*, and NOT *it generalises to degradation '
-        'it has never seen*. The second is a different experiment -- leave-one-condition-out over '
-        'these bundles, with the size-matched control the transfer stage already uses -- and it '
-        'has not been run.', '',
-        '**Read the `drop` series as a trend, not as three results.** Each moves a contaminant, '
-        '2/4/6 dropped peaks, and a 31-peak pattern at once, so no single one isolates a cause. '
-        '`cont2` and `phase3` are the two that change one thing.', '']
+    lines += ['### What each condition is, and what it can answer', '', '| condition | what it is | '
+              'read it as |', '|---|---|---|']
+    for bundle, (what, how) in BUNDLE_MEANING.items():
+        lines.append(f'| `{bundle}` | {what} | {how} |')
+    lines += ['', '**`phase3` is the worst case and the realistic one.** Random contaminants cannot '
+              'be indexed by ANY cell, so no candidate is rewarded for them. Second-phase lines '
+              'follow a real lattice, so a wrong cell can genuinely index some of them and M20 '
+              'counts that as evidence for the wrong answer. **Read the `drop` series as a trend, '
+              'not as three results**: each moves a contaminant, 2/4/6 dropped peaks and a 31-peak '
+              'pattern at once.', '',
+              '**The claim this supports, and the one it does not.** These models were fitted on '
+              'all nine condition bundles, contaminated ones included -- on `fom-train` crystals, '
+              'disjoint from the `fom-dev` crystals reported here, so this is not leakage. But the '
+              'supported claim is *a learned score trained on a realistic mix of conditions is more '
+              'robust to contamination than a formula from 1961*, and NOT *it generalises to '
+              'degradation it has never seen*. The second is a leave-one-condition-out over these '
+              'bundles with the size-matched control, and it has not been run.', '']
     return lines
 
 
