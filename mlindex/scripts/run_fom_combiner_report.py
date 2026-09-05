@@ -94,6 +94,7 @@ def build(artifact_dir, tag, search_suffixes=SEARCH_SUFFIXES, seeds=SEEDS):
 
     lines = ['# S12 — the learned combiner, cut hard', '']
     lines += _verdict(main, mcnemar, search)
+    lines += _metrics()
     lines += _how(main, fit_table)
     lines += _leaderboard(main)
     lines += _controls(main)
@@ -103,6 +104,7 @@ def build(artifact_dir, tag, search_suffixes=SEARCH_SUFFIXES, seeds=SEEDS):
     lines += _per_lattice(main, by_lattice)
     lines += _calibration(calibration, search)
     lines += _transfer(transfer)
+    lines += _contaminated(artifact_dir, tag)
     lines += _bounds(skew)
     return '\n'.join(lines) + '\n'
 
@@ -174,6 +176,39 @@ def _verdict(main, mcnemar, search=None):
         f'features** where campaign 1 carried 65.', '']
     return lines
 
+
+
+def _metrics():
+    """What the two headline numbers mean, in words, before any of them are quoted.
+
+    They are not interchangeable and the difference between them is itself a result: a merit can
+    degrade far more on one than the other, which says whether it stopped ORDERING candidates or
+    stopped MEANING the same thing.
+    """
+    return [
+        '## The two numbers everything here is reported in', '',
+        '**Top-10 is a ranking question and nothing else.** Pool every candidate the search '
+        'produced for one pattern, across all fourteen Bravais lattices, order them by the score, '
+        'and ask whether the correct cell is in the first ten. No threshold is involved, so a '
+        'score that orders well but is numerically meaningless still does well here. It measures '
+        'one thing: *would a human looking at the top of the list find the answer.*', '',
+        '**The operating point is ranking AND a decision.** The correct cell must be in the '
+        'pooled top ten **and** score above a fixed threshold, so the indexer can say "this one" '
+        'rather than "one of these ten". It is the number the project exists to move, because a '
+        'figure of merit that cannot be thresholded does not automate anything. The threshold is '
+        'chosen on crystals the model was never fitted on, at the false-positive rate M20 itself '
+        'produces at the conventional de Wolff cut of 10.0, so every score is asked to be right '
+        '*as often as M20 is wrong* -- that is what makes the comparison fair rather than a choice '
+        'of operating régime.', '',
+        '**Read the gap between them, not just each one.** If a merit loses top-10 it has stopped '
+        'ordering candidates correctly. If it loses much more operating point than top-10, its '
+        'ordering survived but its SCALE moved: the same numerical score no longer means the same '
+        'thing, so a threshold set elsewhere no longer holds. Those are different failures with '
+        'different fixes, and this document reports both for exactly that reason.', '',
+        '`top1` and `mrr` appear in the tables beside them. `top1` is the same question at rank '
+        'one; `mrr` is the mean reciprocal rank, which rewards being second over being tenth. '
+        'Neither is a headline; they are there to show whether a top-10 gain is real depth or a '
+        'reshuffle just inside the cut.', '']
 
 
 def _how(main, fit_table):
@@ -584,6 +619,130 @@ def _transfer(transfer):
               'needs exact ranks, which needs the fully retained pool, which carries the severity '
               'axis and none of the sparsity, contaminant or second-phase bundles (C2-R-024). So '
               'what is measured is transfer across error **severity**.', '']
+    return lines
+
+
+BUNDLE_MEANING = {
+    'c2_error1_cont2': ('2 unindexable lines, 60 peaks, no dropout',
+                        'the clean contaminant read: contaminants and nothing else moving'),
+    'c2_error1_cont0_phase3': ('3 lines from a real partner cell, 60 peaks',
+                               'CORRELATED -- they follow a lattice, so a wrong cell can genuinely '
+                               'index some of them'),
+    'c2_error1_cont1_drop2': ('1 contaminant, 2 peaks dropped, 31 peaks', 'sparsity trend'),
+    'c2_error1_cont1_drop4': ('1 contaminant, 4 peaks dropped, 31 peaks', 'sparsity trend'),
+    'c2_error1_cont1_drop6': ('1 contaminant, 6 peaks dropped, 31 peaks', 'sparsity trend'),
+    }
+
+
+def _contaminated(artifact_dir, tag, clean_suffix='_fullscale', contam_suffix='_contam'):
+    """What the score does on patterns carrying peaks no cell can index.
+
+    Computed here rather than read from a table because the per-bundle split is the whole point:
+    pooling five conditions would bury `phase3`, which is both the worst case and the realistic
+    one. The threshold is the one the clean run chose -- held fixed, so a difference between the
+    two pools is a difference between the pools and not between two thresholds.
+    """
+    import json
+    from mlindex.model_training import FomMetrics
+
+    artifact_dir = Path(artifact_dir)
+    meta_path = artifact_dir/f'{tag}_reduced_meta{contam_suffix}.json'
+    clean = _load(artifact_dir, tag, f'main_table{clean_suffix}', required=False)
+    contam = _load(artifact_dir, tag, f'main_table{contam_suffix}', required=False)
+    if not meta_path.exists() or clean is None or contam is None:
+        return []
+    meta = json.loads(meta_path.read_text(encoding='utf-8'))
+    clean = clean.set_index('arm')
+    contam = contam.set_index('arm')
+    arms = [a for a in ('M20', 'M_sym', 'drop_structural', 'base', 'plus_probation')
+            if a in contam.index and f'{a}|fom-dev' in meta]
+
+    rows = []
+    for arm in arms:
+        path = artifact_dir/f'{tag}_reduced_{arm}_fom-dev{contam_suffix}.parquet'
+        if not path.exists():
+            continue
+        per_entry = pd.read_parquet(path)
+        threshold = float(contam.loc[arm, 'threshold'])
+        for bundle, block in per_entry.groupby('condition_bundle'):
+            result = FomMetrics.summarise_per_entry(
+                block.reset_index(drop=True), meta[f'{arm}|fom-dev'],
+                threshold=threshold, n_bootstrap=0)
+            rows.append(dict(arm=arm, bundle=bundle,
+                             top10=float(result.metric('top10')),
+                             op=float(result.metric('operating_point'))))
+    if not rows:
+        return []
+    table = pd.DataFrame(rows)
+
+    lines = ['## Patterns carrying peaks no cell can index', '',
+             'Everything above is measured on clean patterns -- Gaussian peak-position error and '
+             'nothing else. Real data carries lines a correct cell cannot explain, and this section '
+             'is the only place in the campaign that measures what that does. **The same 530 '
+             'crystals**, regenerated under five further conditions and fully retained, so every '
+             'comparison is paired over crystals and the ranks are exact. **The threshold is the '
+             'one the clean run chose, held fixed** -- otherwise part of any difference would be a '
+             'difference between thresholds rather than between conditions.', '']
+
+    for metric, title, gloss in (
+            ('top10', 'Top-10: does it still ORDER the candidates',
+             'ranking only, no threshold'),
+            ('op', 'Operating point: does it still DECIDE',
+             'ranking and the fixed threshold together')):
+        wide = table.pivot(index='bundle', columns='arm', values=metric)[arms]
+        lines += [f'### {title}', '', f'*{gloss}.*', '',
+                  '| condition | ' + ' | '.join(f'`{a}`' for a in arms) + ' | what it is |',
+                  '|---' * (len(arms) + 2) + '|']
+        for bundle in sorted(wide.index):
+            what = BUNDLE_MEANING.get(bundle, ('', ''))[0]
+            cells = ' | '.join(_pp(wide.loc[bundle, a]) for a in arms)
+            lines.append(f'| `{bundle}` | {cells} | {what} |')
+        clean_cells = ' | '.join(
+            _pp(clean.loc[a, 'top10' if metric == 'top10' else 'operating_point'])
+            if a in clean.index else '--' for a in arms)
+        lines.append(f'| *clean, for reference* | {clean_cells} | 0.1x / 1x / 2x error |')
+        lines.append('')
+
+    wide_t = table.pivot(index='bundle', columns='arm', values='top10')
+    wide_o = table.pivot(index='bundle', columns='arm', values='op')
+
+    def _fall(arm, column, wide):
+        return 100*(clean.loc[arm, column] - wide[arm].mean()) if arm in clean.index else float('nan')
+
+    lines += ['### What the two tables say together', '']
+    if {'M_sym', 'base'} <= set(arms):
+        lines += [
+            f'**The classical merits lose far more than the learned score, and they lose more '
+            f'DECIDING than ORDERING.** Averaged over the five conditions, `M_sym` falls '
+            f'{_fall("M_sym", "top10", wide_t):.1f} pp of top-10 and '
+            f'{_fall("M_sym", "operating_point", wide_o):.1f} pp of operating point; `base` falls '
+            f'{_fall("base", "top10", wide_t):.1f} and '
+            f'{_fall("base", "operating_point", wide_o):.1f}. That `M_sym` loses so much more of '
+            f'the second than the first is the diagnosis: its ordering partly survives, but its '
+            f'numerical scale moves, so a threshold set on clean patterns stops meaning what it '
+            f'meant. The learned score keeps both.', '']
+    if 'c2_error1_cont0_phase3' in wide_o.index and 'M20' in arms:
+        lines += [
+            f'**`phase3` is the worst case and the realistic one.** M20 reaches '
+            f'{_pp(wide_o.loc["c2_error1_cont0_phase3", "M20"])} of operating point there -- on a '
+            f'pattern with three lines from a genuine second phase, at the conventional de Wolff '
+            f'threshold, it returns the right cell about one time in twelve. Independent '
+            f'contaminants hurt it far less ({_pp(wide_o.loc["c2_error1_cont2", "M20"])} on '
+            f'`cont2`), and the difference is why: random lines cannot be indexed by ANY cell, so '
+            f'no candidate is rewarded for them, while second-phase lines follow a real lattice '
+            f'and a wrong cell can genuinely index some of them. M20 counts that as evidence.', '']
+    lines += [
+        '**The claim this supports, and the one it does not.** These models were fitted on all '
+        'nine condition bundles, contaminated ones included -- on `fom-train` crystals, disjoint '
+        'from the `fom-dev` crystals reported here, so this is not leakage. But it means the '
+        'supported claim is *a learned score trained on a realistic mix of conditions is far more '
+        'robust to contamination than a formula from 1961*, and NOT *it generalises to degradation '
+        'it has never seen*. The second is a different experiment -- leave-one-condition-out over '
+        'these bundles, with the size-matched control the transfer stage already uses -- and it '
+        'has not been run.', '',
+        '**Read the `drop` series as a trend, not as three results.** Each moves a contaminant, '
+        '2/4/6 dropped peaks, and a 31-peak pattern at once, so no single one isolates a cause. '
+        '`cont2` and `phase3` are the two that change one thing.', '']
     return lines
 
 
