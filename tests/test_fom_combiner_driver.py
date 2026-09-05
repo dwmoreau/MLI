@@ -543,6 +543,6 @@ def test_the_threshold_copy_happens_before_the_expensive_walk():
     """
     import inspect
     source = inspect.getsource(driver.run_reduce)
-    assert source.index('_reuse_calibration') < source.index('reduce_many')
+    assert source.index('_reuse_calibration(') < source.index('FomMetrics.reduce_many(')
     # And the meta is written straight after the walk, not after everything else.
-    assert source.index('_write_reductions') < source.index('_reduced_meta')
+    assert source.index('_write_reductions(') < source.index('_reduced_meta{args.suffix}')
