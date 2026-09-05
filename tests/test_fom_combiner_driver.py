@@ -486,15 +486,18 @@ def test_a_threshold_reduction_can_be_reused_and_is_copied_not_referenced(tmp_pa
     """
     import json
     tag = 'S12_combiner'
+    # The real key shape: `{name}|{split}{kind}`, so a calibration entry is `base|fom-train_cal`.
+    # The first version of the helper split this on the wrong separator and refused after the
+    # reduce had already spent 100 minutes on 75.7 M candidates.
     (tmp_path/f'{tag}_reduced_meta_fullscale.json').write_text(json.dumps({
-        'base_cal': {'split': 'fom-train', 'ranks_exact': False},
-        'base': {'split': 'fom-dev', 'ranks_exact': True}}), encoding='utf-8')
+        'base|fom-train_cal': {'split': 'fom-train', 'ranks_exact': False},
+        'base|fom-dev': {'split': 'fom-dev', 'ranks_exact': True}}), encoding='utf-8')
     pd.DataFrame({'entry_id': [1]}).to_parquet(
         tmp_path/f'{tag}_reduced_base_fom-train_cal_fullscale.parquet', index=False)
     metas = {}
     copied = driver._reuse_calibration(tmp_path, tag, '_fullscale', '_contam', metas)
     assert copied == 1
-    assert 'base_cal' in metas
+    assert 'base|fom-train_cal' in metas
     # Copied, not referenced: a meta pointing into another suffix dangles the moment either run is
     # regenerated.
     assert (tmp_path/f'{tag}_reduced_base_fom-train_cal_contam.parquet').exists()
@@ -509,7 +512,7 @@ def test_reusing_a_calibration_that_is_not_there_refuses(tmp_path):
 def test_reusing_a_calibration_with_no_cal_entries_refuses(tmp_path):
     import json
     (tmp_path/'S12_combiner_reduced_meta_empty.json').write_text(
-        json.dumps({'base': {'split': 'fom-dev'}}), encoding='utf-8')
+        json.dumps({'base|fom-dev': {'split': 'fom-dev'}}), encoding='utf-8')
     with pytest.raises(SystemExit) as problem:
         driver._reuse_calibration(tmp_path, 'S12_combiner', '_empty', '_contam', {})
     assert 'half a table' in str(problem.value)

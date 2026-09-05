@@ -750,9 +750,14 @@ def run_reduce(args):
 def _reuse_calibration(artifact_dir, tag, source_suffix, suffix, metas):
     """Copy another run's calibration reductions and their metas into this run.
 
+    The meta key is `{name}|{split}{kind}` and the file is
+    `{tag}_reduced_{name}_{split}{kind}{run_suffix}.parquet` -- so a calibration entry is keyed
+    `base|fom-train_cal`, not `base_cal`. The first version of this split the key on the wrong
+    separator, built filenames that could not exist, and refused after the reduce had already spent
+    100 minutes on 75.7 M candidates. Parse the key the way `_write_reductions` writes it.
+
     Copied, not referenced: a meta that points at a file under a different suffix is a dangling
-    reference the moment either run is regenerated, and this record has already been bitten by an
-    artefact that outlived the run that made it.
+    reference the moment either run is regenerated.
     """
     import shutil
 
@@ -764,26 +769,29 @@ def _reuse_calibration(artifact_dir, tag, source_suffix, suffix, metas):
             f'Run the reduce for that suffix first, or drop the flag to compute a fresh '
             f'threshold reduction here.')
     source = json.loads(source_meta.read_text(encoding='utf-8'))
-    copied = 0
+    copied, seen = 0, []
     for key, meta in source.items():
-        if not key.endswith('_cal'):
+        if '|' not in key:
             continue
-        name = key[:-len('_cal')]
-        for split in (meta.get('split'), None):
-            if split is None:
-                continue
-            src = artifact_dir/f'{tag}_reduced_{name}_{split}_cal{source_suffix}.parquet'
-            if src.exists():
-                shutil.copyfile(src, artifact_dir/f'{tag}_reduced_{name}_{split}_cal{suffix}.parquet')
-                metas[key] = meta
-                copied += 1
+        name, _, split_kind = key.partition('|')
+        if not split_kind.endswith('_cal'):
+            continue
+        seen.append(key)
+        src = artifact_dir/f'{tag}_reduced_{name}_{split_kind}{source_suffix}.parquet'
+        if not src.exists():
+            continue
+        shutil.copyfile(src, artifact_dir/f'{tag}_reduced_{name}_{split_kind}{suffix}.parquet')
+        metas[key] = meta
+        copied += 1
     if not copied:
         raise SystemExit(
-            f'--calibration-from {source_suffix!r} matched no calibration reductions in '
-            f'{source_meta}. Without a threshold the analyse stage can report ranks and nothing '
-            f'else, so this refuses rather than producing half a table.')
+            f'--calibration-from {source_suffix!r} copied nothing from {source_meta}. '
+            f'{len(seen)} calibration entries were listed there'
+            + (f' (e.g. {seen[0]})' if seen else '')
+            + f', so the parquet files beside it are what is missing. Without a threshold the '
+            f'analyse stage can report ranks and nothing else, so this refuses rather than '
+            f'producing half a table.')
     return copied
-
 
 
 def _union_groups(arms):
