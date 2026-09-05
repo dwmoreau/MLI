@@ -887,6 +887,86 @@ STRUCTURAL_G_MIN = 1.0
 MAX_BLOCK_ELEMENTS = 8_000_000
 
 
+# S14's per-candidate inputs, written to `<pool>/neural_inputs/` by `run_fom_neural_inputs.py`.
+# The twenty per-peak assignment posteriors (`get_assignment_posterior` at the candidate's own
+# sigma, C2-F-074), the log of that sigma, and the block-A prior read at the candidate's claimed
+# (volume, lattice) pair from the tables `PriorNetwork.entry_tables` precomputed per entry. A cubic
+# candidate is scored on ten peaks, so `asg_p10`..`asg_p19` are NaN there by construction, and
+# `prior_joint` is NaN wherever the claimed lattice is outside the prior's support.
+NEURAL_PEAK_COLUMNS = tuple(f'asg_p{index:02d}' for index in range(20))
+NEURAL_SIGMA_COLUMN = 'asg_sigma'
+NEURAL_CLAIMED_COLUMNS = ('prior_joint', 'prior_joint_margin', 'prior_in_support')
+NEURAL_INPUT_COLUMNS = NEURAL_CLAIMED_COLUMNS + NEURAL_PEAK_COLUMNS + (NEURAL_SIGMA_COLUMN,)
+
+
+def neural_inputs(candidates, entries, prior_tables=None, models_directory=None):
+    """`NEURAL_INPUT_COLUMNS` for every candidate row, aligned to `candidates.index`.
+
+    Grouped like `reduced_merits`, by (entry, lattice, extinction group, peak count): one
+    `assign_lines` per group builds the reference list once, then `get_assignment_sigma` and
+    `get_assignment_posterior(sigma=, d1=)` -- the campaign-1 call shape (`fom:run_fom_neural.py`),
+    which reuses the nearest-line distances and is the same arithmetic `get_soft_counts` reduces
+    to `X_N_soft`. Here the matrix is kept instead of reduced.
+
+    `prior_tables` is `{'joint': (n_entries, n_volumes, n_classes), 'log_branch_volumes':
+    (n_volumes,), 'index': the entries' join key as a pandas Index}` -- the output of
+    `PriorNetwork.entry_tables` for the pool's entries, precomputed so no worker needs keras. A
+    candidate whose entry is missing from it RAISES: a left join here would put NaN in the prior
+    of every candidate of that entry and nothing downstream would tell it from a cubic claim.
+    Pass None to write the assignment block alone.
+    """
+    from mlindex.utilities.FigureOfMerits import get_assignment_posterior
+    from mlindex.utilities.FigureOfMerits import get_assignment_sigma
+
+    names = list(NEURAL_INPUT_COLUMNS)
+    out = pd.DataFrame(np.nan, index=candidates.index, columns=names, dtype=float)
+    if candidates.empty:
+        return out
+
+    join_keys = _join_keys(candidates, entries)
+    peaks = entries.set_index(join_keys)['q2_obs']
+    group_keys = list(join_keys) + ['lattice_system', 'bravais_lattice', 'spacegroup', 'n_peaks']
+    for key, group in candidates.groupby(group_keys, sort=False):
+        peak_key = key[0] if len(join_keys) == 1 else key[:len(join_keys)]
+        lattice_system, bravais_lattice, spacegroup, n_peaks = key[len(join_keys):]
+        n_peaks = int(n_peaks)
+        q2_obs = np.asarray(peaks.loc[peak_key], dtype=np.float64)[:n_peaks]
+        xnn = np.vstack([np.asarray(value, dtype=np.float64) for value in group['xnn']])
+        q2_ref_calc, _, _, _ = assign_lines(
+            q2_obs, xnn, lattice_system, bravais_lattice, spacegroup, models_directory)
+        sigma, d1 = get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system)
+        posterior = get_assignment_posterior(
+            q2_obs, q2_ref_calc, lattice_system, sigma=sigma, d1=d1)
+        posterior = np.asarray(posterior, dtype=np.float64)
+        out.loc[group.index, list(NEURAL_PEAK_COLUMNS[:posterior.shape[1]])] = posterior
+        out.loc[group.index, NEURAL_SIGMA_COLUMN] = np.log(np.asarray(sigma, dtype=np.float64))
+
+    if prior_tables is not None:
+        from mlindex.model_training.FomMetrics import BRAVAIS_LATTICES
+        from mlindex.model_training.PriorNetwork import claimed_pair_readout
+
+        if len(join_keys) == 1:
+            lookup = pd.Index(candidates[join_keys[0]])
+        else:
+            lookup = pd.MultiIndex.from_frame(candidates[join_keys])
+        rows = prior_tables['index'].get_indexer(lookup)
+        if (rows < 0).any():
+            missing = candidates.loc[rows < 0, join_keys].drop_duplicates().head(5)
+            raise KeyError(
+                f'{int((rows < 0).sum())} candidate rows belong to entries with no prior '
+                f'table, e.g. {missing.to_dict("records")}. Run the `entries` stage over the '
+                f'same entry table first; a NaN prior here would be indistinguishable from an '
+                f'out-of-support claim.')
+        class_index = np.array([BRAVAIS_LATTICES.index(code)
+                                for code in candidates['bravais_lattice']], dtype=int)
+        readout = claimed_pair_readout(
+            prior_tables['joint'], prior_tables['log_branch_volumes'], rows,
+            candidates['volume'].to_numpy(dtype=np.float64), class_index)
+        for name in NEURAL_CLAIMED_COLUMNS:
+            out[name] = np.asarray(readout[name], dtype=float)
+    return out
+
+
 def structural_features(candidates, entries, models_directory=None, probation=True,
                         absences=True, dropped=True, g_min=STRUCTURAL_G_MIN):
     """S12's structural columns, aligned to `candidates`' own index.
@@ -2061,7 +2141,14 @@ def bundle_frames(root, merit_dir=None, columns=None, require_merits=False,
     projection = None if columns is None else [name for name in columns if name in available]
     known = (set(RECOMPUTED_MERIT_COLUMNS) | set(SOFT_MERIT_COLUMNS)
              | set(STRUCTURAL_COLUMNS) | set(PROBATION_MERIT_COLUMNS) | set(ABSENCE_COLUMNS))
-    wanted_merits = [] if columns is None else [name for name in columns if name in known]
+    # From `merit_columns` when the caller gave one. Until 2026-09-05 this read `columns` -- the
+    # CANDIDATE projection -- so for `combiner_frames_c2`, which passes both, `wanted_merits` was
+    # always empty and the null check below never fired (S14; the agent's R2). The check is
+    # "absent or wholly null" rather than "partly null": several structural columns are NaN on
+    # a few rows by design, and a merit that is null on EVERY row of a shard is the failure
+    # this guards against -- a sidecar that joined nothing.
+    source = merit_columns if merit_columns is not None else columns
+    wanted_merits = [] if source is None else [name for name in source if name in known]
 
     by_bundle = {}
     for path in sorted(root.glob('candidates*.parquet')):
@@ -2073,27 +2160,33 @@ def bundle_frames(root, merit_dir=None, columns=None, require_merits=False,
             frame = _read_parquet(path, columns=projection)
             if 'condition_bundle' not in frame.columns:
                 frame['condition_bundle'] = bundle
-            found = False
+            found, absent = False, []
             for one in merit_dirs:
                 sidecar = one/path.name
                 if not sidecar.exists():
+                    absent.append(one)
                     continue
                 merits = pd.read_parquet(sidecar, columns=_sidecar_projection(
                     sidecar, merit_columns))
                 keys = [key for key in ZOO_KEY_COLUMNS if key in merits.columns]
                 frame = frame.merge(merits, on=keys, how='left', validate='1:1')
                 found = True
-            if not found and require_merits:
+            if require_merits and (not found or absent):
+                # Per REQUESTED directory, not "any directory had it": with several sidecar sets
+                # joined, a shard missing from one of them used to join as a silent NaN column
+                # while the others made `found` true (S14, 2026-09-05).
                 raise FileNotFoundError(
-                    f'No merit sidecar for {path.name} in {merit_dirs}. Write it with '
-                    f'run_fom_floor_merits.py --pool {root}; a missing sidecar would otherwise '
-                    f'leave every recomputed merit null, and NaN ranks last rather than raising.')
+                    f'{path.name}: no sidecar in {absent or merit_dirs}. Write it with the '
+                    f'directory\'s producer (run_fom_floor_merits.py, '
+                    f'run_fom_structural_features.py, run_fom_neural_inputs.py ...); a missing '
+                    f'sidecar would otherwise leave its columns null, and NaN ranks last rather '
+                    f'than raising.')
             if require_merits:
                 missing = [name for name in wanted_merits if name not in frame.columns
-                           or frame[name].isna().any()]
+                           or frame[name].isna().all()]
                 if missing:
                     raise ValueError(
-                        f'{path.name}: merit columns {missing} are absent or partly null after '
+                        f'{path.name}: merit columns {missing} are absent or wholly null after '
                         f'the sidecar join. A left join that misses becomes NaN, and NaN sorts '
                         f'last -- the merit would report as uniformly worthless.')
             frames.append(frame)

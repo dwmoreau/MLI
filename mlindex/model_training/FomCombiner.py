@@ -237,6 +237,45 @@ PRIOR_ENTRY = tuple(
     ) + ('prior_branch_entropy', 'prior_bravais_entropy')
 PRIOR_MERITS = PRIOR_CLAIMED + PRIOR_ENTRY + ('prior_base_rate',)
 
+# S14's input blocks (2026-09-05), as their own groups so each is a retrained paired arm rather
+# than a line in an importance table. They are NOT the campaign-1 `prior` / `assignment` groups
+# above, which keep their meaning and their flat-directory join path for the S12 record:
+#
+#   * `prior_entry`   -- `PRIOR_ENTRY` as before, but now read through the prior's SUPPORT: the
+#                        fourteen probabilities are renormalised over the lattices the model was
+#                        trained on and NaN outside it, so an untrained class can never be read
+#                        as a probability (S14 gate condition 1; F-117 point 4).
+#   * `prior_volume`  -- E[log V | lattice] per lattice from the joint table, DWMM's "volume for
+#                        each BL"; the reading F-117 measured at 37 % of the volume error.
+#   * `prior_claimed` -- the joint read at the candidate's OWN claimed pair, its margin to the
+#                        table's mode, and whether the claim is inside the support at all. The
+#                        only block-A column that can reorder candidates within an entry.
+#   * `assignment_peaks` -- the twenty per-peak assignment posteriors themselves (C2-F-074), not
+#                        the two summaries campaign 1 fitted and found worth -0.41 pp.
+#   * `assignment_sigma` -- the posterior's own denominator, log-scaled (F-131: +2.82 pp beside
+#                        two columns, a substitute for the posterior beside seventy-eight).
+#
+# The entry-level groups arrive through `neural_covariates` (one row per (entry, bundle)); the
+# per-candidate groups through the `neural_inputs` sidecar. `run_fom_neural_inputs.py` writes both.
+PRIOR_VOLUME = tuple(
+    f'prior_logv_{code}' for code in
+    ('cP', 'cI', 'cF', 'tP', 'tI', 'hP', 'hR', 'oP', 'oC', 'oF', 'oI', 'mP', 'mC', 'aP')
+    )
+PRIOR_SUPPORT_FLAG = 'prior_in_support'
+PRIOR_CLAIMED_C2 = ('prior_joint', 'prior_joint_margin', PRIOR_SUPPORT_FLAG)
+ASSIGNMENT_PEAKS = tuple(f'asg_p{index:02d}' for index in range(20))
+ASSIGNMENT_SIGMA = ('asg_sigma',)
+NEURAL_ENTRY_GROUPS = ('prior_entry', 'prior_volume')
+NEURAL_CANDIDATE_GROUPS = ('prior_claimed', 'assignment_peaks', 'assignment_sigma')
+NEURAL_GROUPS = NEURAL_ENTRY_GROUPS + NEURAL_CANDIDATE_GROUPS
+NEURAL_GROUP_COLUMNS = {
+    'prior_entry': PRIOR_ENTRY,
+    'prior_volume': PRIOR_VOLUME,
+    'prior_claimed': PRIOR_CLAIMED_C2,
+    'assignment_peaks': ASSIGNMENT_PEAKS,
+    'assignment_sigma': ASSIGNMENT_SIGMA,
+    }
+
 SCALER_METHODS = ('analytic', 'z', 'rank')
 # S04 Phase 2, 2026-08-26. Two rival encodings of the same physics, as their own droppable groups
 # so each can be measured by a retrained paired arm rather than an importance table (PROTOCOL
@@ -248,7 +287,8 @@ SYMMETRY_COUNTS = ('n_absent_extra', 'n_absent_extra_in_range', 'f_absent_extra'
 SYMMETRY_DELTA = ('delta_M20', 'delta_M_rev', 'n_groups_searched')
 
 FEATURE_GROUPS = ('raw', 'structural', 'context', 'in_sample', 'cv', 'assignment',
-                  'prior', 'counts', 'delta', 'probation', 'soft', 'holdout', 'campaign1_raw')
+                  'prior', 'counts', 'delta', 'probation', 'soft', 'holdout', 'campaign1_raw',
+                  ) + NEURAL_GROUPS
 # S12's base feature space. `counts` joins the default because S04 Phase 2 settled the symmetry
 # question in its favour -- the absence counts beat the 158-level categorical by +0.522 pp of
 # operating point at p <= 0.004 at every fit seed (C2-F-041) -- so a campaign-2 model that omitted
@@ -417,6 +457,9 @@ def feature_specification(groups=DEFAULT_GROUPS, scalers=(), drop=()):
         # The restoring arm. Everything campaign 1's `raw` group held, so the seven-merit cut is
         # licensed by a retrained paired arm rather than by S00's audit alone (PROTOCOL section 8).
         names.extend(CAMPAIGN1_RAW_MERITS)
+    for group in NEURAL_GROUPS:
+        if group in groups:
+            names.extend(NEURAL_GROUP_COLUMNS[group])
     categorical = ()
     if 'structural' in groups:
         names.extend(STRUCTURAL_NUMERIC)
@@ -682,7 +725,40 @@ SIDECAR_DIRS = {
     'probation': 'structural',
     'soft': 'merits_soft',
     'holdout': 'holdout_merits',
+    'prior_claimed': 'neural_inputs',
+    'assignment_peaks': 'neural_inputs',
+    'assignment_sigma': 'neural_inputs',
     }
+NEURAL_ENTRY_FILE = 'prior_entries.parquet'
+
+
+def neural_covariates(pool, entries):
+    """`entry_covariates` plus the entry-level block-A columns from `<pool>/neural_inputs/`.
+
+    One row per (entry_id, condition_bundle), joined 1:1, and it RAISES when an entry in `entries`
+    has no prior row: `combiner_frames_c2` merges covariates m:1 and left, so a missing row would
+    become NaN in thirty columns for every candidate of that entry, with no symptom.
+    """
+    covariates = entry_covariates(entries)
+    path = Path(pool)/SIDECAR_DIRS['prior_claimed']/NEURAL_ENTRY_FILE
+    if not path.exists():
+        raise FileNotFoundError(
+            f'{path} is missing: write it with run_fom_neural_inputs.py --stage entries')
+    prior = pd.read_parquet(path)
+    wanted = ['entry_id', 'condition_bundle'] + list(PRIOR_ENTRY) + list(PRIOR_VOLUME)
+    absent = [name for name in wanted if name not in prior.columns]
+    if absent:
+        raise KeyError(f'{path} lacks {absent}')
+    merged = covariates.merge(prior[wanted], on=['entry_id', 'condition_bundle'], how='left',
+                              validate='1:1', indicator=True)
+    unmatched = merged['_merge'] != 'both'
+    if unmatched.any():
+        example = merged.loc[unmatched, ['entry_id', 'condition_bundle']].head(5)
+        raise KeyError(
+            f'{int(unmatched.sum())} (entry, bundle) pairs in the entry table have no row in '
+            f'{path}, e.g. {example.to_dict("records")}. Re-run the entries stage over this '
+            f'entry table.')
+    return merged.drop(columns=['_merge'])
 
 # Read from the pool but not fitted on: the labels, the keys the reduction groups by, and the two
 # weights. `check_no_leakage` forbids every one of them as a feature, which is the point -- they
@@ -719,14 +795,19 @@ def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_
         wanted |= set(FomBenchmark.ABSENCE_COLUMNS)
     if 'holdout' in groups:
         wanted |= {FomBenchmark.holdout_column('ho_M20', holdout_n_extra)}
+    for group in NEURAL_CANDIDATE_GROUPS:
+        if group in groups:
+            wanted |= set(NEURAL_GROUP_COLUMNS[group])
     # NOT `wanted -= EXCLUDED_MERITS`. That set documents which merits campaign 2 cut from the
     # default feature space, and six of them are exactly what the `campaign1_raw` group restores --
     # so subtracting it here silently emptied the projection for the one arm that licenses the cut.
     # `_sidecar_projection` already drops a name no sidecar carries, which is the right place for
     # that decision: it is a fact about the data, not about the feature policy.
 
+    # Every group `SIDECAR_DIRS` knows, not a hard-coded list: a directory added to the map and
+    # not to a list here joined nothing and the arm skipped itself downstream (S14, 2026-09-05).
     directories = []
-    for group in ('raw', 'structural', 'counts', 'probation', 'soft', 'holdout'):
+    for group in SIDECAR_DIRS:
         if group in groups or group in ('raw', 'structural'):
             directory = Path(pool)/SIDECAR_DIRS[group]
             if directory not in directories:
@@ -736,7 +817,13 @@ def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_
                     tuple(FomMetrics.SCORE_INDEPENDENT_COLUMNS) + POOL_COLUMNS + CARRIED_NOT_FITTED
                     if name is not None]
     if covariates is None:
-        covariates = entry_covariates(entries)
+        # The entry-level block-A columns ride on the covariates, so any caller asking for those
+        # groups gets them without knowing where they live -- and gets `neural_covariates`'s
+        # refusal if the prior table is missing or short.
+        if any(group in groups for group in NEURAL_ENTRY_GROUPS):
+            covariates = neural_covariates(pool, entries)
+        else:
+            covariates = entry_covariates(entries)
 
     for frame in FomBenchmark.bundle_frames(
             pool, merit_dir=directories, columns=list(dict.fromkeys(pool_columns)),

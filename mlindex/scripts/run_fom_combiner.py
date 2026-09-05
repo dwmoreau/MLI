@@ -42,6 +42,7 @@ import pandas as pd
 from mlindex.model_training import FomBenchmark
 from mlindex.model_training import FomCombiner
 from mlindex.model_training import FomMetrics
+from mlindex.model_training import NeuralScore
 
 
 BASE = Path(__file__).resolve().parents[2]
@@ -608,7 +609,9 @@ def load_arms(models_dir, seed, names=None):
         name = directory.name[:-len(f'_seed{seed}')]
         if names and name not in names:
             continue
-        arms[name] = FomCombiner.FomCombiner.load(directory)
+        # Dispatched on the recorded `model_type`, so a directory holding S14's network loads as
+        # one rather than failing on a missing `model.joblib`; a tree loads exactly as before.
+        arms[name] = NeuralScore.load_any(directory)
     if not arms:
         raise SystemExit(f'no fitted arms under {models_dir} for seed {seed}; run --stage fit')
     return arms
