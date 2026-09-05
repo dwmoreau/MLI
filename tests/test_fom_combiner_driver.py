@@ -531,3 +531,18 @@ def test_calibration_from_does_not_need_the_fit_pool():
     load = head.index('FomBenchmark.load_entries(FIT_POOL)')
     guard = head.index('if args.calibration_from is None:')
     assert guard < load, 'FIT_POOL is still loaded before the guard that makes it optional'
+
+
+def test_the_threshold_copy_happens_before_the_expensive_walk():
+    """Cheap checks before expensive work, enforced on the source order.
+
+    The threshold reuse is a file copy that fails in seconds; the reduce below it walks the pool for
+    100 minutes. Doing the copy afterwards meant a key parsed on the wrong separator refused only
+    once 75.7 M candidates had been read -- and the meta for that finished work was discarded with
+    it, so the whole pool had to be re-read to recover a few kilobytes.
+    """
+    import inspect
+    source = inspect.getsource(driver.run_reduce)
+    assert source.index('_reuse_calibration') < source.index('reduce_many')
+    # And the meta is written straight after the walk, not after everything else.
+    assert source.index('_write_reductions') < source.index('_reduced_meta')

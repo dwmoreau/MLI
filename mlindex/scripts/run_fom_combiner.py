@@ -687,6 +687,19 @@ def run_reduce(args):
     orientation = {name: True for name in scores}
 
     artifact_dir = Path(args.artifact_dir)
+
+    # **The threshold copy happens FIRST, and that ordering is the whole point.** It is a file copy
+    # that fails in seconds; the reduce below walks the pool for 100 minutes. Doing it afterwards
+    # meant a bad suffix, a missing meta or -- as actually happened -- a key parsed on the wrong
+    # separator refused only once 75.7 M candidates had already been read. Cheap checks before
+    # expensive work.
+    metas = {}
+    if args.calibration_from is not None:
+        copied = _reuse_calibration(artifact_dir, args.tag, args.calibration_from,
+                                    args.suffix, metas)
+        print(f'threshold reduction reused from {args.calibration_from or "(no suffix)"}: '
+              f'{copied} score(s), held fixed so this pool is compared at the same threshold')
+
     started = time.perf_counter()
     seen = {'n': 0}
 
@@ -707,7 +720,13 @@ def run_reduce(args):
         # pool, so 'auto' would certify a thinned one. The pool's own manifest is the authority.
         subsample_top_k=_pool_depth(pool), on_shard=announce,
         )
-    metas = _write_reductions(reduced, artifact_dir, args.tag, args.suffix, require_exact=True)
+    metas.update(_write_reductions(reduced, artifact_dir, args.tag, args.suffix,
+                                   require_exact=True))
+    # Written HERE, immediately after the walk that earned it. It used to be written only at the
+    # very end, so a failure in the threshold step discarded the meta for work already on disk and
+    # the whole pool had to be re-read to recover a file of a few kilobytes.
+    (artifact_dir/f'{args.tag}_reduced_meta{args.suffix}.json').write_text(
+        json.dumps(metas, indent=2, sort_keys=True, default=str), encoding='utf-8')
 
     # The threshold has to be chosen somewhere the model was not fitted, and the report pool has no
     # fom-train crystals at all. So a second, much smaller reduction over the slice's calibration
@@ -722,12 +741,6 @@ def run_reduce(args):
     # and the comparison is not paired in the way it claims to be. It also means the fit pool need
     # not exist wherever the reduce runs, which is what lets a 45 GB pool be reduced where it sits.
     if args.calibration_from is not None:
-        source = args.calibration_from
-        copied = _reuse_calibration(artifact_dir, args.tag, source, args.suffix, metas)
-        print(f'\nthreshold reduction reused from {source or "(no suffix)"}: '
-              f'{copied} score(s), held fixed so this pool is compared at the same threshold')
-        (artifact_dir/f'{args.tag}_reduced_meta{args.suffix}.json').write_text(
-            json.dumps(metas, indent=2, sort_keys=True, default=str), encoding='utf-8')
         print(f'\n{seen["n"]:,} candidates reduced -> {artifact_dir}')
         return 0
 
