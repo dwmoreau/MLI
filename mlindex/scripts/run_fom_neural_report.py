@@ -72,7 +72,7 @@ def build(artifact_dir, tag):
     lines += _seeds(seed_summary)
     lines += _per_lattice(main, by_lattice, floors)
     lines += _answer_rates(rates)
-    lines += _calibration(calibration)
+    lines += _calibration(calibration, main)
     lines += _interface(interface)
     lines += _cost(cost)
     lines += _bounds(main, fit_table)
@@ -310,21 +310,25 @@ def _answer_rates(rates):
     return lines
 
 
-def _calibration(calibration):
-    lines = ['## Calibration', '',
-             'Measured on a uniform sample of the report pool, positives not enriched. `share at '
-             '1.0` is the fraction of scored candidates the calibrator maps to exactly 1.0 -- S12\'s '
-             'tree put 55.2 % of clean patterns\' top candidates there, a step rather than a ranking '
-             'at high confidence, which the handoff names as the most concrete opening for a '
-             'network with a continuous head.', '']
+def _calibration(calibration, main=None):
+    lines = ['## Calibration, and saturation at the calibrator\'s maximum', '',
+             'Measured on a uniform sample of the report pool, positives not enriched. `top at max` '
+             'is the share of PATTERNS whose top candidate carries the arm\'s maximum calibrated '
+             'score -- S12\'s tree put 55.2 % of clean patterns there, a step rather than a ranking '
+             'at high confidence, which the handoff names as the opening for a continuous head. '
+             'The network\'s head is continuous and it still saturates: the per-lattice isotonic '
+             'maps its top bin to the maximum for any model (C2-F-151).', '']
     if calibration is None:
         return lines + ['Not computed.', '']
-    lines += ['| arm | ECE | Brier | base rate | share at 1.0 | n | n correct |',
+    lines += ['| arm | ECE | Brier | base rate | top at max | n | n correct |',
               '|---|---|---|---|---|---|---|']
     for _, row in calibration.sort_values('ece').iterrows():
+        top = (main.loc[row['arm'], 'top_score_at_max']
+               if main is not None and row['arm'] in main.index
+               and 'top_score_at_max' in main.columns else np.nan)
         lines.append(f'| `{row["arm"]}` | {row["ece"]:.5f} | {row["brier"]:.6f} | '
-                     f'{row["base_rate"]:.5f} | {row["share_at_one"]:.4f} | {int(row["n"]):,} | '
-                     f'{int(row["n_positive"]):,} |')
+                     f'{row["base_rate"]:.5f} | {_pp(top) if np.isfinite(top) else "--"} % | '
+                     f'{int(row["n"]):,} | {int(row["n_positive"]):,} |')
     lines.append('')
     return lines
 
