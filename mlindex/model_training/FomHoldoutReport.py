@@ -92,24 +92,29 @@ def load_reduction(artifact_dir, tag):
     return stacked, meta, coverage
 
 
-def load_floors(artifact_dir):
+def load_floors(artifact_dir, reference=FLOOR_REFERENCE, aggregate_artefact=FLOOR_AGGREGATE_ARTEFACT,
+                per_lattice_artefact=FLOOR_ARTEFACT):
     """(aggregate floor pp, {lattice: floor pp}) for the reference contrast.
 
     Returns `(None, {})` when S08's artefacts are absent, and the caller then reports gates in
     percentage points with the omission stated -- rather than inventing a floor, which is the
     failure PROTOCOL section 8 exists to prevent.
+
+    The defaults are the top-10 floor S08 measured. S15 reads the operating-point floor too, which
+    S09 measured into `S09_floor_op_*.csv` with the same columns, so the reference and the two
+    artefacts are parameters rather than a second copy of this function.
     """
     artifact_dir = Path(artifact_dir)
-    merit, baseline, metric = FLOOR_REFERENCE
+    merit, baseline, metric = reference
     aggregate, per_lattice = None, {}
-    path = artifact_dir/FLOOR_AGGREGATE_ARTEFACT
+    path = artifact_dir/aggregate_artefact
     if path.exists():
         frame = pd.read_csv(path)
         row = frame.loc[(frame['merit'] == merit) & (frame['baseline'] == baseline)
                         & (frame['metric'] == metric)]
         if row.shape[0]:
             aggregate = float(row['floor_pp'].iloc[0])
-    path = artifact_dir/FLOOR_ARTEFACT
+    path = artifact_dir/per_lattice_artefact
     if path.exists():
         frame = pd.read_csv(path)
         frame = frame.loc[(frame['merit'] == merit) & (frame['baseline'] == baseline)

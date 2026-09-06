@@ -820,8 +820,15 @@ CARRIED_NOT_FITTED = ('is_correct', 'is_off_by_two', 'sampling_weight', 'retaine
 
 
 def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_entry_ids=None,
-                       covariates=None, holdout_n_extra=5, downcast=True):
+                       covariates=None, holdout_n_extra=5, downcast=True, row_filter=None,
+                       extra_columns=()):
     """One assembled frame per condition bundle, for a **Benchmark B** pool. A generator.
+
+    `row_filter`, when given, is applied to each assembled bundle frame AFTER the sidecar join and
+    the derived columns and BEFORE the context features, so a restriction of the pool -- S15's
+    "what would a higher cut have admitted" -- computes `ctx_*` on the restricted field exactly as
+    a real run at that cut would see it. `extra_columns` names candidate columns the filter needs
+    that no feature reads (`m20_at_prune`); they are projected in and never fitted on.
 
     `combiner_frames` reads campaign 1's layout -- a `features_{bundle}.parquet` matrix beside a
     single-file pool -- which Benchmark B does not have. This reads the campaign-2 layout instead:
@@ -867,6 +874,7 @@ def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_
 
     pool_columns = [name for name in
                     tuple(FomMetrics.SCORE_INDEPENDENT_COLUMNS) + POOL_COLUMNS + CARRIED_NOT_FITTED
+                    + tuple(extra_columns)
                     if name is not None]
     if covariates is None:
         # The entry-level block-A columns ride on the covariates, so any caller asking for those
@@ -906,6 +914,11 @@ def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_
                 FomBenchmark.holdout_column('ho_M20', holdout_n_extra)].to_numpy(dtype=np.float64)
         if any(group in groups for group in PRIOR_RATIO_GROUPS):
             frame = add_prior_ratios(frame)
+        if row_filter is not None:
+            frame = row_filter(frame)
+            if not frame.shape[0]:
+                continue
+            frame = frame.reset_index(drop=True)
         frame = add_context(frame)
         if downcast:
             floats = frame.select_dtypes(include=['float64']).columns
