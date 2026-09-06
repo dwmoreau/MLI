@@ -316,7 +316,10 @@ def run_reduce(args):
     fit_ids, cal_ids = s12.split_ids(fit_entries, args.train_split, s12.HOLDOUT_FRACTION, SEED)
     s12.assert_disjoint(set(fit_ids) | set(cal_ids), set(report_entries['entry_id']))
 
-    scores = {name: model.score for name, model in arms.items()}
+    # Chunked, for every model type: a whole-frame design matrix is 6-10 GB on a 15 M-row bundle
+    # and put the laptop into swap for the length of a pool walk (S14, 2026-09-05).
+    scores = {name: (lambda frame, model=model: NeuralScore.chunked_score(model, frame))
+              for name, model in arms.items()}
     if args.with_references:
         scores.update(s12.reference_scores(args.fit_seed))
     orientation = {name: True for name in scores}
@@ -529,7 +532,8 @@ def run_calibration(args):
             continue
         label = FomMetrics.as_bool(shard['is_correct'])
         for name, model in arms.items():
-            collected[name].append(pd.DataFrame({'score': model.score(shard), 'is_correct': label}))
+            collected[name].append(pd.DataFrame({'score': NeuralScore.chunked_score(model, shard),
+                                                 'is_correct': label}))
         _log(f'  {frame["condition_bundle"].iloc[0]:24s} {frame.shape[0]:>10,} candidates, '
              f'{shard.shape[0]:>8,} sampled, {int(label.sum()):>5,} correct')
     rows, tables = [], []

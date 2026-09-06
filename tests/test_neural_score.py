@@ -178,3 +178,17 @@ def test_unweighted_fit_is_an_explicit_choice():
     model = _fit(frame, epochs=1, weight_column=None)
     assert model.meta['weight_column'] is None
     assert model.meta['weight_sum'] == frame.shape[0]
+
+
+def test_chunked_scoring_is_the_same_arithmetic_as_whole_frame_scoring(tmp_path):
+    frame = _frame()
+    net = _fit(frame)
+    net.fit_calibrators(frame, minimum=50)
+    np.testing.assert_array_equal(net.raw_score(frame, chunk=97), net.raw_score(frame))
+    np.testing.assert_array_equal(NeuralScore.chunked_score(net, frame, chunk=101),
+                                  net.score(frame))
+    tree = FomCombiner.FomCombiner.fit(frame, groups=GROUPS, drop=DROP, seed=1,
+                                       weight_column='sampling_weight', max_iter=5)
+    tree.fit_calibrators(frame, minimum=50)
+    np.testing.assert_array_equal(NeuralScore.chunked_score(tree, frame, chunk=101),
+                                  tree.score(frame))

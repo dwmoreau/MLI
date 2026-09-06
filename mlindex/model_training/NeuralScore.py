@@ -345,8 +345,19 @@ class NeuralScore:
             out[start:start + int(chunk)] = 1.0/(1.0 + np.exp(-activations.ravel()))
         return out
 
-    def raw_score(self, frame):
-        return self.predict_batch(self.design_matrix(frame))
+    def raw_score(self, frame, chunk=500_000):
+        """Uncalibrated P(correct) per row, assembled and scored in row chunks.
+
+        The design matrix is float64 over every named column, so a 15 M-row bundle at 55 inputs
+        is 6.6 GB before the first matmul -- built whole, it drove a 16 GB laptop into swap and a
+        six-minute pass took twenty (S14, 2026-09-05). Chunking the assembly, not only the
+        matmul, is what keeps the peak at a few hundred megabytes.
+        """
+        out = np.empty(frame.shape[0], dtype=np.float64)
+        for start in range(0, frame.shape[0], int(chunk)):
+            block = frame.iloc[start:start + int(chunk)]
+            out[start:start + int(chunk)] = self.predict_batch(self.design_matrix(block))
+        return out
 
     # -- persistence -----------------------------------------------------------------------
     def save(self, directory):
@@ -400,6 +411,21 @@ class NeuralScore:
 def _logit(probability):
     p = np.clip(np.asarray(probability, dtype=np.float64), 1e-15, 1 - 1e-15)
     return np.log(p) - np.log1p(-p)
+
+
+def chunked_score(model, frame, chunk=500_000):
+    """`model.score(frame)` in row chunks, for any model with a `score` over a frame.
+
+    The tree's `raw_score` (`FomCombiner.py`) builds its design matrix over the whole frame, and
+    at 86 features on a 15 M-row bundle that is 10 GB of float64 on top of the frame itself. The
+    per-lattice isotonic maps rows independently, so scoring a frame in pieces is exactly the
+    same arithmetic with a bounded peak.
+    """
+    out = np.empty(frame.shape[0], dtype=np.float64)
+    for start in range(0, frame.shape[0], int(chunk)):
+        block = frame.iloc[start:start + int(chunk)]
+        out[start:start + int(chunk)] = model.score(block)
+    return out
 
 
 def load_any(directory):
