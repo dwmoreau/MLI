@@ -69,6 +69,7 @@ def build(artifact_dir, tag):
     lines += _rank_and_threshold(main, mcnemar)
     lines += _controls(main)
     lines += _super_additivity(main, contrasts)
+    lines += _block_a_as_features(main, contrasts, seed_summary)
     lines += _seeds(seed_summary)
     lines += _per_lattice(main, by_lattice, floors)
     lines += _answer_rates(rates)
@@ -229,6 +230,48 @@ def _super_additivity(main, contrasts):
     lines += ['', 'A positive delta means the arm beats `network`. `tree_plus_blocks` is the tree '
               'given the network\'s inputs as well as its own: if it matches the network, the gain '
               'is the inputs; if the network beats it, the architecture is doing something.', '']
+    return lines
+
+
+RATIO_ARMS = ('tree_ratio_marginal', 'tree_ratio_claimed', 'tree_ratio_volume_only',
+              'tree_ratio_dof_only', 'tree_plus_joint', 'tree_plus_blocks')
+
+
+def _block_a_as_features(main, contrasts, seed_summary):
+    lines = ['## Block A as features in the combiner (DWMM\'s redirect, 2026-09-05)', '',
+             'The network is stopped; what only a network can do -- predict a volume and a symmetry '
+             'from the peak list -- enters S12\'s tree instead. Two ratio features per candidate: '
+             '`log(v_candidate / v_inferred)` (the lattice-marginal E[log V], or E[log V | claimed '
+             'lattice], as separate arms) and `dof_candidate / E[dof]` from the prior\'s free-'
+             'parameter head. Beside them, the principled readout (the joint P(V, lattice) at the '
+             'claimed pair) and the whole block-A output. Every arm is S12\'s `plus_probation` '
+             'feature set plus the named columns, refitted on the same rows and paired against '
+             '`tree`.', '',
+             '| arm | features | operating point | top-10 | vs `tree`, operating point | vs `tree`, top-10 |',
+             '|---|---|---|---|---|---|']
+    for arm in RATIO_ARMS:
+        if arm not in main.index:
+            continue
+        cells = []
+        for metric in ('operating_point', 'top10'):
+            row = _row(contrasts, 'tree', arm, metric)
+            cells.append(_significance(row) if row is not None else '--')
+        lines.append(f'| `{arm}` | {int(main.loc[arm, "n_features"]) if np.isfinite(main.loc[arm, "n_features"]) else "--"} | '
+                     f'{_pp(main.loc[arm, "operating_point"])} | {_pp(main.loc[arm, "top10"])} | '
+                     + ' | '.join(cells) + ' |')
+    lines.append('')
+    if seed_summary is not None:
+        rows = seed_summary[(seed_summary['reference'] == 'tree') & (seed_summary['scope'] == 'aggregate')
+                            & seed_summary['arm'].isin(RATIO_ARMS)]
+        if rows.shape[0]:
+            lines += ['Over the fit seeds, against `tree`:', '',
+                      '| arm | metric | mean | range | p at the worst seed | settled |',
+                      '|---|---|---|---|---|---|']
+            for _, row in rows.sort_values(['metric', 'delta_mean'], ascending=[True, False]).iterrows():
+                lines.append(f'| `{row["arm"]}` | {row["metric"]} | {row["delta_mean"]:+.2f} pp | '
+                             f'[{row["delta_min"]:+.2f}, {row["delta_max"]:+.2f}] | '
+                             f'{row["p_max"]:.3g} | {"**yes**" if row["settled"] else "no"} |')
+            lines.append('')
     return lines
 
 
