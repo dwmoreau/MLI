@@ -426,6 +426,15 @@ def run_analyse(args):
                             threshold_rule=rule, fit_seed=args.fit_seed,
                             ranks_exact=bool(dev[name][1]['ranks_exact']))
         row.update(s12.per_lattice(result, 'dev'))
+        # The saturation S12 found (C2-F-142): the share of patterns whose TOP candidate carries
+        # the calibrator's maximum score, where a threshold can no longer separate anything. A
+        # step, not a ranking, at high confidence -- the opening the handoff names for a
+        # continuous head, so it is measured for every arm here.
+        top = dev[name][0]['score_top_in_top_n'].to_numpy(dtype=float)
+        finite = np.isfinite(top)
+        row['top_score_at_max'] = float((top[finite] >= np.nanmax(top) - 1e-9).mean()) \
+            if finite.any() else float('nan')
+        row['top_score_max'] = float(np.nanmax(top)) if finite.any() else float('nan')
         rows.append(row)
         rates.append(answer_rate_rows(name, dev[name][0], dev[name][1]))
         _log(f'  {name:20s} op {row["operating_point"]:.4f}  top10 {row["top10"]:.4f}  '
