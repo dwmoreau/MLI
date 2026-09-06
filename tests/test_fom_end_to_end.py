@@ -353,3 +353,21 @@ def test_the_driver_defaults_to_s12s_full_scale_model_and_parses_learned_arms():
         driver._learned(driver._parse_args(['--stage', 'reduce', '--learned', 'oops']))
     args = driver._parse_args(['--stage', 'analyse', '--existing-pool', 'general:1.5=/p'])
     assert driver._existing_pools(args) == {('general', 1.5): [__import__('pathlib').Path('/p')]}
+
+
+def test_the_entry_list_is_found_under_this_machines_artifact_dir_not_the_recorded_path(tmp_path):
+    """The design travels from the laptop to NERSC; the path it records does not. Every task of
+    the first grid submission failed on /Users/... not existing on Perlmutter (2026-09-06)."""
+    (tmp_path/'S15_entries_hard.csv').write_text('identifier\nA\n', encoding='utf-8')
+    design = {'entry_files': {'hard': {'path': '/Users/nobody/MLI/docs/x/S15_entries_hard.csv',
+                                       'name': 'S15_entries_hard.csv'}}}
+    args = driver._parse_args(['--stage', 'generate', '--population', 'hard', '--cut', '5.0',
+                               '--artifact-dir', str(tmp_path)])
+    assert driver._entries_file(args, design) == tmp_path/'S15_entries_hard.csv'
+    # A design written before `name` existed still resolves by basename.
+    del design['entry_files']['hard']['name']
+    assert driver._entries_file(args, design) == tmp_path/'S15_entries_hard.csv'
+    # An explicit --entries-file wins, which is how the pilot ran.
+    args = driver._parse_args(['--stage', 'generate', '--population', 'hard', '--cut', '5.0',
+                               '--entries-file', '/elsewhere/list.csv'])
+    assert str(driver._entries_file(args, design)) == '/elsewhere/list.csv'

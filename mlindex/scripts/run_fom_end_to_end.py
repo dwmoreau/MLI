@@ -139,7 +139,7 @@ def run_plan(args):
         wanted = wanted.sort_values('identifier')
         path = artifact_dir/f'{E2E.TAG}_entries_{population}.csv'
         wanted.to_csv(path, index=False)
-        entry_files[population] = dict(path=str(path), sha256=E2E.sha256_of(path),
+        entry_files[population] = dict(path=str(path), name=path.name, sha256=E2E.sha256_of(path),
                                        source=str(source), n=int(wanted.shape[0]))
         print(f'{population}: {wanted.shape[0]} crystals from {source.name} -> {path.name}')
     if args.pilot:
@@ -148,7 +148,8 @@ def run_plan(args):
         path = artifact_dir/f'{E2E.TAG}_pilot_entries.csv'
         manifest.loc[manifest['identifier'].isin(chosen), ['identifier', 'bravais_lattice']] \
             .sort_values('identifier').to_csv(path, index=False)
-        entry_files['pilot'] = dict(path=str(path), sha256=E2E.sha256_of(path), n=len(chosen))
+        entry_files['pilot'] = dict(path=str(path), name=path.name, sha256=E2E.sha256_of(path),
+                                    n=len(chosen))
         print(f'pilot: {len(chosen)} crystals -> {path.name}')
     learned = {name: dict(directory=path,
                           specification_sha256=E2E.sha256_of(Path(E2E.BASE/path)/'specification.json'))
@@ -188,9 +189,18 @@ def _design(args):
 # generate / complete
 # ---------------------------------------------------------------------------------------------
 def _entries_file(args, design):
+    """The population's entry list, found under THIS machine's artifact directory.
+
+    The design records the list's path for provenance, and that path is the laptop's -- the design
+    is written there and travels to NERSC with `sync_record.sh push`. Resolving the recorded path
+    literally sent every task of the first grid submission looking under /Users/... on Perlmutter
+    (2026-09-06). The basename under `--artifact-dir` is the same file, and the sha256 check below
+    proves it.
+    """
     if args.entries_file:
         return Path(args.entries_file)
-    return Path(design['entry_files'][args.population]['path'])
+    recorded = design['entry_files'][args.population]
+    return Path(args.artifact_dir)/recorded.get('name', Path(recorded['path']).name)
 
 
 def _arm_root(args):
