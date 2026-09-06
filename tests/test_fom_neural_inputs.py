@@ -219,3 +219,33 @@ def test_the_written_sidecar_verifies_and_records_its_support():
                            encoding='utf-8').read())
     assert meta['n_candidates'] == total
     assert meta['entries']['support']
+
+
+# ---------------------------------------------------------------------------------------
+# DWMM's redirect: block A as two ratio features (decision 2026-09-05)
+# ---------------------------------------------------------------------------------------
+def test_the_ratio_groups_add_exactly_their_columns():
+    base, _ = FomCombiner.feature_specification(('raw',))
+    for group in FomCombiner.PRIOR_RATIO_GROUPS:
+        names, _ = FomCombiner.feature_specification(('raw', group))
+        added = [n for n in names if n not in base]
+        assert tuple(added) == FomCombiner.NEURAL_GROUP_COLUMNS[group]
+    assert FomCombiner.DOF_OF_LATTICE['cP'] == 1 and FomCombiner.DOF_OF_LATTICE['aP'] == 6
+
+
+def test_add_prior_ratios_derives_log_ratios_and_reads_the_claimed_lattice():
+    import pandas as pd
+
+    frame = pd.DataFrame({
+        'volume': [1000.0, 2000.0, 500.0], 'bravais_lattice': ['mP', 'cP', 'aP'],
+        'prior_logv_marginal': [np.log(1000.0)]*3, 'prior_dof_expected': [4.0]*3,
+        'prior_logv_mP': [np.log(1000.0)]*3, 'prior_logv_aP': [np.log(250.0)]*3,
+        'prior_logv_cP': [np.nan]*3})
+    out = FomCombiner.add_prior_ratios(frame.copy())
+    np.testing.assert_allclose(out['prior_volume_ratio_marginal'], [0.0, np.log(2), np.log(0.5)])
+    np.testing.assert_allclose(out['prior_dof_ratio'], [1.0, 0.25, 1.5])
+    assert out['prior_volume_ratio_claimed'].iloc[0] == pytest.approx(0.0)
+    assert np.isnan(out['prior_volume_ratio_claimed'].iloc[1]), 'cubic claim: outside support'
+    assert out['prior_volume_ratio_claimed'].iloc[2] == pytest.approx(np.log(2))
+    with pytest.raises(KeyError):
+        FomCombiner.add_prior_ratios(frame.drop(columns=['prior_dof_expected']))

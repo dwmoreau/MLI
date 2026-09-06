@@ -84,8 +84,25 @@ ARMS = (
      'control: labels permuted within each (entry, bundle); must land between the floors'),
     ('tree', 'tree', TREE_GROUPS, s12.BASE_DROP, 'sampling_weight',
      "S12's plus_probation feature set, refitted on exactly the rows the networks see"),
-    ('tree_plus_blocks', 'tree', TREE_GROUPS + FomCombiner.NEURAL_GROUPS, s12.BASE_DROP,
+    ('tree_plus_blocks', 'tree', TREE_GROUPS + FomCombiner.NEURAL_ENTRY_GROUPS
+     + FomCombiner.NEURAL_CANDIDATE_GROUPS, s12.BASE_DROP,
      'sampling_weight', 'the tree given the network\'s inputs too: inputs or architecture'),
+    # DWMM's redirect (decision 2026-09-05): block A as two ratio features in the combiner.
+    ('tree_ratio_marginal', 'tree',
+     TREE_GROUPS + ('prior_ratio_volume_marginal', 'prior_ratio_dof'), s12.BASE_DROP,
+     'sampling_weight', "S12's tree plus v_candidate/v_inferred (lattice-marginal volume) and "
+     'dof_candidate/E[dof]'),
+    ('tree_ratio_claimed', 'tree',
+     TREE_GROUPS + ('prior_ratio_volume_claimed', 'prior_ratio_dof'), s12.BASE_DROP,
+     'sampling_weight', "S12's tree plus v_candidate/v_inferred (volume at the claimed lattice) "
+     'and dof_candidate/E[dof]'),
+    ('tree_ratio_volume_only', 'tree', TREE_GROUPS + ('prior_ratio_volume_marginal',),
+     s12.BASE_DROP, 'sampling_weight', 'the marginal volume ratio alone'),
+    ('tree_ratio_dof_only', 'tree', TREE_GROUPS + ('prior_ratio_dof',), s12.BASE_DROP,
+     'sampling_weight', 'the dof ratio alone'),
+    ('tree_plus_joint', 'tree', TREE_GROUPS + ('prior_claimed',), s12.BASE_DROP,
+     'sampling_weight', 'the principled alternative: the joint P(V, lattice) read at the claimed '
+     'pair, its margin, and the support flag'),
     )
 NETWORK_ARMS = tuple(name for name, kind, *_ in ARMS if kind == 'network')
 TREE_ARMS = tuple(name for name, kind, *_ in ARMS if kind == 'tree')
@@ -358,6 +375,7 @@ def run_reduce(args):
 # ---------------------------------------------------------------------------------------------
 REFERENCE_ARM = 'network'
 BASELINES = ('tree', 'tree_fullscale', 'M_sym', 'M20')
+REFERENCE_ARMS = ('network', 'tree')     # every arm is paired against each of these
 ANSWER_RATES = (0.75, 0.90)
 
 
@@ -438,9 +456,10 @@ def write_contrasts(results, artifact_dir, tag, suffix):
     for name, result in sorted(results.items()):
         for metric in ('operating_point', 'top10', 'threshold_only'):
             for scope in (None, 'hard'):
-                if REFERENCE_ARM in results and name != REFERENCE_ARM:
-                    contrasts.append(s12._pair(results[REFERENCE_ARM], result, REFERENCE_ARM,
-                                               name, metric, scope))
+                for reference in REFERENCE_ARMS:
+                    if reference in results and name != reference:
+                        contrasts.append(s12._pair(results[reference], result, reference,
+                                                   name, metric, scope))
                 for baseline in BASELINES:
                     if baseline in results and name != baseline \
                             and name not in ('constant', 'uniform_random'):

@@ -265,15 +265,36 @@ PRIOR_SUPPORT_FLAG = 'prior_in_support'
 PRIOR_CLAIMED_C2 = ('prior_joint', 'prior_joint_margin', PRIOR_SUPPORT_FLAG)
 ASSIGNMENT_PEAKS = tuple(f'asg_p{index:02d}' for index in range(20))
 ASSIGNMENT_SIGMA = ('asg_sigma',)
+# DWMM's redirect (decision 2026-09-05): the prior's two summaries -- one predicted volume for the
+# pattern (E[log V] over the branches, lattices summed out) and one predicted number of free cell
+# parameters (E[dof] from the `n_free` head) -- enter the combiner as per-candidate RATIOS against
+# the candidate's own volume and lattice. Entry-level summaries ride the covariates; the ratios
+# are derived in `combiner_frames_c2` from them and the candidate row, so no sidecar pass is
+# needed. The volume ratio exists in two readings, both fitted as arms: against the lattice
+# marginal, and against E[log V | claimed lattice] (the F-117 reading, NaN outside the support).
+PRIOR_SUMMARY = ('prior_logv_marginal', 'prior_dof_expected')
+PRIOR_RATIO_VOLUME_MARGINAL = ('prior_volume_ratio_marginal',)
+PRIOR_RATIO_VOLUME_CLAIMED = ('prior_volume_ratio_claimed',)
+PRIOR_RATIO_DOF = ('prior_dof_ratio',)
+# Free cell parameters per Bravais lattice: cubic 1, tetragonal/hexagonal/rhombohedral 2,
+# orthorhombic 3, monoclinic 4, triclinic 6 (`PriorNetwork.N_FREE_OF`).
+DOF_OF_LATTICE = {'cP': 1, 'cI': 1, 'cF': 1, 'tP': 2, 'tI': 2, 'hP': 2, 'hR': 2,
+                  'oP': 3, 'oC': 3, 'oF': 3, 'oI': 3, 'mP': 4, 'mC': 4, 'aP': 6}
+
 NEURAL_ENTRY_GROUPS = ('prior_entry', 'prior_volume')
 NEURAL_CANDIDATE_GROUPS = ('prior_claimed', 'assignment_peaks', 'assignment_sigma')
-NEURAL_GROUPS = NEURAL_ENTRY_GROUPS + NEURAL_CANDIDATE_GROUPS
+PRIOR_RATIO_GROUPS = ('prior_ratio_volume_marginal', 'prior_ratio_volume_claimed',
+                      'prior_ratio_dof')
+NEURAL_GROUPS = NEURAL_ENTRY_GROUPS + NEURAL_CANDIDATE_GROUPS + PRIOR_RATIO_GROUPS
 NEURAL_GROUP_COLUMNS = {
     'prior_entry': PRIOR_ENTRY,
     'prior_volume': PRIOR_VOLUME,
     'prior_claimed': PRIOR_CLAIMED_C2,
     'assignment_peaks': ASSIGNMENT_PEAKS,
     'assignment_sigma': ASSIGNMENT_SIGMA,
+    'prior_ratio_volume_marginal': PRIOR_RATIO_VOLUME_MARGINAL,
+    'prior_ratio_volume_claimed': PRIOR_RATIO_VOLUME_CLAIMED,
+    'prior_ratio_dof': PRIOR_RATIO_DOF,
     }
 
 SCALER_METHODS = ('analytic', 'z', 'rank')
@@ -603,6 +624,36 @@ def entry_covariates(entries):
     return covariates
 
 
+def add_prior_ratios(frame):
+    """The two block-A ratio features, per candidate, from the entry-level prior summaries.
+
+    Log ratios rather than ratios: a tree is invariant to the monotone transform, and the log
+    form keeps a volume off by 10x and one off by 1/10x symmetric about zero. `prior_volume_ratio_*`
+    is `log V_candidate - E[log V]`; `prior_dof_ratio` is the candidate lattice's free-parameter
+    count over the prior's expected count. The claimed-lattice volume reading is NaN where the
+    claimed lattice is outside the prior's support (cubic, for the shipped model), and so is
+    recorded as such rather than imputed here -- the tree handles a missing value natively.
+    """
+    for name in PRIOR_SUMMARY:
+        if name not in frame.columns:
+            raise KeyError(f'{name} is not on the frame; re-run run_fom_neural_inputs.py '
+                           f'--stage entries with a PriorNetwork that emits it')
+    log_volume = np.log(frame['volume'].to_numpy(dtype=np.float64))
+    lattice = frame['bravais_lattice'].to_numpy().astype(str)
+    frame['prior_volume_ratio_marginal'] = (
+        log_volume - frame['prior_logv_marginal'].to_numpy(dtype=np.float64))
+    claimed = np.empty(frame.shape[0], dtype=np.float64)
+    for code in np.unique(lattice):
+        mask = lattice == code
+        column = f'prior_logv_{code}'
+        claimed[mask] = (frame.loc[mask, column].to_numpy(dtype=np.float64)
+                         if column in frame.columns else np.nan)
+    frame['prior_volume_ratio_claimed'] = log_volume - claimed
+    dof = np.array([DOF_OF_LATTICE.get(code, np.nan) for code in lattice], dtype=np.float64)
+    frame['prior_dof_ratio'] = dof/frame['prior_dof_expected'].to_numpy(dtype=np.float64)
+    return frame
+
+
 def add_context(frame):
     """Append the per-entry context columns, over the pooled cross-lattice entry.
 
@@ -745,7 +796,8 @@ def neural_covariates(pool, entries):
         raise FileNotFoundError(
             f'{path} is missing: write it with run_fom_neural_inputs.py --stage entries')
     prior = pd.read_parquet(path)
-    wanted = ['entry_id', 'condition_bundle'] + list(PRIOR_ENTRY) + list(PRIOR_VOLUME)
+    wanted = ['entry_id', 'condition_bundle'] + list(PRIOR_ENTRY) + list(PRIOR_VOLUME) \
+        + [name for name in PRIOR_SUMMARY if name in prior.columns]
     absent = [name for name in wanted if name not in prior.columns]
     if absent:
         raise KeyError(f'{path} lacks {absent}')
@@ -820,7 +872,7 @@ def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_
         # The entry-level block-A columns ride on the covariates, so any caller asking for those
         # groups gets them without knowing where they live -- and gets `neural_covariates`'s
         # refusal if the prior table is missing or short.
-        if any(group in groups for group in NEURAL_ENTRY_GROUPS):
+        if any(group in groups for group in NEURAL_ENTRY_GROUPS + PRIOR_RATIO_GROUPS):
             covariates = neural_covariates(pool, entries)
         else:
             covariates = entry_covariates(entries)
@@ -852,6 +904,8 @@ def combiner_frames_c2(pool, entries, groups=DEFAULT_GROUPS, bundles=None, keep_
         if 'holdout' in groups:
             frame['ho_M20__n5'] = frame[
                 FomBenchmark.holdout_column('ho_M20', holdout_n_extra)].to_numpy(dtype=np.float64)
+        if any(group in groups for group in PRIOR_RATIO_GROUPS):
+            frame = add_prior_ratios(frame)
         frame = add_context(frame)
         if downcast:
             floats = frame.select_dtypes(include=['float64']).columns

@@ -111,7 +111,7 @@ def write_entry_tables(pool, out_dir, prior_dir, keys_from=None, batch_size=256,
                          f'{model.model_params["peak_length"]}')
 
     parts = {name: [] for name in ('joint', 'bravais_p', 'logv', 'bravais_entropy',
-                                   'branch_entropy')}
+                                   'branch_entropy', 'logv_marginal', 'dof_expected')}
     for start in range(0, q2.shape[0], chunk):
         tables = model.entry_tables(q2[start:start + chunk], batch_size=batch_size)
         for name in parts:
@@ -128,8 +128,11 @@ def write_entry_tables(pool, out_dir, prior_dir, keys_from=None, batch_size=256,
     out['prior_bravais_entropy'] = np.concatenate(parts['bravais_entropy']).astype(np.float32)
     for position, code in enumerate(BRAVAIS_LATTICES):
         out[f'prior_logv_{code}'] = logv[:, position].astype(np.float32)
+    out['prior_logv_marginal'] = np.concatenate(parts['logv_marginal']).astype(np.float32)
+    out['prior_dof_expected'] = np.concatenate(parts['dof_expected']).astype(np.float32)
     # Every column FomCombiner will ask for, by name, before anything is written.
-    for name in list(FomCombiner.PRIOR_ENTRY) + list(FomCombiner.PRIOR_VOLUME):
+    for name in (list(FomCombiner.PRIOR_ENTRY) + list(FomCombiner.PRIOR_VOLUME)
+                 + list(FomCombiner.PRIOR_SUMMARY)):
         assert name in out.columns, name
 
     out_dir = Path(out_dir)

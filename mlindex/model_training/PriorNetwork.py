@@ -720,6 +720,11 @@ class PriorNetwork(IntegralFilter):
         branch_lp = _logsumexp_nan(joint, axis=2)
         return joint, branch_lp
 
+    def predict_log_marginal(self, q2, target, batch_size=None):
+        """One head's log marginal over its classes, as the trained graph emits it."""
+        raw = self.model.predict(self.scale_peaks(q2), batch_size=batch_size or 512, verbose=0)
+        return _log_normalise(np.asarray(raw[target], dtype=np.float64), axis=1)
+
     def entry_tables(self, q2, batch_size=None):
         """Everything block A says about a peak list, as the per-entry inputs S14 consumes.
 
@@ -735,7 +740,26 @@ class PriorNetwork(IntegralFilter):
         conditional = np.exp(joint - bravais_lp[:, np.newaxis, :])     # P(v | c), NaN outside
         logv = (conditional*log_volumes[np.newaxis, :, np.newaxis]).sum(axis=1)
         logv[:, ~self.support_mask()] = np.nan
+        # The lattice-marginal volume, E[log V] under the support-renormalised branch marginal:
+        # DWMM's "predict a volume" as one number per pattern (decision 2026-09-05).
+        logv_marginal = (np.exp(branch_lp)*log_volumes[np.newaxis, :]).sum(axis=1)
+        # The expected number of free cell parameters from the `n_free` head, renormalised over
+        # the levels the support can reach: level 1 is cubic and only cubic, so a model trained
+        # without cubic has never seen it and it is masked exactly as the cubic lattices are.
+        levels = np.asarray(N_FREE_LEVELS, dtype=np.float64)
+        reachable = np.array([any(N_FREE_OF[LATTICE_SYSTEM_OF[code]] == level
+                                  for code in self.support) for level in N_FREE_LEVELS])
+        n_free_lp = np.asarray(self.predict_log_marginal(q2, 'n_free', batch_size=batch_size),
+                               dtype=np.float64)
+        n_free_lp[:, ~reachable] = np.nan
+        n_free_lp = n_free_lp - _logsumexp_nan(n_free_lp, axis=1)[:, np.newaxis]
+        dof_expected = (np.where(np.isnan(n_free_lp), 0.0, np.exp(n_free_lp))
+                        *levels[np.newaxis, :]).sum(axis=1)
         return {
+            'logv_marginal': logv_marginal,
+            'n_free_lp': n_free_lp,
+            'dof_expected': dof_expected,
+            'dof_levels_reachable': reachable,
             'joint': joint,
             'branch_lp': branch_lp,
             'bravais_lp': bravais_lp,
