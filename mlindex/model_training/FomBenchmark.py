@@ -47,7 +47,9 @@ from mlindex.utilities.Q2Calculator import Q2Calculator
 from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 
 
-SCHEMA_VERSION = '3'
+SCHEMA_VERSION = '3.1'
+# 3.1 (S15) adds two entry columns, `seconds_search` and `seconds_total`, and two manifest keys,
+# `record_timing` and `extra_opt_params`; a version-3 pool reads through every loader unchanged.
 # Version 3 is Benchmark B and is deliberately not backward compatible with campaign 1's
 # Benchmark A. Every added column exists because campaign 1 could not answer a question without
 # it; `docs/fom_campaign2/SCHEMA.md` is the specification and its "What changed from Benchmark A"
@@ -215,6 +217,13 @@ ENTRY_COLUMNS = (
     'is_degenerate',
     'degeneracy_conditions',
     'degeneracy_systematic',
+    # --- schema v3.1 (S15) ---------------------------------------------------------------
+    # Per-entry wall clock, written only under `--record-timing` and -1.0 otherwise, so a
+    # deployment cost is measured on the run that produced the pool rather than projected from a
+    # model. `seconds_search` is the fourteen-lattice search alone; `seconds_total` adds the
+    # per-entry bookkeeping. Both are as seen by ONE pool, so node throughput divides by n_pools.
+    'seconds_search',
+    'seconds_total',
 )
 
 

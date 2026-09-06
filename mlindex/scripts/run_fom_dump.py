@@ -129,6 +129,18 @@ def _parse_args(argv=None):
                         help='Frozen manifest supplying the fom-train/dev/test split AND the '
                              'entry list. The split is by source entry and must never be '
                              're-derived here')
+    parser.add_argument('--record-timing', action='store_true',
+                        help='Record per-entry wall clock on the entry row: seconds_search (the '
+                             'fourteen-lattice search) and seconds_total (search plus the '
+                             'per-entry bookkeeping). Off by default so an older invocation '
+                             'writes -1.0 in both columns; S15 uses it so cost is measured '
+                             'rather than projected')
+    parser.add_argument('--opt-param', action='append', default=None, metavar='KEY=VALUE',
+                        help='Extra opt_params entry, repeatable, merged AFTER the fixed keys and '
+                             'refused for any of them. Values parse as JSON and fall back to a '
+                             'string, so hkl_source=posterior and n_iterations=50 both work. '
+                             'Recorded in the manifest as extra_opt_params. This is how a '
+                             'research arm reaches the optimizer without a CLI flag of its own')
     # Not `required=True`: `--print-tag` is how the submit script asks what directory a
     # bundle should be written to, so it cannot be made to name that directory first.
     parser.add_argument('--out-dir', type=str, default=None)
@@ -268,6 +280,8 @@ def entry_record(entry, condition, pattern, split, volume_decile, degeneracy):
         'n_peaks_available': int(np.count_nonzero(full_peaks > 0)),
         'volume_decile': volume_decile,
         'pool_size_full': -1,          # filled in once the candidates for this entry are known
+        'seconds_search': -1.0,        # both filled in only under --record-timing
+        'seconds_total': -1.0,
         'q2_error_multiplier': float(condition.error_multiplier),
         'n_contaminants': int(condition.n_contaminants),
         'contaminant_bias': float(condition.contaminant_bias),
@@ -387,13 +401,43 @@ def optimizer_options(args):
     what made it crash every multiprocessing worker until 2026-08-27 (C2-F-047), which is the mode
     this driver runs in at every pool size above one.
     """
-    return {
+    options = {
         'prune_m20_threshold': float(args.prune_threshold),
         'prune_criterion_capture': True,
         'dump_candidates': True,
         'search_seed_scheme': 'per_entry_bravais',
         'search_base_seed': int(search_seed(args)),
         }
+    options.update(extra_opt_params(args))
+    return options
+
+
+# The keys `optimizer_options` owns. An `--opt-param` naming one of these would silently
+# override the benchmark's identity -- the cut, the seed scheme, the dump -- so it is refused.
+RESERVED_OPT_PARAMS = ('prune_m20_threshold', 'prune_criterion_capture', 'dump_candidates',
+                       'search_seed_scheme', 'search_base_seed')
+
+
+def extra_opt_params(args):
+    """`--opt-param KEY=VALUE` entries as a dict, refusing the reserved keys.
+
+    Values parse as JSON first (`50` -> int, `0.99` -> float, `true` -> bool) and fall back to the
+    bare string, which is what an enumerated option such as `hkl_source=posterior` needs.
+    """
+    extra = {}
+    for item in (getattr(args, 'opt_param', None) or []):
+        key, separator, value = item.partition('=')
+        key = key.strip()
+        if not separator or not key:
+            raise SystemExit(f'--opt-param expects KEY=VALUE, got {item!r}')
+        if key in RESERVED_OPT_PARAMS:
+            raise SystemExit(f'--opt-param {key!r} is set by the driver itself and cannot be '
+                             f'overridden; use --prune-threshold / --optimizer-seed')
+        try:
+            extra[key] = json.loads(value)
+        except json.JSONDecodeError:
+            extra[key] = value
+    return extra
 
 
 def search_seed(args):
@@ -472,6 +516,7 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
         for position in range(entries.shape[0]):
             entry = entries.iloc[position]
             attempted[entry['bravais_lattice']] = attempted.get(entry['bravais_lattice'], 0) + 1
+            entry_started = time.perf_counter()
             hkl_full = np.stack([
                 np.asarray(entry[f'reindexed_{axis}_{FomPatterns.BROADENING_TAG}'], dtype=float)
                 for axis in ('h', 'k', 'l')], axis=1)
@@ -492,6 +537,7 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
                        'condition_bundle': condition.tag}
             records, predownsample_records = [], []
             try:
+                search_started = time.perf_counter()
                 for bravais_lattice in bravais_lattices:
                     optimizer = optimizers[bravais_lattice]
                     optimizer.dump_context = context
@@ -501,6 +547,7 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
                     records += optimizer.drain_candidate_dump()
                     if want_predownsample:
                         predownsample_records += optimizer.drain_predownsample_dump()
+                seconds_search = time.perf_counter() - search_started
                 # `is_degenerate` is cctbx-backed (Niggli reduction of the primitive setting)
                 # and runs once per entry, so it is INSIDE this guard rather than after it. A
                 # single cell cctbx refuses would otherwise abort the whole pool at that entry --
@@ -549,6 +596,12 @@ def run_pool(pool_index, args, entries, manifest, out_dir, shard_tag, second_pha
                 volume_decile=-1 if frozen is None else int(frozen['volume_decile']),
                 degeneracy=degeneracy)
             row['pool_size_full'] = int(candidates.shape[0])
+            if args.record_timing:
+                # Wall clock as this pool saw it: the search loop alone, and the whole entry
+                # including labelling-free bookkeeping. With several pools on one node each
+                # number is per pool, so node throughput is n_pools / seconds_total.
+                row['seconds_search'] = round(seconds_search, 3)
+                row['seconds_total'] = round(time.perf_counter() - entry_started, 3)
             entry_rows.append(row)
             succeeded[entry['bravais_lattice']] = succeeded.get(entry['bravais_lattice'], 0) + 1
 
@@ -813,6 +866,8 @@ def run(args):
         n_pools=args.n_pools,
         pool_size=args.pool_size,
         prune_threshold=float(args.prune_threshold),
+        record_timing=bool(args.record_timing),
+        extra_opt_params=extra_opt_params(args),
         labelled=not args.no_label,
         # What the run ACTUALLY did, not what it was asked to do. An earlier version wrote
         # `subsampled: true` whenever the flag was absent, while the subsampler did not exist --

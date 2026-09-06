@@ -385,3 +385,42 @@ def test_the_supplementary_lists_refuse_a_lattice_that_is_not_there(tmp_path):
     manifest.to_parquet(path, index=False)
     with pytest.raises(SystemExit, match='nothing to regenerate'):
         main([str(path), str(tmp_path / 'c.csv'), str(tmp_path / 'm.csv')])
+
+
+# ---------------------------------------------------------------------------------------------
+# S15: per-entry timing and the extra opt_params hook
+# ---------------------------------------------------------------------------------------------
+def test_timing_is_off_by_default_and_the_entry_table_carries_the_placeholders():
+    """An invocation written before `--record-timing` existed must produce the same pool, so the
+    flag is off and the two columns are present with -1.0 -- like `volume_decile = -1`, a value
+    that says "not recorded" rather than a default that could be mistaken for a measurement."""
+    from mlindex.model_training import FomBenchmark
+    args = _parse_args([])
+    assert args.record_timing is False
+    assert 'seconds_search' in FomBenchmark.ENTRY_COLUMNS
+    assert 'seconds_total' in FomBenchmark.ENTRY_COLUMNS
+    assert FomBenchmark.ENTRY_COLUMNS.index('seconds_search') > FomBenchmark.ENTRY_COLUMNS.index('pool_size_full')
+
+
+def test_extra_opt_params_are_merged_after_the_fixed_keys_and_typed():
+    from mlindex.scripts.run_fom_dump import extra_opt_params, optimizer_options
+    args = _parse_args(['--opt-param', 'hkl_source=posterior', '--opt-param', 'n_iterations=50',
+                        '--opt-param', 'assignment_threshold=0.99'])
+    extra = extra_opt_params(args)
+    assert extra == {'hkl_source': 'posterior', 'n_iterations': 50, 'assignment_threshold': 0.99}
+    options = optimizer_options(args)
+    # The fixed keys are still there and still the driver's, and the extras sit beside them.
+    assert options['prune_m20_threshold'] == 1.5
+    assert options['search_seed_scheme'] == 'per_entry_bravais'
+    assert options['hkl_source'] == 'posterior'
+    # No flag at all is an empty dict, which is what the manifest records for every older run.
+    assert extra_opt_params(_parse_args([])) == {}
+
+
+def test_a_reserved_opt_param_is_refused_rather_than_silently_overriding_the_cut():
+    from mlindex.scripts.run_fom_dump import RESERVED_OPT_PARAMS, extra_opt_params
+    for key in RESERVED_OPT_PARAMS:
+        with pytest.raises(SystemExit, match=key):
+            extra_opt_params(_parse_args(['--opt-param', f'{key}=1']))
+    with pytest.raises(SystemExit, match='KEY=VALUE'):
+        extra_opt_params(_parse_args(['--opt-param', 'no_separator']))
