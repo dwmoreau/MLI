@@ -273,10 +273,63 @@ def run_fit(args):
             _log(f'  {name:20s} SKIPPED -- {problem}')
             rows.append(dict(arm=name, kind=kind, purpose=purpose, skipped=str(problem),
                              fit_seed=int(args.fit_seed)))
-    table = pd.DataFrame(rows)
+    # MERGED into the existing table by arm, never overwritten: a second `--stage fit --arms ...`
+    # used to replace the whole file, and the document then listed five arms where fourteen had
+    # been fitted (S14, 2026-09-05).
     path = Path(args.artifact_dir)/f'{args.tag}_fit_table{args.suffix}.csv'
+    table = write_fit_table(rows, path)
+    _log(f'\nwrote {path} ({table.shape[0]} arms)')
+    return 0
+
+
+def write_fit_table(rows, path):
+    table = pd.DataFrame(rows)
+    if path.exists():
+        try:
+            existing = pd.read_csv(path)
+            existing = existing.loc[~existing['arm'].isin(set(table['arm']))]
+            table = pd.concat([existing, table], ignore_index=True)
+        except pd.errors.EmptyDataError:
+            pass
     table.to_csv(path, index=False)
-    _log(f'\nwrote {path}')
+    return table
+
+
+def fit_row_from_model(directory):
+    """The fit-table row a saved model implies, from its own `specification.json`.
+
+    Everything the fit stage records is also in the model's meta, so a table can be rebuilt from
+    the model directories rather than trusted to a CSV that a later fit may have replaced.
+    """
+    model = NeuralScore.load_any(directory)
+    meta = model.meta
+    kind = 'network' if meta.get('model_type') == NeuralScore.MODEL_TYPE else 'tree'
+    row = dict(arm=meta.get('arm'), kind=kind, purpose=meta.get('purpose', ''),
+               groups='+'.join(model.groups), n_features=len(model.names),
+               dropped=';'.join(sorted(meta.get('dropped', []))),
+               fit_seed=int(meta.get('seed', -1)), weight_column=meta.get('weight_column') or 'none',
+               n_rows_fit=int(meta.get('n_rows', -1)), n_positive_fit=int(meta.get('n_positive', -1)),
+               n_calibration_rows=int(meta.get('n_calibration_rows', -1)),
+               calibrated_lattices=len(meta.get('calibrated_lattices', [])), seconds=np.nan)
+    if kind == 'network':
+        row.update(input_width=int(meta['input_width']), epochs_run=int(meta['epochs_run']),
+                   best_validation_loss=meta.get('best_validation_loss'),
+                   train_auc=float(meta['train_auc']),
+                   loss_ratio=float(meta['loss_check']['ratio']),
+                   min_lattices_per_epoch=int(min(r['lattices_present']
+                                                  for r in meta['composition'])))
+    return row
+
+
+def run_fit_table(args):
+    """Rebuild `{tag}_fit_table{suffix}.csv` from every model directory of this run's seed."""
+    directory = models_directory(args)
+    rows = [fit_row_from_model(path) for path in sorted(directory.glob(f'*_seed{args.fit_seed}'))]
+    if not rows:
+        raise SystemExit(f'no models under {directory} for seed {args.fit_seed}')
+    path = Path(args.artifact_dir)/f'{args.tag}_fit_table{args.suffix}.csv'
+    table = write_fit_table(rows, path)
+    _log(f'rebuilt {path}: {table.shape[0]} arms from {directory}')
     return 0
 
 
@@ -697,7 +750,8 @@ def run_cost(args):
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description='S14: the neural scoring network')
     parser.add_argument('--stage', required=True,
-                        choices=('fit', 'reduce', 'analyse', 'combine', 'calibration', 'cost'))
+                        choices=('fit', 'fit-table', 'reduce', 'analyse', 'combine',
+                                 'calibration', 'cost'))
     parser.add_argument('--models-dir', default=str(MODELS_DIR))
     parser.add_argument('--artifact-dir', default=str(ARTIFACT_DIR))
     parser.add_argument('--tag', default=TAG)
@@ -736,7 +790,8 @@ def _parse_args(argv=None):
 def main(argv=None):
     args = _parse_args(argv)
     Path(args.artifact_dir).mkdir(parents=True, exist_ok=True)
-    stage = {'fit': run_fit, 'reduce': run_reduce, 'analyse': run_analyse,
+    stage = {'fit': run_fit, 'fit-table': run_fit_table, 'reduce': run_reduce,
+             'analyse': run_analyse,
              'combine': run_combine, 'calibration': run_calibration, 'cost': run_cost}[args.stage]
     return stage(args)
 
