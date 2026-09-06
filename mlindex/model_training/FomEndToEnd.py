@@ -480,8 +480,15 @@ def check_peak_digests(entries_by_cut, witness_columns=WITNESS_COLUMNS):
         raise ValueError('need at least two cuts to compare')
     problems = []
     rows = []
-    bundles = sorted(set().union(*(set(t.index.get_level_values(1)) for t in tables.values())))
-    for bundle in bundles:
+    per_cut_bundles = {cut: set(t.index.get_level_values(1)) for cut, t in tables.items()}
+    shared = set.intersection(*per_cut_bundles.values())
+    # A bundle one arm never generated (cut 1.5 has no `error_shape`) is reported, not fatal:
+    # the factorial simply has no cell there. A cell missing INSIDE a shared bundle is fatal.
+    for cut, present in sorted(per_cut_bundles.items()):
+        for bundle in sorted(set().union(*per_cut_bundles.values()) - present):
+            rows.append(dict(condition_bundle=bundle, cuts_compared='', n_cells=0, n_agree=0,
+                             n_disagree=0, n_missing=0, note=f'absent at {cut_label(cut)}'))
+    for bundle in sorted(shared):
         per_cut = {cut: t.xs(bundle, level='condition_bundle', drop_level=False)
                    for cut, t in tables.items()}
         union = sorted(set().union(*(set(p.index) for p in per_cut.values())))
@@ -510,8 +517,10 @@ def check_peak_digests(entries_by_cut, witness_columns=WITNESS_COLUMNS):
                                     f'{[cut_label(c) for c in cuts]}')
         rows.append(dict(condition_bundle=bundle, cuts_compared=','.join(cut_label(c) for c in cuts),
                          n_cells=len(common), n_agree=agree, n_disagree=disagree,
-                         n_missing=n_missing))
+                         n_missing=n_missing, note=''))
     table = pd.DataFrame(rows)
+    if not shared:
+        raise ValueError('the arms share no condition bundle at all')
     if problems:
         raise ValueError('peak lists are NOT identical across cuts: ' + '; '.join(problems[:10]))
     return table

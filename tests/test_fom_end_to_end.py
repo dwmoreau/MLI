@@ -133,6 +133,14 @@ def test_the_digest_check_passes_on_identical_peak_lists_and_names_the_cell_that
         E2E.check_peak_digests({5.0: same, 3.0: different})
     with pytest.raises(ValueError, match='missing'):
         E2E.check_peak_digests({5.0: same, 3.0: same.iloc[:2]})
+    # A whole bundle one arm never generated is a note, not a failure: cut 1.5 has no error_shape.
+    extra = pd.concat([same, _entries(['p', 'q', 'r'], bundle='c2_error1_cont0_icept4')],
+                      ignore_index=True)
+    table = E2E.check_peak_digests({5.0: extra, 1.5: same})
+    absent = table.loc[table['note'] != '']
+    assert absent.shape[0] == 1 and absent['condition_bundle'].iloc[0] == 'c2_error1_cont0_icept4'
+    assert 'cut1.5' in absent['note'].iloc[0]
+    assert table.loc[table['note'] == '', 'n_agree'].sum() == 3
     witness = _entries(['a', 'b', 'c'])
     witness.loc[1, 'n_dropout_achieved'] = 4
     with pytest.raises(ValueError, match='E1'):

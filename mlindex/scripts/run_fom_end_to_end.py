@@ -89,7 +89,8 @@ def _parse_args(argv=None):
                         help='reduce: a saved combiner to score, by name; defaults to S12\'s '
                              'plus_probation at full scale')
     parser.add_argument('--keep-entries', default=None,
-                        help='reduce/restrict: CSV of identifiers, to reduce a subset (pilot)')
+                        help='reduce/restrict/analyse: CSV of identifiers, to work on a subset '
+                             '(the pilot); analyse restricts the digest and cost tables to it')
     parser.add_argument('--suffix', default='',
                         help='reduce: namespaces the reduction files, e.g. _pilot')
     parser.add_argument('--pilot', action='store_true',
@@ -246,7 +247,12 @@ def run_complete(args):
     if args.cut is None:
         raise SystemExit('--cut is required')
     population = args.population + args.arm_suffix
-    bundles = list(E2E.POPULATIONS[args.population]['bundles'])
+    # The arm's OWN bundle list, from the provenance `generate` wrote before its first bundle --
+    # a pilot arm carries one bundle and is complete when that one is done; the grid arms carry
+    # the population's full set.
+    provenance = E2E.load_provenance(E2E.arm_dir(args.out_root, population, args.cut),
+                                     require_complete=False)
+    bundles = list(provenance.get('bundles') or E2E.POPULATIONS[args.population]['bundles'])
     done = E2E.arm_bundles_done(args.out_root, population, args.cut, bundles)
     if set(done) != set(bundles):
         raise SystemExit(f'{population} {E2E.cut_label(args.cut)}: {len(done)} of {len(bundles)} '
@@ -255,6 +261,8 @@ def run_complete(args):
     for tag in bundles:
         manifest = FomBenchmark.load_manifest(E2E.bundle_dir(args.out_root, population, args.cut, tag))
         seconds[tag] = manifest.get('seconds_total')
+    # A digest-for-digest check within the arm is cheap here and catches a bundle generated under
+    # another seed before anything is consolidated.
     payload = E2E.stamp_complete(E2E.arm_dir(args.out_root, population, args.cut),
                                  bundle_seconds_total=seconds,
                                  completed=time.strftime('%Y-%m-%dT%H:%M:%S'))
@@ -514,10 +522,18 @@ def _pool_paths(args, design):
     return pools
 
 
+def _load_arm_entries(args, paths):
+    entries = pd.concat([FomBenchmark.load_entries(p) for p in paths], ignore_index=True)
+    keep = _keep(args)
+    if keep is not None:
+        entries = entries.loc[entries['entry_id'].astype(str).isin(keep)].reset_index(drop=True)
+    return entries
+
+
 def _cost_table(args, design, reductions):
     rows = []
     for (population, cut), paths in _pool_paths(args, design).items():
-        entries = pd.concat([FomBenchmark.load_entries(p) for p in paths], ignore_index=True)
+        entries = _load_arm_entries(args, paths)
         manifests = [FomBenchmark.load_manifest(p) for p in paths]
         inner = []
         for manifest in manifests:
@@ -567,7 +583,7 @@ def _digest_check(args, design, artifact_dir):
     pools = _pool_paths(args, design)
     tables, identities = [], []
     for population in E2E.POPULATIONS:
-        by_cut = {cut: pd.concat([FomBenchmark.load_entries(p) for p in paths], ignore_index=True)
+        by_cut = {cut: _load_arm_entries(args, paths)
                   for (pop, cut), paths in pools.items() if pop == population}
         manifests = {cut: FomBenchmark.load_manifest(paths[0])
                      for (pop, cut), paths in pools.items() if pop == population}
