@@ -484,10 +484,11 @@ def check_peak_digests(entries_by_cut, witness_columns=WITNESS_COLUMNS):
     shared = set.intersection(*per_cut_bundles.values())
     # A bundle one arm never generated (cut 1.5 has no `error_shape`) is reported, not fatal:
     # the factorial simply has no cell there. A cell missing INSIDE a shared bundle is fatal.
-    for cut, present in sorted(per_cut_bundles.items()):
-        for bundle in sorted(set().union(*per_cut_bundles.values()) - present):
-            rows.append(dict(condition_bundle=bundle, cuts_compared='', n_cells=0, n_agree=0,
-                             n_disagree=0, n_missing=0, note=f'absent at {cut_label(cut)}'))
+    for bundle in sorted(set().union(*per_cut_bundles.values()) - shared):
+        absent = [cut_label(cut) for cut, present in sorted(per_cut_bundles.items())
+                  if bundle not in present]
+        rows.append(dict(condition_bundle=bundle, cuts_compared='', n_cells=0, n_agree=0,
+                         n_disagree=0, n_missing=0, note='absent at ' + ','.join(absent)))
     for bundle in sorted(shared):
         per_cut = {cut: t.xs(bundle, level='condition_bundle', drop_level=False)
                    for cut, t in tables.items()}
@@ -607,6 +608,10 @@ def stratum_rows(result, stratum, **identifiers):
 def contrast(reference, arm, metric, mask=None):
     """One paired contrast: McNemar plus the cluster-bootstrap interval, signed so that a
     positive delta means the arm is better (`run_fom_combiner._pair`'s convention)."""
+    # An empty stratum is not a contrast: `mcnemar` would return a NaN delta with a warning, and
+    # a NaN row in the contrasts table reads as a measurement that happens to be missing.
+    if mask is not None and not np.any(mask):
+        return None
     try:
         test = FomMetrics.mcnemar(reference, arm, metric=metric, subset=mask)
         interval = FomMetrics.paired_delta_ci(arm, reference, metric=metric, subset=mask)

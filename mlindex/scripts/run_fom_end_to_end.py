@@ -679,11 +679,15 @@ def run_figure(args):
                 line = line.sort_values('x')
                 style, marker = CUT_STYLES.get(float(cut), ('-', 'o'))
                 colour = MERIT_COLOURS.get(merit, '#444444')
-                ax.plot(line['x'], 100*line['value'], linestyle=style, marker=marker, color=colour,
-                        markersize=4, linewidth=1.2 if (float(cut), merit) in recommended else 0.9,
-                        markerfacecolor=[colour if not c else 'white' for c in line['caveat'].astype(bool)][0]
-                        if line.shape[0] else colour,
+                ax.plot(line['x'], 100*line['value'], linestyle=style, color=colour,
+                        linewidth=1.2 if (float(cut), merit) in recommended else 0.9,
                         label=f'{merit}, cut {cut:g}')
+                # Per point: a caveated point (it moves more than one thing) is hollow.
+                caveated = line['caveat'].fillna('').astype(str) != ''
+                ax.plot(line.loc[~caveated, 'x'], 100*line.loc[~caveated, 'value'], linestyle='none',
+                        marker=marker, color=colour, markersize=4)
+                ax.plot(line.loc[caveated, 'x'], 100*line.loc[caveated, 'value'], linestyle='none',
+                        marker=marker, color=colour, markerfacecolor='white', markersize=4)
                 if (float(cut), merit) in recommended and line['ci_low'].notna().any():
                     ax.fill_between(line['x'], 100*line['ci_low'], 100*line['ci_high'],
                                     color=colour, alpha=0.12, linewidth=0)
@@ -792,7 +796,7 @@ def run_report(args):
         parts += ['## 1. Gate 5 - the arms differ in nothing but the cut', '',
                   _table(digest, [c for c in ('population', 'condition_bundle', 'cuts_compared',
                                               'n_cells', 'n_agree', 'n_disagree', 'n_missing',
-                                              'status') if c in digest.columns]), '']
+                                              'note', 'status') if c in digest.columns]), '']
 
     parts += ['## 2. The factorial: cut x merit, both populations', '']
     for pool_subset in E2E.POOL_SUBSETS:

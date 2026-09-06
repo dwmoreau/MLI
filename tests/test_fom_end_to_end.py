@@ -281,6 +281,8 @@ def test_levels_alignment_and_the_contrast_sign_convention():
     assert len(common) == 10
     restricted, dropped = E2E.restrict_per_entry(per_a, common)
     assert restricted.shape[0] == 10 and dropped == 2
+    # An empty stratum yields no row rather than a NaN one.
+    assert E2E.contrast(a, b, 'operating_point', mask=np.zeros(12, dtype=bool)) is None
     masks = E2E.scope_masks(a)
     assert 'aggregate' in masks and 'bravais_lattice=oP' in masks
     assert f'condition_bundle=c2_error1_cont0' in masks
