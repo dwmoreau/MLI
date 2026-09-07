@@ -124,6 +124,87 @@ def peak_resident_bytes():
                   + resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
 
 
+def current_resident_bytes():
+    """Resident set size of this process now (not the peak), via `ps`; None where unreadable."""
+    try:
+        out = subprocess.run(['ps', '-o', 'rss=', '-p', str(os.getpid())], capture_output=True,
+                             text=True, check=True).stdout.strip()
+        return 1024*int(out)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return None
+
+
+def run_memory(args):
+    """S18 item 2: what the peak-assignment network costs in memory, measured rather than inferred.
+
+    Two numbers, because they answer different questions. (a) The 43 quantized calibration
+    sessions loaded alone: the resident memory a lazy load would never allocate on the shipped
+    path, with the file bytes beside it so the two are not confused. (b) One pattern indexed end
+    to end at `--nproc 1` under the shipped default and under `hkl_source=posterior`, each in its
+    own subprocess: the peak RSS S13 measured going UP under the flag (2.99 -> 3.21 GB) because
+    the flag stops the network being used and not loaded. Together they bound what the flip saves.
+    """
+    from mlindex.model_training.IntegralFilter import HKL_SOURCE_DEFAULT
+    rows = []
+    if args.memory_mode in ('sessions', 'all'):
+        from mlindex.utilities.IOManagers import NeuralNetworkManager
+        from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+        models_dir = Path(_resolve_models_dir())
+        files = sorted(models_dir.glob(os.path.join('*_1', 'integral_filter', '*',
+                                                    '*_calibration_weights_*_quantized.onnx')))
+        before = current_resident_bytes()
+        sessions = []
+        started = time.perf_counter()
+        for path in files:
+            name = path.name[:-len('_quantized.onnx')]
+            sessions.append(NeuralNetworkManager(model_name=name, save_dir=str(path.parent))
+                            .load_onnx_model(quantized=True))
+        after = current_resident_bytes()
+        rows.append(dict(measure='calibration_sessions_loaded', n_files=len(files),
+                         file_bytes=int(sum(p.stat().st_size for p in files)),
+                         rss_before_bytes=before, rss_after_bytes=after,
+                         rss_delta_bytes=(after - before) if before is not None else None,
+                         seconds=time.perf_counter() - started, models_dir=str(models_dir),
+                         hkl_source='', machine=platform.machine(), commit=commit_hash()))
+        del sessions
+    if args.memory_mode in ('run', 'all'):
+        for hkl_source in ('', 'posterior'):
+            cmd = [sys.executable, os.path.abspath(__file__), '--stage', 'memory',
+                   '--memory-mode', 'one-pattern', '--population', args.population,
+                   '--search-seed', str(args.search_seed)]
+            if hkl_source:
+                cmd += ['--hkl-source', hkl_source]
+            out = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=BASE)
+            line = [l for l in out.stdout.splitlines() if l.startswith('{')][-1]
+            row = json.loads(line)
+            row['hkl_source'] = hkl_source or f'default ({HKL_SOURCE_DEFAULT})'
+            rows.append(row)
+    if args.memory_mode == 'one-pattern':
+        from mlindex.optimization.MPOptimizer import setup_mp_optimizers, shutdown_mp_workers
+        root = Path(BASE)/POPULATIONS[args.population]
+        shard = sorted(next(d for d in sorted(root.iterdir()) if d.is_dir()).glob('entries_*.parquet'))[0]
+        entry = pd.read_parquet(shard).iloc[0]
+        options = {'hkl_source': args.hkl_source} if args.hkl_source else None
+        started = time.perf_counter()
+        optimizers, processes, task_queues = setup_mp_optimizers(
+            1, BROADENING_TAG, n_candidates_scale=1, seed=args.search_seed, options=options)
+        loaded = time.perf_counter()
+        rss_loaded = current_resident_bytes()
+        ranked_pool(optimizers, task_queues, entry, args.search_seed)
+        finished = time.perf_counter()
+        shutdown_mp_workers(processes, task_queues)
+        print(json.dumps(dict(measure='one_pattern_nproc1', entry_id=str(entry['entry_id']),
+                              rss_after_load_bytes=rss_loaded, peak_rss_bytes=peak_resident_bytes(),
+                              seconds_load=loaded - started, seconds_pattern=finished - loaded,
+                              machine=platform.machine(), commit=commit_hash())))
+        return
+    frame = pd.DataFrame(rows)
+    path = Path(args.artifact_dir)/'S18_network_memory.csv'
+    frame.to_csv(path, index=False)
+    print(frame.to_string(index=False))
+    print(f'-> {path}')
+
+
 def commit_hash():
     try:
         return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=BASE, capture_output=True,
@@ -458,7 +539,9 @@ def run_report(args):
 
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    parser.add_argument('--stage', choices=['run', 'report', 'diagnostic'], default='run')
+    parser.add_argument('--stage', choices=['run', 'report', 'diagnostic', 'memory'], default='run')
+    parser.add_argument('--memory-mode', default='all', choices=('all', 'sessions', 'run', 'one-pattern'))
+    parser.add_argument('--hkl-source', default=None, help='memory one-pattern: the arm to load')
     parser.add_argument('--arm', default='baseline', choices=sorted(ARM_OPTIONS))
     parser.add_argument('--arms', default='baseline,mask,assigner',
                         help='report stage: the arms to contrast against the baseline')
@@ -492,7 +575,7 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    {'report': run_report, 'diagnostic': run_diagnostic}.get(args.stage, run_arm)(args)
+    {'report': run_report, 'diagnostic': run_diagnostic, 'memory': run_memory}.get(args.stage, run_arm)(args)
 
 
 
