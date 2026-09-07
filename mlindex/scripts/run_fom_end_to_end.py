@@ -684,8 +684,9 @@ def run_figure(args):
     axes_names = list(AXIS_LABELS)
     fig, panels = plt.subplots(len(populations), 3, figsize=(11, 3.4*len(populations)),
                                squeeze=False, sharey='row')
-    recommended = set(zip(menu.loc[menu['recommended'] & (menu['pool_subset'] == 'in_top_n'), 'cut'],
-                          menu.loc[menu['recommended'] & (menu['pool_subset'] == 'in_top_n'), 'merit']))
+    chosen = menu['decided'] if 'decided' in menu.columns else menu['recommended']
+    recommended = set(zip(menu.loc[chosen & (menu['pool_subset'] == 'in_top_n'), 'cut'],
+                          menu.loc[chosen & (menu['pool_subset'] == 'in_top_n'), 'merit']))
     for row, population in enumerate(populations):
         for col, axis in enumerate(axes_names):
             ax = panels[row][col]
@@ -880,8 +881,10 @@ def run_report(args):
                           'gained': lambda v: '' if pd.isna(v) else f'{int(v)}',
                           'lost': lambda v: '' if pd.isna(v) else f'{int(v)}'}), '']
 
-    parts += ['## 3. Per lattice, the recommended pair against the incumbent, top-10', '']
-    rec = menu.loc[menu['recommended'] & (menu['pool_subset'] == 'in_top_n')]
+    parts += ['## 3. Per lattice, the decided pair against the incumbent, top-10', '',
+              'The pair DWMM decided on (`decided` in the menu), which is the rule\'s pick unless '
+              'the decisions log says otherwise and why.', '']
+    rec = menu.loc[menu['decided'] & (menu['pool_subset'] == 'in_top_n')]
     for _, line in rec.iterrows():
         lat = contrasts.loc[(contrasts['contrast_kind'] == 'pair') & (contrasts['population'] == 'general')
                             & (contrasts['cut'] == line['cut']) & (contrasts['merit'] == line['merit'])
@@ -954,7 +957,7 @@ def run_report(args):
                       'hard_ceiling', 'general_delta_pp_vs_incumbent',
                       'general_standard_errors_vs_incumbent', 'hard_standard_errors_vs_incumbent',
                       'worst_lattice', 'worst_lattice_standard_errors', 'seconds_per_entry',
-                      'seconds_vs_incumbent_pct', 'pool_size_median', 'recommended'],
+                      'seconds_vs_incumbent_pct', 'pool_size_median', 'recommended', 'decided'],
                      {'cut': g, 'general_top10': pct, 'general_top1': pct, 'general_ceiling': pct,
                       'general_mrr': lambda v: f'{v:.3f}', 'hard_top1': pct,
                       'hard_top10': pct, 'hard_ceiling': pct,

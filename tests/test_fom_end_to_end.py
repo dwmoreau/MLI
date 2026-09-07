@@ -396,3 +396,15 @@ def test_the_entry_list_is_found_under_this_machines_artifact_dir_not_the_record
     args = driver._parse_args(['--stage', 'generate', '--population', 'hard', '--cut', '5.0',
                                '--entries-file', '/elsewhere/list.csv'])
     assert str(driver._entries_file(args, design)) == '/elsewhere/list.csv'
+
+
+def test_the_decided_pair_is_shown_beside_the_rules_pick():
+    """DWMM's decision (cut 3.5 for the learned score) overrides the rule's 3.0 and the menu shows
+    both, so a reader sees where they differ and goes to the decisions log for why."""
+    levels, contrasts = _levels_and_contrasts()
+    ranked = contrasts.assign(metric='top10')
+    menu = E2E.build_menu(levels, ranked, merits=('M20', 'M_sym'), decided={'M_sym': 3.0})
+    rows = menu.set_index(['merit', 'cut'])
+    assert bool(rows.loc[('M_sym', 3.0), 'decided']) and not bool(rows.loc[('M_sym', 5.0), 'decided'])
+    assert bool(rows.loc[('M_sym', 5.0), 'recommended'])
+    assert E2E.DECIDED == {'plus_probation': 3.5}

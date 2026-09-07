@@ -99,6 +99,11 @@ MENU_METRIC = 'top10'
 # of the hard lattices' own floor, among cuts measured on both populations. Recorded as a decision;
 # nothing is chosen on the result.
 MENU_HARD_TOLERANCE_SE = 2.0
+# What was DECIDED, where it differs from what the rule picks. DWMM, 2026-09-07: cut 3.5 for the
+# learned score -- the rule picks 3.0 on +0.96 pp of general top-10 (1.9 se) and cannot see that
+# 3.0 loses 1.29 pp on the hard population (6 / 29, p < 0.001) at an unchanged ceiling, because
+# it compares each cut to the incumbent and never to its neighbour (C2-Q-033).
+DECIDED = {'plus_probation': 3.5}
 MENU_RULE = ('per merit, among the cuts measured on BOTH populations, the cut with the largest '
              'general top-10 whose hard-population top-10 is not more than MENU_HARD_TOLERANCE_SE '
              'floor standard errors below the incumbent (5.0, M20)')
@@ -756,7 +761,7 @@ def restrict_at_cut(frame, cut, n_top=N_TOP_CANDIDATES, column='m20_at_prune'):
 # The deployment menu
 # ---------------------------------------------------------------------------------------------
 def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=MENU_HARD_TOLERANCE_SE,
-               merits=None, metric=MENU_METRIC):
+               merits=None, metric=MENU_METRIC, decided=None):
     """One row per (cut, merit, pool depth): the levels on both populations, the paired delta of
     `metric` against the incumbent in floor standard errors, the worst lattice on it, the cost, and
     whether the stated rule recommends it. `metric` is a rank metric by decision; the operating
@@ -824,4 +829,9 @@ def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=M
         admissible = measured.loc[~(measured['hard_standard_errors_vs_incumbent'] < -tolerance_se)]
         if admissible.shape[0]:
             menu.loc[admissible[f'general_{value}'].idxmax(), 'recommended'] = True
+    # `recommended` is what the rule says; `decided` is what DWMM chose. Both are shown so a
+    # reader sees where and why they differ.
+    decided = DECIDED if decided is None else decided
+    menu['decided'] = [bool(decided.get(merit) is not None and float(decided[merit]) == float(cut))
+                       for merit, cut in zip(menu['merit'], menu['cut'])]
     return menu
