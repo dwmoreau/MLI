@@ -341,7 +341,10 @@ def generate_cli_expected(test_metadata):
             "--seed",
             "12345",
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp)
+        # Pin the subprocess to the repository's own model tree, as tests/conftest.py's
+        # `models_dir` fixture does: the expected file is versioned with these models.
+        env = {**os.environ, "MLINDEX_MODELS_DIR": str(Path(__file__).parent.parent / "mlindex" / "models")}
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp, env=env)
         if r.returncode != 0:
             print(f"run ML failed:\n{r.stderr}")
         else:

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import numpy as np
@@ -119,9 +120,14 @@ def test_run_analytical_aP(test_metadata, tmp_path):
 
 
 @pytest.mark.slow
-def test_run_ml_aP(test_metadata, tmp_path, models_available):
+def test_run_ml_aP(test_metadata, tmp_path, models_available, models_dir):
     if not models_available:
         pytest.skip("ML models not available")
+    # The subprocess resolves models on its own (MLINDEX_MODELS_DIR, then $XDG_DATA_HOME, then
+    # the package tree), so without this a developer with a downloaded tree tests models the
+    # expected file was never generated against -- exactly what the `models_dir` fixture pins
+    # against for the in-process tests.
+    env = {**os.environ, "MLINDEX_MODELS_DIR": str(models_dir)}
 
     q2 = _aP_q2(test_metadata)
     peak_file = tmp_path / "aP_q2.npy"
@@ -142,7 +148,7 @@ def test_run_ml_aP(test_metadata, tmp_path, models_available):
         "--seed",
         "12345",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(tmp_path))
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(tmp_path), env=env)
     assert result.returncode == 0, f"CLI exited {result.returncode}:\n{result.stderr}"
     output_file = tmp_path / "indexing_results.json"
     assert output_file.exists(), "output JSON not written"
