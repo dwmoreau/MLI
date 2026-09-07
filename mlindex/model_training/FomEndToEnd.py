@@ -835,3 +835,157 @@ def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=M
     menu['decided'] = [bool(decided.get(merit) is not None and float(decided[merit]) == float(cut))
                        for merit, cut in zip(menu['merit'], menu['cut'])]
     return menu
+
+
+# ---------------------------------------------------------------------------------------------
+# S18: variant arms -- one optimizer setting changed, everything else the S15 grid's
+# ---------------------------------------------------------------------------------------------
+# A variant arm is the S15 arm at the decided cut with one `opt_params` entry changed, generated
+# over the same crystals, seeds and pool size so the digest check pairs it cell for cell with the
+# arm it varies from. The three S18 asks about: the posterior peak filter in `refine_cell`
+# (C2-Q-021; the old `rho` filter is refuted, so the live contrast is against NO filter, decision
+# 2026-08-28), and the analytic posterior in place of the IntegralFilter's peak-assignment network
+# (C2-Q-020). Values are strings because `--opt-param` parses them as JSON on the way in.
+S18_TAG = 'S18'
+VARIANT_CUT = DECIDED['plus_probation']
+VARIANTS = {
+    '_mask': dict(question='C2-Q-021', label='posterior peak filter at 0.99',
+                  opt_params={'assignment_statistic': 'posterior', 'assignment_threshold': '0.99'}),
+    '_nofilter': dict(question='C2-Q-021', label='no peak filter (every peak refined on)',
+                      opt_params={'assignment_threshold': '0.0'}),
+    '_posterior': dict(question='C2-Q-020', label='analytic posterior for the peak-assignment network',
+                       opt_params={'hkl_source': 'posterior'}),
+    }
+# The pairs the question is answered on. Reference first, arm second; `contrast` signs a positive
+# delta as "the arm is better". The base arm is the S15 arm at the same cut.
+VARIANT_CONTRASTS = (
+    ('', '_mask'),               # shipped filter -> posterior filter
+    ('', '_nofilter'),           # shipped filter -> no filter
+    ('_nofilter', '_mask'),      # the live contrast: no filter -> posterior filter
+    ('', '_posterior'),          # network -> formula
+    )
+VARIANT_METRICS = ('top10', 'top1', 'operating_point', 'found')
+MECHANISM_COLUMNS = ('n_other_lattice_above_best_correct', 'n_same_lattice_above_best_correct',
+                     'rank_best_correct', 'n_candidates', 'n_correct')
+
+
+def variant_arm_names(population, variants=VARIANTS):
+    """`{suffix: arm name}` -- the base arm has the empty suffix."""
+    return {'': population, **{suffix: population + suffix for suffix in variants}}
+
+
+def find_variant_reductions(artifact_dir, cut=VARIANT_CUT, suffix='', populations=POPULATIONS,
+                            variants=VARIANTS):
+    """Every (population, variant suffix) whose reductions at `cut` are on disk, base included."""
+    found = []
+    for population in populations:
+        for variant, arm in variant_arm_names(population, variants).items():
+            if reduction_paths(artifact_dir, arm, cut, suffix)[0].exists():
+                found.append((population, variant))
+    return found
+
+
+def compare_peak_digests(base_entries, variant_entries):
+    """The variant saw the same peak lists as the base, cell for cell, or it is not paired.
+
+    Returns a one-row summary; raises naming the first offending cell on any disagreement. A cell
+    the variant lacks is reported, not fatal -- the contrast is paired on shared cells anyway --
+    but a cell whose digest DIFFERS means a different peak list, and no restriction repairs that.
+    """
+    key = ['entry_id', 'condition_bundle']
+    a = base_entries[key + ['q2_digest']].astype(str).set_index(key)
+    b = variant_entries[key + ['q2_digest']].astype(str).set_index(key)
+    both = a.join(b, how='inner', lsuffix='_base', rsuffix='_variant')
+    differs = both.loc[both['q2_digest_base'] != both['q2_digest_variant']]
+    if differs.shape[0]:
+        cell = differs.index[0]
+        raise ValueError(f'{differs.shape[0]} cell(s) carry a different peak list in the variant '
+                         f'arm, e.g. {cell[0]} / {cell[1]}: the arms are not paired')
+    return dict(n_cells_base=int(a.shape[0]), n_cells_variant=int(b.shape[0]),
+                n_shared=int(both.shape[0]), n_agree=int(both.shape[0]),
+                n_missing_in_variant=int(a.shape[0] - both.shape[0]),
+                n_missing_in_base=int(b.shape[0] - both.shape[0]))
+
+
+def variant_contrast_rows(reference, arm, reference_name, arm_name, population, cut, merit,
+                          pool_subset, floors, metrics=VARIANT_METRICS, n_dropped=0):
+    """Paired contrasts of one variant arm against its reference, every scope, every metric."""
+    rows = []
+    for scope, mask in scope_masks(arm).items():
+        for metric in metrics:
+            row = contrast(reference, arm, metric, mask)
+            if row is None:
+                continue
+            floor_metric = 'top10' if metric in ('top1', 'found') else metric
+            floor_pp, source = floor_for(floors, floor_metric,
+                                         scope if population == 'general'
+                                         else ('hard' if scope == 'aggregate' else scope))
+            if metric in ('top1', 'found'):
+                source += ' (top-10 floor standing in)'
+            row.update(population=population, contrast_kind='variant', reference_arm=reference_name,
+                       arm=arm_name, cut=cut, merit=merit, pool_subset=pool_subset, scope=scope,
+                       floor_pp=floor_pp, floor_source=source,
+                       standard_errors=in_floor_ses(row['delta_pp'], floor_pp),
+                       n_dropped_unpaired=n_dropped)
+            rows.append(row)
+    return rows
+
+
+def mechanism_rows(reference_per_entry, arm_per_entry, reference_name, arm_name, population, cut,
+                   merit, pool_subset, columns=MECHANISM_COLUMNS):
+    """What moved underneath a contrast: the crowd above the correct cell, by lattice.
+
+    Paired on the cells where BOTH arms hold a correct cell, because the counts are defined only
+    there. `n_other_lattice_above_best_correct` is the C2-F-033 quantity -- wrong-lattice
+    candidates outranking the correct cell -- and a peak filter that lifts correct cells without
+    lifting those is what would move it down.
+    """
+    key = ['entry_id', 'condition_bundle']
+    a = reference_per_entry.set_index(key)
+    b = arm_per_entry.set_index(key)
+    shared = a.index.intersection(b.index)
+    a, b = a.loc[shared], b.loc[shared]
+    both_found = (a[f'has_correct_{pool_subset}'] & b[f'has_correct_{pool_subset}']).to_numpy()
+    rows = []
+    for column in columns:
+        name = f'{column}_{pool_subset}'
+        if name not in a.columns or name not in b.columns:
+            continue
+        needs_correct = column not in ('n_candidates',)
+        mask = both_found if needs_correct else np.ones(len(shared), dtype=bool)
+        x = a.loc[mask, name].to_numpy(dtype=np.float64)
+        y = b.loc[mask, name].to_numpy(dtype=np.float64)
+        rows.append(dict(population=population, cut=cut, merit=merit, pool_subset=pool_subset,
+                         reference_arm=reference_name, arm=arm_name, quantity=column,
+                         n_cells=int(mask.sum()), reference_mean=float(np.mean(x)) if x.size else np.nan,
+                         arm_mean=float(np.mean(y)) if y.size else np.nan,
+                         reference_median=float(np.median(x)) if x.size else np.nan,
+                         arm_median=float(np.median(y)) if y.size else np.nan,
+                         delta_mean=float(np.mean(y - x)) if x.size else np.nan,
+                         n_down=int(np.sum(y < x)), n_up=int(np.sum(y > x)),
+                         n_same=int(np.sum(y == x))))
+    return rows
+
+
+def variant_cost_row(base_entries, variant_entries, population, cut, arm_name):
+    """Per-entry wall clock of the variant against the base, on the cells both timed."""
+    key = ['entry_id', 'condition_bundle']
+    a = base_entries.set_index(key)
+    b = variant_entries.set_index(key)
+    shared = a.index.intersection(b.index)
+    a, b = a.loc[shared], b.loc[shared]
+    timed = ((a['seconds_search'] >= 0) & (b['seconds_search'] >= 0)).to_numpy() \
+        if 'seconds_search' in a.columns and 'seconds_search' in b.columns \
+        else np.zeros(len(shared), dtype=bool)
+    row = dict(population=population, cut=cut, arm=arm_name, n_cells=int(len(shared)),
+               n_timed=int(timed.sum()),
+               pool_size_full_median_base=float(a['pool_size_full'].median()),
+               pool_size_full_median_arm=float(b['pool_size_full'].median()))
+    if timed.any():
+        x = a.loc[timed, 'seconds_total'].to_numpy(dtype=np.float64)
+        y = b.loc[timed, 'seconds_total'].to_numpy(dtype=np.float64)
+        row.update(seconds_per_entry_median_base=float(np.median(x)),
+                   seconds_per_entry_median_arm=float(np.median(y)),
+                   seconds_ratio_median=float(np.median(y/np.where(x > 0, x, np.nan))),
+                   seconds_vs_base_pct=100*(float(np.median(y))/float(np.median(x)) - 1))
+    return row

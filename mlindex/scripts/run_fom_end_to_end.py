@@ -55,7 +55,7 @@ def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description='S15: end-to-end runs and the deployment menu')
     parser.add_argument('--stage', required=True,
                         choices=('plan', 'generate', 'complete', 'sidecars', 'reduce', 'restrict',
-                                 'analyse', 'figure', 'report'))
+                                 'analyse', 'figure', 'report', 'variants'))
     parser.add_argument('--artifact-dir', default=str(E2E.ARTIFACT_DIR))
     parser.add_argument('--out-root', default=str(DEFAULT_OUT_ROOT),
                         help='Where the arms live: <out-root>/e2e/<population>/cut<cut>/')
@@ -76,6 +76,9 @@ def _parse_args(argv=None):
     parser.add_argument('--opt-param', action='append', default=None, metavar='KEY=VALUE',
                         help='generate: an extra optimizer setting, e.g. hkl_source=posterior for '
                              'the C2-Q-020 arm. Recorded in the provenance as the arm\'s options')
+    parser.add_argument('--variant-cut', type=float, default=E2E.VARIANT_CUT,
+                        help='variants: the cut the variant arms were generated at (the decided '
+                             'cut, 3.5). The base arm is the S15 arm at that cut')
     parser.add_argument('--arm-suffix', default='',
                         help='generate/reduce: names a variant arm, e.g. _posterior, so its '
                              'directory and reductions do not collide with the main grid')
@@ -984,10 +987,263 @@ def run_report(args):
     print(f'-> {path}')
 
 
+# ---------------------------------------------------------------------------------------------
+# S18: variant arms at the decided cut, each against the arm it varies from
+# ---------------------------------------------------------------------------------------------
+def _variant_entries(args, arm_name, cut):
+    """The arm's entry table and manifest, from its pool if it is readable here, else from the
+    flat copies the submit script drops into the artifact directory for `pull-artifacts`."""
+    pool = E2E.pool_dir(args.out_root, arm_name, cut)
+    label = E2E.cut_label(cut)
+    flat_entries = Path(args.artifact_dir)/f'{E2E.TAG}_pool_entries_{arm_name}_{label}.parquet'
+    flat_manifest = Path(args.artifact_dir)/f'{E2E.TAG}_pool_manifest_{arm_name}_{label}.json'
+    if (pool/'entries.parquet').exists() and (pool/'manifest.json').exists():
+        return FomBenchmark.load_entries(pool), FomBenchmark.load_manifest(pool), str(pool)
+    if flat_entries.exists() and flat_manifest.exists():
+        return (pd.read_parquet(flat_entries),
+                json.loads(flat_manifest.read_text(encoding='utf-8')), str(flat_entries))
+    return None, None, None
+
+
+def run_variants(args):
+    """S18: the variant arms (peak filter, no filter, network replacement) against the S15 arm at
+    the decided cut. Reads reductions only, like `analyse`; the entry tables are used for the
+    digest check and the cost row when they are readable here."""
+    design = _design(args)
+    artifact_dir = Path(args.artifact_dir)
+    cut = float(args.variant_cut)
+    thresholds = {name: spec['threshold'] for name, spec in design['thresholds'].items()}
+    floors = E2E.load_floor_tables(artifact_dir)
+    found = E2E.find_variant_reductions(artifact_dir, cut, args.suffix)
+    if not found:
+        raise SystemExit(f'no variant reductions at {E2E.cut_label(cut)}{args.suffix}; run '
+                         f'--stage reduce --arm-suffix <variant> first')
+    print(f'arms with reductions at {E2E.cut_label(cut)}: {found}')
+
+    levels, contrasts, mechanism, digests, identities, costs = [], [], [], [], [], []
+    for population in E2E.POPULATIONS:
+        present = [v for p, v in found if p == population]
+        if '' not in present:
+            if present:
+                print(f'{population}: variant arms {present} but no base arm at '
+                      f'{E2E.cut_label(cut)}; nothing to pair them with')
+            continue
+        names = E2E.variant_arm_names(population)
+        reductions = {v: E2E.load_reductions(artifact_dir, names[v], cut, args.suffix)
+                      for v in present}
+        entries = {v: _variant_entries(args, names[v], cut) for v in present}
+
+        # Gate 5 for a variant: same peak lists, same identity, cell for cell.
+        digest_status = {}
+        for variant in present:
+            if variant == '':
+                continue
+            base_entries, base_manifest, _ = entries['']
+            arm_entries, arm_manifest, source = entries[variant]
+            if base_entries is None or arm_entries is None:
+                digest_status[variant] = 'not checked here (entry tables not readable)'
+                digests.append(dict(population=population, arm=names[variant], cut=cut,
+                                    status=digest_status[variant]))
+                continue
+            try:
+                row = E2E.compare_peak_digests(base_entries, arm_entries)
+                identity = E2E.check_manifest_identity({names['']: base_manifest,
+                                                        names[variant]: arm_manifest})
+                identity.insert(0, 'population', population)
+                identities.append(identity)
+                digest_status[variant] = 'agree'
+            except ValueError as error:
+                row = {}
+                digest_status[variant] = f'FAIL: {error}'
+            digests.append(dict(population=population, arm=names[variant], cut=cut,
+                                status=digest_status[variant], source=source, **row))
+            costs.append(E2E.variant_cost_row(base_entries, arm_entries, population, cut,
+                                              names[variant]))
+
+        # Levels on each arm's own cells.
+        results = {}
+        for variant in present:
+            for pool_subset in E2E.POOL_SUBSETS:
+                for merit in REPORTED:
+                    if merit not in reductions[variant]:
+                        continue
+                    per_entry, meta = reductions[variant][merit]
+                    result = E2E.summarise(per_entry, meta, thresholds.get(merit), pool_subset,
+                                           n_bootstrap=args.n_bootstrap)
+                    results[(variant, merit, pool_subset)] = result
+                    ids = dict(population=population, arm=names[variant], variant=variant,
+                               cut=cut, merit=merit, pool_subset=pool_subset,
+                               threshold=thresholds.get(merit))
+                    levels.append(E2E.level_row(result, 'aggregate', **ids))
+                    levels.append(E2E.level_row(result, 'hard', **ids))
+                    levels += E2E.stratum_rows(result, 'bravais_lattice', **ids)
+                    levels += E2E.stratum_rows(result, 'condition_bundle', **ids)
+
+        # Contrasts, paired on the cells both arms carry.
+        for reference_variant, arm_variant in E2E.VARIANT_CONTRASTS:
+            if reference_variant not in present or arm_variant not in present:
+                continue
+            status = digest_status.get(arm_variant, 'base') if reference_variant == '' \
+                else '; '.join(f'{v}: {digest_status.get(v, "")}'
+                               for v in (reference_variant, arm_variant))
+            for pool_subset in E2E.POOL_SUBSETS:
+                for merit in REPORTED:
+                    if (reference_variant, merit, pool_subset) not in results \
+                            or (arm_variant, merit, pool_subset) not in results:
+                        continue
+                    reference = results[(reference_variant, merit, pool_subset)]
+                    arm = results[(arm_variant, merit, pool_subset)]
+                    n_dropped = 0
+                    if reference.meta['entry_digest'] != arm.meta['entry_digest']:
+                        common = E2E.common_keys([reference.per_entry, arm.per_entry])
+                        n_dropped = max(reference.per_entry.shape[0], arm.per_entry.shape[0]) \
+                            - len(common)
+                        reference = E2E.summarise(
+                            E2E.restrict_per_entry(reference.per_entry, common)[0],
+                            reference.meta, thresholds.get(merit), pool_subset, n_bootstrap=0)
+                        arm = E2E.summarise(E2E.restrict_per_entry(arm.per_entry, common)[0],
+                                            arm.meta, thresholds.get(merit), pool_subset,
+                                            n_bootstrap=0)
+                    rows = E2E.variant_contrast_rows(
+                        reference, arm, names[reference_variant], names[arm_variant], population,
+                        cut, merit, pool_subset, floors, n_dropped=n_dropped)
+                    for row in rows:
+                        row['digest_status'] = status
+                    contrasts += rows
+                    mechanism += E2E.mechanism_rows(
+                        reference.per_entry, arm.per_entry, names[reference_variant],
+                        names[arm_variant], population, cut, merit, pool_subset)
+
+    tag, suffix = E2E.S18_TAG, args.suffix
+    out = {}
+    for name, rows in (('levels', levels), ('contrasts', contrasts), ('mechanism', mechanism),
+                       ('digest', digests), ('manifest_identity', identities), ('cost', costs)):
+        frame = (pd.concat(rows, ignore_index=True) if name == 'manifest_identity' and rows
+                 else pd.DataFrame(rows))
+        frame.to_csv(artifact_dir/f'{tag}_variant_{name}{suffix}.csv', index=False)
+        out[name] = frame
+        print(f'{name}: {frame.shape[0]} rows')
+    _variants_report(args, design, cut, out)
+
+
+def _variants_report(args, design, cut, tables):
+    """`S18_filter_under_merit.md`: the variant contrasts, generated rather than transcribed."""
+    tag, suffix = E2E.S18_TAG, args.suffix
+    artifact_dir = Path(args.artifact_dir)
+    levels, contrasts, mechanism = tables['levels'], tables['contrasts'], tables['mechanism']
+    digest, cost = tables['digest'], tables['cost']
+    pct = lambda v: '' if pd.isna(v) else f'{100*v:.2f}'  # noqa: E731
+    pp = lambda v: '' if pd.isna(v) else f'{v:+.2f}'  # noqa: E731
+    se = lambda v: '' if pd.isna(v) else f'{v:+.1f}'  # noqa: E731
+    fmt_pp = {'delta_pp': pp, 'ci_low_pp': pp, 'ci_high_pp': pp, 'standard_errors': se,
+              'floor_pp': lambda v: '' if pd.isna(v) else f'{v:.2f}',
+              'p_value': lambda v: '' if pd.isna(v) else f'{v:.2g}'}
+    label = E2E.cut_label(cut)
+    variants = '; '.join(f'`{k}`: {v["label"]} ({v["question"]}, '
+                         + ', '.join(f'{a}={b}' for a, b in v['opt_params'].items()) + ')'
+                         for k, v in E2E.VARIANTS.items())
+    parts = [f'# {tag} - the peak filter and the network replacement, under a merit that can see them', '',
+             f'**Design:** the S15 arm at cut {cut:g} (`{design["search_seed_scheme"]}`, seed '
+             f'{design["seed"]}, optimizer seed {design["optimizer_seed"]}, pool size '
+             f'{design["pool_size"]}) with one `opt_params` entry changed per variant arm, over the '
+             'same crystals and condition bundles, every candidate kept. Variants: ' + variants + '.',
+             '', '## 0. How to read this', '',
+             'Each variant is paired against the arm it varies from on the cells both carry, with '
+             'McNemar and a cluster bootstrap over crystals, on **ranking** (top-10, top-1; the '
+             'operating point is kept as the matched-false-positive convention and is not a gate) '
+             'and on `found`, whether the search produced a correct cell at all -- a peak filter '
+             'changes cells, so the ceiling itself can move. Every delta is in standard errors of '
+             'the contrast floor for its metric and scope; `top1` and `found` have no floor of their '
+             'own and borrow the top-10 one, labelled. The hard population has no floor of its own '
+             'and reads against the mean of the hard lattices\' floors. **The live contrast for the '
+             'filter question is no filter against the posterior filter** (decision 2026-08-28: the '
+             'shipped `rho` filter is refuted and is not re-established). `plus_probation` is the '
+             'merit DWMM decided to ship; M20 and `M_sym` are beside it so the reader can see what '
+             'S13 could not: whether the change is invisible under M20 and visible under a merit '
+             'that does not gate the refinement it judges (C2-F-075).', '',
+             '## 1. The arms, and gate 5 (same peak lists, same identity)', '']
+    if digest.shape[0]:
+        parts += [_table(digest, [c for c in ('population', 'arm', 'status', 'n_shared',
+                                              'n_missing_in_variant', 'n_missing_in_base', 'source')
+                                  if c in digest.columns]), '']
+    else:
+        parts += ['No entry tables readable here; the digest check is owed.', '']
+    if levels.shape[0]:
+        agg = levels.loc[(levels['scope'] == 'aggregate') & (levels['pool_subset'] == 'in_top_n')]
+        parts += ['Levels on each arm\'s own cells, `in_top_n`:', '',
+                  _table(agg, ['population', 'arm', 'merit', 'n_entries', 'top1', 'top10', 'mrr',
+                               'ceiling_rescorer', 'operating_point'],
+                         {'top1': pct, 'top10': pct, 'ceiling_rescorer': pct,
+                          'operating_point': pct, 'mrr': lambda v: f'{v:.3f}',
+                          'n_entries': lambda v: f'{int(v)}'}), '']
+    parts += ['## 2. The contrasts, aggregate and hard population', '']
+    if contrasts.shape[0]:
+        for pool_subset in ('in_top_n', 'all'):
+            for scope in ('aggregate', 'hard'):
+                sub = contrasts.loc[(contrasts['pool_subset'] == pool_subset)
+                                    & (contrasts['scope'] == scope)]
+                if sub.empty:
+                    continue
+                parts += [f'### `{pool_subset}`, {scope}', '',
+                          _table(sub, ['population', 'reference_arm', 'arm', 'merit', 'metric',
+                                       'delta_pp', 'ci_low_pp', 'ci_high_pp', 'gained', 'lost',
+                                       'p_value', 'floor_pp', 'standard_errors', 'n_entries',
+                                       'n_dropped_unpaired', 'digest_status'], fmt_pp), '']
+        parts += ['## 3. Per lattice, top-10, `in_top_n`', '']
+        lat = contrasts.loc[(contrasts['pool_subset'] == 'in_top_n') & (contrasts['metric'] == 'top10')
+                            & contrasts['scope'].str.startswith('bravais_lattice=')].copy()
+        if lat.shape[0]:
+            lat['lattice'] = lat['scope'].str.split('=', n=1).str[1]
+            parts += [_table(lat, ['population', 'reference_arm', 'arm', 'merit', 'lattice',
+                                   'delta_pp', 'gained', 'lost', 'p_value', 'floor_pp',
+                                   'standard_errors', 'n_entries'], fmt_pp), '']
+    else:
+        parts += ['No contrast could be formed (one arm per population).', '']
+    parts += ['## 4. What moved underneath: the crowd above the correct cell', '',
+              'On the cells where both arms hold a correct cell. `n_other_lattice_above_best_correct` '
+              'is the number of candidates from a lattice other than the correct cell\'s ranked above '
+              'it -- the cross-lattice failure C2-F-033 names. A filter that lifts correct cells '
+              'without lifting their competitors moves it down; one whose lift reaches the '
+              'competitors too leaves it where it was (C2-F-075).', '']
+    if mechanism.shape[0]:
+        sub = mechanism.loc[mechanism['pool_subset'] == 'in_top_n']
+        parts += [_table(sub, ['population', 'reference_arm', 'arm', 'merit', 'quantity', 'n_cells',
+                               'reference_mean', 'arm_mean', 'delta_mean', 'n_down', 'n_up',
+                               'n_same'],
+                         {'reference_mean': lambda v: f'{v:.3f}', 'arm_mean': lambda v: f'{v:.3f}',
+                          'delta_mean': lambda v: f'{v:+.3f}'}), '']
+    parts += ['## 5. Cost, measured', '']
+    if cost.shape[0]:
+        parts += [_table(cost, [c for c in ('population', 'arm', 'n_cells', 'n_timed',
+                                            'seconds_per_entry_median_base',
+                                            'seconds_per_entry_median_arm', 'seconds_vs_base_pct',
+                                            'pool_size_full_median_base', 'pool_size_full_median_arm')
+                                if c in cost.columns],
+                         {'seconds_per_entry_median_base': lambda v: f'{v:.1f}',
+                          'seconds_per_entry_median_arm': lambda v: f'{v:.1f}',
+                          'seconds_vs_base_pct': lambda v: '' if pd.isna(v) else f'{v:+.1f}'}), '',
+                  'Seconds per entry as ONE pool saw them, on the machine the arm ran on; the two '
+                  'arms of a row ran on the same machine and layout, so the ratio is the number.', '']
+    else:
+        parts += ['No entry tables readable here; the cost row is owed.', '']
+    parts += ['## 6. Bounds', '',
+              '- `in_top_n` is a strict superset of the printed list; ranks there bound the printed '
+              'rank from above.',
+              '- One search seed per arm: the contrast floor is S08/S09\'s, measured on the S15 '
+              'population under the shipped configuration, not re-measured per variant.',
+              '- The hard population has no measured floor of its own.',
+              '- A variant changes cells, so `found` can move; a top-10 delta is read beside its '
+              '`found` delta, never alone.', '']
+    path = artifact_dir/f'{tag}_filter_under_merit{suffix}.md'
+    path.write_text('\n'.join(parts), encoding='utf-8')
+    print(f'-> {path}')
+
+
 def main(argv=None):
     args = _parse_args(argv)
     {'plan': run_plan, 'generate': run_generate, 'complete': run_complete,
      'sidecars': run_sidecars, 'reduce': run_reduce, 'restrict': run_restrict,
+     'variants': run_variants,
      'analyse': run_analyse, 'figure': run_figure, 'report': run_report}[args.stage](args)
 
 

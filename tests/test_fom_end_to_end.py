@@ -408,3 +408,128 @@ def test_the_decided_pair_is_shown_beside_the_rules_pick():
     assert bool(rows.loc[('M_sym', 3.0), 'decided']) and not bool(rows.loc[('M_sym', 5.0), 'decided'])
     assert bool(rows.loc[('M_sym', 5.0), 'recommended'])
     assert E2E.DECIDED == {'plus_probation': 3.5}
+
+
+# ---------------------------------------------------------------------------------------------
+# S18: the variant arms
+# ---------------------------------------------------------------------------------------------
+def test_the_variants_change_one_setting_each_and_never_a_reserved_key():
+    from mlindex.scripts.run_fom_dump import RESERVED_OPT_PARAMS
+    assert set(E2E.VARIANTS) == {'_mask', '_nofilter', '_posterior'}
+    for suffix, spec in E2E.VARIANTS.items():
+        assert suffix.startswith('_') and spec['question'] in ('C2-Q-020', 'C2-Q-021')
+        assert not set(spec['opt_params']) & set(RESERVED_OPT_PARAMS)
+        # The values travel as strings and are parsed as JSON by run_fom_dump on the way in.
+        assert all(isinstance(v, str) for v in spec['opt_params'].values())
+    assert E2E.VARIANTS['_mask']['opt_params']['assignment_statistic'] == 'posterior'
+    assert E2E.VARIANTS['_nofilter']['opt_params'] == {'assignment_threshold': '0.0'}
+    assert E2E.VARIANTS['_posterior']['opt_params'] == {'hkl_source': 'posterior'}
+    # The variant cut IS the decided cut, so a variant is judged on what ships.
+    assert E2E.VARIANT_CUT == E2E.DECIDED['plus_probation'] == 3.5
+    # Every contrast pair names arms that exist, reference first.
+    for reference, arm in E2E.VARIANT_CONTRASTS:
+        assert reference in ('',) + tuple(E2E.VARIANTS) and arm in E2E.VARIANTS
+    assert ('_nofilter', '_mask') in E2E.VARIANT_CONTRASTS
+    names = E2E.variant_arm_names('hard')
+    assert names[''] == 'hard' and names['_mask'] == 'hard_mask'
+
+
+def test_the_generation_argv_carries_the_variant_setting_into_its_own_directory(tmp_path):
+    spec = E2E.VARIANTS['_mask']
+    argv = E2E.generate_argv('general_mask', 3.5, 'nominal', tmp_path, 4, 'm.parquet', 'e.csv',
+                             extra_opt_params=spec['opt_params'])
+    joined = ' '.join(argv)
+    assert '--opt-param assignment_statistic=posterior' in joined
+    assert '--opt-param assignment_threshold=0.99' in joined
+    assert '--prune-threshold 3.5' in joined and '--no-subsample' in joined
+    assert str(E2E.bundle_dir(tmp_path, 'general_mask', 3.5, 'c2_error1_cont0')) in joined
+    assert str(E2E.bundle_dir(tmp_path, 'general', 3.5, 'c2_error1_cont0')) not in joined
+
+
+def test_the_reduction_counts_who_sits_above_the_correct_cell_by_lattice():
+    # E0: aP 30 (wrong lattice), oP 25 (same lattice, wrong), oP 20 (correct), oP 10.
+    # E1: correct first. E2: no correct cell at all.
+    rows = [('E0', 'aP', 30, False), ('E0', 'oP', 25, False), ('E0', 'oP', 20, True),
+            ('E0', 'oP', 10, False), ('E1', 'oP', 20, True), ('E1', 'aP', 5, False),
+            ('E2', 'aP', 9, False)]
+    candidates, entries = _tiny(rows)
+    per_entry, _ = _reduce(candidates, entries, 'score')
+    per_entry = per_entry.set_index('entry_id')
+    for pool_subset in ('all', 'in_top_n'):
+        assert per_entry.loc['E0', f'rank_best_correct_{pool_subset}'] == 2
+        assert per_entry.loc['E0', f'n_same_lattice_above_best_correct_{pool_subset}'] == 1
+        assert per_entry.loc['E0', f'n_other_lattice_above_best_correct_{pool_subset}'] == 1
+        assert per_entry.loc['E1', f'n_other_lattice_above_best_correct_{pool_subset}'] == 0
+        assert per_entry.loc['E1', f'n_same_lattice_above_best_correct_{pool_subset}'] == 0
+        # No correct cell: the counts are zero, not the whole pool.
+        assert per_entry.loc['E2', f'rank_best_correct_{pool_subset}'] == -1
+        assert per_entry.loc['E2', f'n_other_lattice_above_best_correct_{pool_subset}'] == 0
+
+
+def test_the_variant_digest_check_pairs_only_identical_peak_lists():
+    base = _entries(['a', 'b', 'c'])
+    same = _entries(['a', 'b', 'c'])
+    row = E2E.compare_peak_digests(base, same)
+    assert row['n_shared'] == 3 and row['n_agree'] == 3 and row['n_missing_in_variant'] == 0
+    # A missing cell is reported, not fatal: the contrast pairs on the shared cells.
+    row = E2E.compare_peak_digests(base, same.iloc[:2])
+    assert row['n_shared'] == 2 and row['n_missing_in_variant'] == 1
+    # A differing digest is a different peak list and refuses, naming the cell.
+    with pytest.raises(ValueError, match='E1'):
+        E2E.compare_peak_digests(base, _entries(['a', 'X', 'c']))
+
+
+def test_variant_contrasts_and_the_mechanism_table_are_paired_and_signed():
+    # Reference: correct cell ranked 3rd on every entry (two aP cells above it).
+    # Arm: the same cells with the correct cell ranked first -- the filter "worked".
+    rows_ref, rows_arm = [], []
+    for i in range(12):
+        e = f'E{i}'
+        rows_ref += [(e, 'aP', 30, False), (e, 'aP', 25, False), (e, 'oP', 20, True)]
+        rows_arm += [(e, 'aP', 18, False), (e, 'aP', 17, False), (e, 'oP', 20, True)]
+    cand_ref, entries = _tiny(rows_ref)
+    cand_arm, _ = _tiny(rows_arm)
+    ref = E2E.summarise(*_reduce(cand_ref, entries, 'score'), 10.0, 'all', n_bootstrap=20)
+    arm = E2E.summarise(*_reduce(cand_arm, entries, 'score'), 10.0, 'all', n_bootstrap=20)
+    floors = {'top10': (0.5, {'oP': 1.0}), 'operating_point': (0.4, {'oP': 0.8})}
+    rows = E2E.variant_contrast_rows(ref, arm, 'general', 'general_mask', 'general', 3.5, 'M20',
+                                     'all', floors)
+    frame = pd.DataFrame(rows)
+    assert set(frame['metric']) == set(E2E.VARIANT_METRICS)
+    top1 = frame.loc[(frame['scope'] == 'aggregate') & (frame['metric'] == 'top1')].iloc[0]
+    assert top1['gained'] == 12 and top1['lost'] == 0 and top1['delta_pp'] == pytest.approx(100.0)
+    assert top1['contrast_kind'] == 'variant' and top1['arm'] == 'general_mask'
+    # top1 borrows the top-10 floor and says so.
+    assert top1['floor_pp'] == 0.5 and 'standing in' in top1['floor_source']
+    assert top1['standard_errors'] == pytest.approx(200.0)
+    # found and top10 are unchanged: 0 / 0 with a zero delta.
+    found = frame.loc[(frame['scope'] == 'aggregate') & (frame['metric'] == 'found')].iloc[0]
+    assert found['gained'] == 0 and found['lost'] == 0
+    lattice = frame.loc[(frame['scope'] == 'bravais_lattice=oP') & (frame['metric'] == 'top1')].iloc[0]
+    assert lattice['floor_pp'] == 1.0
+    mech = pd.DataFrame(E2E.mechanism_rows(ref.per_entry, arm.per_entry, 'general', 'general_mask',
+                                           'general', 3.5, 'M20', 'all'))
+    other = mech.loc[mech['quantity'] == 'n_other_lattice_above_best_correct'].iloc[0]
+    assert other['reference_mean'] == pytest.approx(2.0) and other['arm_mean'] == 0.0
+    assert other['n_down'] == 12 and other['n_up'] == 0 and other['n_cells'] == 12
+
+
+def test_the_variant_cost_row_pairs_timed_cells_only():
+    base = pd.DataFrame(dict(entry_id=['E0', 'E1', 'E2'], condition_bundle='b', seconds_search=[1., 1., -1.],
+                             seconds_total=[10., 20., 30.], pool_size_full=[100, 200, 300]))
+    arm = pd.DataFrame(dict(entry_id=['E0', 'E1', 'E2'], condition_bundle='b', seconds_search=[1., 1., 1.],
+                            seconds_total=[11., 22., 33.], pool_size_full=[110, 220, 330]))
+    row = E2E.variant_cost_row(base, arm, 'general', 3.5, 'general_mask')
+    assert row['n_cells'] == 3 and row['n_timed'] == 2
+    assert row['seconds_per_entry_median_base'] == 15.0 and row['seconds_per_entry_median_arm'] == 16.5
+    assert row['seconds_vs_base_pct'] == pytest.approx(10.0)
+
+
+def test_the_driver_finds_variant_reductions_beside_the_base_arm(tmp_path):
+    for arm in ('general', 'general_mask', 'hard_posterior'):
+        E2E.reduction_paths(tmp_path, arm, 3.5)[0].write_text('{}', encoding='utf-8')
+    found = E2E.find_variant_reductions(tmp_path, 3.5)
+    assert ('general', '') in found and ('general', '_mask') in found
+    assert ('hard', '_posterior') in found and ('hard', '') not in found
+    assert E2E.find_variant_reductions(tmp_path, 5.0) == []
+    assert 'variants' in driver._parse_args(['--stage', 'variants']).stage

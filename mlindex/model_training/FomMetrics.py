@@ -1012,6 +1012,20 @@ def _reduce_subset(entry_code, rank_code, values, lattice, lattice_order, candid
         columns[f'n_correct{suffix}'] = _count(entry_sorted, mask, n_groups)
         columns[f'has_correct{suffix}'] = rank_best >= 0
         columns[f'n_ties_at_best_correct{suffix}'] = ties
+        # Who sits ABOVE the best correct cell, split by lattice. C2-F-033 says this pipeline's
+        # ranking failure is cross-lattice; a pipeline change that lifts correct cells within
+        # their own lattice buys nothing if the same lift reaches the other lattices' candidates
+        # (C2-F-075, S18). Counted in the cross-lattice sorted order whatever `pool` says, so the
+        # two numbers are the same object under either pooling; zero where no correct cell exists.
+        position_best = np.full(n_groups, -1, dtype=np.int64)
+        if hits.size:
+            position_best[winners] = positions
+        above = np.arange(entry_sorted.size) < position_best[entry_sorted]
+        same_lattice = lattice_sorted == lattice_best[entry_sorted]
+        columns[f'n_same_lattice_above_best_correct{suffix}'] = \
+            _count(entry_sorted, above & same_lattice, n_groups)
+        columns[f'n_other_lattice_above_best_correct{suffix}'] = \
+            _count(entry_sorted, above & ~same_lattice, n_groups)
     return columns
 
 
