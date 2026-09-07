@@ -18,8 +18,9 @@
 # THE CUT-1.5 ARM is the general population's fourth real run and lives in two pools already on
 # disk: the three clean bundles in `full_pool` (S08) and the five contaminated ones in
 # `contaminant_pool` (S12). Both are fully retained -- the reduce refuses a thinned pool -- and
-# both need their `merits/` and `structural/` sidecars, which the contaminant job wrote and the
-# full-retained one may not have here: the guard below says what to do.
+# both need their `merits/` and `structural/` sidecars; the contaminant job wrote its own and the
+# clean pool's were only ever written on the laptop copy, so this job writes whatever is missing.
+# Every arm already reduced is skipped, so a re-submit resumes.
 #
 # THE RESTRICTION PASS replays `prune_below_m20` on the cut-1.5 pools at 5.0, 3.5 and 3.0 and
 # scores the same merits, so the analyse stage can put "what a restriction says" beside "what the
@@ -74,6 +75,10 @@ for POPULATION in general hard; do
             echo "FATAL: $POOL has no manifest; the generate array did not finish this arm" >&2
             exit 1
         fi
+        if [ -f "$ARTIFACTS/S15_reduced_${POPULATION}_cut${CUT%.0}_meta.json" ]; then
+            echo "--- $POPULATION cut $CUT: already reduced, skipping"
+            continue
+        fi
         echo "--- $POPULATION cut $CUT: $POOL"
         "$PYTHON" mlindex/scripts/run_fom_end_to_end.py --stage reduce \
             --population "$POPULATION" --cut "$CUT" --pool "$POOL" \
@@ -82,24 +87,52 @@ for POPULATION in general hard; do
 done
 
 echo "=== the cut-1.5 arm: two fully retained pools, one reduction ==="
+# The clean pool (S08) was generated here and its sidecars were only ever written on the laptop
+# copy; the contaminated pool's were written by its own job. Whichever is missing is written now,
+# each producer followed by its --verify (exit 0 is not evidence: C2-F-071, C2-F-139). ~43 M and
+# ~76 M candidates; minutes on a node, not hours.
+PROCESSES=${SLURM_CPUS_ON_NODE:-128}
+PROCESSES=$((PROCESSES / 2))
 for POOL in "$FULL_POOL" "$CONTAM_POOL"; do
-    if [ ! -d "$POOL/structural" ] || [ ! -d "$POOL/merits" ]; then
-        echo "FATAL: $POOL lacks its merits/ or structural/ sidecar." >&2
-        echo "For full_pool, write them here first (they exist on the laptop copy):" >&2
-        echo "  $PYTHON mlindex/scripts/run_fom_floor_merits.py --pool $POOL --processes 64" >&2
-        echo "  $PYTHON mlindex/scripts/run_fom_structural_features.py --pool $POOL --processes 64" >&2
-        echo "or reduce the clean half on the laptop over mlindex/data/fom_full_c2_pool." >&2
+    if [ ! -f "$POOL/manifest.json" ]; then
+        echo "FATAL: $POOL has no manifest" >&2
         exit 1
     fi
+    if [ ! -d "$POOL/merits" ]; then
+        echo "--- $POOL: writing merits/"
+        "$PYTHON" mlindex/scripts/run_fom_floor_merits.py --pool "$POOL" --processes "$PROCESSES"
+    fi
+    if [ ! -d "$POOL/structural" ]; then
+        echo "--- $POOL: writing structural/"
+        "$PYTHON" mlindex/scripts/run_fom_structural_features.py --pool "$POOL" \
+            --processes "$PROCESSES"
+    fi
+    "$PYTHON" mlindex/scripts/run_fom_floor_merits.py --pool "$POOL" --verify
+    "$PYTHON" mlindex/scripts/run_fom_structural_features.py --pool "$POOL" --verify
 done
-"$PYTHON" mlindex/scripts/run_fom_end_to_end.py --stage reduce \
-    --population general --cut 1.5 --pool "$FULL_POOL" --pool "$CONTAM_POOL" \
-    --learned "plus_probation=$MODEL" --artifact-dir "$ARTIFACTS"
+if [ -f "$ARTIFACTS/S15_reduced_general_cut1.5_meta.json" ]; then
+    echo "--- general cut 1.5: already reduced, skipping"
+else
+    "$PYTHON" mlindex/scripts/run_fom_end_to_end.py --stage reduce \
+        --population general --cut 1.5 --pool "$FULL_POOL" --pool "$CONTAM_POOL" \
+        --learned "plus_probation=$MODEL" --artifact-dir "$ARTIFACTS"
+fi
 
 echo "=== restriction versus run: the cut-1.5 pools replayed at 5.0, 3.5, 3.0 ==="
-"$PYTHON" mlindex/scripts/run_fom_end_to_end.py --stage restrict \
-    --population general --pool "$FULL_POOL" --pool "$CONTAM_POOL" --cuts 5.0,3.5,3.0 \
-    --learned "plus_probation=$MODEL" --artifact-dir "$ARTIFACTS"
+# One reduction per cut, each skipped if its meta already exists.
+CUTS_TODO=""
+for CUT in 5.0 3.5 3.0; do
+    if [ ! -f "$ARTIFACTS/S15_reduced_general_cut${CUT%.0}_restricted_meta.json" ]; then
+        CUTS_TODO="${CUTS_TODO:+$CUTS_TODO,}$CUT"
+    fi
+done
+if [ -z "$CUTS_TODO" ]; then
+    echo "--- every restriction already reduced, skipping"
+else
+    "$PYTHON" mlindex/scripts/run_fom_end_to_end.py --stage restrict \
+        --population general --pool "$FULL_POOL" --pool "$CONTAM_POOL" --cuts "$CUTS_TODO" \
+        --learned "plus_probation=$MODEL" --artifact-dir "$ARTIFACTS"
+fi
 
 echo
 echo "DONE. Reductions are in $ARTIFACTS/S15_reduced_*"
