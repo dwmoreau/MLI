@@ -93,9 +93,9 @@ FLOOR_REFERENCE = ('M_sym', 'M20')
 # hard-population operating point is not below the incumbent's by more than this many standard
 # errors of the hard lattices' own floor. Recorded as a decision; nothing is chosen on the result.
 MENU_HARD_TOLERANCE_SE = 2.0
-MENU_RULE = ('per merit, the cut with the largest general operating point whose hard-population '
-             'operating point is not more than MENU_HARD_TOLERANCE_SE floor standard errors '
-             'below the incumbent (5.0, M20)')
+MENU_RULE = ('per merit, among the cuts measured on BOTH populations, the cut with the largest '
+             'general operating point whose hard-population operating point is not more than '
+             'MENU_HARD_TOLERANCE_SE floor standard errors below the incumbent (5.0, M20)')
 
 
 # ---------------------------------------------------------------------------------------------
@@ -772,7 +772,7 @@ def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=M
                                           & (aggregate['cut'] == cut) & (aggregate['merit'] == merit)
                                           & (aggregate['pool_subset'] == pool_subset)]
                     for column, name in (('operating_point', 'op'), ('top10', 'top10'),
-                                         ('ceiling_rescorer', 'ceiling')):
+                                         ('ceiling_rescorer', 'ceiling'), ('n_entries', 'n_cells')):
                         row[f'{population}_{name}'] = (float(level[column].iloc[0])
                                                        if level.shape[0] else np.nan)
                     delta = pair.loc[(pair['population'] == population) & (pair['cut'] == cut)
@@ -808,7 +808,10 @@ def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=M
     menu['recommended'] = False
     menu['rule'] = MENU_RULE
     for (pool_subset, merit), group in menu.groupby(['pool_subset', 'merit']):
-        admissible = group.loc[~(group['hard_standard_errors_vs_incumbent'] < -tolerance_se)]
+        # A cut with no hard measurement cannot be recommended: the first grid analysis picked
+        # cut 1.5 for the learned score on exactly that absence (2026-09-07).
+        measured = group.loc[group['hard_op'].notna()]
+        admissible = measured.loc[~(measured['hard_standard_errors_vs_incumbent'] < -tolerance_se)]
         if admissible.shape[0]:
             menu.loc[admissible['general_op'].idxmax(), 'recommended'] = True
     return menu

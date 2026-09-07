@@ -402,20 +402,10 @@ def run_analyse(args):
     for population, cut in arms:
         reductions[(population, cut)] = E2E.load_reductions(artifact_dir, population, cut, args.suffix)
 
-    # Pair every cut of a population on the cells all its cuts share, so a cross-cut contrast is
-    # over one entry set. The count dropped is reported, not hidden.
-    for population in E2E.POPULATIONS:
-        keys = [k for k in reductions if k[0] == population]
-        if not keys:
-            continue
-        frames = [reductions[k][name][0] for k in keys for name in reductions[k]]
-        common = E2E.common_keys(frames)
-        for k in keys:
-            for name, (per_entry, meta) in reductions[k].items():
-                restricted, dropped = E2E.restrict_per_entry(per_entry, common)
-                meta = dict(meta, n_dropped_unpaired=dropped)
-                reductions[k][name] = (restricted, meta)
-        print(f'{population}: {len(common)} cells common to {len(keys)} arm(s)')
+    # Levels are reported on each arm's OWN cells; pairing happens per contrast, below, on the
+    # cells the two arms share. Aligning every arm of a population at once dropped `error_shape`
+    # from every general level because the cut-1.5 arm never generated it (first grid analysis,
+    # 2026-09-07) -- a missing factorial cell on one arm is not a reason to lose it on the others.
 
     levels, contrasts = [], []
     for (population, cut), reduced in reductions.items():
@@ -429,19 +419,31 @@ def run_analyse(args):
                 results[(population, cut, name, pool_subset)] = result
                 ids = dict(population=population, cut=cut, merit=name, pool_subset=pool_subset,
                            threshold=thresholds.get(name), condition_bundle='all',
-                           is_real_run=True, source='existing' if cut == design['existing_cut'] else 'e2e',
-                           n_dropped_unpaired=meta.get('n_dropped_unpaired', 0))
+                           is_real_run=True, source='existing' if cut == design['existing_cut'] else 'e2e')
                 levels.append(E2E.level_row(result, 'aggregate', **ids))
-                if pool_subset == 'in_top_n' or True:
-                    levels.append(E2E.level_row(result, 'hard', **ids))
+                levels.append(E2E.level_row(result, 'hard', **ids))
                 levels += E2E.stratum_rows(result, 'bravais_lattice', **ids)
                 levels += E2E.stratum_rows(result, 'condition_bundle', **ids)
     levels = pd.DataFrame(levels)
 
+    def aligned(reference_key, arm_key):
+        """The two results on the cells both arms carry, re-summarised only when they differ."""
+        reference, arm = results[reference_key], results[arm_key]
+        if reference.meta['entry_digest'] == arm.meta['entry_digest']:
+            return reference, arm, 0
+        common = E2E.common_keys([reference.per_entry, arm.per_entry])
+        out = []
+        for key, result in ((reference_key, reference), (arm_key, arm)):
+            per_entry, dropped = E2E.restrict_per_entry(result.per_entry, common)
+            out.append(E2E.summarise(per_entry, result.meta, thresholds.get(key[2]), key[3],
+                                     n_bootstrap=0))
+        n_dropped = max(reference.per_entry.shape[0], arm.per_entry.shape[0]) - len(common)
+        return out[0], out[1], n_dropped
+
     def add_contrast(kind, reference_key, arm_key):
-        reference, arm = results.get(reference_key), results.get(arm_key)
-        if reference is None or arm is None:
+        if reference_key not in results or arm_key not in results:
             return
+        reference, arm, n_dropped = aligned(reference_key, arm_key)
         population, ref_cut, ref_merit, pool_subset = reference_key
         _, cut, merit, _ = arm_key
         masks = E2E.scope_masks(arm)
@@ -455,7 +457,8 @@ def run_analyse(args):
                 row.update(population=population, contrast_kind=kind, reference_cut=ref_cut,
                            reference_merit=ref_merit, cut=cut, merit=merit, pool_subset=pool_subset,
                            scope=scope, floor_pp=floor_pp, floor_source=source,
-                           standard_errors=E2E.in_floor_ses(row['delta_pp'], floor_pp))
+                           standard_errors=E2E.in_floor_ses(row['delta_pp'], floor_pp),
+                           n_dropped_unpaired=n_dropped)
                 contrasts.append(row)
 
     for (population, cut, merit, pool_subset) in list(results):
@@ -899,15 +902,21 @@ def run_report(args):
 
     parts += ['## 7. The deployment menu', '',
               f'Rule: {E2E.MENU_RULE} (tolerance {E2E.MENU_HARD_TOLERANCE_SE} se). The rule is a '
-              'decision recorded in STATUS.md, not a search over this table.', '',
+              'decision recorded in STATUS.md, not a search over this table. Levels are on each '
+              'arm\'s own cells (`n_cells`): the generated arms carry nine bundles and the cut-1.5 '
+              'arm eight, so the aggregate levels of different cuts are NOT on one population; '
+              'the contrasts are, being paired on the cells both arms share.', '',
               _table(menu.loc[menu['pool_subset'] == 'in_top_n'],
-                     ['cut', 'merit', 'general_op', 'general_top10', 'general_ceiling', 'hard_op',
+                     ['cut', 'merit', 'general_n_cells', 'general_op', 'general_top10',
+                      'general_ceiling', 'hard_n_cells', 'hard_op',
                       'hard_top10', 'hard_ceiling', 'general_delta_pp_vs_incumbent',
                       'general_standard_errors_vs_incumbent', 'hard_standard_errors_vs_incumbent',
                       'worst_lattice', 'worst_lattice_standard_errors', 'seconds_per_entry',
                       'seconds_vs_incumbent_pct', 'pool_size_median', 'recommended'],
                      {'cut': g, 'general_op': pct, 'general_top10': pct, 'general_ceiling': pct,
                       'hard_op': pct, 'hard_top10': pct, 'hard_ceiling': pct,
+                      'general_n_cells': lambda v: '' if pd.isna(v) else f'{int(v)}',
+                      'hard_n_cells': lambda v: '' if pd.isna(v) else f'{int(v)}',
                       'general_delta_pp_vs_incumbent': pp,
                       'general_standard_errors_vs_incumbent': se,
                       'hard_standard_errors_vs_incumbent': se, 'worst_lattice_standard_errors': se,

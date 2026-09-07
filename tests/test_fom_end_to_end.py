@@ -333,6 +333,14 @@ def test_the_menu_applies_the_stated_rule_and_marks_the_incumbent():
     rec = menu.loc[menu['recommended']].set_index('merit')
     assert rec.loc['M_sym', 'cut'] == 5.0
     assert rec.loc['M20', 'cut'] == 5.0
+    # A cut measured on the general population only is never recommended, however good.
+    extra = levels.iloc[:0].copy()
+    extra = pd.concat([levels, pd.DataFrame([dict(population='general', cut=1.5, merit='M_sym',
+                                                  pool_subset='in_top_n', scope='aggregate',
+                                                  operating_point=0.99, top10=0.99,
+                                                  ceiling_rescorer=0.99)])], ignore_index=True)
+    menu2 = E2E.build_menu(extra, contrasts, cost=cost, merits=('M20', 'M_sym'))
+    assert menu2.loc[menu2['recommended']].set_index('merit').loc['M_sym', 'cut'] == 5.0
     row = menu.set_index(['cut', 'merit']).loc[(3.0, 'M_sym')]
     assert row['worst_lattice'] == 'aP' and row['worst_lattice_standard_errors'] == pytest.approx(-1.2)
     assert row['seconds_per_entry'] == 50.0 and row['seconds_vs_incumbent_pct'] == pytest.approx(25.0)
