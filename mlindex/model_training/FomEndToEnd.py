@@ -89,13 +89,19 @@ FLOOR_SOURCES = {
     }
 FLOOR_REFERENCE = ('M_sym', 'M20')
 
-# The menu rule, stated once. Per merit: the cut with the largest general operating point whose
-# hard-population operating point is not below the incumbent's by more than this many standard
-# errors of the hard lattices' own floor. Recorded as a decision; nothing is chosen on the result.
+# The menu is built on a RANK metric (DWMM, 2026-09-07: "the decisions made should be based on this
+# ranking-based analysis; I really dislike the arbitrary threshold"). The operating point stays in
+# the tables as the matched-false-positive convention every merit was compared under, never as a
+# deployment threshold; the calibrated probability is a readout beside each candidate, not a gate.
+MENU_METRIC = 'top10'
+# The menu rule, stated once. Per merit: the cut with the largest general MENU_METRIC whose
+# hard-population MENU_METRIC is not below the incumbent's by more than this many standard errors
+# of the hard lattices' own floor, among cuts measured on both populations. Recorded as a decision;
+# nothing is chosen on the result.
 MENU_HARD_TOLERANCE_SE = 2.0
 MENU_RULE = ('per merit, among the cuts measured on BOTH populations, the cut with the largest '
-             'general operating point whose hard-population operating point is not more than '
-             'MENU_HARD_TOLERANCE_SE floor standard errors below the incumbent (5.0, M20)')
+             'general top-10 whose hard-population top-10 is not more than MENU_HARD_TOLERANCE_SE '
+             'floor standard errors below the incumbent (5.0, M20)')
 
 
 # ---------------------------------------------------------------------------------------------
@@ -750,28 +756,30 @@ def restrict_at_cut(frame, cut, n_top=N_TOP_CANDIDATES, column='m20_at_prune'):
 # The deployment menu
 # ---------------------------------------------------------------------------------------------
 def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=MENU_HARD_TOLERANCE_SE,
-               merits=None):
-    """One row per (cut, merit, pool depth): the levels on both populations, the paired delta
-    against the incumbent in floor standard errors, the worst lattice, the cost, and whether the
-    stated rule recommends it."""
+               merits=None, metric=MENU_METRIC):
+    """One row per (cut, merit, pool depth): the levels on both populations, the paired delta of
+    `metric` against the incumbent in floor standard errors, the worst lattice on it, the cost, and
+    whether the stated rule recommends it. `metric` is a rank metric by decision; the operating
+    point is available for the record and is never the basis of a recommendation."""
     aggregate = levels.loc[levels['scope'] == 'aggregate']
     pair = contrasts.loc[(contrasts['contrast_kind'] == 'pair') & (contrasts['scope'] == 'aggregate')
-                         & (contrasts['metric'] == 'operating_point')]
+                         & (contrasts['metric'] == metric)]
     lattice = contrasts.loc[(contrasts['contrast_kind'] == 'pair')
                             & contrasts['scope'].str.startswith('bravais_lattice=')
-                            & (contrasts['metric'] == 'operating_point')
+                            & (contrasts['metric'] == metric)
                             & (contrasts['population'] == 'general')]
     rows = []
     merits = merits or sorted(aggregate['merit'].unique())
     for pool_subset in sorted(aggregate['pool_subset'].unique()):
         for merit in merits:
             for cut in sorted(aggregate.loc[aggregate['merit'] == merit, 'cut'].unique(), reverse=True):
-                row = dict(cut=float(cut), merit=merit, pool_subset=pool_subset)
+                row = dict(cut=float(cut), merit=merit, pool_subset=pool_subset, menu_metric=metric)
                 for population in ('general', 'hard'):
                     level = aggregate.loc[(aggregate['population'] == population)
                                           & (aggregate['cut'] == cut) & (aggregate['merit'] == merit)
                                           & (aggregate['pool_subset'] == pool_subset)]
-                    for column, name in (('operating_point', 'op'), ('top10', 'top10'),
+                    for column, name in (('top10', 'top10'), ('top1', 'top1'), ('mrr', 'mrr'),
+                                         ('operating_point', 'op'),
                                          ('ceiling_rescorer', 'ceiling'), ('n_entries', 'n_cells')):
                         row[f'{population}_{name}'] = (
                             float(level[column].iloc[0])
@@ -808,11 +816,12 @@ def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=M
         menu['seconds_vs_incumbent_pct'] = 100*(menu['seconds_per_entry']/base - 1)
     menu['recommended'] = False
     menu['rule'] = MENU_RULE
+    value = {'top10': 'top10', 'top1': 'top1', 'mrr': 'mrr', 'operating_point': 'op'}[metric]
     for (pool_subset, merit), group in menu.groupby(['pool_subset', 'merit']):
         # A cut with no hard measurement cannot be recommended: the first grid analysis picked
         # cut 1.5 for the learned score on exactly that absence (2026-09-07).
-        measured = group.loc[group['hard_op'].notna()]
+        measured = group.loc[group[f'hard_{value}'].notna()]
         admissible = measured.loc[~(measured['hard_standard_errors_vs_incumbent'] < -tolerance_se)]
         if admissible.shape[0]:
-            menu.loc[admissible['general_op'].idxmax(), 'recommended'] = True
+            menu.loc[admissible[f'general_{value}'].idxmax(), 'recommended'] = True
     return menu

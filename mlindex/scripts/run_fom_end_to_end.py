@@ -665,6 +665,8 @@ def _restriction_table(args, design, thresholds, artifact_dir):
 # figure / report
 # ---------------------------------------------------------------------------------------------
 MERIT_COLOURS = {'M20': '#8a817c', 'M_sym': '#1b4965', 'plus_probation': '#e09f3e'}
+METRIC_LABELS = {'top10': 'correct cell in the top ten', 'top1': 'correct cell ranked first',
+                 'mrr': 'mean reciprocal rank', 'operating_point': 'operating point'}
 CUT_STYLES = {5.0: ('-', 'o'), 3.5: ('--', 's'), 3.0: (':', '^'), 1.5: ('-.', 'd')}
 AXIS_LABELS = {'error_scale': 'peak-position error, x nominal',
                'contaminant_count': 'unindexable lines in the window',
@@ -677,7 +679,7 @@ def run_figure(args):
     artifact_dir = Path(args.artifact_dir)
     curves = pd.read_csv(artifact_dir/f'{E2E.TAG}_success_curves{args.suffix}.csv')
     menu = pd.read_csv(artifact_dir/f'{E2E.TAG}_deployment_menu{args.suffix}.csv')
-    curves = curves.loc[(curves['pool_subset'] == 'in_top_n') & (curves['metric'] == 'operating_point')]
+    curves = curves.loc[(curves['pool_subset'] == 'in_top_n') & (curves['metric'] == E2E.MENU_METRIC)]
     populations = [p for p in ('general', 'hard') if p in set(curves['population'])]
     axes_names = list(AXIS_LABELS)
     fig, panels = plt.subplots(len(populations), 3, figsize=(11, 3.4*len(populations)),
@@ -706,14 +708,14 @@ def run_figure(args):
                                     color=colour, alpha=0.12, linewidth=0)
             ax.set_xlabel(AXIS_LABELS[axis])
             if col == 0:
-                ax.set_ylabel(f'{population}: operating point, %')
+                ax.set_ylabel(f'{population}: {METRIC_LABELS[E2E.MENU_METRIC]}, %')
             if axis == 'error_scale':
                 ax.set_xscale('log')
             ax.set_title(f'{population} - {axis.replace("_", " ")}')
     handles, labels = panels[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', ncol=min(6, max(1, len(labels))), fontsize=7,
                bbox_to_anchor=(0.5, -0.02))
-    fig.suptitle('S15 - success rate on real runs, by cut and ranking merit '
+    fig.suptitle(f'S15 - {METRIC_LABELS[E2E.MENU_METRIC]} on real runs, by cut and ranking merit '
                  '(production list depth; hollow markers: the point moves more than one thing)',
                  fontsize=9)
     fig.tight_layout(rect=(0, 0.06, 1, 0.97))
@@ -726,13 +728,13 @@ def run_figure(args):
     contrasts = pd.read_csv(artifact_dir/f'{E2E.TAG}_factorial_contrasts{args.suffix}.csv')
     agg = levels.loc[(levels['scope'] == 'aggregate') & (levels['pool_subset'] == 'in_top_n')]
     pair = contrasts.loc[(contrasts['contrast_kind'] == 'pair') & (contrasts['scope'] == 'aggregate')
-                         & (contrasts['metric'] == 'operating_point')
+                         & (contrasts['metric'] == E2E.MENU_METRIC)
                          & (contrasts['pool_subset'] == 'in_top_n')]
     fig, panels = plt.subplots(1, len(populations), figsize=(4.2*len(populations), 3.2), squeeze=False)
     for col, population in enumerate(populations):
         ax = panels[0][col]
         table = agg.loc[agg['population'] == population].pivot(index='cut', columns='merit',
-                                                               values='operating_point')
+                                                               values=E2E.MENU_METRIC)
         table = table.reindex(index=sorted(table.index, reverse=True),
                               columns=[m for m in REPORTED if m in table.columns])
         image = ax.imshow(100*table.to_numpy(dtype=float), cmap='viridis', aspect='auto')
@@ -740,7 +742,7 @@ def run_figure(args):
         ax.set_yticks(range(table.shape[0]), [f'{c:g}' for c in table.index])
         ax.set_xlabel('ranking merit')
         ax.set_ylabel('prune cut')
-        ax.set_title(f'{population}: operating point, % (production depth)')
+        ax.set_title(f'{population}: {METRIC_LABELS[E2E.MENU_METRIC]}, % (production depth)')
         ax.grid(False)
         for i, cut in enumerate(table.index):
             for j, merit in enumerate(table.columns):
@@ -790,6 +792,13 @@ def run_report(args):
              '**Nothing here is tuned.**', '',
              f'![success curves]({E2E.TAG}_success_curves{suffix}.png)', '',
              '## 0. How to read this', '',
+             '**The recommendation is made on ranking** (DWMM, 2026-09-07): the headline is the share '
+             'of patterns whose correct cell is in the pooled top ten, with the correct-cell-first '
+             'share and the mean reciprocal rank beside it, none of which involves a threshold. The '
+             'operating point -- top ten AND above a threshold chosen at M20\'s own false-positive '
+             'rate at de Wolff 10 -- is kept as the convention every merit was compared under and is '
+             'not a deployment threshold; the calibrated probability is a readout beside each '
+             'candidate, not a gate.', '',
              'Every number is from a **real run** of the indexer at the stated cut, through the '
              'benchmark generator (the same optimizer code, the cut reaching it as '
              '`opt_params[\'prune_m20_threshold\']`), every candidate kept. A merit is a score over '
@@ -811,46 +820,78 @@ def run_report(args):
                                               'n_cells', 'n_agree', 'n_disagree', 'n_missing',
                                               'note', 'status') if c in digest.columns]), '']
 
-    parts += ['## 2. The factorial: cut x merit, both populations', '']
+    parts += ['## 2. The factorial: cut x merit, both populations -- ranking', '',
+              'Rank metrics only. `share_of_ceiling` is top-10 over the ceiling: of the patterns '
+              'whose correct cell the search produced at all, the share the merit ranks into the top '
+              'ten. `delta_pp` .. `standard_errors`: the pair against the incumbent (5.0, M20) on '
+              'top-10, paired over the cells both arms share, in standard errors of S08\'s top-10 '
+              'floor (per-lattice claims use each lattice\'s own).', '']
     for pool_subset in E2E.POOL_SUBSETS:
         for population in ('general', 'hard'):
             agg = levels.loc[(levels['scope'] == 'aggregate') & (levels['population'] == population)
-                             & (levels['pool_subset'] == pool_subset)]
+                             & (levels['pool_subset'] == pool_subset)].copy()
             if agg.empty:
                 continue
+            agg['share_of_ceiling'] = agg['top10']/agg['ceiling_rescorer']
             pair = contrasts.loc[(contrasts['contrast_kind'] == 'pair') & (contrasts['scope'] == 'aggregate')
                                  & (contrasts['population'] == population)
                                  & (contrasts['pool_subset'] == pool_subset)]
-            table = agg.merge(pair.loc[pair['metric'] == 'operating_point',
+            table = agg.merge(pair.loc[pair['metric'] == 'top10',
                                        ['cut', 'merit', 'delta_pp', 'ci_low_pp', 'ci_high_pp',
                                         'gained', 'lost', 'p_value', 'standard_errors']],
                               on=['cut', 'merit'], how='left').sort_values(['cut', 'merit'],
                                                                            ascending=[False, True])
             parts += [f'### {population}, depth `{pool_subset}` ({int(agg["n_entries"].max())} cells)', '',
-                      _table(table, ['cut', 'merit', 'operating_point', 'top10', 'ceiling_rescorer',
-                                     'reported', 'precision', 'delta_pp', 'ci_low_pp', 'ci_high_pp',
-                                     'gained', 'lost', 'p_value', 'standard_errors'],
-                             {'cut': g, 'operating_point': pct, 'top10': pct, 'ceiling_rescorer': pct,
-                              'reported': pct, 'precision': pct, 'delta_pp': pp, 'ci_low_pp': pp,
+                      _table(table, ['cut', 'merit', 'n_entries', 'top1', 'top5', 'top10', 'mrr',
+                                     'ceiling_rescorer', 'share_of_ceiling', 'delta_pp', 'ci_low_pp',
+                                     'ci_high_pp', 'gained', 'lost', 'p_value', 'standard_errors'],
+                             {'cut': g, 'n_entries': lambda v: f'{int(v)}', 'top1': pct, 'top5': pct,
+                              'top10': pct, 'mrr': lambda v: f'{v:.3f}', 'ceiling_rescorer': pct,
+                              'share_of_ceiling': pct, 'delta_pp': pp, 'ci_low_pp': pp,
                               'ci_high_pp': pp, 'standard_errors': se,
                               'p_value': lambda v: '' if pd.isna(v) else f'{v:.2g}',
                               'gained': lambda v: '' if pd.isna(v) else f'{int(v)}',
-                              'lost': lambda v: '' if pd.isna(v) else f'{int(v)}'}),
-                      '', '`delta_pp` .. `standard_errors`: the pair against the incumbent '
-                      '(5.0, M20) on the operating point.', '']
+                              'lost': lambda v: '' if pd.isna(v) else f'{int(v)}'}), '']
+    parts += ['## 2b. The same factorial at the operating point (secondary)', '',
+              'For the record: top ten AND above each merit\'s frozen threshold, the matched '
+              'false-positive convention S12 chose on `fom-train`. **Not a deployment threshold.** '
+              '`reported` is the share of patterns the merit would answer on and `precision` the '
+              'share of those answers that are right; the two say what the threshold costs.', '']
+    for population in ('general', 'hard'):
+        agg = levels.loc[(levels['scope'] == 'aggregate') & (levels['population'] == population)
+                         & (levels['pool_subset'] == 'in_top_n')]
+        if agg.empty:
+            continue
+        pair = contrasts.loc[(contrasts['contrast_kind'] == 'pair') & (contrasts['scope'] == 'aggregate')
+                             & (contrasts['population'] == population)
+                             & (contrasts['pool_subset'] == 'in_top_n')
+                             & (contrasts['metric'] == 'operating_point')]
+        table = agg.merge(pair[['cut', 'merit', 'delta_pp', 'gained', 'lost', 'p_value',
+                                'standard_errors']], on=['cut', 'merit'], how='left') \
+            .sort_values(['cut', 'merit'], ascending=[False, True])
+        parts += [f'### {population}, depth `in_top_n`', '',
+                  _table(table, ['cut', 'merit', 'threshold', 'operating_point', 'reported',
+                                 'false_positive', 'precision', 'delta_pp', 'gained', 'lost',
+                                 'p_value', 'standard_errors'],
+                         {'cut': g, 'threshold': lambda v: f'{v:.4g}', 'operating_point': pct,
+                          'reported': pct, 'false_positive': pct, 'precision': pct, 'delta_pp': pp,
+                          'standard_errors': se,
+                          'p_value': lambda v: '' if pd.isna(v) else f'{v:.2g}',
+                          'gained': lambda v: '' if pd.isna(v) else f'{int(v)}',
+                          'lost': lambda v: '' if pd.isna(v) else f'{int(v)}'}), '']
 
-    parts += ['## 3. Per lattice, the recommended pair against the incumbent', '']
+    parts += ['## 3. Per lattice, the recommended pair against the incumbent, top-10', '']
     rec = menu.loc[menu['recommended'] & (menu['pool_subset'] == 'in_top_n')]
     for _, line in rec.iterrows():
         lat = contrasts.loc[(contrasts['contrast_kind'] == 'pair') & (contrasts['population'] == 'general')
                             & (contrasts['cut'] == line['cut']) & (contrasts['merit'] == line['merit'])
                             & (contrasts['pool_subset'] == 'in_top_n')
                             & contrasts['scope'].str.startswith('bravais_lattice=')
-                            & (contrasts['metric'] == 'operating_point')].copy()
+                            & (contrasts['metric'] == E2E.MENU_METRIC)].copy()
         if lat.empty:
             continue
         lat['lattice'] = lat['scope'].str.split('=', n=1).str[1]
-        parts += [f'### ({line["cut"]:g}, {line["merit"]}) vs (5.0, M20), operating point, `in_top_n`', '',
+        parts += [f'### ({line["cut"]:g}, {line["merit"]}) vs (5.0, M20), top-10, `in_top_n`', '',
                   _table(lat, ['lattice', 'delta_pp', 'ci_low_pp', 'ci_high_pp', 'gained', 'lost',
                                'p_value', 'floor_pp', 'standard_errors', 'n_entries'],
                          {'delta_pp': pp, 'ci_low_pp': pp, 'ci_high_pp': pp, 'standard_errors': se,
@@ -863,7 +904,7 @@ def run_report(args):
               'x = 1 also drops two peaks, and the dropout series carries one contaminant where its '
               'x = 0 reference does not. `error_shape` and `second_phase` are factorial rows, not '
               'curve points.', '']
-    c = curves.loc[(curves['pool_subset'] == 'in_top_n') & (curves['metric'] == 'operating_point')]
+    c = curves.loc[(curves['pool_subset'] == 'in_top_n') & (curves['metric'] == E2E.MENU_METRIC)]
     if not c.empty:
         wide = c.pivot_table(index=['population', 'axis', 'x', 'condition_bundle', 'caveat'],
                              columns=['merit', 'cut'], values='value').reset_index()
@@ -902,19 +943,21 @@ def run_report(args):
 
     parts += ['## 7. The deployment menu', '',
               f'Rule: {E2E.MENU_RULE} (tolerance {E2E.MENU_HARD_TOLERANCE_SE} se). The rule is a '
-              'decision recorded in STATUS.md, not a search over this table. Levels are on each '
+              'decision recorded in STATUS.md, not a search over this table. The deltas and '
+              'standard errors are on top-10. Levels are on each '
               'arm\'s own cells (`n_cells`): the generated arms carry nine bundles and the cut-1.5 '
               'arm eight, so the aggregate levels of different cuts are NOT on one population; '
               'the contrasts are, being paired on the cells both arms share.', '',
               _table(menu.loc[menu['pool_subset'] == 'in_top_n'],
-                     ['cut', 'merit', 'general_n_cells', 'general_op', 'general_top10',
-                      'general_ceiling', 'hard_n_cells', 'hard_op',
-                      'hard_top10', 'hard_ceiling', 'general_delta_pp_vs_incumbent',
+                     ['cut', 'merit', 'general_n_cells', 'general_top10', 'general_top1',
+                      'general_mrr', 'general_ceiling', 'hard_n_cells', 'hard_top10', 'hard_top1',
+                      'hard_ceiling', 'general_delta_pp_vs_incumbent',
                       'general_standard_errors_vs_incumbent', 'hard_standard_errors_vs_incumbent',
                       'worst_lattice', 'worst_lattice_standard_errors', 'seconds_per_entry',
                       'seconds_vs_incumbent_pct', 'pool_size_median', 'recommended'],
-                     {'cut': g, 'general_op': pct, 'general_top10': pct, 'general_ceiling': pct,
-                      'hard_op': pct, 'hard_top10': pct, 'hard_ceiling': pct,
+                     {'cut': g, 'general_top10': pct, 'general_top1': pct, 'general_ceiling': pct,
+                      'general_mrr': lambda v: f'{v:.3f}', 'hard_top1': pct,
+                      'hard_top10': pct, 'hard_ceiling': pct,
                       'general_n_cells': lambda v: '' if pd.isna(v) else f'{int(v)}',
                       'hard_n_cells': lambda v: '' if pd.isna(v) else f'{int(v)}',
                       'general_delta_pp_vs_incumbent': pp,

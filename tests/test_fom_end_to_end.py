@@ -324,8 +324,9 @@ def test_the_menu_applies_the_stated_rule_and_marks_the_incumbent():
                               seconds_per_entry_median=40.0, pool_size_full_median=100.0),
                          dict(population='general', cut=3.0, condition_bundle='all',
                               seconds_per_entry_median=50.0, pool_size_full_median=1000.0)])
-    menu = E2E.build_menu(levels, contrasts, cost=cost, merits=('M20', 'M_sym'))
-    assert menu.shape[0] == 4
+    menu = E2E.build_menu(levels, contrasts, cost=cost, merits=('M20', 'M_sym'),
+                          metric='operating_point')
+    assert menu.shape[0] == 4 and (menu['menu_metric'] == 'operating_point').all()
     incumbent = menu.loc[menu['is_incumbent']]
     assert incumbent.shape[0] == 1 and np.isnan(incumbent['general_delta_pp_vs_incumbent'].iloc[0])
     # M_sym at 3.0 has the largest general operating point but its hard population falls by
@@ -339,12 +340,28 @@ def test_the_menu_applies_the_stated_rule_and_marks_the_incumbent():
                                                   pool_subset='in_top_n', scope='aggregate',
                                                   operating_point=0.99, top10=0.99,
                                                   ceiling_rescorer=0.99)])], ignore_index=True)
-    menu2 = E2E.build_menu(extra, contrasts, cost=cost, merits=('M20', 'M_sym'))
+    menu2 = E2E.build_menu(extra, contrasts, cost=cost, merits=('M20', 'M_sym'),
+                           metric='operating_point')
     assert menu2.loc[menu2['recommended']].set_index('merit').loc['M_sym', 'cut'] == 5.0
     row = menu.set_index(['cut', 'merit']).loc[(3.0, 'M_sym')]
     assert row['worst_lattice'] == 'aP' and row['worst_lattice_standard_errors'] == pytest.approx(-1.2)
     assert row['seconds_per_entry'] == 50.0 and row['seconds_vs_incumbent_pct'] == pytest.approx(25.0)
     assert (menu['rule'] == E2E.MENU_RULE).all()
+
+
+def test_the_menu_is_built_on_a_rank_metric_by_default_and_never_on_a_threshold():
+    """DWMM, 2026-09-07: the recommendation is made on ranking. The default metric is top-10, and a
+    contrast table carrying only operating-point rows yields no recommendation rather than one
+    quietly read off the threshold."""
+    levels, contrasts = _levels_and_contrasts()
+    assert E2E.MENU_METRIC == 'top10'
+    menu = E2E.build_menu(levels, contrasts, merits=('M20', 'M_sym'))
+    assert (menu['menu_metric'] == 'top10').all()
+    # Operating-point contrasts are not read at all: every delta column is empty.
+    assert menu['general_delta_pp_vs_incumbent'].isna().all()
+    ranked = contrasts.assign(metric='top10')
+    menu = E2E.build_menu(levels, ranked, merits=('M20', 'M_sym'))
+    assert menu['recommended'].sum() == 2
 
 
 # ---------------------------------------------------------------------------------------------
