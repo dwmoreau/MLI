@@ -773,8 +773,9 @@ def build_menu(levels, contrasts, cost=None, incumbent=INCUMBENT, tolerance_se=M
                                           & (aggregate['pool_subset'] == pool_subset)]
                     for column, name in (('operating_point', 'op'), ('top10', 'top10'),
                                          ('ceiling_rescorer', 'ceiling'), ('n_entries', 'n_cells')):
-                        row[f'{population}_{name}'] = (float(level[column].iloc[0])
-                                                       if level.shape[0] else np.nan)
+                        row[f'{population}_{name}'] = (
+                            float(level[column].iloc[0])
+                            if level.shape[0] and column in level.columns else np.nan)
                     delta = pair.loc[(pair['population'] == population) & (pair['cut'] == cut)
                                      & (pair['merit'] == merit) & (pair['pool_subset'] == pool_subset)]
                     for column in ('delta_pp', 'ci_low_pp', 'ci_high_pp', 'p_value', 'standard_errors'):
