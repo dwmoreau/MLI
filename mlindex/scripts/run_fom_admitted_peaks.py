@@ -7,7 +7,7 @@ least-squares step on those peaks alone; `n_indexed` on the persisted pool is th
 final cell. A cell has 1-6 free parameters (`N_FREE_PARAMETERS`); a step on fewer admitted
 peaks than that is singular (zero step) and on barely more is poorly conditioned. This tabulates
 the count per pool, per lattice, split by correctness, and the share of candidates at or below
-the parameter count -- the test of the hypothesis in C2-F-167's follow-up: a calibrated
+the parameter count -- the test of the hypothesis in C2-F-171's follow-up: a calibrated
 posterior at 0.99 admits fewer peaks on hard patterns than the over-confident `rho` at 0.95,
 and starves the refinement where the cells are hardest.
 """
