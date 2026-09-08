@@ -557,3 +557,84 @@ def test_the_shipped_prior_reads_cubic_as_out_of_support(keras_available):
     # the raw head still puts ~e^-19 on cubic; that is what the mask exists to hide
     raw = model.predict_distributions(q2, batch_size=4)['bravais']
     assert raw[:, :3].max() < 1e-3
+
+
+# ---------------------------------------------------------------------------------------
+# Checkpoints: a walltime kill keeps every finished epoch, and --resume continues from it
+# ---------------------------------------------------------------------------------------
+def _fit_args(tmp_path, epochs, resume=False):
+    import argparse
+
+    return argparse.Namespace(seed=7, per_class=4, models_dir=str(tmp_path), verbose=False,
+                              resume=resume)
+
+
+def _tiny_params(epochs):
+    return {'n_volumes': 16, 'n_filters': 64, 'layers': [16], 'd_model': 16, 'n_heads': 2,
+            'epochs': epochs, 'batch_size': 16}
+
+
+def test_fit_arm_checkpoints_every_epoch_and_resumes(keras_available, tmp_path):
+    """The cluster fit used to save once, at the end, so a kill at epoch 29 of 30 kept nothing.
+
+    Two runs of the same tiny fit: one straight through for two epochs, and one that stops after
+    one epoch and is resumed. The resumed run must skip the epoch the checkpoint has seen, restore
+    the optimizer as well as the weights (an Adam step counter of zero after a load is a warm start
+    pretending to be a resume), and finish with a history of two epochs.
+    """
+    import json
+    import sys
+
+    sys.path.insert(0, os.path.join(REPOSITORY, 'mlindex', 'scripts'))
+    import run_fom_prior as driver
+
+    pool = _fake_pool(n_rows=80)
+
+    model, history = driver.fit_arm(pool, _tiny_params(epochs=1), _fit_args(tmp_path/'a', 1), 'arm')
+    directory = model.save_to_split_group
+    assert len(history) == 1
+    for name in ('prior.weights.h5', 'extraction_grid.npz', 'model_params.json',
+                 driver.CHECKPOINT_HISTORY):
+        assert os.path.exists(os.path.join(directory, name)), name
+    with open(os.path.join(directory, driver.CHECKPOINT_HISTORY), encoding='utf-8') as handle:
+        assert len(json.load(handle)) == 1
+    steps_after_one = int(model.model.optimizer.iterations)
+    assert steps_after_one > 0
+
+    # Resume for a second epoch: the first is skipped, the optimizer continues counting.
+    resumed, history = driver.fit_arm(pool, _tiny_params(epochs=2),
+                                      _fit_args(tmp_path/'a', 2, resume=True), 'arm')
+    assert len(history) == 2
+    assert int(resumed.model.optimizer.iterations) == 2*steps_after_one, \
+        'the optimizer state was not restored: the step counter restarted'
+
+    # Without --resume the checkpoint is ignored and the fit starts over.
+    fresh, history = driver.fit_arm(pool, _tiny_params(epochs=1), _fit_args(tmp_path/'a', 1), 'arm')
+    assert len(history) == 1
+    assert int(fresh.model.optimizer.iterations) == steps_after_one
+
+
+def test_resume_refuses_a_checkpoint_of_a_different_model(keras_available, tmp_path):
+    import sys
+
+    sys.path.insert(0, os.path.join(REPOSITORY, 'mlindex', 'scripts'))
+    import run_fom_prior as driver
+
+    pool = _fake_pool(n_rows=80)
+    driver.fit_arm(pool, _tiny_params(epochs=1), _fit_args(tmp_path/'b', 1), 'arm')
+    params = _tiny_params(epochs=2)
+    params['layers'] = [8]
+    with pytest.raises(RuntimeError, match='cannot resume'):
+        driver.fit_arm(pool, params, _fit_args(tmp_path/'b', 2, resume=True), 'arm')
+
+
+def test_epoch_rng_is_a_pure_function_of_seed_and_epoch():
+    """What lets a resumed run draw the batches the uninterrupted one would have drawn."""
+    import sys
+    sys.path.insert(0, os.path.join(REPOSITORY, 'mlindex', 'scripts'))
+    import run_fom_prior as driver
+    first = driver.epoch_rng(5, 3).random(4)
+    again = driver.epoch_rng(5, 3).random(4)
+    other = driver.epoch_rng(5, 4).random(4)
+    assert np.array_equal(first, again)
+    assert not np.array_equal(first, other)

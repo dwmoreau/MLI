@@ -229,8 +229,86 @@ def check_balanced(batch, pool, per_class, epoch):
             )
 
 
+CHECKPOINT_HISTORY = 'history.json'
+# The keys that define the graph a checkpoint's weights fit. A resume that silently loaded weights
+# into a differently shaped model would fail on the first mismatched layer -- and NOT fail on a
+# different `support` list or a different `loss_mode`, which change what the numbers mean rather
+# than their shape. So the whole list is compared, and a mismatch refuses rather than proceeds.
+GRAPH_KEYS = ('n_volumes', 'n_filters', 'layers', 'd_model', 'n_heads', 'head_mode', 'loss_mode',
+              'peak_length', 'extraction_peak_length', 'support', 'batch_size')
+
+
+def epoch_rng(seed, epoch):
+    """The sampler's RNG for one epoch, a pure function of (seed, epoch).
+
+    Seeded per epoch rather than advanced through the run so that a resumed run draws exactly the
+    batches the uninterrupted run would have drawn from that epoch on -- nothing has to be replayed
+    to put the stream back where it was. `epoch` is 1-based, as it is printed.
+    """
+    return np.random.default_rng([int(seed), int(epoch)])
+
+
+def save_checkpoint(model, history, directory=None):
+    """The model as it stands plus the per-epoch history, written after EVERY epoch.
+
+    A 30-epoch fit on the cluster is a day of walltime and the loop used to save once, at the end,
+    so a walltime kill at epoch 29 left nothing. The checkpoint is the same three files `save_prior`
+    writes -- so anything that can read a finished model can read a partial one -- plus the history,
+    whose length is how many epochs the weights have seen.
+    """
+    directory = model.save_prior(directory)
+    with open(os.path.join(directory, CHECKPOINT_HISTORY), 'w', encoding='utf-8') as handle:
+        json.dump(history, handle, indent=2)
+    return directory
+
+
+def restore_checkpoint(model, directory):
+    """Continue a fit from `directory`: weights, optimizer state and history. `[]` if none there.
+
+    The optimizer's variables have to exist before `load_weights` can fill them, and Keras only
+    creates them on the first training step -- loading into a freshly compiled model restores the
+    weights and silently skips Adam's moments, which is a warm start rather than a resume. Building
+    them first makes the restore complete: verified to reproduce the step counter and the weights
+    exactly (2026-09-08).
+    """
+    weights = os.path.join(directory, 'prior.weights.h5')
+    history_path = os.path.join(directory, CHECKPOINT_HISTORY)
+    if not (os.path.exists(weights) and os.path.exists(history_path)):
+        return []
+    with open(os.path.join(directory, 'model_params.json'), encoding='utf-8') as handle:
+        saved = json.load(handle)['model_params']
+    for key in GRAPH_KEYS:
+        if saved.get(key) != model.model_params.get(key):
+            raise RuntimeError(
+                f'cannot resume from {directory}: checkpoint has {key}={saved.get(key)!r}, '
+                f'this fit has {model.model_params.get(key)!r}. Delete the checkpoint or match '
+                f'the configuration; a resume never adapts one to the other.'
+                )
+    grid = np.load(os.path.join(directory, 'extraction_grid.npz'))
+    for key, current in (('volumes', model.extraction_layer.volumes),
+                         ('filters', model.extraction_layer.filters),
+                         ('sigma', model.extraction_layer.sigma)):
+        if not np.allclose(np.asarray(grid[key], dtype=float), np.asarray(current, dtype=float)):
+            raise RuntimeError(
+                f'cannot resume from {directory}: its extraction grid ({key}) differs from the '
+                f'one this fit derived from its pool, so it was fitted on different data.'
+                )
+    with open(history_path, encoding='utf-8') as handle:
+        history = json.load(handle)
+    model.model.optimizer.build(model.model.trainable_variables)
+    model.model.load_weights(weights)
+    return history
+
+
 def fit_arm(pool_fit, model_params, args, tag):
-    """Fit one arm. A fresh condition draw per epoch, which is what makes balancing honest."""
+    """Fit one arm. A fresh condition draw per epoch, which is what makes balancing honest.
+
+    Checkpoints after every epoch, and with `--resume` picks up from the last one: the epochs the
+    checkpoint has seen are skipped, the sampler draws epoch k from `epoch_rng(seed, k)` so the
+    batches are the ones the uninterrupted run would have drawn, and the optimizer state comes
+    back with the weights. What a resumed run does NOT reproduce bit for bit is the framework's
+    own within-epoch shuffling, which is seeded once per process.
+    """
     rng = np.random.default_rng(args.seed)
     grid_q2, _, _ = Prior.draw_peak_lists(pool_fit, rng)
     grid_frame = pool_fit.assign(q2_window=list(grid_q2))
@@ -247,15 +325,22 @@ def fit_arm(pool_fit, model_params, args, tag):
         )
     model.build_model(data=grid_frame)
 
+    history = restore_checkpoint(model, model.save_to_split_group) \
+        if getattr(args, 'resume', False) else []
+    completed = len(history)
+    if completed:
+        print(f'  {tag}: resuming from {model.save_to_split_group}, {completed} epoch(s) done',
+              flush=True)
+
     codes = pool_fit['target_bravais'].to_numpy()
-    history = []
-    for epoch in range(model.model_params['epochs']):
+    for epoch in range(completed, model.model_params['epochs']):
+        sampler = epoch_rng(args.seed, epoch + 1)
         rows = Prior.balanced_indices(
-            codes, len(Prior.BRAVAIS_LATTICES), rng, args.per_class,
+            codes, len(Prior.BRAVAIS_LATTICES), sampler, args.per_class,
             )
         batch = pool_fit.iloc[rows].reset_index(drop=True)
         check_balanced(batch, pool_fit, args.per_class, epoch + 1)
-        q2, _, _ = Prior.draw_peak_lists(batch, rng)
+        q2, _, _ = Prior.draw_peak_lists(batch, sampler)
         branch = model.get_branch_labels(batch)
         joint = model.model_params['loss_mode'] == 'joint'
         width = model.model_params.get('volume_target_width', 0.0)
@@ -274,11 +359,14 @@ def fit_arm(pool_fit, model_params, args, tag):
             # conclusions came out of it (F-120).
             values = batch[f'target_{name}'].to_numpy()
             targets[name] = Prior.joint_targets(values, branch) if joint else values
+        started = time.time()
         record = model.model.fit(
             model.scale_peaks(q2), targets, epochs=1, verbose=0,
             batch_size=model.model_params['batch_size'],
             )
         history.append({key: float(value[-1]) for key, value in record.history.items()})
+        history[-1]['seconds'] = round(time.time() - started, 1)
+        save_checkpoint(model, history)
         if args.verbose:
             # Per-head losses, not just the total. `fit` has carried them all along and logging only
             # the total cost three runs: two collapsed with a total that was arithmetically
@@ -290,7 +378,8 @@ def fit_arm(pool_fit, model_params, args, tag):
                 if key.endswith('_loss') and key != 'loss'
                 )
             print(f'  {tag} epoch {epoch + 1}/{model.model_params["epochs"]} '
-                  f'loss {history[-1]["loss"]:.4f} | {parts}', flush=True)
+                  f'loss {history[-1]["loss"]:.4f} | {parts} '
+                  f'({history[-1]["seconds"]:.0f} s)', flush=True)
     return model, history
 
 
@@ -620,6 +709,10 @@ def run(args):
         if args.volume_target_width is not None:
             params.setdefault('volume_target_width', args.volume_target_width)
         model, history = fit_arm(pool_fit, params, args, tag)
+        # `fit_arm` decides the support from the pool it was handed and writes it into the
+        # checkpoint; copy it back so the run's meta.json says the same thing the checkpoint does
+        # (it used to say `[]`, because `params` was read before the fit had set it).
+        params['support'] = list(model.model_params.get('support', []))
         results, tables = evaluate_arm(model, evaluation, base_rates)
         model.save_prior()
         records.append(dict(arm=tag, params=params, results=results, tables=tables,
@@ -688,6 +781,8 @@ def write_outputs(args, records, pool_fit, pool_test, evaluation, base_rates, st
                  'S14 retrains at campaign 1\'s `main` configuration with cubic included',
             ),
         support=list(records[0]['params'].get('support', [])) if records else [],
+        epochs_completed=[len(record['history']) for record in records],
+        resume=bool(getattr(args, 'resume', False)),
         bounds=['R11: no perturbed error-model bundle exists, so robustness to a different error '
                 'law is untested rather than passed',
                 'R12: broadening tag 1 only, so no instrument-transfer claim is available'],
@@ -749,6 +844,9 @@ def main():
                         choices=('heldout', 'benchmark'),
                         help="'heldout' = unseen training structures (the network's own "
                              "measurement); 'benchmark' = the FOM pool block C consumes.")
+    parser.add_argument('--resume', action='store_true',
+                        help='Continue a fit from the per-epoch checkpoint in its model '
+                             'directory, if one is there; otherwise start from scratch')
     parser.add_argument('--include-cubic', action='store_true',
                         help='Cover all fourteen lattices. Default excludes cubic, to '
                              'match scripts/classification.py.')

@@ -1,11 +1,22 @@
 #!/bin/bash
 # S14 -- retrain the prior network on all FOURTEEN Bravais lattices (cubic included).
 #
-#   docs/sync_record.sh push
-#   sbatch submit_fom_prior_retrain.sh
-#   then, from the laptop:
-#       rsync -avz <nersc>:$REPO/mlindex/models/fom_prior_c2/ mlindex/models/fom_prior_c2/
-#       docs/sync_record.sh pull-artifacts 'S14_prior_*'
+#   docs/sync_record.sh push                  # the record, including the frozen split manifest
+#   git push origin fom_campaign2 (laptop) ; git pull (NERSC)
+#   sbatch mlindex/scripts/submit_fom_prior_retrain.sh
+#   if it hits the walltime, resubmit the SAME command: --resume continues from the last epoch
+#   then, from the laptop -- both live in the repo on $CFS, NOT in $SCRATCH, so
+#   `sync_record.sh pull-artifacts` (which reads $SCRATCH) does not see them:
+#       rsync -avz <nersc>:/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/models/fom_prior_c2/ \
+#                  mlindex/models/fom_prior_c2/
+#       rsync -avz '<nersc>:/global/cfs/cdirs/m4064/dwmoreau/MLI/docs/fom_campaign2/artifacts/S14_prior_main14_*' \
+#                  docs/fom_campaign2/artifacts/
+#
+# Walltime: campaign 1's `main` arm drew 6 000 patterns per class over eleven lattices for 30
+# epochs (66 000 rows an epoch) and took 14.9 h on the laptop, most of it training. This job draws
+# 20 000 per class over fourteen (280 000 rows an epoch), 4.2x the rows, so 48 h is asked for and
+# may still not be enough -- which is why the fit now checkpoints after every epoch and a
+# resubmission with --resume loses at most the epoch in progress.
 #
 # Campaign 1 trained on eleven lattices, excluding cubic because cubic is indexed on ten peaks
 # where the extraction window takes twenty -- but the cubic ENTRIES' peak lists are twenty peaks
@@ -27,7 +38,7 @@
 #SBATCH --mail-user=dwmoreau@lbl.gov
 #SBATCH --mail-type=ALL
 #SBATCH -A lcls
-#SBATCH -t 12:00:00
+#SBATCH -t 48:00:00
 #SBATCH -o fom_s14_prior_%j.out
 
 module load conda
@@ -37,10 +48,19 @@ PYTHON=/global/cfs/cdirs/m4064/dwmoreau/envs/pytorch/bin/python
 REPO=/global/cfs/cdirs/m4064/dwmoreau/MLI
 cd "$REPO" || exit 1
 
-MANIFEST="$REPO/mlindex/data/generated_datasets/fom_split_c2.parquet"
 DATASETS="$REPO/mlindex/data/generated_datasets"
 MODELS="$REPO/mlindex/models/fom_prior_c2"
 ARTIFACTS="$REPO/docs/fom_campaign2/artifacts"
+
+# The split guard accepts either copy of the frozen split: the sidecar beside the datasets
+# (column `fom_split`) or the record's own manifest (column `split`). They carry the same 18 991
+# identifiers with identical splits (checked 2026-09-08). The sidecar is git-ignored and
+# `sync_record.sh push` moves only docs/, so on a fresh checkout only the second exists here.
+MANIFEST="$DATASETS/fom_split_c2.parquet"
+if [ ! -f "$MANIFEST" ]; then
+    MANIFEST="$ARTIFACTS/S06_split_manifest.parquet"
+    echo "split sidecar absent; using the record's manifest $MANIFEST"
+fi
 
 for f in "$MANIFEST" "$DATASETS/dataset_cP.parquet" "$DATASETS/dataset_mP.parquet"; do
     if [ ! -f "$f" ]; then
@@ -48,7 +68,7 @@ for f in "$MANIFEST" "$DATASETS/dataset_cP.parquet" "$DATASETS/dataset_mP.parque
         exit 1
     fi
 done
-sha256sum "$MANIFEST"      # compare with `docs/sync_record.sh checksum` on the laptop
+sha256sum "$MANIFEST"      # the record's manifest must match `docs/sync_record.sh checksum`
 
 set -e
 echo "=== prior retrain, 14 lattices, campaign 1's main configuration ==="
@@ -56,8 +76,9 @@ echo "=== prior retrain, 14 lattices, campaign 1's main configuration ==="
     --manifest "$MANIFEST" --datasets-dir "$DATASETS" --models-dir "$MODELS" \
     --artifact-dir "$ARTIFACTS" --tag S14_prior_main14 \
     --limit-per-lattice 0 --per-class 20000 --epochs 30 --n-volumes 128 --n-filters 1024 \
-    --eval-source heldout
+    --eval-source heldout --resume
 
 echo
 echo "DONE. Model at $MODELS/main14/global; artefacts S14_prior_main14_* in $ARTIFACTS"
 echo "Check the .out for the per-epoch lines: every epoch must list 14 lattices (check_balanced)."
+echo "Per-epoch checkpoint: $MODELS/main14/global/history.json holds one entry per finished epoch."
