@@ -613,6 +613,61 @@ def active_lattices(args):
 # -----------------------------------------------------------------------------------------
 # Stage: interface -- the untrained-class defect, before and after
 # -----------------------------------------------------------------------------------------
+VOLUME_READOUTS = ('given_true_lattice', 'given_predicted_lattice', 'lattice_marginal')
+
+
+def volume_readout_table(tables, labels, volume_true, support):
+    """How far each way of reading the prior's volume sits from the true volume, in log volume.
+
+    Three readouts, because a consumer has three: E[log V | true lattice] is the ceiling nobody
+    deployed can read (it needs the truth); E[log V | predicted lattice] is what a consumer reads
+    when it trusts the lattice head; the lattice-marginal is what it reads when it does not. The
+    scale to read the errors against is the failure mode: a wrong winner is a lower-symmetry cell
+    about 20 % smaller than the true one (F-069), so `within_20pct` is the share of patterns where
+    the volume readout can separate the two at all. Per-lattice rows carry the true-lattice readout
+    only, which is the one the per-candidate ratio features of C2-F-152 were built from.
+    """
+    lattices = list(Prior.BRAVAIS_LATTICES)
+    log_true = np.log(np.asarray(volume_true, dtype=float))
+    labels = np.asarray(labels)
+    logv = np.asarray(tables['logv'], dtype=float)
+    lattice_log = np.asarray(tables['bravais_lp'], dtype=float)
+    predicted = np.argmax(np.where(np.isnan(lattice_log), -np.inf, lattice_log), axis=1)
+    rows_index = np.arange(labels.size)
+    errors = {
+        'given_true_lattice': logv[rows_index, labels] - log_true,
+        'given_predicted_lattice': logv[rows_index, predicted] - log_true,
+        'lattice_marginal': np.asarray(tables['logv_marginal'], dtype=float) - log_true,
+        }
+    rows = []
+    for readout in VOLUME_READOUTS:
+        error = errors[readout]
+        finite = np.isfinite(error)
+        held = error[finite]
+        rows.append(dict(
+            readout=readout, bravais_lattice='all', n=int(finite.sum()),
+            n_without_prior=int((~finite).sum()),
+            median_abs_log_error=float(np.median(np.abs(held))) if held.size else float('nan'),
+            within_20pct=float(np.mean(np.abs(held) < np.log(1.2))) if held.size else float('nan'),
+            within_2x=float(np.mean(np.abs(held) < np.log(2.0))) if held.size else float('nan'),
+            median_signed_log_error=float(np.median(held)) if held.size else float('nan'),
+            ))
+    error = errors['given_true_lattice']
+    for index, code in enumerate(lattices):
+        mask = (labels == index) & np.isfinite(error)
+        held = np.abs(error[mask])
+        rows.append(dict(
+            readout='given_true_lattice', bravais_lattice=code, n=int(mask.sum()),
+            n_without_prior=int(((labels == index) & ~np.isfinite(error)).sum()),
+            median_abs_log_error=float(np.median(held)) if held.size else float('nan'),
+            within_20pct=float(np.mean(held < np.log(1.2))) if held.size else float('nan'),
+            within_2x=float(np.mean(held < np.log(2.0))) if held.size else float('nan'),
+            median_signed_log_error=float(np.median(error[mask])) if held.size else float('nan'),
+            in_support=code in set(support),
+            ))
+    return rows
+
+
 def run_interface(args):
     """`S14_prior_interface.csv`: every lattice under every prior dir given, raw head and masked.
 
@@ -632,12 +687,17 @@ def run_interface(args):
     q2 = np.stack(evaluation['q2_obs'].to_numpy()).astype(float)
     counts = np.bincount(labels, minlength=len(Prior.BRAVAIS_LATTICES)).astype(float)
     base_rate = counts/counts.sum()
-    rows = []
+    rows, volume_rows = [], []
     for label, directory in zip(args.interface_labels, args.interface_dirs):
         model = Prior.PriorNetwork.load_prior(directory)
         raw = predict_in_batches(model, q2)
         raw_log = np.asarray(raw['bravais'], dtype=float)
-        masked_log = model.entry_tables(q2, batch_size=256)['bravais_lp']
+        tables = model.entry_tables(q2, batch_size=256)
+        masked_log = tables['bravais_lp']
+        for row in volume_readout_table(tables, labels, evaluation['volume_true'].to_numpy(),
+                                        model.support):
+            row.update(model=label, prior_dir=str(directory), n_evaluation=int(labels.size))
+            volume_rows.append(row)
         for readout, lattice_log in (('raw_head', raw_log), ('support_masked', masked_log)):
             for row in macro_f1_table(np.where(np.isnan(lattice_log), -np.inf, lattice_log),
                                       labels, model.support, base_rate):
@@ -659,7 +719,14 @@ def run_interface(args):
     path = os.path.join(args.artifact_dir, f'{args.tag}_interface.csv')
     out.to_csv(path, index=False)
     print(f'wrote {path}')
-    return out
+    volume = pd.DataFrame(volume_rows)
+    volume_path = os.path.join(args.artifact_dir, f'{args.tag}_volume.csv')
+    volume.to_csv(volume_path, index=False)
+    for _, row in volume[volume.bravais_lattice == 'all'].iterrows():
+        print(f'{row.model:12s} volume {row.readout:24s} median |log V error| '
+              f'{row.median_abs_log_error:.3f}, within 20 % {row.within_20pct:.3f} (n {row.n})')
+    print(f'wrote {volume_path}')
+    return out, volume
 
 
 def build_pools(args):

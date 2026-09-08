@@ -59,6 +59,7 @@ def build(artifact_dir, tag):
     fit_table = _load(artifact_dir, tag, 'fit_table', required=False)
     cost = _load(artifact_dir, tag, 'cost', required=False)
     interface = _load(artifact_dir, 'S14_prior', 'interface', required=False)
+    volume = _load(artifact_dir, 'S14_prior', 'volume', required=False)
     floors = lattice_floors(artifact_dir)
 
     lines = ['# S14 — the neural scoring network', '']
@@ -75,6 +76,7 @@ def build(artifact_dir, tag):
     lines += _answer_rates(rates)
     lines += _calibration(calibration, main)
     lines += _interface(interface)
+    lines += _volume(volume)
     lines += _cost(cost)
     lines += _bounds(main, fit_table)
     return '\n'.join(lines) + '\n'
@@ -401,6 +403,47 @@ def _interface(interface):
                          f'| {row["median_log_probability"]:.2f} | {row["median_rank"]:.0f} | '
                          f'{row["max_probability"]:.2e} |')
         lines.append('')
+    return lines
+
+
+def _volume(volume):
+    lines = ['## The prior\'s volume readout, before and after', '',
+             'The same evaluation frame as the table above. Three readouts, because a consumer has '
+             'three: E[log V | true lattice] needs the truth and is the ceiling; E[log V | predicted '
+             'lattice] is what a consumer reads when it trusts the lattice head; the lattice-marginal '
+             'is what it reads when it does not. Read the errors against the failure mode -- a wrong '
+             'winner of lower symmetry about 20 % smaller than the truth (F-069) -- so `within 20 %` '
+             'is the share of patterns where the volume readout could separate the two at all. The '
+             'per-lattice rows are the true-lattice readout, which the C2-F-152 ratio features were '
+             'built from (C2-F-172).', '']
+    if volume is None:
+        return lines + ['`S14_prior_volume.csv` not present.', '']
+    lines += ['| model | readout | n | no prior | median \\|log V error\\| | as a factor | within 20 % '
+              '| within 2x | median signed |', '|---|---|---|---|---|---|---|---|---|']
+    whole = volume[volume['bravais_lattice'] == 'all']
+    for _, row in whole.iterrows():
+        lines.append(f'| `{row["model"]}` | {row["readout"]} | {int(row["n"])} | '
+                     f'{int(row["n_without_prior"])} | {row["median_abs_log_error"]:.3f} | '
+                     f'x{np.exp(row["median_abs_log_error"]):.2f} | {_pp(row["within_20pct"])} | '
+                     f'{_pp(row["within_2x"])} | {row["median_signed_log_error"]:+.3f} |')
+    lines.append('')
+    per = volume[volume['bravais_lattice'] != 'all']
+    models = list(dict.fromkeys(per['model']))
+    lines += ['| lattice | ' + ' | '.join(f'`{model}` median \\|log V error\\|' for model in models)
+              + ' | ' + ' | '.join(f'`{model}` within 20 %' for model in models) + ' |',
+              '|---|' + '---|'*(2*len(models))]
+    for lattice, group in per.groupby('bravais_lattice', sort=False):
+        by_model = group.set_index('model')
+        errors = ' | '.join(
+            f'{by_model.loc[m, "median_abs_log_error"]:.3f}'
+            if m in by_model.index and np.isfinite(by_model.loc[m, "median_abs_log_error"])
+            else '--' for m in models)
+        within = ' | '.join(
+            f'{_pp(by_model.loc[m, "within_20pct"])}'
+            if m in by_model.index and np.isfinite(by_model.loc[m, "within_20pct"])
+            else '--' for m in models)
+        lines.append(f'| {lattice} | {errors} | {within} |')
+    lines.append('')
     return lines
 
 

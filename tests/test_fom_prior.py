@@ -638,3 +638,37 @@ def test_epoch_rng_is_a_pure_function_of_seed_and_epoch():
     other = driver.epoch_rng(5, 4).random(4)
     assert np.array_equal(first, again)
     assert not np.array_equal(first, other)
+
+
+def test_volume_readout_table_measures_each_readout_against_the_truth():
+    """Three readouts, one truth; a lattice with no prior (NaN) is counted, not averaged in."""
+    import sys
+    sys.path.insert(0, os.path.join(REPOSITORY, 'mlindex', 'scripts'))
+    import run_fom_prior as driver
+
+    n_lattices = len(Prior.BRAVAIS_LATTICES)
+    truth = np.array([0, 3, 3, 13])                       # cP, tP, tP, aP
+    volume_true = np.array([100.0, 200.0, 400.0, 800.0])
+    logv = np.tile(np.log(volume_true)[:, None], (1, n_lattices))
+    logv[:, 3] += np.log(1.5)                             # the tP column is 50 % high everywhere
+    logv[0, :] = np.nan                                   # the cP pattern has no volume readout
+    lattice_log = np.full((4, n_lattices), np.log(0.01))
+    lattice_log[np.arange(4), [0, 3, 13, 13]] = np.log(0.9)   # third pattern predicted aP, not tP
+    lattice_log[0, :] = np.nan
+    tables = {'logv': logv, 'bravais_lp': lattice_log,
+              'logv_marginal': np.log(volume_true) + np.array([np.nan, 0.0, 0.0, np.log(1.1)])}
+    rows = driver.volume_readout_table(tables, truth, volume_true, support=('tP', 'aP'))
+    by = {(r['readout'], r['bravais_lattice']): r for r in rows}
+
+    true_row = by[('given_true_lattice', 'all')]
+    assert true_row['n'] == 3 and true_row['n_without_prior'] == 1
+    assert np.isclose(true_row['median_abs_log_error'], np.log(1.5))   # tP, tP, aP -> 0.405, 0.405, 0
+    assert np.isclose(true_row['within_20pct'], 1/3)
+    pred_row = by[('given_predicted_lattice', 'all')]
+    assert np.isclose(pred_row['median_abs_log_error'], 0.0)          # tP, aP(read exact), aP
+    marg_row = by[('lattice_marginal', 'all')]
+    assert np.isclose(marg_row['within_20pct'], 1.0)
+    assert by[('given_true_lattice', 'cP')]['n'] == 0
+    assert by[('given_true_lattice', 'cP')]['n_without_prior'] == 1
+    assert by[('given_true_lattice', 'tP')]['in_support'] is True
+    assert by[('given_true_lattice', 'cP')]['in_support'] is False
