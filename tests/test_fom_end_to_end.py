@@ -415,9 +415,10 @@ def test_the_decided_pair_is_shown_beside_the_rules_pick():
 # ---------------------------------------------------------------------------------------------
 def test_the_variants_change_one_setting_each_and_never_a_reserved_key():
     from mlindex.scripts.run_fom_dump import RESERVED_OPT_PARAMS
-    assert set(E2E.VARIANTS) == {'_mask', '_nofilter', '_posterior'}
+    assert set(E2E.VARIANTS) == {'_mask', '_nofilter', '_posterior', '_mask95'}
+    assert E2E.VARIANTS['_mask95']['opt_params']['assignment_threshold'] == '0.95'
     for suffix, spec in E2E.VARIANTS.items():
-        assert suffix.startswith('_') and spec['question'] in ('C2-Q-020', 'C2-Q-021')
+        assert suffix.startswith('_') and spec['question'] in ('C2-Q-020', 'C2-Q-021', 'C2-Q-034')
         assert not set(spec['opt_params']) & set(RESERVED_OPT_PARAMS)
         # The values travel as strings and are parsed as JSON by run_fom_dump on the way in.
         assert all(isinstance(v, str) for v in spec['opt_params'].values())
@@ -430,6 +431,7 @@ def test_the_variants_change_one_setting_each_and_never_a_reserved_key():
     for reference, arm in E2E.VARIANT_CONTRASTS:
         assert reference in ('',) + tuple(E2E.VARIANTS) and arm in E2E.VARIANTS
     assert ('_nofilter', '_mask') in E2E.VARIANT_CONTRASTS
+    assert ('_mask', '_mask95') in E2E.VARIANT_CONTRASTS
     names = E2E.variant_arm_names('hard')
     assert names[''] == 'hard' and names['_mask'] == 'hard_mask'
 

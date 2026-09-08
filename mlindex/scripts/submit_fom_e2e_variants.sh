@@ -19,6 +19,9 @@
 #                                                                          peak filter in refine_cell
 #   _nofilter   assignment_threshold=0.0                                   C2-Q-021: no peak filter;
 #                                                                          the live contrast
+#   _mask95     assignment_statistic=posterior assignment_threshold=0.95   C2-Q-034: the posterior
+#                                                                          filter at rho's nominal
+#                                                                          threshold (tasks 6-7)
 #   _posterior  hkl_source=posterior                                       C2-Q-020: the analytic
 #                                                                          posterior in place of the
 #                                                                          IntegralFilter's network
@@ -48,7 +51,7 @@
 #SBATCH --mail-type=ALL
 #SBATCH -A lcls
 #SBATCH -t 6:00:00
-#SBATCH --array=0-5
+#SBATCH --array=0-7
 #SBATCH -o fom_e2e_var_%A_%a.out
 
 PYTHON=/global/cfs/cdirs/m4064/dwmoreau/envs/onnx/bin/python
@@ -67,8 +70,11 @@ NPOOLS=64
 POOLSIZE=2
 PROCESSES=64
 
-VARIANTS=(_mask _nofilter _posterior _mask _nofilter _posterior)
-POPULATIONS=(general general general hard hard hard)
+# Tasks 0-5 ran on 2026-09-07. Tasks 6-7 (added 2026-09-08, C2-Q-034: the posterior filter at
+# rho's own nominal threshold) are submitted alone with `sbatch --array=6-7 <this script>`; a
+# full re-submit would regenerate nothing (existing bundles are skipped) but would re-reduce.
+VARIANTS=(_mask _nofilter _posterior _mask _nofilter _posterior _mask95 _mask95)
+POPULATIONS=(general general general hard hard hard general hard)
 VARIANT=${VARIANTS[$SLURM_ARRAY_TASK_ID]}
 POPULATION=${POPULATIONS[$SLURM_ARRAY_TASK_ID]}
 ENTRIES="$ARTIFACTS/S15_entries_${POPULATION}.csv"
@@ -76,6 +82,7 @@ case "$VARIANT" in
     _mask)      OPTS=(--opt-param assignment_statistic=posterior --opt-param assignment_threshold=0.99) ;;
     _nofilter)  OPTS=(--opt-param assignment_threshold=0.0) ;;
     _posterior) OPTS=(--opt-param hkl_source=posterior) ;;
+    _mask95)    OPTS=(--opt-param assignment_statistic=posterior --opt-param assignment_threshold=0.95) ;;
     *) echo "FATAL: unknown variant $VARIANT" >&2; exit 1 ;;
 esac
 

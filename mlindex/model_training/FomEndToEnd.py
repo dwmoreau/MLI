@@ -853,6 +853,11 @@ VARIANTS = {
                   opt_params={'assignment_statistic': 'posterior', 'assignment_threshold': '0.99'}),
     '_nofilter': dict(question='C2-Q-021', label='no peak filter (every peak refined on)',
                       opt_params={'assignment_threshold': '0.0'}),
+    # Added 2026-09-08 (DWMM, C2-Q-034): at 0.99 the posterior admits about as many peaks as a
+    # hard cell has free parameters (aP 7.3 for 6, mC/mP 7.3-8.0 for 4, `S18_admitted_peaks_hard.csv`),
+    # so the step is barely determined. 0.95 is `rho`'s own nominal threshold: the matched comparison.
+    '_mask95': dict(question='C2-Q-034', label='posterior peak filter at 0.95 (matched nominal threshold)',
+                    opt_params={'assignment_statistic': 'posterior', 'assignment_threshold': '0.95'}),
     '_posterior': dict(question='C2-Q-020', label='analytic posterior for the peak-assignment network',
                        opt_params={'hkl_source': 'posterior'}),
     }
@@ -863,6 +868,9 @@ VARIANT_CONTRASTS = (
     ('', '_nofilter'),           # shipped filter -> no filter
     ('_nofilter', '_mask'),      # the live contrast: no filter -> posterior filter
     ('', '_posterior'),          # network -> formula
+    ('', '_mask95'),             # shipped filter -> posterior filter at the same nominal threshold
+    ('_nofilter', '_mask95'),    # no filter -> posterior filter at 0.95
+    ('_mask', '_mask95'),        # the posterior filter's threshold: 0.99 -> 0.95
     )
 VARIANT_METRICS = ('top10', 'top1', 'operating_point', 'found')
 MECHANISM_COLUMNS = ('n_other_lattice_above_best_correct', 'n_same_lattice_above_best_correct',
