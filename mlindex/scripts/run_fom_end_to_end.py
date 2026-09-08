@@ -1123,7 +1123,53 @@ def run_variants(args):
         frame.to_csv(artifact_dir/f'{tag}_variant_{name}{suffix}.csv', index=False)
         out[name] = frame
         print(f'{name}: {frame.shape[0]} rows')
+    _variants_figure(args, out['contrasts'])
     _variants_report(args, design, cut, out)
+
+
+def _variants_figure(args, contrasts):
+    """Top-10 delta with its bootstrap interval, one panel per population, one row per contrast
+    pair, one marker per merit; the floor drawn as a band. `S18_filter_under_merit.png`."""
+    if contrasts.shape[0] == 0:
+        return
+    from mlindex.model_training.FomHoldoutReport import _style
+    plt = _style()
+    sub = contrasts.loc[(contrasts['pool_subset'] == 'in_top_n') & (contrasts['scope'] == 'aggregate')
+                        & (contrasts['metric'] == 'top10')].copy()
+    if sub.empty:
+        return
+    populations = [p for p in E2E.POPULATIONS if p in set(sub['population'])]
+    fig, panels = plt.subplots(1, len(populations), figsize=(5.6*len(populations), 3.8), squeeze=False)
+    offsets = {'M20': -0.22, 'M_sym': 0.0, 'plus_probation': 0.22}
+    for ax, population in zip(panels[0], populations):
+        rows = sub.loc[sub['population'] == population]
+        pairs = list(dict.fromkeys(zip(rows['reference_arm'], rows['arm'])))
+        labels = [f'{r.replace(population, "") or "shipped"} -> {a.replace(population, "")}' for r, a in pairs]
+        floor = float(rows['floor_pp'].iloc[0])
+        ax.axvspan(-floor, floor, color='#dddddd', alpha=0.6, label='contrast floor (+/- 1 se)')
+        ax.axvline(0, color='black', linewidth=0.8)
+        for y, (reference, arm) in enumerate(pairs):
+            for merit, dy in offsets.items():
+                line = rows.loc[(rows['reference_arm'] == reference) & (rows['arm'] == arm)
+                                & (rows['merit'] == merit)]
+                if line.empty:
+                    continue
+                line = line.iloc[0]
+                ax.errorbar(line['delta_pp'], y + dy,
+                            xerr=[[line['delta_pp'] - line['ci_low_pp']], [line['ci_high_pp'] - line['delta_pp']]],
+                            fmt='o', color=MERIT_COLOURS.get(merit, '#444444'), markersize=5,
+                            capsize=2, label=merit if y == 0 else None)
+        ax.set_yticks(range(len(pairs)))
+        ax.set_yticklabels(labels, fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xlabel('top-10 delta, percentage points (arm minus reference)')
+        ax.set_title(f'{population}: {int(rows["n_entries"].max())} cells, cut {E2E.cut_label(float(args.variant_cut))[3:]}')
+        ax.grid(axis='x', alpha=0.3)
+    panels[0][0].legend(fontsize=8, loc='lower right')
+    fig.tight_layout()
+    path = Path(args.artifact_dir)/f'{E2E.S18_TAG}_filter_under_merit{args.suffix}.png'
+    fig.savefig(path, dpi=160)
+    print(f'-> {path}')
 
 
 def _variants_report(args, design, cut, tables):
@@ -1143,6 +1189,7 @@ def _variants_report(args, design, cut, tables):
                          + ', '.join(f'{a}={b}' for a, b in v['opt_params'].items()) + ')'
                          for k, v in E2E.VARIANTS.items())
     parts = [f'# {tag} - the peak filter and the network replacement, under a merit that can see them', '',
+             f'![top-10 contrasts]({tag}_filter_under_merit{suffix}.png)', '',
              f'**Design:** the S15 arm at cut {cut:g} (`{design["search_seed_scheme"]}`, seed '
              f'{design["seed"]}, optimizer seed {design["optimizer_seed"]}, pool size '
              f'{design["pool_size"]}) with one `opt_params` entry changed per variant arm, over the '
