@@ -783,6 +783,27 @@ SIDECAR_DIRS = {
 NEURAL_ENTRY_FILE = 'prior_entries.parquet'
 
 
+def set_neural_sidecar(name):
+    """Point the per-candidate neural groups AND `neural_covariates` at `<pool>/<name>/`.
+
+    One switch for both, because they must agree: the entry-level prior columns and the
+    per-candidate claimed-pair readout come from one prior network, and reading one from a
+    sidecar written by a different checkpoint would mix two priors in one design matrix with no
+    symptom. Returns the previous name so a caller can restore it. The default, `neural_inputs`,
+    is the sidecar the shipped eleven-lattice prior wrote; a retrained prior writes its own
+    (`run_fom_neural_inputs.py --out-dir <pool>/<name>`) and a fit selects it by name.
+    """
+    previous = SIDECAR_DIRS['prior_claimed']
+    for group in NEURAL_CANDIDATE_GROUPS:
+        SIDECAR_DIRS[group] = str(name)
+    return previous
+
+
+def neural_sidecar():
+    """The directory name the neural groups currently read from."""
+    return SIDECAR_DIRS['prior_claimed']
+
+
 def neural_covariates(pool, entries):
     """`entry_covariates` plus the entry-level block-A columns from `<pool>/neural_inputs/`.
 

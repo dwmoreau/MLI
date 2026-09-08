@@ -72,3 +72,25 @@ def test_reduce_refuses_to_run_without_arms():
 def test_suffix_namespaces_the_models_directory():
     args = driver._parse_args(['--stage', 'fit', '--suffix', '_seed777'])
     assert str(driver.models_directory(args)).endswith('fom_neural_score_seed777')
+
+
+def test_neural_dir_selects_the_sidecar_and_a_mismatched_model_is_refused():
+    from mlindex.model_training import FomCombiner
+    from mlindex.scripts import run_fom_neural_score as driver
+
+    args = driver._parse_args(['--stage', 'fit', '--neural-dir', 'neural_inputs_main14'])
+    try:
+        assert driver.apply_neural_dir(args) == 'neural_inputs_main14'
+        assert FomCombiner.neural_sidecar() == 'neural_inputs_main14'
+
+        class Model:
+            def __init__(self, meta):
+                self.meta = meta
+        driver.check_models_match_neural_dir({'a': Model({'neural_dir': 'neural_inputs_main14'}),
+                                              'b': Model({})}, args)
+        with pytest.raises(SystemExit):
+            driver.check_models_match_neural_dir({'a': Model({'neural_dir': 'neural_inputs'})},
+                                                 args)
+    finally:
+        FomCombiner.set_neural_sidecar('neural_inputs')
+    assert driver._parse_args(['--stage', 'fit']).neural_dir is None

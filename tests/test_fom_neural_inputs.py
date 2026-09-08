@@ -249,3 +249,91 @@ def test_add_prior_ratios_derives_log_ratios_and_reads_the_claimed_lattice():
     assert out['prior_volume_ratio_claimed'].iloc[2] == pytest.approx(np.log(2))
     with pytest.raises(KeyError):
         FomCombiner.add_prior_ratios(frame.drop(columns=['prior_dof_expected']))
+
+
+# ---------------------------------------------------------------------------------------
+# A second prior gets its own sidecar, and only the three prior columns are recomputed
+# ---------------------------------------------------------------------------------------
+def test_set_neural_sidecar_redirects_the_groups_and_the_covariates(tmp_path):
+    import pandas as pd
+
+    previous = FomCombiner.set_neural_sidecar('neural_inputs_other')
+    try:
+        assert previous == 'neural_inputs'
+        assert FomCombiner.neural_sidecar() == 'neural_inputs_other'
+        for group in FomCombiner.NEURAL_CANDIDATE_GROUPS:
+            assert FomCombiner.SIDECAR_DIRS[group] == 'neural_inputs_other'
+        entries = pd.DataFrame(dict(entry_id=['e'], condition_bundle=['c2_x'], q2_obs=[[0.1]*20],
+                                    n_peaks_available=[20], pool_size_full=[10]))
+        columns = {name: [0.5] for name in FomCombiner.PRIOR_ENTRY + FomCombiner.PRIOR_VOLUME
+                   + FomCombiner.PRIOR_SUMMARY}
+        prior = pd.DataFrame(dict(entry_id=['e'], condition_bundle=['c2_x'], **columns))
+        out = tmp_path/'neural_inputs_other'
+        out.mkdir()
+        prior.to_parquet(out/FomCombiner.NEURAL_ENTRY_FILE)
+        covariates = FomCombiner.neural_covariates(tmp_path, entries)
+        assert covariates.shape[0] == 1
+    finally:
+        FomCombiner.set_neural_sidecar(previous)
+    assert FomCombiner.neural_sidecar() == 'neural_inputs'
+    with pytest.raises(FileNotFoundError):
+        FomCombiner.neural_covariates(tmp_path, entries)
+
+
+def test_the_claimed_stage_rewrites_only_the_prior_columns(tmp_path):
+    """Reuse an earlier prior's assignment block; recompute the claimed-pair readout from new tables."""
+    import pandas as pd
+    from mlindex.model_training.PriorNetwork import claimed_pair_readout
+    from mlindex.scripts import run_fom_neural_inputs as writer
+
+    pool = tmp_path
+    n_classes = len(FomBenchmark.BRAVAIS_LATTICES) if hasattr(FomBenchmark, 'BRAVAIS_LATTICES') \
+        else 14
+    keys = dict(entry_id=['e', 'e'], condition_bundle=['c2_x', 'c2_x'],
+                bravais_lattice=['tP', 'aP'], candidate_id=[0, 1])
+    pd.DataFrame(dict(**keys, volume=[300.0, 900.0], M20=[1.0, 2.0])).to_parquet(
+        pool/'candidates_c2_x_tP.parquet')
+    pd.DataFrame(dict(entry_id=['e'], condition_bundle=['c2_x'], q2_obs=[[0.1]*20])).to_parquet(
+        pool/'entries.parquet')
+    old = pool/'neural_inputs'
+    old.mkdir()
+    asg = {name: [0.5, 0.25] for name in FomBenchmark.NEURAL_PEAK_COLUMNS}
+    asg[FomBenchmark.NEURAL_SIGMA_COLUMN] = [-3.0, -2.0]
+    stale = {'prior_joint': [-9.0, -9.0], 'prior_joint_margin': [-1.0, -1.0],
+             'prior_in_support': [1, 1]}
+    pd.DataFrame(dict(**keys, **asg, **stale)).to_parquet(old/'candidates_c2_x_tP.parquet')
+
+    # new entry tables: 4 volume branches, the claimed pairs sit on branches 1 and 3
+    new = pool/'neural_inputs_new'
+    new.mkdir()
+    log_branch_volumes = np.log(np.array([100.0, 300.0, 600.0, 900.0]))
+    joint = np.full((1, 4, n_classes), np.log(0.001))
+    joint[0, 1, 3] = np.log(0.5)         # tP at 300
+    joint[0, 3, 13] = np.log(0.2)        # aP at 900
+    np.savez(new/writer.TABLES_FILE, joint=joint, log_branch_volumes=log_branch_volumes,
+             entry_id=np.array(['e']), condition_bundle=np.array(['c2_x']),
+             support=np.array(['tP', 'aP']), support_defaulted=np.array(False))
+
+    path, rows, requested = writer.reclaim_file(
+        (str(pool/'candidates_c2_x_tP.parquet'), str(new/'candidates_c2_x_tP.parquet'),
+         str(pool), str(new), str(old)))
+    assert rows == 2 and requested == 2
+    written = pd.read_parquet(new/'candidates_c2_x_tP.parquet')
+    assert list(written.columns) == list(pd.read_parquet(old/'candidates_c2_x_tP.parquet').columns)
+    for name in list(FomBenchmark.NEURAL_PEAK_COLUMNS) + [FomBenchmark.NEURAL_SIGMA_COLUMN]:
+        assert np.array_equal(written[name].to_numpy(), np.array(asg[name], dtype=np.float32))
+    expected = claimed_pair_readout(joint, log_branch_volumes, np.array([0, 0]),
+                                    np.array([300.0, 900.0]), np.array([3, 13]))
+    assert np.allclose(written['prior_joint'].to_numpy(), expected['prior_joint'], atol=1e-6)
+    assert np.allclose(written['prior_joint_margin'].to_numpy(), expected['prior_joint_margin'],
+                       atol=1e-6)
+    assert not np.allclose(written['prior_joint'].to_numpy(), [-9.0, -9.0])
+
+    # a sidecar short of its pool is refused rather than copied short
+    pd.DataFrame(dict(**{k: v[:1] for k, v in keys.items()},
+                      **{k: v[:1] for k, v in asg.items()},
+                      **{k: v[:1] for k, v in stale.items()})).to_parquet(
+        old/'candidates_c2_x_tP.parquet')
+    with pytest.raises(SystemExit):
+        writer.reclaim_file((str(pool/'candidates_c2_x_tP.parquet'),
+                             str(new/'candidates_c2_x_tP.parquet'), str(pool), str(new), str(old)))

@@ -247,6 +247,58 @@ def score_file(task):
 
 
 # ---------------------------------------------------------------------------------------
+# Stage 2b: the claimed-pair readout alone, reusing another sidecar's assignment block
+# ---------------------------------------------------------------------------------------
+def reclaim_file(task):
+    """One existing sidecar -> the same rows with the three prior columns recomputed.
+
+    The assignment block (twenty posteriors and log sigma) does not depend on the prior network,
+    and it is the whole cost of the candidate pass -- `assign_lines` and the posterior over 43 M
+    candidates. A retrained prior changes only `NEURAL_CLAIMED_COLUMNS`, which are a table lookup
+    per candidate. So this reads the sidecar an earlier prior wrote, joins each row's claimed
+    (volume, lattice) back from the pool, and rewrites those three columns from the new
+    `prior_joint_tables.npz` in `out_dir`. Every row must be found on both sides, and the row
+    count must match the source file's: a sidecar short of its pool would otherwise be copied
+    short and pass `--verify` on its own count.
+    """
+    from mlindex.model_training.PriorNetwork import claimed_pair_readout
+
+    path, out_path, pool, out_dir, reuse_dir = task
+    tables = load_prior_tables(out_dir)
+    existing = pd.read_parquet(Path(reuse_dir)/Path(path).name)
+    claimed = pq.ParquetFile(path)
+    projection = [name for name in JOIN_KEYS + ('volume',) if name in claimed.schema_arrow.names]
+    candidates = claimed.read(columns=projection).to_pandas()
+    if 'condition_bundle' not in candidates.columns:
+        candidates['condition_bundle'] = FomBenchmark.bundle_from_candidate_path(Path(path))
+    for name in ('entry_id', 'condition_bundle', 'bravais_lattice'):
+        candidates[name] = candidates[name].astype(object)
+        existing[name] = existing[name].astype(object)
+    merged = existing.merge(candidates, on=list(JOIN_KEYS), how='inner', validate='1:1')
+    if merged.shape[0] != existing.shape[0] or merged.shape[0] != candidates.shape[0]:
+        raise SystemExit(
+            f'{Path(path).name}: {existing.shape[0]} sidecar rows, {candidates.shape[0]} pool '
+            f'rows, {merged.shape[0]} matched. The reused sidecar and the pool disagree; recompute '
+            f'the candidate stage in full instead.')
+    lookup = pd.MultiIndex.from_frame(merged[list(ENTRY_KEYS)])
+    rows = tables['index'].get_indexer(lookup)
+    if (rows < 0).any():
+        raise SystemExit(f'{Path(path).name}: {int((rows < 0).sum())} rows belong to entries with '
+                         f'no prior table in {out_dir}; run --stage entries there first')
+    class_index = np.array([BRAVAIS_LATTICES.index(code) for code in merged['bravais_lattice']],
+                           dtype=int)
+    readout = claimed_pair_readout(tables['joint'], tables['log_branch_volumes'], rows,
+                                   merged['volume'].to_numpy(dtype=np.float64), class_index)
+    for name in FomBenchmark.NEURAL_CLAIMED_COLUMNS:
+        merged[name] = np.asarray(readout[name], dtype=np.float32)
+    merged['prior_in_support'] = merged['prior_in_support'].fillna(0).astype(np.int8)
+    merged = merged.drop(columns=['volume'])[list(existing.columns)]
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    merged.to_parquet(out_path, index=False)
+    return path, int(merged.shape[0]), int(merged.shape[0])
+
+
+# ---------------------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------------------
 def verify(pool, out_dir):
@@ -337,7 +389,13 @@ def _parse_args(argv=None):
     parser.add_argument('--pool', type=str, required=True)
     parser.add_argument('--out-dir', type=str, default=None,
                         help=f'Where the sidecars go. Default is <pool>/{OUT_DIRNAME}')
-    parser.add_argument('--stage', choices=('entries', 'candidates', 'all'), default='all')
+    parser.add_argument('--stage', choices=('entries', 'candidates', 'claimed', 'all'),
+                        default='all',
+                        help='`claimed` rewrites only the three prior columns of an existing '
+                             'sidecar (--reuse-from) from the entry tables in --out-dir')
+    parser.add_argument('--reuse-from', type=str, default=None,
+                        help='For --stage claimed: the sidecar directory whose assignment block '
+                             'is reused, e.g. <pool>/neural_inputs')
     parser.add_argument('--prior-dir', type=str, default=DEFAULT_PRIOR_DIR,
                         help='The prior network checkpoint (weights, grid, params). Its recorded '
                              'support decides which lattices read as probabilities')
@@ -392,22 +450,35 @@ def main(argv=None):
     if with_prior and not (out_dir/TABLES_FILE).exists():
         raise SystemExit(f'{out_dir/TABLES_FILE} is missing: run --stage entries first')
 
+    reclaim = args.stage == 'claimed'
+    if reclaim:
+        if not args.reuse_from or not Path(args.reuse_from).is_dir():
+            raise SystemExit('--stage claimed needs --reuse-from <existing sidecar directory>')
+        if Path(args.reuse_from).resolve() == out_dir.resolve():
+            raise SystemExit('--stage claimed must write to a different directory from --reuse-from')
+        meta['reused_assignment_from'] = str(args.reuse_from)
     tasks = []
     for path in sorted(pool.glob('candidates*.parquet')):
         out_path = out_dir/path.name
         if out_path.exists() and not args.overwrite:
             continue
+        if reclaim:
+            if not (Path(args.reuse_from)/path.name).exists():
+                raise SystemExit(f'{args.reuse_from} has no sidecar for {path.name}')
+            tasks.append((str(path), str(out_path), str(pool), str(out_dir), args.reuse_from))
+            continue
         tasks.append((str(path), str(out_path), str(pool), str(out_dir), int(args.chunk_rows),
                       with_prior, tuple(args.keys_from or ())))
+    worker = reclaim_file if reclaim else score_file
     rows_per_file = dict(meta.get('rows_per_file', {}))
     if tasks:
         processes = max(1, min(int(args.processes), len(tasks)))
         print(f'{pool}: scoring {len(tasks)} files over {processes} process(es)')
         if processes == 1:
-            results = map(score_file, tasks)
+            results = map(worker, tasks)
         else:
             handle = Pool(processes)
-            results = handle.imap_unordered(score_file, tasks)
+            results = handle.imap_unordered(worker, tasks)
         for path, rows, requested in results:
             rows_per_file[Path(path).name] = int(rows)
             flag = '' if not args.keys_from or rows == requested else \

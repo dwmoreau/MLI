@@ -224,6 +224,7 @@ def fit_arm(name, kind, groups, drop, weight_column, purpose, fit_frames, cal_fr
     model.meta['arm'] = name
     model.meta['purpose'] = purpose
     model.meta['kind'] = kind
+    model.meta['neural_dir'] = FomCombiner.neural_sidecar()
     directory = models_directory(args)/f'{name}_seed{args.fit_seed}'
     model.save(directory)
     elapsed = time.perf_counter() - started
@@ -232,6 +233,7 @@ def fit_arm(name, kind, groups, drop, weight_column, purpose, fit_frames, cal_fr
     row = dict(arm=name, kind=kind, purpose=purpose, groups='+'.join(groups),
                n_features=len(model.names), dropped=';'.join(sorted(drop)),
                fit_seed=int(args.fit_seed), weight_column=weight_column or 'none',
+               neural_dir=FomCombiner.neural_sidecar(),
                n_rows_fit=int(model.meta['n_rows']), n_positive_fit=int(model.meta['n_positive']),
                n_calibration_rows=int(model.meta['n_calibration_rows']),
                calibrated_lattices=len(model.meta['calibrated_lattices']),
@@ -361,6 +363,7 @@ def load_arms(args):
         if model.meta.get('arm') != name:
             raise SystemExit(f'{path} records arm {model.meta.get("arm")!r}, not {name!r}')
         arms[name] = model
+    check_models_match_neural_dir(arms, args)
     return arms
 
 
@@ -772,6 +775,10 @@ def _parse_args(argv=None):
     parser.add_argument('--report-pool', default=None)
     parser.add_argument('--tree-fullscale', default=str(TREE_FULLSCALE))
     parser.add_argument('--prior-dir', default='mlindex/models/fom_prior/main/global')
+    parser.add_argument('--neural-dir', default=None,
+                        help='Name of the neural-inputs sidecar directory under each pool '
+                             '(default: neural_inputs, the shipped prior). A retrained prior '
+                             'gets its own, and every model records which it was fitted on')
     parser.add_argument('--n-bootstrap', type=int, default=1000)
     parser.add_argument('--hidden', type=int, nargs='+', default=list(NETWORK_PARAMS['hidden']))
     parser.add_argument('--epochs', type=int, default=NETWORK_PARAMS['epochs'])
@@ -787,9 +794,34 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def apply_neural_dir(args):
+    """Select the sidecar every stage reads, and say so; the models then record it."""
+    if getattr(args, 'neural_dir', None):
+        FomCombiner.set_neural_sidecar(args.neural_dir)
+        _log(f'neural inputs read from <pool>/{FomCombiner.neural_sidecar()}/')
+    return FomCombiner.neural_sidecar()
+
+
+def check_models_match_neural_dir(arms, args):
+    """A model fitted on one prior's sidecar must not be scored on another's (C2-F-141's lesson:
+    assert that the thing you namespaced actually moved)."""
+    current = FomCombiner.neural_sidecar()
+    for name, model in arms.items():
+        recorded = model.meta.get('neural_dir')
+        if recorded is None:
+            if args.neural_dir:
+                _log(f'  {name}: records no neural_dir (fitted before the switch existed); it is '
+                     f'scored on {current}')
+            continue
+        if recorded != current:
+            raise SystemExit(f'{name} was fitted on <pool>/{recorded}/ and this run reads '
+                             f'<pool>/{current}/; pass --neural-dir {recorded} or refit')
+
+
 def main(argv=None):
     args = _parse_args(argv)
     Path(args.artifact_dir).mkdir(parents=True, exist_ok=True)
+    apply_neural_dir(args)
     stage = {'fit': run_fit, 'fit-table': run_fit_table, 'reduce': run_reduce,
              'analyse': run_analyse,
              'combine': run_combine, 'calibration': run_calibration, 'cost': run_cost}[args.stage]
