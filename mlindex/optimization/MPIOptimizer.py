@@ -183,7 +183,10 @@ class OptimizerBase:
         # measurement, so skip both rather than trying to track the permutation.
         convergence = self.opt_params['convergence_testing']
         if not convergence:
-            candidates.prune_below_m20()
+            # Behaviour-preserving: 5.0 is prune_below_m20's own default. Reading it from
+            # opt_params is what lets a driver move the threshold via `options`.
+            candidates.prune_below_m20(
+                threshold=self.opt_params.get('prune_m20_threshold', 5.0))
         candidates.refine_cell()
         candidates.standardize_cell()
         if not convergence:

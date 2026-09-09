@@ -43,7 +43,7 @@ class AnalyticOptimizer(OptimizerManager):
         based on the lattice system.
     """
 
-    def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5, n_ref_hkl_guess=5, opt_params=None, seed=12345):
+    def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5, n_ref_hkl_guess=5, opt_params=None, seed=12345, options=None):
         # Basic attributes required by the parent class
         self.bravais_lattice = bravais_lattice
         self.n_peaks_guess = n_peaks_guess
@@ -110,6 +110,13 @@ class AnalyticOptimizer(OptimizerManager):
             }
         else:
             self.opt_params = opt_params
+
+        # `opt_params` replaces the defaults wholesale; `options` merges over whichever
+        # of the two is in force. That is the same three-line idiom the seven
+        # lattice-system factories use, so a driver sets a knob the same way on both paths.
+        if not options is None:
+            for key in options.keys():
+                self.opt_params[key] = options[key]
 
         # Minimal placeholders required for ``run_common``
         self.set_seed(seed)
@@ -211,14 +218,15 @@ class MPAnalyticOptimizer(AnalyticOptimizer):
     _mp_n_ranks = None
 
     def __init__(self, bravais_lattice, comm, n_peaks=10, n_peaks_guess=5,
-                 n_ref_hkl_guess=5, opt_params=None, seed=12345):
+                 n_ref_hkl_guess=5, opt_params=None, seed=12345, options=None):
         self._data_queues = MPAnalyticOptimizer._mp_data_queues
         self._result_queues = MPAnalyticOptimizer._mp_result_queues
         n_ranks = MPAnalyticOptimizer._mp_n_ranks
         # comm arg is ignored; LocalComm lets AnalyticOptimizer.__init__ run without MPI
         super().__init__(bravais_lattice, comm=LocalComm(n_ranks),
                          n_peaks=n_peaks, n_peaks_guess=n_peaks_guess,
-                         n_ref_hkl_guess=n_ref_hkl_guess, opt_params=opt_params, seed=seed)
+                         n_ref_hkl_guess=n_ref_hkl_guess, opt_params=opt_params, seed=seed,
+                         options=options)
         self._init_workers()
 
     def _init_workers(self):
