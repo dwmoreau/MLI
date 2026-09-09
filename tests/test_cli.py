@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -154,3 +155,50 @@ def test_run_ml_aP(test_metadata, tmp_path, models_available, models_dir):
     assert output_file.exists(), "output JSON not written"
 
     _compare_json(output_file, EXPECTED_DIR / "run_ml_aP.json")
+
+
+@pytest.mark.slow
+def test_the_answer_is_repeatable_at_a_fixed_process_count(
+        test_metadata, tmp_path, models_available, models_dir):
+    """A given --nproc must always give the same answer.
+
+    The answer is allowed to change with --nproc: above a certain process count the
+    planner splits a heavy lattice and stripes its candidates, which is worth roughly
+    2x at fourteen processes and is the deliberate trade. What is not allowed is two
+    runs of the same command disagreeing, which is what a benchmark relies on.
+
+    Run at --nproc 8, where the plan does split a lattice, so the striped path is
+    exercised rather than only the one-process-per-group path.
+    """
+    if not models_available:
+        pytest.skip("ML models not available")
+    # Without this the subprocess resolves models itself and a developer with a
+    # downloaded tree tests a different model tree from the one in the checkout.
+    env = {**os.environ, "MLINDEX_MODELS_DIR": str(models_dir)}
+
+    q2 = _aP_q2(test_metadata)
+    peak_file = tmp_path / "aP_q2.npy"
+    np.save(peak_file, q2)
+
+    digests = []
+    for repeat in range(2):
+        run_dir = tmp_path / f"repeat_{repeat}"
+        run_dir.mkdir()
+        cmd = [
+            sys.executable, "-m", "mlindex.command_line.run",
+            "--peak-file", str(peak_file),
+            "--peak-units", "q2",
+            "--nproc", "8",
+            "--seed", "12345",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                cwd=str(run_dir), env=env)
+        assert result.returncode == 0, (
+            f"run {repeat} exited {result.returncode}:\n{result.stderr}")
+        output_file = run_dir / "indexing_results.json"
+        assert output_file.exists(), f"run {repeat} wrote no output"
+        digests.append(hashlib.sha256(output_file.read_bytes()).hexdigest())
+
+    assert digests[0] == digests[1], (
+        "two runs of the same command disagree: "
+        f"{digests[0][:16]} then {digests[1][:16]}")
