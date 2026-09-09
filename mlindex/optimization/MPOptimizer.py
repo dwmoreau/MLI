@@ -269,6 +269,226 @@ def shutdown_mp_workers(processes, task_queues):
         p.join()
 
 
+# Lattice groups: parallelism ACROSS Bravais lattices, not only across candidates.
+#
+# `setup_mp_optimizers` above gives every process the same lattice at once, so only
+# the manager -- the one process holding models -- can generate candidates, and the
+# rest block waiting for it. A group owns a subset of the lattices and holds only
+# their models, so several generate at the same time.
+#
+# The assignment must be static for a whole run: generator streams advance once per
+# pattern, so a lattice has to stay with the same group for every pattern.
+
+
+def _build_group_optimizers(bl_list, group_size, data_queues, result_queues,
+                            broadening_tag, n_candidates_scale, seed, options,
+                            logger=None):
+    """Construct the manager optimizers for one lattice group.
+
+    Only `bl_list` is built, so a group loads only the models it will use:
+    12-222 MB per lattice against 1.29 GB for all fourteen.
+    """
+    from mlindex.optimization.UtilitiesOptimizer import get_optimizers
+    from types import SimpleNamespace
+
+    MPOptimizerManager._mp_data_queues = data_queues
+    MPOptimizerManager._mp_result_queues = result_queues
+    MPOptimizerManager._mp_n_ranks = group_size
+    organizers = {bl: SimpleNamespace(manager=0, workers=list(range(group_size)),
+                                      split_comm=None, color=None)
+                  for bl in bl_list}
+    optimizers = get_optimizers(0, organizers, broadening_tag, n_candidates_scale,
+                                logger=logger, optimizer_class=MPOptimizerManager,
+                                seed=seed, options=options)
+    # Class attributes, so a manager left pointing at a dead group's queues would
+    # be inherited by the next construction in this process.
+    MPOptimizerManager._mp_data_queues = None
+    MPOptimizerManager._mp_result_queues = None
+    MPOptimizerManager._mp_n_ranks = None
+    return optimizers
+
+
+def _group_result(optimizer):
+    """The five arrays `run.py` needs back from a lattice, ready to pickle."""
+    return {
+        'top_unit_cell': optimizer.top_unit_cell,
+        'top_M20': optimizer.top_M20,
+        'top_Minfo': optimizer.top_Minfo,
+        'top_spacegroup': optimizer.top_spacegroup,
+        'top_n_indexed': optimizer.top_n_indexed,
+        }
+
+
+def _mp_group_manager_fn(bl_list, group_size, data_queues, result_queues, task_queues,
+                         control_queue, output_queue, broadening_tag,
+                         n_candidates_scale, seed, options):
+    """Manager process for one lattice group (module level, so spawn can pickle it).
+
+    Holds the models for `bl_list` and drives the group's own refinement workers
+    through `run_mp_bl`; what is new is only that several of these run at once.
+    """
+    try:
+        optimizers = _build_group_optimizers(
+            bl_list, group_size, data_queues, result_queues,
+            broadening_tag, n_candidates_scale, seed, options)
+        output_queue.put(('ready', None))
+        while True:
+            msg = control_queue.get()
+            if msg == 'shutdown':
+                break
+            if msg[0] == 'promote':
+                # Imported here, not at module scope: run.py imports this
+                # module, and cctbx costs a second to import in a process that
+                # may never be asked to promote anything.
+                from mlindex.command_line.run import promote_entries
+                output_queue.put(('promoted', promote_entries(msg[1], delta=msg[2])))
+                continue
+            _, q2, zero_error, wavelength, n_top = msg
+            payload = {}
+            for bl in bl_list:
+                run_mp_bl(optimizers[bl], bl, task_queues, q2=q2,
+                          zero_error=zero_error, wavelength=wavelength,
+                          n_top=n_top)
+                payload[bl] = _group_result(optimizers[bl])
+            output_queue.put(('results', payload))
+    except Exception as e:
+        # Reported rather than raised: the coordinator is blocked on output_queue
+        # and would otherwise wait for a message that never comes.
+        output_queue.put(('error', e))
+    finally:
+        for r in range(1, group_size):
+            task_queues[r].put('shutdown')
+
+
+def setup_lattice_groups(assignment, broadening_tag, n_candidates_scale,
+                         logger=None, seed=12345, options=None):
+    """Spawn one process group per (lattice list, group size) pair in `assignment`.
+
+    The first entry is run by the calling process, so `sum(group_size)` processes do
+    the work and the caller does not idle. Returns (groups, processes).
+    """
+    groups = []
+    processes = []
+    for group_index, (bl_list, group_size) in enumerate(assignment):
+        bl_list = list(bl_list)
+        data_queues = [Queue() for _ in range(group_size)]
+        result_queues = [Queue() for _ in range(group_size)]
+        task_queues = [Queue() for _ in range(group_size)]
+        # Refinement workers first: each blocks in its constructor on the init
+        # tuple the manager's `_init_workers` sends, so the manager cannot be
+        # built until they exist. Daemons, so that an exception anywhere on the
+        # main path takes them down at interpreter exit rather than hanging on a
+        # queue that nobody will fill.
+        for r in range(1, group_size):
+            p = Process(target=_mp_worker_fn,
+                        args=(r, group_size, data_queues[r], result_queues[r],
+                              task_queues[r]),
+                        kwargs={'seed': seed, 'bravais_lattices': bl_list},
+                        daemon=True)
+            p.start()
+            processes.append(p)
+        # data_queues and result_queues are retained here even though only this
+        # group's manager reads them: a Queue is rebuilt from a named semaphore in
+        # the child, and if the parent drops its last reference the semaphore is
+        # reclaimed before the child finishes unpickling. Dropping these keys
+        # brings back `SemLock._rebuild ... FileNotFoundError`.
+        group = {'bravais_lattices': bl_list, 'size': group_size,
+                 'data_queues': data_queues, 'result_queues': result_queues,
+                 'task_queues': task_queues, 'control_queue': None,
+                 'output_queue': None, 'optimizers': None}
+        if group_index == 0:
+            group['optimizers'] = _build_group_optimizers(
+                bl_list, group_size, data_queues, result_queues,
+                broadening_tag, n_candidates_scale, seed, options, logger=logger)
+        else:
+            control_queue = Queue()
+            output_queue = Queue()
+            p = Process(target=_mp_group_manager_fn,
+                        args=(bl_list, group_size, data_queues, result_queues,
+                              task_queues, control_queue, output_queue,
+                              broadening_tag, n_candidates_scale, seed, options),
+                        daemon=True)
+            p.start()
+            processes.append(p)
+            group['control_queue'] = control_queue
+            group['output_queue'] = output_queue
+        groups.append(group)
+
+    # Wait out the model load here rather than inside the first pattern, so a
+    # caller timing patterns is not also timing the load.
+    for group in groups[1:]:
+        tag, payload = group['output_queue'].get()
+        if tag == 'error':
+            raise RuntimeError('Lattice group failed while loading models') from payload
+    return groups, processes
+
+
+def run_lattice_groups(groups, q2, zero_error, wavelength, n_top):
+    """Run one pattern across every group concurrently.
+
+    Returns {bravais_lattice: `_group_result` dict}. There is no per-run seed to
+    pass: every rank re-keys its own generator from the peak list at the top of
+    `OptimizerBase._run_loop`, so a group needs nothing but the pattern itself.
+    """
+    message = ('run', q2, zero_error, wavelength, n_top)
+    for group in groups[1:]:
+        group['control_queue'].put(message)
+
+    results = {}
+    local = groups[0]
+    for bl in local['bravais_lattices']:
+        run_mp_bl(local['optimizers'][bl], bl, local['task_queues'], q2=q2,
+                  zero_error=zero_error, wavelength=wavelength, n_top=n_top)
+        results[bl] = _group_result(local['optimizers'][bl])
+
+    for group in groups[1:]:
+        tag, payload = group['output_queue'].get()
+        if tag == 'error':
+            raise RuntimeError('Lattice group failed during optimization') from payload
+        results.update(payload)
+    return results
+
+
+def promote_over_groups(groups, entries, delta):
+    """Run `run.promote_entries` over `entries`, split across the lattice groups.
+
+    The groups are idle by this point and cctbx holds the GIL, so processes are the
+    only way to overlap this. Entries are dealt out round-robin and reassembled by
+    the same stride, so the promoted list keeps its input order whatever ran it.
+    """
+    n_groups = len(groups)
+    if n_groups < 2 or len(entries) < 2 * n_groups:
+        from mlindex.command_line.run import promote_entries
+        return promote_entries(entries, delta=delta)
+
+    for index, group in enumerate(groups[1:], start=1):
+        group['control_queue'].put(('promote', entries[index::n_groups], delta))
+
+    from mlindex.command_line.run import promote_entries
+    promoted = {0: promote_entries(entries[0::n_groups], delta=delta)}
+    for index, group in enumerate(groups[1:], start=1):
+        tag, payload = group['output_queue'].get()
+        if tag == 'error':
+            raise RuntimeError('Lattice group failed during promotion') from payload
+        promoted[index] = payload
+
+    out = [None] * len(entries)
+    for index in range(n_groups):
+        out[index::n_groups] = promoted[index]
+    return out
+
+
+def shutdown_lattice_groups(groups, processes):
+    """Stop every group manager and refinement worker, then join."""
+    for group in groups[1:]:
+        group['control_queue'].put('shutdown')
+    local = groups[0]
+    for r in range(1, local['size']):
+        local['task_queues'][r].put('shutdown')
+    for p in processes:
+        p.join()
+
+
 def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue,
                            bravais_lattices, fom=None, seed=12345):
     workers = {}
