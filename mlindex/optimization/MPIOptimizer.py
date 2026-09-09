@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import numpy as np
 import scipy.spatial
 
@@ -67,6 +68,19 @@ def _downsample_chunk(args):
             n_indexed_chunk[order], [spacegroup_chunk[i] for i in order])
 
 
+def q2_digest(q2_obs):
+    """Stable short digest of a peak list.
+
+    Eight bytes of blake2b over the peak list itself. It identifies the pattern
+    without needing an entry identifier, which matters because the optimizer is
+    handed peaks and is never told which entry they came from. The dtype is pinned
+    little-endian so the digest of a peak list is the same number on every machine.
+    """
+    return hashlib.blake2b(
+        np.ascontiguousarray(q2_obs, dtype='<f8').tobytes(), digest_size=8
+        ).hexdigest()
+
+
 class OptimizerBase:
     def __init__(self, comm, fom):
         self.comm = comm
@@ -84,6 +98,37 @@ class OptimizerBase:
         self.zero_error = False
         self.wavelength = None
 
+    def set_seed(self, seed):
+        """Seed the search, keeping the seed itself.
+
+        The raw seed is kept, not just the generator built from it, because the
+        search re-derives a generator from it for every pattern -- see
+        _reseed_for_pattern.
+        """
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
+
+    def _reseed_for_pattern(self):
+        """Re-key the search generator to the pattern about to be indexed.
+
+        Without this, one generator serves every pattern a process ever sees and
+        advances through all of them, so what a pattern gets depends on what ran
+        before it. Two consequences, both measured: a benchmark cannot be
+        regenerated in subsets, because a 243-entry run meets the generators at
+        different states from a 5 955-entry one; and the same pattern in two runs
+        of different length gets two different searches.
+
+        The key is the peak list, the Bravais lattice and the rank -- not an entry
+        identifier, which the optimizer is never given. Every rank derives the same
+        key from `q2_obs`, which it already holds by this point, so no worker
+        protocol changes.
+        """
+        key = f'search:{q2_digest(self.q2_obs)}:{self.bravais_lattice}:{self.rank}'
+        # `hash()` will not do here: it is salted per process, so it would give a
+        # different seed for the same pattern on every run.
+        digest = hashlib.sha256(f'{self.seed}:{key}'.encode()).digest()
+        self.rng = np.random.default_rng(int.from_bytes(digest[:8], 'big'))
+
     def generate_candidates_common(self, xnn_rank):
         candidates = Candidates(
             q2_obs=self.q2_obs,
@@ -100,6 +145,7 @@ class OptimizerBase:
         return candidates
 
     def _run_loop(self, n_top_candidates):
+        self._reseed_for_pattern()
         candidates = self.generate_candidates_rank()
         if self.opt_params['redistribution_testing']:
             return None
@@ -163,7 +209,7 @@ class OptimizerWorker(OptimizerBase):
         self.hkl_ref = None
         self.n_peaks = None
         self.hkl_ref_length = None
-        self.rng = np.random.default_rng(seed)
+        self.set_seed(seed)
         super().__init__(comm, fom)
 
     def run(self, entry=None, q2=None, n_top_candidates=20, zero_error=False, wavelength=None):
@@ -212,7 +258,7 @@ class OptimizerManager(OptimizerBase):
         self.random_params = random_params
         self.template_params = template_params
         self.bravais_lattice = bravais_lattice
-        self.rng = np.random.default_rng(seed)
+        self.set_seed(seed)
 
         opt_params_defaults = {
             'minimum_uc': 2,
@@ -235,7 +281,7 @@ class OptimizerManager(OptimizerBase):
             template_params=self.template_params,
             integral_filter_params=self.integral_filter_params,
             random_params=self.random_params,
-            seed=12345,
+            seed=seed,
             )
         self.wrapper.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
         if self.opt_params['convergence_testing'] == False:

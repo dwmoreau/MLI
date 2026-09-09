@@ -112,7 +112,7 @@ class AnalyticOptimizer(OptimizerManager):
             self.opt_params = opt_params
 
         # Minimal placeholders required for ``run_common``
-        self.rng = np.random.default_rng(seed)
+        self.set_seed(seed)
 
         self.comm = comm
         self.rank = comm.Get_rank()

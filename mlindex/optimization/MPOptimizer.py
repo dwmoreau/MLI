@@ -138,7 +138,7 @@ class MPOptimizerWorker(OptimizerWorker):
         self.rank = rank
         self.n_ranks = n_ranks
         self.fom = fom
-        self.rng = np.random.default_rng(seed)
+        self.set_seed(seed)
         self.zero_error = False
         self.wavelength = None
         # Receive init tuple sent by MPOptimizerManager._init_workers()
