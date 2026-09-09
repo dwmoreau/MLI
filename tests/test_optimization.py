@@ -504,3 +504,29 @@ def test_every_lattice_has_a_cost_entry():
     assert sorted(_BL_COST) == sorted(BRAVAIS_LATTICES)
     for bl, cost in _BL_COST.items():
         assert len(cost) == 2 and all(c >= 0 for c in cost), f"{bl}: {cost}"
+
+
+def test_the_cost_table_measurement_script_still_matches_the_optimizer():
+    """`measure_bl_cost` times two methods by name; a rename must fail loudly here.
+
+    The script wraps `_generate_candidates_xnn` and `_run_loop` on an optimizer
+    instance to separate the cost that divides with group size from the cost that
+    does not. Both are private, so nothing else would notice them being renamed --
+    and the script would then either crash mid-measurement or, worse, silently
+    report zero for a phase that had moved.
+    """
+    from mlindex.optimization.MPIOptimizer import OptimizerBase, OptimizerManager
+
+    assert hasattr(OptimizerManager, '_generate_candidates_xnn'), (
+        "measure_bl_cost times OptimizerManager._generate_candidates_xnn by name")
+    assert hasattr(OptimizerBase, '_run_loop'), (
+        "measure_bl_cost times OptimizerBase._run_loop by name")
+
+
+def test_the_cost_table_measurement_script_names_real_patterns():
+    """Its default patterns must exist, or the script fails only once run."""
+    from mlindex.scripts.measure_bl_cost import DEFAULT_PATTERNS, _test_data_dir
+
+    for name in DEFAULT_PATTERNS:
+        path = _test_data_dir().joinpath(name, f"{name}_peak_list.npy")
+        assert path.is_file(), f"default pattern {name} is missing at {path}"
