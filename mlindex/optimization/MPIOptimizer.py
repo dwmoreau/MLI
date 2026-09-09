@@ -68,19 +68,6 @@ def _downsample_chunk(args):
             n_indexed_chunk[order], [spacegroup_chunk[i] for i in order])
 
 
-def q2_digest(q2_obs):
-    """Stable short digest of a peak list.
-
-    Eight bytes of blake2b over the peak list itself. It identifies the pattern
-    without needing an entry identifier, which matters because the optimizer is
-    handed peaks and is never told which entry they came from. The dtype is pinned
-    little-endian so the digest of a peak list is the same number on every machine.
-    """
-    return hashlib.blake2b(
-        np.ascontiguousarray(q2_obs, dtype='<f8').tobytes(), digest_size=8
-        ).hexdigest()
-
-
 class OptimizerBase:
     def __init__(self, comm, fom):
         self.comm = comm
@@ -118,16 +105,19 @@ class OptimizerBase:
         different states from a 5 955-entry one; and the same pattern in two runs
         of different length gets two different searches.
 
-        The key is the peak list, the Bravais lattice and the rank -- not an entry
-        identifier, which the optimizer is never given. Every rank derives the same
-        key from `q2_obs`, which it already holds by this point, so no worker
-        protocol changes.
+        The key is the peak list itself, with the Bravais lattice and the rank -- not
+        an entry identifier, which the optimizer is never given. Every rank derives
+        the same key from `q2_obs`, which it already holds by this point, so no
+        worker protocol changes.
+
+        `hash()` will not do for this: it is salted per process, so the same pattern
+        would get a different seed on every run. The dtype is pinned little-endian so
+        the seed for a peak list is the same number on every machine.
         """
-        key = f'search:{q2_digest(self.q2_obs)}:{self.bravais_lattice}:{self.rank}'
-        # `hash()` will not do here: it is salted per process, so it would give a
-        # different seed for the same pattern on every run.
-        digest = hashlib.sha256(f'{self.seed}:{key}'.encode()).digest()
-        self.rng = np.random.default_rng(int.from_bytes(digest[:8], 'big'))
+        key = hashlib.sha256()
+        key.update(np.ascontiguousarray(self.q2_obs, dtype='<f8').tobytes())
+        key.update(f':{self.bravais_lattice}:{self.rank}:{self.seed}'.encode())
+        self.rng = np.random.default_rng(int.from_bytes(key.digest()[:8], 'big'))
 
     def generate_candidates_common(self, xnn_rank):
         candidates = Candidates(

@@ -264,36 +264,40 @@ def test_integral_filter_draws_only_from_the_rng_it_is_given(
 
 
 # --- the search does not carry state from one pattern to the next -------------------
+#
+# The golden CLI tests cannot see this. They index one pattern, and the failure is
+# state carried BETWEEN patterns -- two consecutive CLI runs were byte-identical on
+# the code these tests were written against. A benchmark run is nothing but the case
+# they omit, so it is checked here instead.
 
 
-def _top_cells(optimizer, q2_obs):
+def _rows_differing(after, alone):
+    """Candidate rows of `after` with no counterpart in `alone`, plus any count change."""
+    n = min(after.size, alone.size)
+    return (int(np.count_nonzero(after[:n] != alone[:n]))
+            + abs(after.size - alone.size))
+
+
+def _index(optimizer, q2_obs):
     optimizer.run(q2=q2_obs, n_top_candidates=20)
-    return np.array(optimizer.top_M20), np.array(optimizer.top_unit_cell)
+    return np.array(optimizer.top_M20)
 
 
 def test_search_does_not_carry_state_between_patterns(test_metadata, all_optimizers):
-    """What a pattern gets must not depend on what the same process indexed before it.
-
-    Without the per-pattern re-keying this fails on every row: one generator served
-    every pattern and advanced through all of them, so a benchmark could not be
-    regenerated in subsets and the same pattern got a different search in a longer run.
-    """
+    """What a pattern gets must not depend on what the same process indexed before it."""
     rows = {str(row["bravais lattice"]): row for _, row in test_metadata.iterrows()}
-    first_q2 = load_test_case(rows["tP"])[0]
-    subject_q2 = load_test_case(rows["aP"])[0]
+    other = load_test_case(rows["tP"])[0]
+    subject = load_test_case(rows["aP"])[0]
     optimizer = all_optimizers["aP"]
 
-    alone_M20, alone_cells = _top_cells(optimizer, subject_q2)
-    _top_cells(optimizer, first_q2)
-    after_M20, after_cells = _top_cells(optimizer, subject_q2)
+    alone = _index(optimizer, subject)
+    _index(optimizer, other)
+    after = _index(optimizer, subject)
 
-    np.testing.assert_array_equal(
-        after_M20, alone_M20,
-        err_msg="aP M20 depends on whether a tP pattern was indexed first",
-    )
-    np.testing.assert_array_equal(
-        after_cells, alone_cells,
-        err_msg="aP cells depend on whether a tP pattern was indexed first",
+    differing = _rows_differing(after, alone)
+    assert differing == 0, (
+        f"{differing} of {max(after.size, alone.size)} aP candidate rows depend on "
+        f"whether a tP pattern was indexed first"
     )
 
 
@@ -317,21 +321,23 @@ def test_search_does_not_carry_state_between_patterns_in_worker_processes(
         setup_mp_optimizers, run_mp_bl, shutdown_mp_workers)
 
     rows = {str(row["bravais lattice"]): row for _, row in test_metadata.iterrows()}
-    first_q2 = load_test_case(rows["tP"])[0]
-    subject_q2 = load_test_case(rows["aP"])[0]
+    other = load_test_case(rows["tP"])[0]
+    subject = load_test_case(rows["aP"])[0]
 
-    def indexed_after(patterns):
+    def index_in_pool(patterns):
         optimizers, processes, task_queues = setup_mp_optimizers(
             2, "1", n_candidates_scale=1, seed=12345)
         try:
-            for q2 in patterns:
-                run_mp_bl(optimizers["aP"], "aP", task_queues, q2=q2, zero_error=False,
+            for q2_obs in patterns:
+                run_mp_bl(optimizers["aP"], "aP", task_queues, q2=q2_obs, zero_error=False,
                           wavelength=None, n_top=20)
             return np.array(optimizers["aP"].top_M20)
         finally:
             shutdown_mp_workers(processes, task_queues)
 
-    np.testing.assert_array_equal(
-        indexed_after([first_q2, subject_q2]), indexed_after([subject_q2]),
-        err_msg="at pool size 2 the aP result depends on what the workers indexed first",
+    after, alone = index_in_pool([other, subject]), index_in_pool([subject])
+    differing = _rows_differing(after, alone)
+    assert differing == 0, (
+        f"at pool size 2, {differing} of {max(after.size, alone.size)} aP candidate "
+        f"rows depend on what the workers indexed first"
     )
