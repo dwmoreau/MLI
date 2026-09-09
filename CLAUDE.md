@@ -6,6 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MLINDEX is a powder diffraction indexing program. Given a list of observed diffraction peaks, it returns candidate unit cells ranked by the de Wolff M20 figure of merit. ML models initialize candidate unit cells for each Bravais lattice; candidates are then refined by least-squares optimization.
 
+## How to make changes (required for all edits)
+
+These rules outrank convenience. Each was written down because this repository has paid for
+ignoring it.
+
+**Fix it upstream, not downstream.** When a value is wrong where it is used, change where it comes
+from. Reaching in from outside to correct another object's state is a band-aid: it leaves the
+original defect in place for the next caller, and the correction has to be remembered at every
+future call site. Prefer the smaller, higher change to the larger, lower one.
+
+**Reuse what exists; no redundancy.** One behaviour has one implementation and one call site.
+Before adding a function, look for the one that already does it. If a change appears to need the
+same call repeated in several subclass overrides, it belongs at the point those overrides share --
+a call added to three of four overrides is a bug that has not happened yet, and this repository
+has shipped exactly that twice.
+
+**A function that draws random numbers takes its generator as a required argument.** No `rng=None`
+default: a default has to invent an unseeded generator, so a caller who forgets one gets a result
+that cannot be reproduced, and no error.
+
 ## Installation
 
 ```bash

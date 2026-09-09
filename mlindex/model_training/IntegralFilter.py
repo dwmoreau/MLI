@@ -20,7 +20,7 @@ from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
 class IntegralFilter:
-    def __init__(self, split_group, data_params, model_params, save_to, seed, hkl_ref):
+    def __init__(self, split_group, data_params, model_params, save_to, hkl_ref):
         self.split_group = split_group
         self.data_params = data_params
         self.model_params = model_params
@@ -32,8 +32,6 @@ class IntegralFilter:
         self.save_to_split_group = os.path.join(self.save_to, split_group)
         if not os.path.exists(self.save_to_split_group):
             os.mkdir(self.save_to_split_group)
-        self.seed = seed
-        self.rng = np.random.default_rng(self.seed)
         self.lattice_system = self.data_params['lattice_system']
         self.hkl_ref = hkl_ref
 
@@ -845,7 +843,7 @@ class IntegralFilter:
             ))
         plt.close()
 
-    def predict_xnn(self, top_n, data=None, inputs=None, q2_obs=None, batch_size=None):
+    def predict_xnn(self, top_n, rng, data=None, inputs=None, q2_obs=None, batch_size=None):
         if not data is None:
             q2_obs = np.stack(data['q2'])[:, :self.model_params['peak_length']]
         elif not inputs is None:
@@ -899,7 +897,7 @@ class IntegralFilter:
             xnn_pred_top_n[:, index, :] = fix_unphysical(
                 xnn=xnn_pred_top_n[:, index, :],
                 lattice_system=self.data_params['lattice_system'],
-                rng=self.rng
+                rng=rng
                 )
         return xnn_pred_top_n, softmax_pred_top_n
 
@@ -964,7 +962,7 @@ class IntegralFilter:
             )
 
         if top_n > n_unit_cells:
-            xnn_gen, _ = self.predict_xnn(n_unit_cells, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
+            xnn_gen, _ = self.predict_xnn(n_unit_cells, rng, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
             xnn_gen = xnn_gen[0]
             q2_ref_calc = q2_calculator.get_q2(xnn_gen)
             hkl_assign = fast_assign(q2_obs, q2_ref_calc)
@@ -977,7 +975,7 @@ class IntegralFilter:
 
             # If top_n == 5, then self.predict_xnn generates 5 unit cells
             # xnn_pred: 1, top_n, unit_cell_length
-            xnn_pred, _ = self.predict_xnn(top_n, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
+            xnn_pred, _ = self.predict_xnn(top_n, rng, q2_obs=q2_obs[np.newaxis], batch_size=batch_size)
             xnn_pred = xnn_pred[0]
             xnn_gen[:top_n] = xnn_pred
             q2_ref_calc = q2_calculator.get_q2(xnn_pred)
@@ -1006,7 +1004,7 @@ class IntegralFilter:
             )
         target_function.update(hkl, xnn_gen)
         xnn_gen += target_function.gauss_newton_step(xnn_gen)
-        xnn_gen = fix_unphysical(xnn=xnn_gen, rng=self.rng, lattice_system=self.lattice_system)
+        xnn_gen = fix_unphysical(xnn=xnn_gen, rng=rng, lattice_system=self.lattice_system)
         unit_cell_gen = get_unit_cell_from_xnn(
             xnn_gen, partial_unit_cell=True, lattice_system=self.lattice_system
             )

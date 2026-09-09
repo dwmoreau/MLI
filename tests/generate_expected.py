@@ -19,6 +19,9 @@ from pathlib import Path
 # Paths
 # ---------------------------------------------------------------------------
 
+sys.path.insert(0, str(Path(__file__).parent))
+from conftest import resolve_models_dir
+
 REPO_ROOT = Path(__file__).parent.parent
 EXPECTED_DIR = Path(__file__).parent / "expected"
 TEST_DATA_DIR = REPO_ROOT / "mlindex" / "data" / "test_data"
@@ -208,7 +211,6 @@ def generate_model_training_expected(test_metadata):
     from mlindex.optimization.MPOptimizer import LocalComm
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     from mlindex.optimization.UtilitiesOptimizer import (
-        _resolve_models_dir,
         get_cubic_optimizer,
         get_hexagonal_optimizer,
         get_rhombohedral_optimizer,
@@ -220,7 +222,12 @@ def generate_model_training_expected(test_metadata):
 
     print("Loading ML models ...")
     comm = LocalComm(1)
-    models_dir = _resolve_models_dir()
+    # The same tree the tests pin to. Bare _resolve_models_dir() searches
+    # MLINDEX_MODELS_DIR, then $XDG_DATA_HOME/mlindex/models, then the package -- so on a
+    # machine that has ever run mlindex.download_models it silently regenerates every
+    # fixture against a possibly older release than the checkout. It did exactly that
+    # here, replacing all ten candidates in all fourteen integral_filter fixtures.
+    models_dir = resolve_models_dir()
     bl_to_factory = {
         "cF": get_cubic_optimizer,
         "cI": get_cubic_optimizer,
@@ -341,9 +348,9 @@ def generate_cli_expected(test_metadata):
             "--seed",
             "12345",
         ]
-        # Pin the subprocess to the repository's own model tree, as tests/conftest.py's
-        # `models_dir` fixture does: the expected file is versioned with these models.
-        env = {**os.environ, "MLINDEX_MODELS_DIR": str(Path(__file__).parent.parent / "mlindex" / "models")}
+        # Pin the subprocess to the same tree, so both halves of this script and the
+        # tests agree: the expected file is versioned with these models.
+        env = {**os.environ, "MLINDEX_MODELS_DIR": str(resolve_models_dir())}
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp, env=env)
         if r.returncode != 0:
             print(f"run ML failed:\n{r.stderr}")

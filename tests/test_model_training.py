@@ -214,3 +214,130 @@ def test_candidate_matcher_rejects_a_real_regression():
     # So is a change in how many candidates come back.
     with pytest.raises(AssertionError):
         _assert_candidates_match(expected[:9], expected, "wrong count")
+
+
+# --- the generators own no randomness of their own ---------------------------------
+
+
+def _generator_is_stateless(call, q2_obs):
+    """True if `call(rng, q2_obs)` depends on `rng` and on nothing the object carries.
+
+    Draw once, then run the generator again on a different stream so that anything it
+    keeps internally has moved on, then draw a third time from a stream identical to
+    the first. If the object holds no randomness of its own, the first and third
+    results are identical.
+    """
+    first = call(np.random.default_rng(7), q2_obs)
+    call(np.random.default_rng(999), q2_obs)
+    third = call(np.random.default_rng(7), q2_obs)
+    return np.array_equal(first, third)
+
+
+def test_mi_templates_draws_only_from_the_rng_it_is_given(
+    unique_test_metadata, all_optimizers
+):
+    """`generate` took an rng and then reached for `self.rng` further down its own
+    call chain, so the second call below left the third one drawing from a different
+    stream than the first. That is how random state leaked between patterns."""
+    for q2_obs, unit_cell, wavelength, bl, lattice_system in _cases(unique_test_metadata):
+        templator = all_optimizers[bl].wrapper.miller_index_templator[bl]
+        assert _generator_is_stateless(
+            lambda rng, q2: templator.generate(N_GENERATE, rng, q2), q2_obs
+        ), f"mi_templates {bl}: output depends on state the object carries, not on its rng"
+
+
+def test_integral_filter_draws_only_from_the_rng_it_is_given(
+    unique_test_metadata, all_optimizers
+):
+    for q2_obs, unit_cell, wavelength, bl, lattice_system in _cases(unique_test_metadata):
+        opt = all_optimizers[bl]
+        generator = opt.wrapper.integral_filter_generator[
+            opt.wrapper.data_params["split_groups"][0]
+        ]
+        assert not hasattr(generator, "rng"), (
+            "IntegralFilter should hold no generator of its own; everything it draws "
+            "comes from the rng its caller passes in"
+        )
+        assert _generator_is_stateless(
+            lambda rng, q2: generator.generate(N_GENERATE, rng, q2, batch_size=2), q2_obs
+        ), f"integral_filter {bl}: output depends on state the object carries, not on its rng"
+
+
+# --- the search does not carry state from one pattern to the next -------------------
+#
+# The golden CLI tests cannot see this. They index one pattern, and the failure is
+# state carried BETWEEN patterns -- two consecutive CLI runs were byte-identical on
+# the code these tests were written against. A benchmark run is nothing but the case
+# they omit, so it is checked here instead.
+
+
+def _rows_differing(after, alone):
+    """Candidate rows of `after` with no counterpart in `alone`, plus any count change."""
+    n = min(after.size, alone.size)
+    return (int(np.count_nonzero(after[:n] != alone[:n]))
+            + abs(after.size - alone.size))
+
+
+def _index(optimizer, q2_obs):
+    optimizer.run(q2=q2_obs, n_top_candidates=20)
+    return np.array(optimizer.top_M20)
+
+
+def test_search_does_not_carry_state_between_patterns(test_metadata, all_optimizers):
+    """What a pattern gets must not depend on what the same process indexed before it."""
+    rows = {str(row["bravais lattice"]): row for _, row in test_metadata.iterrows()}
+    other = load_test_case(rows["tP"])[0]
+    subject = load_test_case(rows["aP"])[0]
+    optimizer = all_optimizers["aP"]
+
+    alone = _index(optimizer, subject)
+    _index(optimizer, other)
+    after = _index(optimizer, subject)
+
+    differing = _rows_differing(after, alone)
+    assert differing == 0, (
+        f"{differing} of {max(after.size, alone.size)} aP candidate rows depend on "
+        f"whether a tP pattern was indexed first"
+    )
+
+
+@pytest.mark.slow
+def test_search_does_not_carry_state_between_patterns_in_worker_processes(
+    test_metadata, models_available, models_dir, monkeypatch
+):
+    """The same property with a real worker pool, which is where it was broken before.
+
+    Campaign 2's equivalent gates all ran at pool size one, where the manager is the
+    only rank -- so a scheme that could not work in a worker process at all went
+    unnoticed for weeks. Multiprocessing is the mode benchmarks generate in.
+    """
+    if not models_available:
+        pytest.skip("ML models not available")
+    # Spawned workers resolve models on their own, so they need this in the environment
+    # they inherit -- and monkeypatch puts it back afterwards rather than leaving it set
+    # for every test that follows.
+    monkeypatch.setenv("MLINDEX_MODELS_DIR", str(models_dir))
+    from mlindex.optimization.MPOptimizer import (
+        setup_mp_optimizers, run_mp_bl, shutdown_mp_workers)
+
+    rows = {str(row["bravais lattice"]): row for _, row in test_metadata.iterrows()}
+    other = load_test_case(rows["tP"])[0]
+    subject = load_test_case(rows["aP"])[0]
+
+    def index_in_pool(patterns):
+        optimizers, processes, task_queues = setup_mp_optimizers(
+            2, "1", n_candidates_scale=1, seed=12345)
+        try:
+            for q2_obs in patterns:
+                run_mp_bl(optimizers["aP"], "aP", task_queues, q2=q2_obs, zero_error=False,
+                          wavelength=None, n_top=20)
+            return np.array(optimizers["aP"].top_M20)
+        finally:
+            shutdown_mp_workers(processes, task_queues)
+
+    after, alone = index_in_pool([other, subject]), index_in_pool([subject])
+    differing = _rows_differing(after, alone)
+    assert differing == 0, (
+        f"at pool size 2, {differing} of {max(after.size, alone.size)} aP candidate "
+        f"rows depend on what the workers indexed first"
+    )

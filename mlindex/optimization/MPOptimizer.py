@@ -138,7 +138,7 @@ class MPOptimizerWorker(OptimizerWorker):
         self.rank = rank
         self.n_ranks = n_ranks
         self.fom = fom
-        self.rng = np.random.default_rng(seed)
+        self.set_seed(seed)
         self.zero_error = False
         self.wavelength = None
         # Receive init tuple sent by MPOptimizerManager._init_workers()
@@ -190,11 +190,16 @@ def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None,
         result_queue.put(e)
 
 
-def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345):
+def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345,
+                        options=None):
     """Spawn worker processes and construct manager optimizers for all 14 BLs.
 
     Returns (optimizers, processes, task_queues).
     Call shutdown_mp_workers(processes, task_queues) when done.
+
+    `options` is merged into every lattice's opt_params by the factories. Workers need
+    no separate delivery: _init_workers ships the merged opt_params, so whatever a
+    driver sets here reaches every rank.
     """
     from mlindex.optimization.UtilitiesOptimizer import get_optimizers
     import mlindex
@@ -226,7 +231,8 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
                      for bl in bravais_lattices}
 
     optimizers = get_optimizers(0, mp_organizers, broadening_tag, n_candidates_scale,
-                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed)
+                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed,
+                                options=options)
 
     # Clean up class-level injection
     MPOptimizerManager._mp_data_queues   = None
@@ -270,11 +276,14 @@ def _mp_analytic_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue,
         result_queue.put(e)
 
 
-def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_lattices, seed=12345):
+def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_lattices, seed=12345,
+                                 options=None):
     """Spawn worker processes and construct MPAnalyticOptimizer managers for the given BLs.
 
     Returns (optimizers, processes, task_queues).
     Call shutdown_mp_workers(processes, task_queues) when done.
+
+    `options` is merged over the analytic defaults, matching setup_mp_optimizers.
     """
     from mlindex.optimization.AnalyticOptimizer import MPAnalyticOptimizer
 
@@ -305,6 +314,7 @@ def setup_mp_analytic_optimizers(n_procs, n_peaks, n_ref_hkl_guess, bravais_latt
             n_peaks=n_peaks,
             n_ref_hkl_guess=n_ref_hkl_guess[bl],
             seed=seed,
+            options=options,
         )
 
     # Clean up class-level injection

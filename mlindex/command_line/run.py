@@ -88,7 +88,10 @@ def build_base_parser(description="Start the display application"):
         "--seed",
         type=int,
         default=12345,
-        help="Random seed for reproducibility (default: 12345)",
+        # ASCII only: piping --help on Windows encodes through the locale codepage.
+        help=("Seed for the candidate search (default: 12345). Runs with the same seed, "
+              "peak list and process count give identical results; there is normally no "
+              "reason to change it."),
     )
     return parser
 

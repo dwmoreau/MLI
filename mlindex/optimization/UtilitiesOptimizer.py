@@ -756,7 +756,15 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     return optimizer
 
 
-def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, logger=None, optimizer_class=None, seed=12345):
+def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, logger=None, optimizer_class=None, seed=12345, options=None):
+    """Build one optimizer per Bravais lattice this rank manages.
+
+    `options` is a flat dict merged over each lattice's `opt_params` after the
+    defaults are built, which is how a driver script reaches settings that are
+    deliberately not command-line flags -- they are research knobs, not user
+    controls. The seven per-system factories already accept and merge it; this
+    threads it through to them.
+    """
     from mlindex.optimization.MPIOptimizer import OptimizerWorker
 
     models_dir = _resolve_models_dir()
@@ -778,6 +786,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     mpi_organizers[bravais_lattice].split_comm,
                     project_path,
                     fom,
+                    options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
                     models_directory=models_dir,
@@ -790,6 +799,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     mpi_organizers[bravais_lattice].split_comm,
                     project_path,
                     fom,
+                    options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
                     models_directory=models_dir,
@@ -802,6 +812,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     mpi_organizers[bravais_lattice].split_comm,
                     project_path,
                     fom,
+                    options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
                     models_directory=models_dir,
@@ -814,6 +825,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     mpi_organizers[bravais_lattice].split_comm,
                     project_path,
                     fom,
+                    options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
                     models_directory=models_dir,
@@ -826,6 +838,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     mpi_organizers[bravais_lattice].split_comm,
                     project_path,
                     fom,
+                    options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
                     models_directory=models_dir,
@@ -838,6 +851,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     mpi_organizers[bravais_lattice].split_comm,
                     project_path,
                     fom,
+                    options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
                     models_directory=models_dir,
@@ -850,6 +864,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     mpi_organizers[bravais_lattice].split_comm,
                     project_path,
                     fom,
+                    options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
                     models_directory=models_dir,

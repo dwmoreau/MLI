@@ -231,3 +231,41 @@ def test_factories_pass_models_dir_into_data_params(monkeypatch, fake_models_dir
     )
     assert captured["models_directory"] == fake_models_dir
     assert captured["tag"] == "cubic_1"
+
+
+def test_options_reach_opt_params(monkeypatch, fake_models_dir):
+    """`options` is how a driver reaches settings that are deliberately not CLI flags.
+
+    They are research knobs, not user controls, so they travel through opt_params
+    rather than argparse. Checked at both entry points a driver can use, with a
+    FakeManager so neither ONNX nor cctbx is needed.
+    """
+    from types import SimpleNamespace
+    from mlindex.optimization import UtilitiesOptimizer as uo
+
+    captured = {}
+
+    class FakeManager:
+        def __init__(self, data_params, opt_params, *args, **kwargs):
+            captured.clear()
+            captured.update(opt_params)
+
+    monkeypatch.setenv("MLINDEX_MODELS_DIR", str(fake_models_dir))
+
+    uo.get_cubic_optimizer(
+        "cP", "1", 1, comm=None, project_path=None,
+        options={"prune_m20_threshold": 1.5, "a_knob_nobody_has_added_yet": "x"},
+        optimizer_class=FakeManager,
+        models_directory=uo._resolve_models_dir(),
+    )
+    assert captured["prune_m20_threshold"] == 1.5
+    assert captured["a_knob_nobody_has_added_yet"] == "x"
+    # A key the factory sets itself is still there; options merges, it does not replace.
+    assert "generator_info" in captured
+
+    organizers = {"cP": SimpleNamespace(manager=0, workers=[0], split_comm=None, color=None)}
+    uo.get_optimizers(
+        0, organizers, "1", 1, optimizer_class=FakeManager,
+        options={"prune_m20_threshold": 2.5},
+    )
+    assert captured["prune_m20_threshold"] == 2.5

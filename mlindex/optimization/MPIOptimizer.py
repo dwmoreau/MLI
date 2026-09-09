@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import numpy as np
 import scipy.spatial
 
@@ -84,6 +85,40 @@ class OptimizerBase:
         self.zero_error = False
         self.wavelength = None
 
+    def set_seed(self, seed):
+        """Seed the search, keeping the seed itself.
+
+        The raw seed is kept, not just the generator built from it, because the
+        search re-derives a generator from it for every pattern -- see
+        _reseed_for_pattern.
+        """
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
+
+    def _reseed_for_pattern(self):
+        """Re-key the search generator to the pattern about to be indexed.
+
+        Without this, one generator serves every pattern a process ever sees and
+        advances through all of them, so what a pattern gets depends on what ran
+        before it. Two consequences, both measured: a benchmark cannot be
+        regenerated in subsets, because a 243-entry run meets the generators at
+        different states from a 5 955-entry one; and the same pattern in two runs
+        of different length gets two different searches.
+
+        The key is the peak list itself, with the Bravais lattice and the rank -- not
+        an entry identifier, which the optimizer is never given. Every rank derives
+        the same key from `q2_obs`, which it already holds by this point, so no
+        worker protocol changes.
+
+        `hash()` will not do for this: it is salted per process, so the same pattern
+        would get a different seed on every run. The dtype is pinned little-endian so
+        the seed for a peak list is the same number on every machine.
+        """
+        key = hashlib.sha256()
+        key.update(np.ascontiguousarray(self.q2_obs, dtype='<f8').tobytes())
+        key.update(f':{self.bravais_lattice}:{self.rank}:{self.seed}'.encode())
+        self.rng = np.random.default_rng(int.from_bytes(key.digest()[:8], 'big'))
+
     def generate_candidates_common(self, xnn_rank):
         candidates = Candidates(
             q2_obs=self.q2_obs,
@@ -100,6 +135,7 @@ class OptimizerBase:
         return candidates
 
     def _run_loop(self, n_top_candidates):
+        self._reseed_for_pattern()
         candidates = self.generate_candidates_rank()
         if self.opt_params['redistribution_testing']:
             return None
@@ -137,7 +173,10 @@ class OptimizerBase:
         # measurement, so skip both rather than trying to track the permutation.
         convergence = self.opt_params['convergence_testing']
         if not convergence:
-            candidates.prune_below_m20()
+            # Behaviour-preserving: 5.0 is prune_below_m20's own default. Reading it from
+            # opt_params is what lets a driver move the threshold via `options`.
+            candidates.prune_below_m20(
+                threshold=self.opt_params.get('prune_m20_threshold', 5.0))
         candidates.refine_cell()
         candidates.standardize_cell()
         if not convergence:
@@ -163,7 +202,7 @@ class OptimizerWorker(OptimizerBase):
         self.hkl_ref = None
         self.n_peaks = None
         self.hkl_ref_length = None
-        self.rng = np.random.default_rng(seed)
+        self.set_seed(seed)
         super().__init__(comm, fom)
 
     def run(self, entry=None, q2=None, n_top_candidates=20, zero_error=False, wavelength=None):
@@ -212,7 +251,7 @@ class OptimizerManager(OptimizerBase):
         self.random_params = random_params
         self.template_params = template_params
         self.bravais_lattice = bravais_lattice
-        self.rng = np.random.default_rng(seed)
+        self.set_seed(seed)
 
         opt_params_defaults = {
             'minimum_uc': 2,
@@ -235,7 +274,7 @@ class OptimizerManager(OptimizerBase):
             template_params=self.template_params,
             integral_filter_params=self.integral_filter_params,
             random_params=self.random_params,
-            seed=12345,
+            seed=seed,
             )
         self.wrapper.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
         if self.opt_params['convergence_testing'] == False:
@@ -292,7 +331,7 @@ class OptimizerManager(OptimizerBase):
             if generator_info['generator'] == 'integral_filter':
                 if generator_info['split_group'] == split_group:
                     xnn_pred, prob = self.wrapper.integral_filter_generator[split_group].predict_xnn(
-                        top_n, q2_obs=q2[np.newaxis], batch_size=2
+                        top_n, self.rng, q2_obs=q2[np.newaxis], batch_size=2
                         )
             elif generator_info['generator'] == 'templates':
                 template_unit_cells = self.wrapper.miller_index_templator[self.bravais_lattice].generate(

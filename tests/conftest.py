@@ -87,8 +87,7 @@ def models_available(models_dir):
     return models_dir is not None
 
 
-@pytest.fixture(scope="session")
-def models_dir():
+def resolve_models_dir():
     """The model tree the expected/ fixtures were generated against.
 
     Prefer the repository's own mlindex/models over whatever
@@ -114,6 +113,11 @@ def models_dir():
         return _resolve_models_dir()
     except (FileNotFoundError, ImportError):
         return None
+
+
+@pytest.fixture(scope="session")
+def models_dir():
+    return resolve_models_dir()
 
 
 def pytest_addoption(parser):
