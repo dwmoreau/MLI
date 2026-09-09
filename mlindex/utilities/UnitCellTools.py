@@ -422,15 +422,17 @@ def get_hkl_matrix(hkl, lattice_system):
 
 
 def fix_unphysical(
+    rng,
     xnn=None,
     unit_cell=None,
-    rng=None,
     lattice_system=None,
     minimum_unit_cell=2,
     maximum_unit_cell=500,
 ):
-    if rng is None:
-        rng = np.random.default_rng()
+    # `rng` is required, and deliberately has no default. A default would have to
+    # invent an unseeded generator, and a caller who forgot to pass one would then get
+    # a silently irreproducible result rather than a TypeError. Every other function in
+    # this package that draws random numbers takes its generator the same way.
     if not xnn is None:
         if lattice_system == "triclinic":
             return fix_unphysical_triclinic(
@@ -492,14 +494,12 @@ def fix_unphysical(
 
 
 def fix_unphysical_triclinic(
-    xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500
+    rng, xnn=None, unit_cell=None, minimum_unit_cell=2, maximum_unit_cell=500
 ):
     """
     The purpose of this function is to ensure that RANDOMLY GENERATED triclinic unit cells are physically
     possible. This should not be used on known unit cells
     """
-    if rng is None:
-        rng = np.random.default_rng()
 
     if not xnn is None:
 
@@ -717,10 +717,8 @@ def fix_unphysical_triclinic(
 
 
 def fix_unphysical_rhombohedral(
-    xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500
+    rng, xnn=None, unit_cell=None, minimum_unit_cell=2, maximum_unit_cell=500
 ):
-    if rng is None:
-        rng = np.random.default_rng()
 
     if not xnn is None:
         if xnn.shape[1] != 2:
@@ -782,10 +780,8 @@ def fix_unphysical_rhombohedral(
 
 
 def fix_unphysical_box(
-    xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500
+    rng, xnn=None, unit_cell=None, minimum_unit_cell=2, maximum_unit_cell=500
 ):
-    if rng is None:
-        rng = np.random.default_rng()
     if not xnn is None:
         xnn = np.abs(xnn)
         zero = xnn == 0
@@ -813,10 +809,8 @@ def fix_unphysical_box(
 
 
 def fix_unphysical_monoclinic(
-    xnn=None, unit_cell=None, rng=None, minimum_unit_cell=2, maximum_unit_cell=500
+    rng, xnn=None, unit_cell=None, minimum_unit_cell=2, maximum_unit_cell=500
 ):
-    if rng is None:
-        rng = np.random.default_rng()
     if not xnn is None:
         xnn[:, :3] = np.abs(xnn[:, :3])
         zero = xnn[:, :3] == 0

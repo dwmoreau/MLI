@@ -8,26 +8,23 @@ MLINDEX is a powder diffraction indexing program. Given a list of observed diffr
 
 ## How to make changes (required for all edits)
 
-These two rules outrank convenience, and both were written down because this repository has paid
-for ignoring them.
+These rules outrank convenience. Each was written down because this repository has paid for
+ignoring it.
 
 **Fix it upstream, not downstream.** When a value is wrong where it is used, change where it comes
 from. Reaching in from outside to correct another object's state is a band-aid: it leaves the
 original defect in place for the next caller, and the correction has to be remembered at every
 future call site. Prefer the smaller, higher change to the larger, lower one.
 
-*The worked example.* `MITemplates.generate` and `IntegralFilter.generate` each accept an `rng`
-argument and then, further down their own call chain, fell back to a `self.rng` they had built at
-construction. So the search leaked random state from one pattern to the next and the same peak
-list did not give the same answer twice. The band-aid is to overwrite those attributes from the
-optimizer between patterns; the fix is to pass the `rng` those methods already accepted down to
-where it is used. The second is smaller, and it is the one that stays fixed.
-
 **Reuse what exists; no redundancy.** One behaviour has one implementation and one call site.
 Before adding a function, look for the one that already does it. If a change appears to need the
 same call repeated in several subclass overrides, it belongs at the point those overrides share --
 a call added to three of four overrides is a bug that has not happened yet, and this repository
 has shipped exactly that twice.
+
+**A function that draws random numbers takes its generator as a required argument.** No `rng=None`
+default: a default has to invent an unseeded generator, so a caller who forgets one gets a result
+that cannot be reproduced, and no error.
 
 ## Installation
 
