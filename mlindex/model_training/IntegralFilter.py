@@ -20,7 +20,7 @@ from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
 class IntegralFilter:
-    def __init__(self, split_group, data_params, model_params, save_to, seed, hkl_ref):
+    def __init__(self, split_group, data_params, model_params, save_to, hkl_ref):
         self.split_group = split_group
         self.data_params = data_params
         self.model_params = model_params
@@ -32,7 +32,6 @@ class IntegralFilter:
         self.save_to_split_group = os.path.join(self.save_to, split_group)
         if not os.path.exists(self.save_to_split_group):
             os.mkdir(self.save_to_split_group)
-        self.seed = seed
         self.lattice_system = self.data_params['lattice_system']
         self.hkl_ref = hkl_ref
 

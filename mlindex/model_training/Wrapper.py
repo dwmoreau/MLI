@@ -1047,7 +1047,6 @@ class Wrapper:
                 self.data_params,
                 self.integral_filter_params[split_group],
                 self.save_to['integral_filter'],
-                self.random_seed,
                 self.hkl_ref[bravais_lattice]
                 )
             if self.integral_filter_params[split_group]['load_from_tag']:
@@ -1091,7 +1090,6 @@ class Wrapper:
                 self.data_params,
                 self.integral_filter_params[split_group],
                 self.save_to['integral_filter'],
-                self.random_seed,
                 self.hkl_ref[bravais_lattice]
                 )
             generator.load_from_tag(mode='inference' if quantitized_model else 'training')
