@@ -299,7 +299,7 @@ def test_search_does_not_carry_state_between_patterns(test_metadata, all_optimiz
 
 @pytest.mark.slow
 def test_search_does_not_carry_state_between_patterns_in_worker_processes(
-    test_metadata, models_available, models_dir
+    test_metadata, models_available, models_dir, monkeypatch
 ):
     """The same property with a real worker pool, which is where it was broken before.
 
@@ -309,8 +309,10 @@ def test_search_does_not_carry_state_between_patterns_in_worker_processes(
     """
     if not models_available:
         pytest.skip("ML models not available")
-    import os
-    os.environ.setdefault("MLINDEX_MODELS_DIR", str(models_dir))
+    # Spawned workers resolve models on their own, so they need this in the environment
+    # they inherit -- and monkeypatch puts it back afterwards rather than leaving it set
+    # for every test that follows.
+    monkeypatch.setenv("MLINDEX_MODELS_DIR", str(models_dir))
     from mlindex.optimization.MPOptimizer import (
         setup_mp_optimizers, run_mp_bl, shutdown_mp_workers)
 
