@@ -5,6 +5,10 @@ from mlindex.optimization.MPIOptimizer import OptimizerManager, OptimizerWorker
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 
 
+BRAVAIS_LATTICES_ALL = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                        'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+
+
 class LocalComm:
     """Dummy MPI communicator for use during MPOptimizerManager.__init__ only.
 
@@ -166,14 +170,22 @@ class MPOptimizerWorker(OptimizerWorker):
         self._result_q.put({'M20': candidates.best_M20, 'xnn': candidates.best_xnn})
 
 
-def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None, seed=12345):
+def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None, seed=12345,
+                  bravais_lattices=None):
     """Module-level worker function (picklable for macOS spawn start method).
 
-    Builds all 14 MPOptimizerWorker objects at startup (reusing imports across
-    all Bravais lattices), then loops waiting for task signals.
+    Builds one MPOptimizerWorker per Bravais lattice at startup (reusing imports
+    across all of them), then loops waiting for task signals.
+
+    `bravais_lattices` must list the lattices in the SAME ORDER the manager
+    constructs them: each worker constructor drains one init tuple from the
+    shared data queue, so a different order silently pairs a worker with another
+    lattice's hkl_ref. Default None means all 14, which is what
+    `setup_mp_optimizers` builds; `setup_lattice_groups` passes its group's own
+    subset, and `get_optimizers` iterates the organizer dict in insertion order.
     """
-    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
-                        'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+    if bravais_lattices is None:
+        bravais_lattices = list(BRAVAIS_LATTICES_ALL)
     workers = {}
     try:
         for bl in bravais_lattices:
@@ -224,8 +236,7 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
     MPOptimizerManager._mp_result_queues = result_queues
     MPOptimizerManager._mp_n_ranks       = n_procs
 
-    bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
-                        'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+    bravais_lattices = list(BRAVAIS_LATTICES_ALL)
     mp_organizers = {bl: SimpleNamespace(manager=0, workers=list(range(n_procs)),
                                          split_comm=None, color=None)
                      for bl in bravais_lattices}
