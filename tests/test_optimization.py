@@ -407,3 +407,126 @@ def test_best_cell_and_best_score_describe_the_same_candidate_after_repair():
     assert differing == 0, f"{differing} candidates whose stored cell does not give their score"
 
 
+def _allocation_lattices():
+    from mlindex.command_line.run import BRAVAIS_LATTICES
+
+    return list(BRAVAIS_LATTICES)
+
+
+def test_every_requested_lattice_is_allocated_exactly_once():
+    """A lattice dropped from the plan is a lattice that never gets indexed.
+
+    _run_mp reads its results dict by lattice name, so a missing one is a KeyError
+    after all the work, and a duplicated one is the same lattice searched twice.
+    """
+    from mlindex.command_line.run import allocate_lattice_groups
+
+    all_bl = _allocation_lattices()
+    for n_procs in range(1, 21):
+        for requested in (all_bl, all_bl[:1], all_bl[:5]):
+            plan = allocate_lattice_groups(requested, n_procs)
+            allocated = [bl for bl_list, _ in plan for bl in bl_list]
+            assert sorted(allocated) == sorted(requested), (
+                f"n_procs={n_procs}, requested={requested}: got {allocated}")
+
+
+def test_the_plan_never_asks_for_more_processes_than_it_was_given():
+    from mlindex.command_line.run import allocate_lattice_groups
+
+    all_bl = _allocation_lattices()
+    for n_procs in range(1, 21):
+        plan = allocate_lattice_groups(all_bl, n_procs)
+        used = sum(group_size for _, group_size in plan)
+        assert used <= n_procs, f"n_procs={n_procs}: plan uses {used}"
+        assert all(group_size >= 1 for _, group_size in plan)
+
+
+def test_more_processes_never_make_the_plan_slower():
+    """The regression that motivated dropping the no-split rule.
+
+    Refusing to split a lattice until every lattice had its own process left the
+    predicted makespan flat at 9.87 s from eight processes through fourteen -- six
+    processes that bought nothing, because nothing can beat mP running alone -- and
+    then halved it at fifteen. The planner must be free to split, so that each added
+    process is worth at least as much as the last.
+    """
+    from mlindex.command_line.run import allocate_lattice_groups, _group_cost
+
+    all_bl = _allocation_lattices()
+    previous = None
+    for n_procs in range(1, 25):
+        plan = allocate_lattice_groups(all_bl, n_procs)
+        makespan = max(_group_cost(bl_list, size) for bl_list, size in plan)
+        if previous is not None:
+            assert makespan <= previous + 1e-9, (
+                f"n_procs={n_procs} is slower than {n_procs - 1}: "
+                f"{makespan:.2f} vs {previous:.2f}")
+        previous = makespan
+
+
+def test_cheap_lattices_share_a_process_and_expensive_ones_are_split():
+    """cI and cP cost 0.01 s; mP costs 9.87 s and is the makespan on its own.
+
+    Giving each of the fourteen its own process wastes most of them. At fourteen the
+    planner should be pooling the cheap lattices and spending what it saves on mP.
+    """
+    from mlindex.command_line.run import allocate_lattice_groups
+
+    plan = allocate_lattice_groups(_allocation_lattices(), 14)
+    sizes = {bl: size for bl_list, size in plan for bl in bl_list}
+    shared = {bl for bl_list, _ in plan for bl in bl_list if len(bl_list) > 1}
+
+    assert sizes['mP'] > 1, f"the heaviest lattice was not split: {plan}"
+    assert {'cI', 'cP'} <= shared, (
+        f"the two cheapest lattices each took a whole process: {plan}")
+
+
+def test_the_heaviest_group_comes_first_because_the_caller_runs_it():
+    """setup_lattice_groups runs group 0 in the calling process and spawns the rest.
+
+    If group 0 were not the heaviest, the caller would finish early and sit idle
+    while a spawned group was still going.
+    """
+    from mlindex.command_line.run import allocate_lattice_groups, _group_cost
+
+    all_bl = _allocation_lattices()
+    for n_procs in (2, 4, 8, 14, 18):
+        plan = allocate_lattice_groups(all_bl, n_procs)
+        costs = [_group_cost(bl_list, group_size) for bl_list, group_size in plan]
+        assert costs == sorted(costs, reverse=True), f"n_procs={n_procs}: {costs}"
+
+
+def test_every_lattice_has_a_cost_entry():
+    """allocate_lattice_groups indexes _BL_COST directly, so a missing key is a
+    KeyError at startup rather than a bad plan."""
+    from mlindex.command_line.run import BRAVAIS_LATTICES, _BL_COST
+
+    assert sorted(_BL_COST) == sorted(BRAVAIS_LATTICES)
+    for bl, cost in _BL_COST.items():
+        assert len(cost) == 2 and all(c >= 0 for c in cost), f"{bl}: {cost}"
+
+
+def test_the_cost_table_measurement_script_still_matches_the_optimizer():
+    """`measure_bl_cost` times two methods by name; a rename must fail loudly here.
+
+    The script wraps `_generate_candidates_xnn` and `_run_loop` on an optimizer
+    instance to separate the cost that divides with group size from the cost that
+    does not. Both are private, so nothing else would notice them being renamed --
+    and the script would then either crash mid-measurement or, worse, silently
+    report zero for a phase that had moved.
+    """
+    from mlindex.optimization.MPIOptimizer import OptimizerBase, OptimizerManager
+
+    assert hasattr(OptimizerManager, '_generate_candidates_xnn'), (
+        "measure_bl_cost times OptimizerManager._generate_candidates_xnn by name")
+    assert hasattr(OptimizerBase, '_run_loop'), (
+        "measure_bl_cost times OptimizerBase._run_loop by name")
+
+
+def test_the_cost_table_measurement_script_names_real_patterns():
+    """Its default patterns must exist, or the script fails only once run."""
+    from mlindex.scripts.measure_bl_cost import DEFAULT_PATTERNS, _test_data_dir
+
+    for name in DEFAULT_PATTERNS:
+        path = _test_data_dir().joinpath(name, f"{name}_peak_list.npy")
+        assert path.is_file(), f"default pattern {name} is missing at {path}"
