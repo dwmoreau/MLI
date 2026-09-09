@@ -30,21 +30,27 @@ _BL_MPI6_CFG = {
 }
 
 
-# Per-lattice cost in seconds, measured on a 20-peak pattern with one process, as
-# (gen, par). `gen` is candidate generation, which runs on a group's manager alone
-# because only the manager holds models, so it does not divide by group size; `par`
-# is the refinement loop, which does. A group of `k` processes owning lattice set S
-# costs sum(gen) + sum(par)/k.
+# Per-lattice cost in seconds, as (gen, par). `gen` is candidate generation, which
+# runs on a group's manager alone because only the manager holds models, so it does
+# not divide by group size; `par` is the refinement loop, which does. A group of `k`
+# processes owning lattice set S costs sum(gen) + sum(par)/k.
 #
-# The table only has to rank lattices, not predict wall clock on a given machine.
-# Checked against the shipped code at --nproc 1/2/4: mP measured 9.81/6.22/4.35
-# against 9.87/6.15/4.29 predicted, and eleven of twelve such points agree to 0.15 s.
+# Measured by `python -m mlindex.scripts.measure_bl_cost`, which times
+# _generate_candidates_xnn and _run_loop directly. Re-run it to retune for a machine
+# whose balance differs; it reports whether any allocation would actually change.
+#
+# These are steady-state costs. Roughly 1.1 s of one-time warm-up -- numba compiling,
+# first-touch caching -- is paid once per process by whichever lattice it runs first,
+# and is deliberately not in this table: it lands on every group alike, so it raises
+# the true makespan above what `_group_cost` predicts without changing which plan
+# wins. The previous table charged all of it to cF, which is first in
+# BRAVAIS_LATTICES, and so claimed cF cost 1.25 s against the 0.01 s it really costs.
 _BL_COST = {
-    'cF': (1.00, 0.25), 'cI': (0.01, 0.00), 'cP': (0.01, 0.00),
-    'hP': (1.07, 0.76), 'hR': (1.17, 0.72),
-    'tI': (0.58, 0.54), 'tP': (0.63, 0.70),
-    'oC': (0.89, 2.58), 'oF': (0.84, 2.86), 'oI': (0.65, 2.56), 'oP': (1.48, 5.54),
-    'mC': (2.26, 6.62), 'mP': (2.43, 7.44), 'aP': (2.18, 5.02),
+    'cF': (0.01, 0.00), 'cI': (0.01, 0.00), 'cP': (0.01, 0.00),
+    'hP': (0.87, 0.56), 'hR': (1.05, 0.68),
+    'tI': (0.52, 0.43), 'tP': (0.52, 0.44),
+    'oC': (0.82, 1.94), 'oF': (0.77, 1.91), 'oI': (0.70, 1.90), 'oP': (1.33, 2.16),
+    'mC': (2.01, 4.37), 'mP': (2.16, 4.67), 'aP': (1.94, 3.28),
     }
 
 
@@ -90,15 +96,15 @@ def allocate_lattice_groups(bravais_lattices, n_procs):
     """Assign Bravais lattices to `n_procs` processes as (lattice list, size) pairs.
 
     Binary search for the lowest makespan `_plan_for_makespan` can reach within
-    the process budget. Cheap lattices share a process and expensive ones are
-    split across several, whichever the cost table says is faster: at fourteen
-    processes mP takes three and cI, cP ride along with oF and tI.
+    the process budget. Cheap lattices share a process and expensive ones are split
+    across several, whichever `_BL_COST` says is faster: the three cubics together
+    cost 0.03 s while mP alone costs 6.83 s.
 
     Splitting a lattice stripes its candidates across the group, so **the result
     depends on `n_procs`**. A given `n_procs` always gives the same answer; a
     different one need not. That trade is deliberate -- refusing to split until
-    every lattice had its own process left the makespan flat at 9.87 s from eight
-    processes to fourteen, then halved it at fifteen.
+    every lattice had its own process left the makespan flat from eight processes
+    to fourteen, six processes that bought nothing.
 
     The heaviest group comes first: the caller runs group 0 itself.
     """
