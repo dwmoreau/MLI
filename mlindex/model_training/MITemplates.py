@@ -425,7 +425,7 @@ class MITemplates:
         train_inputs = self.calibrate_templates(data)
         self.save(train_inputs)
 
-    def generate_xnn(self, q2_obs, indices=None):
+    def generate_xnn(self, q2_obs, rng, indices=None):
         if indices is None:
             hkl2 = get_hkl_matrix(self.hkl_ref[self.miller_index_templates], self.lattice_system)
             n_templates = self.template_params['n_templates']
@@ -457,10 +457,10 @@ class MITemplates:
             H = np.sum(hessian_prefactor * term0, axis=1)
             delta_gn = -np.matmul(np.linalg.inv(H), dloss_dxnn[:, :, np.newaxis])[:, :, 0]
             xnn += delta_gn
-            xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
-        return self._generate_xnn_common(q2_obs, xnn)
+            xnn = fix_unphysical(xnn=xnn, rng=rng, lattice_system=self.lattice_system)
+        return self._generate_xnn_common(q2_obs, xnn, rng)
 
-    def generate_xnn_true(self, q2_obs, xnn_true):
+    def generate_xnn_true(self, q2_obs, xnn_true, rng):
         from mlindex.utilities.ErrorAdder import perturb_xnn
         if self.bravais_lattice in ['cF', 'cI', 'cP']:
             convergence_distances = np.logspace(-4, -0, 50)
@@ -477,11 +477,11 @@ class MITemplates:
             minimum_uc=2,
             maximum_uc=500,
             lattice_system=self.lattice_system,
-            rng=self.rng,
+            rng=rng,
         )
-        return self._generate_xnn_common(q2_obs, xnn)
+        return self._generate_xnn_common(q2_obs, xnn, rng)
         
-    def _generate_xnn_common(self, q2_obs, xnn):
+    def _generate_xnn_common(self, q2_obs, xnn, rng):
         q2_obs_template = q2_obs[:self.template_params['n_peaks_template']]
         q2_obs_calibration = q2_obs[:self.template_params['n_peaks_calibration']]
         # Now prepare each template for calibration, which does not involve the same
@@ -517,7 +517,7 @@ class MITemplates:
             )
         target_function.update(hkl_template[:, :self.template_params['n_peaks_template']], xnn)
         xnn += target_function.gauss_newton_step(xnn)
-        xnn = fix_unphysical(xnn=xnn, rng=self.rng, lattice_system=self.lattice_system)
+        xnn = fix_unphysical(xnn=xnn, rng=rng, lattice_system=self.lattice_system)
         hkl2 = get_hkl_matrix(hkl_calibration, self.lattice_system)
         q2_calc = (hkl2 @ xnn[:, :, np.newaxis])[:, :, 0]
         residuals = (q2_calc - q2_obs_calibration[np.newaxis]) / q2_obs_calibration[np.newaxis]
@@ -546,7 +546,7 @@ class MITemplates:
         return xnn, probability, N_pred, q2_calc_max
 
     def generate(self, n_templates, rng, q2_obs):
-        xnn_templates_all, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs)
+        xnn_templates_all, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs, rng)
         if n_templates == 'all':
             xnn_templates = xnn_templates_all
         elif n_templates <= xnn_templates_all.shape[0]:
@@ -659,12 +659,12 @@ class MITemplates:
             random_n_contaminants=True
         )[0]
 
-        xnn, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs)
+        xnn, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs, self.rng)
         """
         if type(train) != bool:
             train = train[0]
         if train == True:
-            xnn1, probability1, N_pred1, q2_calc_max1 = self.generate_xnn_true(q2_obs, xnn_true)
+            xnn1, probability1, N_pred1, q2_calc_max1 = self.generate_xnn_true(q2_obs, xnn_true, self.rng)
             xnn = np.concatenate((xnn, xnn1), axis=0)
             probability = np.concatenate((probability, probability1), axis=0)
             N_pred = np.concatenate((N_pred, N_pred1))

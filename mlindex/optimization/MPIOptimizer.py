@@ -292,7 +292,7 @@ class OptimizerManager(OptimizerBase):
             if generator_info['generator'] == 'integral_filter':
                 if generator_info['split_group'] == split_group:
                     xnn_pred, prob = self.wrapper.integral_filter_generator[split_group].predict_xnn(
-                        top_n, q2_obs=q2[np.newaxis], batch_size=2
+                        top_n, self.rng, q2_obs=q2[np.newaxis], batch_size=2
                         )
             elif generator_info['generator'] == 'templates':
                 template_unit_cells = self.wrapper.miller_index_templator[self.bravais_lattice].generate(
