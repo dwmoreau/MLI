@@ -9,7 +9,6 @@ import math
 import types
 from pathlib import Path
 import numpy as np
-import pandas as pd
 
 from mlindex.optimization.UtilitiesOptimizer import get_logger
 from mlindex.optimization.UtilitiesOptimizer import get_mpi_organizer
@@ -178,9 +177,10 @@ def build_base_parser(description="Start the display application"):
         type=int,
         default=12345,
         # ASCII only: piping --help on Windows encodes through the locale codepage.
-        help=("Seed for the candidate search (default: 12345). Runs with the same seed, "
-              "peak list and process count give identical results; there is normally no "
-              "reason to change it."),
+        help=("Seed for the candidate search (default: 12345). The same seed, peak list "
+              "and --nproc always give the same result. Changing --nproc can change it, "
+              "because the work is divided differently. There is normally no reason to "
+              "change this seed."),
     )
     return parser
 
@@ -263,6 +263,10 @@ def _collect_results(optimizer, bl, all_results,
 
 
 def _write_results(output_data, output_file_base='indexing_results'):
+    # Imported here rather than at module scope: this is its only use, and every
+    # lattice group's manager re-imports this module when it is spawned.
+    import pandas as pd
+
     output_df = pd.DataFrame(output_data)
     output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
     drop_columns = [c for c in ['Minfo'] if c in output_df.columns]
