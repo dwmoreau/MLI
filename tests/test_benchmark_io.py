@@ -254,3 +254,33 @@ def test_reducing_an_existing_pool_does_not_rewrite_its_merit_sidecar(tmp_path):
 
     read = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0')
     assert read['M_sym'].tolist() == [123.0, 456.0]
+
+
+def test_several_bundles_and_several_pools_consolidate_without_colliding(tmp_path):
+    """A floor arm carries three condition bundles and a hard arm five, written by several pools
+    at once. Bundle tags contain both dots and underscores (`b1_error0.5_cont0`), and the reader
+    rebuilds a shard name by splitting the lattice off the end -- so this pins that a tag survives
+    the round trip through a filename."""
+    bundles = ('b1_error0.5_cont0', 'b1_error1_cont0', 'b1_error2_cont0')
+    entries = pd.concat([_entries('AAAAAA', bundle=bundle) for bundle in bundles]
+                        + [_entries('BBBBBB', bundle=bundle) for bundle in bundles],
+                        ignore_index=True)
+    for part, entry_id in enumerate(('AAAAAA', 'BBBBBB')):
+        directory = Benchmark.part_dir(tmp_path, part)
+        for bundle in bundles:
+            frame = Benchmark.records_to_frame([_record(entry_id=entry_id, bundle=bundle)])
+            frame = Benchmark.label_frame(frame, entries)
+            Benchmark.write_candidate_shard(frame, directory, bundle, 'cP')
+        Benchmark.write_entry_table(
+            entries.loc[entries['entry_id'] == entry_id].reset_index(drop=True), directory)
+
+    Benchmark.consolidate(tmp_path)
+
+    assert Benchmark.available_bundles(tmp_path) == sorted(bundles)
+    read_entries = Benchmark.load_entries(tmp_path)
+    assert read_entries.shape[0] == 6
+    for bundle in bundles:
+        read = Benchmark.load_candidates(tmp_path, bundle, sidecars=())
+        assert sorted(read['entry_id'].unique()) == ['AAAAAA', 'BBBBBB']
+        assert read['condition_bundle'].unique().tolist() == [bundle]
+        assert read.shape[0] == 4
