@@ -2,6 +2,110 @@ import copy
 import numpy as np
 
 
+# The basis changes a monoclinic cell can be re-expressed under, shared by the standardisation in
+# `reindex_entry_monoclinic`, the enumeration in `get_different_monoclinic_settings`, and the
+# candidate validator. Integer dtype is deliberate: these multiply integer reindexing matrices
+# whose dtype propagates to `hkl_reindexer`.
+AC_SWAP = np.array([
+    [0, 0, 1],
+    [0, 1, 0],
+    [-1, 0, 0],
+    ])
+
+OBTUSE_FLIP = np.array([
+    [-1, 0, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    ])
+
+# The five cell transformations, `AC_SWAP` and `OBTUSE_FLIP`, each as a pair with the identity so
+# a loop over the three lists covers "apply it or do not".
+MONOCLINIC_TRANSFORMATIONS = (
+    np.eye(3),
+    np.array([
+        [-1, 0, 1],
+        [0, 1, 0],
+        [-1, 0, 0],
+        ]),
+    np.array([
+        [0, 0, -1],
+        [0, 1, 0],
+        [1, 0, -1],
+        ]),
+    np.array([
+        [1, 0, 0],
+        [0, 1, 0],
+        [-1, 0, 1],
+        ]),
+    np.array([
+        [1, 0, 0],
+        [0, 1, 0],
+        [1, 0, 1],
+        ]),
+    )
+
+MONOCLINIC_AC_REINDEXERS = (np.eye(3), AC_SWAP)
+MONOCLINIC_OBTUSE_REINDEXERS = (np.eye(3), OBTUSE_FLIP)
+
+# All twenty products, formed once. The three factors are constant, so a caller comparing one
+# candidate against every setting multiplies by a single matrix per setting instead of three.
+MONOCLINIC_BASIS_CHANGES = np.stack([
+    obtuse @ ac @ transformation
+    for transformation in MONOCLINIC_TRANSFORMATIONS
+    for ac in MONOCLINIC_AC_REINDEXERS
+    for obtuse in MONOCLINIC_OBTUSE_REINDEXERS
+    ])
+
+# The rhombohedral sub- and super-cell relations the validator tests a candidate against.
+RHOMBOHEDRAL_TRANSFORMATIONS = (
+    np.eye(3),
+    np.array([
+        [-1, 1, 1],
+        [1, -1, 1],
+        [1, 1, -1],
+        ]),
+    np.array([
+        [3, -1, -1],
+        [-1, 3, -1],
+        [-1, -1, 3],
+        ]),
+    np.array([
+        [0, 0.5, 0.5],
+        [0.5, 0, 0.5],
+        [0.5, 0.5, 0],
+        ]),
+    np.array([
+        [0.50, 0.25, 0.25],
+        [0.25, 0.50, 0.25],
+        [0.25, 0.25, 0.50],
+        ]),
+    )
+
+
+def monoclinic_cell_matrix(unit_cell, partial_unit_cell=False):
+    """The Cartesian basis of a monoclinic cell, b along y and the unique angle in the a-c plane.
+
+    `partial_unit_cell` reads beta from index 3 ([a, b, c, beta]) rather than index 4.
+    """
+    beta = unit_cell[3] if partial_unit_cell else unit_cell[4]
+    return np.array([
+        [unit_cell[0], 0, unit_cell[2] * np.cos(beta)],
+        [0, unit_cell[1], 0],
+        [0, 0, unit_cell[2] * np.sin(beta)],
+        ])
+
+
+def rhombohedral_cell_matrix(unit_cell):
+    """The Cartesian basis of a rhombohedral cell from its partial form [a, alpha]."""
+    a, alpha = unit_cell[0], unit_cell[1]
+    arg = (np.cos(alpha) - np.cos(alpha) ** 2) / np.sin(alpha)
+    return np.array([
+        [a, a * np.cos(alpha), a * np.cos(alpha)],
+        [0, a * np.sin(alpha), a * arg],
+        [0, 0, a * np.sqrt(np.sin(alpha) ** 2 - arg ** 2)],
+        ])
+
+
 def hexagonal_to_rhombohedral_unit_cell(hexagonal_unit_cell):
     a_hexagonal = hexagonal_unit_cell[0]
     c_hexagonal = hexagonal_unit_cell[2]
@@ -518,15 +622,8 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, space="direct"):
     if space == "reciprocal" and reindexed_unit_cell[0] < reindexed_unit_cell[2]:
         swap_ac = True
     if swap_ac:
-        ac_reindexer = np.array(
-            [
-                [0, 0, 1],
-                [0, 1, 0],
-                [-1, 0, 0],
-            ]
-        )
-        centered_reindexer = centered_reindexer @ ac_reindexer
-        reindexed_unit_cell = reindex_unit_cell(reindexed_unit_cell, ac_reindexer)
+        centered_reindexer = centered_reindexer @ AC_SWAP
+        reindexed_unit_cell = reindex_unit_cell(reindexed_unit_cell, AC_SWAP)
 
     reindex_angle = False
     if space == "direct" and reindexed_unit_cell[4] < np.pi / 2:
@@ -535,83 +632,24 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, space="direct"):
         reindex_angle = True
 
     if reindex_angle:
-        obtuse_reindexer = np.array(
-            [
-                [-1, 0, 0],
-                [0, -1, 0],
-                [0, 0, 1],
-            ]
-        )
         reindexed_unit_cell[4] = np.pi - reindexed_unit_cell[4]
-        hkl_reindexer = centered_reindexer @ obtuse_reindexer
+        hkl_reindexer = centered_reindexer @ OBTUSE_FLIP
     else:
         hkl_reindexer = centered_reindexer
     return reindexed_unit_cell, reindexed_spacegroup_symbol, hkl_reindexer
 
 
 def get_different_monoclinic_settings(unit_cell, partial_unit_cell=False):
-    ac_reindexer = [
-        np.eye(3),
-        np.array(
-            [
-                [0, 0, 1],
-                [0, 1, 0],
-                [-1, 0, 0],
-            ]
-        ),
-    ]
-    transformations = [
-        np.eye(3),
-        np.array(
-            [
-                [-1, 0, 1],
-                [0, 1, 0],
-                [-1, 0, 0],
-            ]
-        ),
-        np.array(
-            [
-                [0, 0, -1],
-                [0, 1, 0],
-                [1, 0, -1],
-            ]
-        ),
-        np.array(
-            [
-                [1, 0, 0],
-                [0, 1, 0],
-                [-1, 0, 1],
-            ]
-        ),
-        np.array(
-            [
-                [1, 0, 0],
-                [0, 1, 0],
-                [1, 0, 1],
-            ]
-        ),
-    ]
-    if partial_unit_cell:
-        ucm = np.array(
-            [
-                [unit_cell[0], 0, unit_cell[2] * np.cos(unit_cell[3])],
-                [0, unit_cell[1], 0],
-                [0, 0, unit_cell[2] * np.sin(unit_cell[3])],
-            ]
-        )
-        reindexed_unit_cell = np.zeros((10, 4))
-    else:
-        ucm = np.array(
-            [
-                [unit_cell[0], 0, unit_cell[2] * np.cos(unit_cell[4])],
-                [0, unit_cell[1], 0],
-                [0, 0, unit_cell[2] * np.sin(unit_cell[4])],
-            ]
-        )
-        reindexed_unit_cell = np.zeros((10, 6))
+    """The ten monoclinic settings of one cell: five transformations, each with and without the
+    a/c swap. The obtuse flip is not applied here; `MONOCLINIC_BASIS_CHANGES` is the set that
+    includes it.
+    """
+    ucm = monoclinic_cell_matrix(unit_cell, partial_unit_cell=partial_unit_cell)
+    n_parameters = 4 if partial_unit_cell else 6
+    reindexed_unit_cell = np.zeros((10, n_parameters))
     i = 0
-    for trans in transformations:
-        for perm in ac_reindexer:
+    for trans in MONOCLINIC_TRANSFORMATIONS:
+        for perm in MONOCLINIC_AC_REINDEXERS:
             rucm = ucm @ perm @ trans
             reindexed_unit_cell[i, 0] = np.linalg.norm(rucm[:, 0])
             reindexed_unit_cell[i, 1] = np.linalg.norm(rucm[:, 1])

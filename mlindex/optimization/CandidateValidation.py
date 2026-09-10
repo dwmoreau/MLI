@@ -1,5 +1,20 @@
 import numpy as np
 
+from mlindex.utilities.Reindexing import MONOCLINIC_BASIS_CHANGES
+from mlindex.utilities.Reindexing import RHOMBOHEDRAL_TRANSFORMATIONS
+from mlindex.utilities.Reindexing import monoclinic_cell_matrix
+from mlindex.utilities.Reindexing import rhombohedral_cell_matrix
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+from mlindex.utilities.UnitCellTools import get_partial_unit_cell
+
+
+# The sub- and super-cell multipliers each lattice system is tested against. A candidate whose
+# axes are a small rational multiple of the truth found the right lattice at the wrong scale,
+# which is its own outcome and never counted as correct.
+MULTIPLIERS_HALF_DOUBLE = np.array([1 / 2, 2])
+MULTIPLIERS_THIRDS = np.array([1 / 3, 1 / 2, 1, 2, 3])
+MULTIPLIERS_UNIT = np.array([1 / 2, 1, 2])
+
 
 def validate_candidate(entry, top_unit_cell, top_M20):
     found = False
@@ -30,96 +45,51 @@ def validate_candidate(entry, top_unit_cell, top_M20):
 
 
 def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_pred, rtol=1e-2):
+    """Is `unit_cell_pred` the true cell, and if not, is it a sub- or super-cell of it?
+
+    Returns (correct, off_by_two). `unit_cell_true` is the full six-parameter cell;
+    `unit_cell_pred` is the partial cell of the predicted Bravais lattice, so the truth is sliced
+    to the same free parameters before anything is compared. Each lattice system is tested against
+    its own multiplier grid, and monoclinic and rhombohedral cells are additionally re-expressed
+    under every basis change that leaves the lattice unchanged.
+    """
     # This should probably be replace with distance measurements in NCDIST
     from mlindex.utilities.Reindexing import reindex_entry_triclinic
-    if bravais_lattice_pred in ['cF', 'cI', 'cP']:
-        lattice_system_pred = 'cubic'
-        unit_cell_true = unit_cell_true[0]
-    elif bravais_lattice_pred == 'hP':
-        lattice_system_pred = 'hexagonal'
-        unit_cell_true = unit_cell_true[[0, 2]]
-    elif bravais_lattice_pred == 'hR':
-        lattice_system_pred = 'rhombohedral'
-        unit_cell_true = unit_cell_true[[0, 3]]
-    elif bravais_lattice_pred in ['tI', 'tP']:
-        lattice_system_pred = 'tetragonal'
-        unit_cell_true = unit_cell_true[[0, 2]]
-    elif bravais_lattice_pred in ['oC', 'oF', 'oI', 'oP']:
-        lattice_system_pred = 'orthorhombic'
-        unit_cell_true = unit_cell_true[:3]
-    elif bravais_lattice_pred in ['mC', 'mP']:
-        lattice_system_pred = 'monoclinic'
-        unit_cell_true = unit_cell_true[[0, 1, 2, 4]]
-    elif bravais_lattice_pred == 'aP':
-        lattice_system_pred = 'triclinic'
+
+    lattice_system_pred = BL_TO_LATTICE_SYSTEM[bravais_lattice_pred]
+    unit_cell_true = get_partial_unit_cell(unit_cell_true, lattice_system=lattice_system_pred)
 
     if lattice_system_pred == 'cubic':
         if np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol):
             return True, False
-        mult_factors = np.array([1/2, 2])
-        for mf in mult_factors:
+        for mf in MULTIPLIERS_HALF_DOUBLE:
             if np.isclose(mf * unit_cell_pred, unit_cell_true, rtol=rtol):
                 return False, True
     elif lattice_system_pred in ['tetragonal', 'hexagonal']:
         if np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol)):
             return True, False
-        mult_factors = np.array([1/3, 1/2, 1, 2, 3])
-        for mf0 in mult_factors:
-            for mf1 in mult_factors:
+        for mf0 in MULTIPLIERS_THIRDS:
+            for mf1 in MULTIPLIERS_THIRDS:
                 mf = np.array([mf0, mf1])
                 if np.all(np.isclose(mf * unit_cell_pred, unit_cell_true, rtol=rtol)):
                     return False, True
     elif lattice_system_pred == 'rhombohedral':
         if np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol)):
             return True, False
-        mult_factors = np.array([1/2, 2])
-        transformations = [
-            np.eye(3),
-            np.array([
-                [-1, 1, 1],
-                [1, -1, 1],
-                [1, 1, -1],
-                ]),
-            np.array([
-                [3, -1, -1],
-                [-1, 3, -1],
-                [-1, -1, 3],
-                ]),
-            np.array([
-                [0, 0.5, 0.5],
-                [0.5, 0, 0.5],
-                [0.5, 0.5, 0],
-                ]),
-            np.array([
-                [0.50, 0.25, 0.25],
-                [0.25, 0.50, 0.25],
-                [0.25, 0.25, 0.50],
-                ])
-            ]
-        ax = unit_cell_pred[0]
-        bx = unit_cell_pred[0]*np.cos(unit_cell_pred[1])
-        by = unit_cell_pred[0]*np.sin(unit_cell_pred[1])
-        cx = unit_cell_pred[0]*np.cos(unit_cell_pred[1])
-        arg = (np.cos(unit_cell_pred[1]) - np.cos(unit_cell_pred[1])**2) / np.sin(unit_cell_pred[1])
-        cy = unit_cell_pred[0] * arg
-        cz = unit_cell_pred[0] * np.sqrt(np.sin(unit_cell_pred[1])**2 - arg**2)
-        ucm = np.array([
-            [ax, bx, cx],
-            [0,  by, cy],
-            [0,  0,  cz]
-            ])
+        ucm = rhombohedral_cell_matrix(unit_cell_pred)
         found = False
         off_by_two = False
-        for trans in transformations:
+        for trans in RHOMBOHEDRAL_TRANSFORMATIONS:
             rucm = ucm @ trans
             reindexed_unit_cell = np.zeros(2)
             reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
-            reindexed_unit_cell[1] = np.arccos(np.dot(rucm[:, 1], rucm[:, 2]) / reindexed_unit_cell[0]**2)
+            reindexed_unit_cell[1] = np.arccos(
+                np.dot(rucm[:, 1], rucm[:, 2]) / reindexed_unit_cell[0]**2)
             if np.all(np.isclose(reindexed_unit_cell, unit_cell_true, rtol=rtol)):
                 found = True
-            mult_factors = np.array([1/2, 2])
-            for mf in mult_factors:
-                if np.all(np.isclose(np.array([mf, 1]) * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
+            for mf in MULTIPLIERS_HALF_DOUBLE:
+                if np.all(np.isclose(np.array([mf, 1]) * reindexed_unit_cell, unit_cell_true,
+                                     rtol=rtol)):
                     off_by_two = True
         return found, off_by_two
     elif lattice_system_pred == 'orthorhombic':
@@ -127,82 +97,34 @@ def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_
         unit_cell_pred_sorted = np.sort(unit_cell_pred)
         if np.all(np.isclose(unit_cell_pred_sorted, unit_cell_true_sorted, rtol=rtol)):
             return True, False
-        mult_factors = np.array([1/2, 1, 2])
-        for mf0 in mult_factors:
-            for mf1 in mult_factors:
-                for mf2 in mult_factors:
+        for mf0 in MULTIPLIERS_UNIT:
+            for mf1 in MULTIPLIERS_UNIT:
+                for mf2 in MULTIPLIERS_UNIT:
                     mf = np.array([mf0, mf1, mf2])
-                    if np.all(np.isclose(np.sort(mf * unit_cell_pred), unit_cell_true_sorted, rtol=rtol)):
+                    if np.all(np.isclose(np.sort(mf * unit_cell_pred), unit_cell_true_sorted,
+                                         rtol=rtol)):
                         return False, True
     elif lattice_system_pred == 'monoclinic':
-        mult_factors = np.array([1/2, 1, 2])
-        obtuse_reindexer = [
-            np.eye(3),
-            np.array([
-                [-1, 0, 0],
-                [0, -1, 0],
-                [0, 0, 1],
-                ])
-            ]
-        ac_reindexer = [
-            np.eye(3),
-            np.array([
-                [0, 0, 1],
-                [0, 1, 0],
-                [-1, 0, 0],
-                ])
-            ]
-        transformations = [
-            np.eye(3),
-            np.array([
-                [-1, 0, 1],
-                [0, 1, 0],
-                [-1, 0, 0],
-                ]),
-            np.array([
-                [0, 0, -1],
-                [0, 1, 0],
-                [1, 0, -1],
-                ]),
-            np.array([
-                [1, 0, 0],
-                [0, 1, 0],
-                [-1, 0, 1],
-                ]),
-            np.array([
-                [1, 0, 0],
-                [0, 1, 0],
-                [1, 0, 1],
-                ]),
-            ]
-
-        ucm = np.array([
-            [unit_cell_pred[0], 0,            unit_cell_pred[2] * np.cos(unit_cell_pred[3])],
-            [0,            unit_cell_pred[1], 0],
-            [0,            0,            unit_cell_pred[2] * np.sin(unit_cell_pred[3])],
-            ])
+        ucm = monoclinic_cell_matrix(unit_cell_pred, partial_unit_cell=True)
         found = False
         off_by_two = False
-        for trans in transformations:
-            for perm in ac_reindexer:
-                for obt in obtuse_reindexer:
-                    rucm = ucm @ obt @ perm @ trans
-                    reindexed_unit_cell = np.zeros(4)
-                    reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
-                    reindexed_unit_cell[1] = np.linalg.norm(rucm[:, 1])
-                    reindexed_unit_cell[2] = np.linalg.norm(rucm[:, 2])
-                    dot_product = np.dot(rucm[:, 0], rucm[:, 2])
-                    mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
-                    reindexed_unit_cell[3] = np.arccos(dot_product / mag)
-                    if np.all(np.isclose(reindexed_unit_cell, unit_cell_true, rtol=rtol)):
-                        found = True
-                    mult_factors = np.array([1/2, 1, 2])
-                    for mf0 in mult_factors:
-                        for mf1 in mult_factors:
-                            for mf2 in mult_factors:
-                                mf = np.array([mf0, mf1, mf2, 1])
-                                if np.all(np.isclose(mf * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
-                                    off_by_two = True
+        for basis_change in MONOCLINIC_BASIS_CHANGES:
+            rucm = ucm @ basis_change
+            reindexed_unit_cell = np.zeros(4)
+            reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
+            reindexed_unit_cell[1] = np.linalg.norm(rucm[:, 1])
+            reindexed_unit_cell[2] = np.linalg.norm(rucm[:, 2])
+            dot_product = np.dot(rucm[:, 0], rucm[:, 2])
+            mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
+            reindexed_unit_cell[3] = np.arccos(dot_product / mag)
+            if np.all(np.isclose(reindexed_unit_cell, unit_cell_true, rtol=rtol)):
+                found = True
+            for mf0 in MULTIPLIERS_UNIT:
+                for mf1 in MULTIPLIERS_UNIT:
+                    for mf2 in MULTIPLIERS_UNIT:
+                        mf = np.array([mf0, mf1, mf2, 1])
+                        if np.all(np.isclose(mf * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
+                            off_by_two = True
         return found, off_by_two
     elif lattice_system_pred == 'triclinic':
         reindexed_unit_cell, _ = reindex_entry_triclinic(unit_cell_pred)
@@ -210,10 +132,9 @@ def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_
         off_by_two = False
         if np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol)):
             found = True
-        mult_factors = np.array([1/2, 1, 2])
-        for mf0 in mult_factors:
-            for mf1 in mult_factors:
-                for mf2 in mult_factors:
+        for mf0 in MULTIPLIERS_UNIT:
+            for mf1 in MULTIPLIERS_UNIT:
+                for mf2 in MULTIPLIERS_UNIT:
                     mf = np.array([mf0, mf1, mf2, 1, 1, 1])
                     if np.all(np.isclose(mf * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
                         off_by_two = True
