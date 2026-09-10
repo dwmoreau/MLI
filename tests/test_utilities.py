@@ -468,3 +468,72 @@ def test_partial_unit_cell_keeps_the_angle_each_system_actually_has():
     for lattice_system, want in expected.items():
         got = get_partial_unit_cell(unit_cell, lattice_system=lattice_system)
         np.testing.assert_array_equal(got, np.array(want), err_msg=lattice_system)
+
+
+def test_xnn_axis_multipliers_describe_a_real_axis_rescaling():
+    """The multipliers must be what actually happens to the metric when the axes are scaled.
+
+    Reproducing the grid the optimizer used to build by hand is not enough: that grid could have
+    been wrong. This scales a cell's axes directly, converts, and checks the metric agrees --
+    which is what makes the square roots on the cross terms testable rather than folklore.
+    """
+    from mlindex.utilities.UnitCellTools import n_axis_factors, xnn_axis_multipliers
+
+    cells = {
+        'orthorhombic': np.array([5.0, 7.0, 11.0]),
+        'monoclinic': np.array([5.0, 7.0, 11.0, np.deg2rad(103.0)]),
+        'triclinic': np.array([5.0, 7.0, 11.0, np.deg2rad(88.0), np.deg2rad(103.0),
+                               np.deg2rad(95.0)]),
+        'tetragonal': np.array([5.0, 11.0]),
+        'cubic': np.array([5.0]),
+    }
+    scalings = {
+        'orthorhombic': np.array([2.0, 0.5, 3.0]),
+        'monoclinic': np.array([2.0, 0.5, 3.0]),
+        'triclinic': np.array([2.0, 0.5, 3.0]),
+        'tetragonal': np.array([2.0, 0.5]),
+        'cubic': np.array([2.0]),
+    }
+
+    for lattice_system, cell in cells.items():
+        scale = scalings[lattice_system]
+        assert scale.size == n_axis_factors(lattice_system)
+
+        xnn = get_xnn_from_unit_cell(cell[np.newaxis], partial_unit_cell=True,
+                                     lattice_system=lattice_system)
+
+        # Scale the direct axis lengths, leaving the angles alone.
+        scaled_cell = cell.copy()
+        n_lengths = 1 if lattice_system in ('cubic', 'rhombohedral') else (
+            2 if lattice_system in ('tetragonal', 'hexagonal') else 3)
+        scaled_cell[:n_lengths] = cell[:n_lengths] * scale[:n_lengths]
+        expected = get_xnn_from_unit_cell(scaled_cell[np.newaxis], partial_unit_cell=True,
+                                          lattice_system=lattice_system)
+
+        # A direct axis scaled by s scales the reciprocal axis by 1/s.
+        multipliers = xnn_axis_multipliers(1.0 / scale, lattice_system)
+        np.testing.assert_allclose(multipliers**2 * xnn, expected, rtol=1e-12,
+                                   err_msg=lattice_system)
+
+
+def test_the_identity_scaling_leaves_the_metric_alone():
+    """Row zero of the optimizer's grid is the identity, and its acceptance test depends on it."""
+    from mlindex.utilities.UnitCellTools import XNN_AXIS_PAIRS
+    from mlindex.utilities.UnitCellTools import n_axis_factors, xnn_axis_multipliers
+
+    for lattice_system, pairs in XNN_AXIS_PAIRS.items():
+        ones = np.ones(n_axis_factors(lattice_system))
+        np.testing.assert_array_equal(
+            xnn_axis_multipliers(ones, lattice_system), np.ones(len(pairs)),
+            err_msg=lattice_system)
+
+
+def test_the_xnn_component_map_matches_the_hkl_design_matrix():
+    """`q2` is `get_hkl_matrix(hkl) @ xnn`, so the two must agree on how many components a lattice
+    system has and in what order. A mismatch multiplies the wrong coefficient by the wrong axis."""
+    from mlindex.utilities.UnitCellTools import XNN_AXIS_PAIRS
+
+    hkl = np.array([[1, 2, 3], [2, 0, 1]])
+    for lattice_system, pairs in XNN_AXIS_PAIRS.items():
+        design = get_hkl_matrix(hkl, lattice_system)
+        assert design.shape[-1] == len(pairs), lattice_system
