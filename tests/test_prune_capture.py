@@ -147,16 +147,6 @@ def test_capture_refuses_zero_error_rather_than_returning_a_stale_value():
         candidates.prune_below_m20(threshold=0.0)
 
 
-# Index lists into the full six-parameter truth cell (a, b, c, alpha, beta, gamma), matching what
-# `validate_candidate_known_bl` slices out for itself. Not contiguous ranges: monoclinic takes
-# beta and skips alpha, rhombohedral takes alpha and skips c. Getting this wrong compares the
-# wrong angle and mislabels silently, which is why it is asserted here as well as used.
-TRUTH_SLICE = {
-    'cubic': [0], 'tetragonal': [0, 2], 'hexagonal': [0, 2], 'rhombohedral': [0, 3],
-    'orthorhombic': [0, 1, 2], 'monoclinic': [0, 1, 2, 4], 'triclinic': [0, 1, 2, 3, 4, 5],
-    }
-
-
 # ----------------------------------------------------------------------------------------------
 # The stored ORDER, and the support N_cal. Both had to be settled before S07's array, because
 # neither is repairable on a generated pool.

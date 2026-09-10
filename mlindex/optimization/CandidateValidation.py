@@ -3,7 +3,9 @@ import numpy as np
 from mlindex.utilities.Reindexing import MONOCLINIC_BASIS_CHANGES
 from mlindex.utilities.Reindexing import RHOMBOHEDRAL_TRANSFORMATIONS
 from mlindex.utilities.Reindexing import monoclinic_cell_matrix
+from mlindex.utilities.Reindexing import monoclinic_settings
 from mlindex.utilities.Reindexing import rhombohedral_cell_matrix
+from mlindex.utilities.Reindexing import rhombohedral_settings
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 from mlindex.utilities.UnitCellTools import get_partial_unit_cell
 
@@ -142,75 +144,18 @@ def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_
     return False, False
 
 
-# Which entries of a full [a, b, c, alpha, beta, gamma] each lattice system leaves free, derived
-# from the function that defines the slicing rather than restated. `label_known_bl_batch` takes the
-# truth already sliced, and slicing it differently from the scalar routine compares the wrong angle
-# and mislabels silently.
-TRUTH_SLICE = {
-    system: np.atleast_1d(get_partial_unit_cell(np.arange(6), lattice_system=system)).tolist()
-    for system in sorted(set(BL_TO_LATTICE_SYSTEM.values()))
-    }
-
 # The systems whose scalar arm returns on the first match, so `correct` and `off_by_two` cannot
 # both be set. The other three accumulate both inside one loop over the bases and a candidate can
 # carry each, which is why this is a set rather than a rule.
 _EARLY_RETURN_SYSTEMS = frozenset({'cubic', 'tetragonal', 'hexagonal', 'orthorhombic'})
 
 
-def _monoclinic_reindexed(unit_cell_pred):
-    """(k, n, 4) -- every monoclinic candidate under every one of the twenty basis changes.
-
-    Shared by the correctness and off-by-two arms so both walk one array. The scalar routine sets
-    both flags inside a single loop over the bases, and sharing the reindexed cells is what keeps
-    the two agreeing by construction rather than by inspection.
-    """
-    a, b, c, beta = (unit_cell_pred[:, 0], unit_cell_pred[:, 1],
-                     unit_cell_pred[:, 2], unit_cell_pred[:, 3])
-    ucm = np.zeros((a.shape[0], 3, 3), dtype=np.float64)
-    ucm[:, 0, 0] = a
-    ucm[:, 0, 2] = c * np.cos(beta)
-    ucm[:, 1, 1] = b
-    ucm[:, 2, 2] = c * np.sin(beta)
-
-    rucm = np.einsum('nij,kjl->knil', ucm, MONOCLINIC_BASIS_CHANGES)
-    lengths = np.linalg.norm(rucm, axis=2)
-    dot = np.einsum('kni,kni->kn', rucm[:, :, :, 0], rucm[:, :, :, 2])
-    magnitude = lengths[:, :, 0] * lengths[:, :, 2]
-    with np.errstate(invalid='ignore', divide='ignore'):
-        # arccos of a magnitude above one is NaN, which compares False -- the outcome the scalar
-        # routine reaches, reached the same way.
-        angle = np.arccos(dot / magnitude)
-    return np.concatenate([lengths, angle[:, :, np.newaxis]], axis=2)
-
-
-def _rhombohedral_reindexed(unit_cell_pred):
-    """(k, n, 2) -- every rhombohedral candidate under every one of the five transformations."""
-    a, alpha = unit_cell_pred[:, 0], unit_cell_pred[:, 1]
-    cos_alpha, sin_alpha = np.cos(alpha), np.sin(alpha)
-    with np.errstate(invalid='ignore', divide='ignore'):
-        arg = (cos_alpha - cos_alpha ** 2) / sin_alpha
-        cz = a * np.sqrt(sin_alpha ** 2 - arg ** 2)
-    ucm = np.zeros((a.shape[0], 3, 3), dtype=np.float64)
-    ucm[:, 0, 0] = a
-    ucm[:, 0, 1] = a * cos_alpha
-    ucm[:, 0, 2] = a * cos_alpha
-    ucm[:, 1, 1] = a * sin_alpha
-    ucm[:, 1, 2] = a * arg
-    ucm[:, 2, 2] = cz
-
-    rucm = np.einsum('nij,kjl->knil', ucm, RHOMBOHEDRAL_TRANSFORMATIONS)
-    first = np.linalg.norm(rucm[:, :, :, 0], axis=2)
-    dot = np.einsum('kni,kni->kn', rucm[:, :, :, 1], rucm[:, :, :, 2])
-    with np.errstate(invalid='ignore', divide='ignore'):
-        angle = np.arccos(dot / first ** 2)
-    return np.stack([first, angle], axis=2)
-
-
 def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rtol=1e-2):
     """`validate_candidate_known_bl(...)[0]` for a batch sharing one truth and one lattice system.
 
-    `unit_cell_true` is the truth already sliced to that system's free parameters -- see
-    `TRUTH_SLICE` -- and `unit_cell_pred` is (n, k) of partial cells. Returns a boolean array.
+    `unit_cell_true` is the truth already sliced to that system's free parameters, by
+    `UnitCellTools.get_partial_unit_cell`, and `unit_cell_pred` is (n, k) of partial cells.
+    Returns a boolean array.
 
     An unimplemented lattice system raises rather than returning False, because a quiet False here
     reads as "no correct candidate in the pool", which is a generation failure and must stay
@@ -234,9 +179,9 @@ def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
                                  rtol=rtol), axis=1)
 
     if lattice_system == 'rhombohedral':
-        reindexed = _rhombohedral_reindexed(unit_cell_pred)
+        reindexed = rhombohedral_settings(unit_cell_pred)
     elif lattice_system == 'monoclinic':
-        reindexed = _monoclinic_reindexed(unit_cell_pred)
+        reindexed = monoclinic_settings(unit_cell_pred)
     else:
         raise ValueError(
             f'is_correct_known_bl_batch does not implement {lattice_system!r}. '
@@ -302,10 +247,10 @@ def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
 
     if lattice_system == 'rhombohedral':
         grid = np.stack([MULTIPLIERS_HALF_DOUBLE, np.ones_like(MULTIPLIERS_HALF_DOUBLE)], axis=-1)
-        return any_multiple(_rhombohedral_reindexed(unit_cell_pred), grid, unit_cell_true)
+        return any_multiple(rhombohedral_settings(unit_cell_pred), grid, unit_cell_true)
 
     if lattice_system == 'monoclinic':
-        return any_multiple(_monoclinic_reindexed(unit_cell_pred),
+        return any_multiple(monoclinic_settings(unit_cell_pred),
                             grid_of(MULTIPLIERS_UNIT, 3, pad=1), unit_cell_true)
 
     if lattice_system == 'triclinic':
@@ -321,9 +266,10 @@ def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
 def label_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rtol=1e-2):
     """`validate_candidate_known_bl` for a whole (entry, lattice system) block.
 
-    Returns `(is_correct, is_off_by_two)` as boolean arrays. `unit_cell_true` is the truth sliced
-    by `TRUTH_SLICE`. This is what a benchmark labels with: over a pool of millions of candidates
-    the scalar routine is not an option.
+    Returns `(is_correct, is_off_by_two)` as boolean arrays. `unit_cell_true` is the truth
+    sliced by `UnitCellTools.get_partial_unit_cell`, the same call the scalar routine makes on
+    its own argument. This is what a benchmark labels with: over a pool of millions of
+    candidates the scalar routine is not an option.
     """
     correct = is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rtol=rtol)
     off_by_two = off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system,

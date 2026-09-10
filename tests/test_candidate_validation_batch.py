@@ -10,16 +10,27 @@ batch function, never a reason to relax this test.
 import numpy as np
 import pytest
 
-from mlindex.optimization.CandidateValidation import TRUTH_SLICE
 from mlindex.optimization.CandidateValidation import is_correct_known_bl_batch
 from mlindex.optimization.CandidateValidation import label_known_bl_batch
 from mlindex.optimization.CandidateValidation import off_by_two_known_bl_batch
 from mlindex.optimization.CandidateValidation import validate_candidate_known_bl
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+from mlindex.utilities.UnitCellTools import get_partial_unit_cell
 
 LATTICE_SYSTEMS = sorted(set(BL_TO_LATTICE_SYSTEM.values()))
 BL_FOR_SYSTEM = {'cubic': 'cP', 'tetragonal': 'tP', 'hexagonal': 'hP', 'rhombohedral': 'hR',
                  'orthorhombic': 'oP', 'monoclinic': 'mP', 'triclinic': 'aP'}
+
+
+def _sliced(unit_cell, lattice_system):
+    """The truth cut down to a system's free parameters, by the function that defines the rule.
+
+    The batch labeller takes the truth already sliced, and slicing it any other way than the scalar
+    routine does compares the wrong angle -- monoclinic keeps beta and skips alpha, rhombohedral
+    keeps alpha and skips c.
+    """
+    return np.atleast_1d(get_partial_unit_cell(unit_cell, lattice_system=lattice_system)).astype(
+        float)
 
 
 def _random_true_cell(system, rng):
@@ -59,7 +70,7 @@ def _candidates(true_partial, system, rng, n_random=6):
         block.append(scaled)
     for _ in range(n_random):
         other = _random_true_cell(system, rng)
-        block.append(np.atleast_1d(other[TRUTH_SLICE[system]]).astype(float))
+        block.append(_sliced(other, system))
     return np.array(block)
 
 
@@ -72,7 +83,7 @@ def test_the_batched_labeller_agrees_with_the_scalar_one(system):
 
     for _ in range(25):
         true_full = _random_true_cell(system, rng)
-        true_partial = np.atleast_1d(true_full[TRUTH_SLICE[system]]).astype(float)
+        true_partial = _sliced(true_full, system)
         block = _candidates(true_partial, system, rng)
 
         correct, off_by_two = label_known_bl_batch(true_partial, block, system)
@@ -99,7 +110,7 @@ def test_the_two_arms_are_the_two_halves_of_the_scalar_return(system):
     which is the one documented difference."""
     rng = np.random.default_rng(11)
     true_full = _random_true_cell(system, rng)
-    true_partial = np.atleast_1d(true_full[TRUTH_SLICE[system]]).astype(float)
+    true_partial = _sliced(true_full, system)
     block = _candidates(true_partial, system, rng)
 
     correct, off_by_two = label_known_bl_batch(true_partial, block, system)
@@ -112,8 +123,7 @@ def test_the_two_arms_are_the_two_halves_of_the_scalar_return(system):
 @pytest.mark.parametrize('system', LATTICE_SYSTEMS)
 def test_an_empty_block_returns_empty_arrays(system):
     """A Bravais lattice can contribute no candidates to a pattern, and that must not raise."""
-    true_partial = np.atleast_1d(
-        _random_true_cell(system, np.random.default_rng(0))[TRUTH_SLICE[system]]).astype(float)
+    true_partial = _sliced(_random_true_cell(system, np.random.default_rng(0)), system)
     width = true_partial.size
     correct, off_by_two = label_known_bl_batch(true_partial, np.empty((0, width)), system)
     assert correct.shape == (0,) and off_by_two.shape == (0,)
@@ -129,13 +139,14 @@ def test_an_unimplemented_system_raises_rather_than_reporting_nothing_correct():
         off_by_two_known_bl_batch(np.array([5.0]), np.array([[5.0]]), 'nonsense')
 
 
-def test_truth_slice_keeps_the_angle_each_system_actually_has():
+def test_the_truth_is_sliced_the_way_the_scalar_routine_slices_it():
     """Monoclinic keeps beta and skips alpha; rhombohedral keeps alpha and skips c. Slicing the
     truth differently from the scalar routine compares the wrong angle and mislabels silently."""
-    assert TRUTH_SLICE['cubic'] == [0]
-    assert TRUTH_SLICE['tetragonal'] == [0, 2]
-    assert TRUTH_SLICE['hexagonal'] == [0, 2]
-    assert TRUTH_SLICE['rhombohedral'] == [0, 3]
-    assert TRUTH_SLICE['orthorhombic'] == [0, 1, 2]
-    assert TRUTH_SLICE['monoclinic'] == [0, 1, 2, 4]
-    assert TRUTH_SLICE['triclinic'] == [0, 1, 2, 3, 4, 5]
+    unit_cell = np.array([5.0, 6.0, 7.0, 1.1, 1.2, 1.3])
+    expected = {'cubic': [5.0], 'tetragonal': [5.0, 7.0], 'hexagonal': [5.0, 7.0],
+                'rhombohedral': [5.0, 1.1], 'orthorhombic': [5.0, 6.0, 7.0],
+                'monoclinic': [5.0, 6.0, 7.0, 1.2],
+                'triclinic': [5.0, 6.0, 7.0, 1.1, 1.2, 1.3]}
+    for lattice_system, want in expected.items():
+        np.testing.assert_array_equal(_sliced(unit_cell, lattice_system), np.array(want),
+                                      err_msg=lattice_system)

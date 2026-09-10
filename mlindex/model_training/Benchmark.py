@@ -16,8 +16,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from mlindex.utilities.Digests import q2_digest
-
 MANIFEST_NAME = 'manifest.json'
 ENTRY_TABLE_NAME = 'entries.parquet'
 COMPLETION_NAME = 'complete.json'
@@ -199,8 +197,3 @@ def check_peak_digests(candidates, entries):
             f'{disagree} candidate rows carry a q2_digest that disagrees with their entry. The '
             'two tables are describing different peak lists for the same pattern.')
     return True
-
-
-def entry_digest_of(q2_obs):
-    """The digest an entry row should carry for this peak list."""
-    return q2_digest(q2_obs)

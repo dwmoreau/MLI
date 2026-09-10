@@ -7,7 +7,6 @@ from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
 from mlindex.utilities.ErrorAdder import perturb_xnn
 from mlindex.utilities.Reindexing import reindex_entry_basic
-from mlindex.utilities.Digests import peak_list_bytes
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
@@ -115,7 +114,7 @@ class OptimizerBase:
         the seed for a peak list is the same number on every machine.
         """
         key = hashlib.sha256()
-        key.update(peak_list_bytes(self.q2_obs))
+        key.update(np.ascontiguousarray(self.q2_obs, dtype='<f8').tobytes())
         key.update(f':{self.bravais_lattice}:{self.rank}:{self.seed}'.encode())
         self.rng = np.random.default_rng(int.from_bytes(key.digest()[:8], 'big'))
 
