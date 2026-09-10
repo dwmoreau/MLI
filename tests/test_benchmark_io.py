@@ -1,0 +1,197 @@
+"""Writing a benchmark pool, and reading back exactly what was written.
+
+The reading half of this module was validated in P04a against a pool campaign 2 generated. These
+cover the half that produces one, and the refusals that stop a broken pool from reporting as a
+measurement rather than as an error.
+"""
+
+import json
+import numpy as np
+import pandas as pd
+import pytest
+
+from mlindex.model_training import Benchmark
+
+
+def _record(entry_id='AAAAAA', bundle='b1_error1_cont0', lattice='cP',
+            lattice_system='cubic', m20=(30.0, 10.0), cells=(5.0, 7.0)):
+    n = len(m20)
+    return {
+        'entry_id': entry_id, 'condition_bundle': bundle, 'q2_digest': 'deadbeefdeadbeef',
+        'bravais_lattice': lattice, 'lattice_system': lattice_system,
+        'n_peaks': 10, 'hkl_ref_length': 500, 'n_entering': 99,
+        'assignment_threshold': 0.95, 'downsample_radius': 1e-4, 'prune_threshold': 1.5,
+        'candidate_id': np.arange(n, dtype=np.int64),
+        'xnn': np.array([[1.0/c**2] for c in cells]),
+        'unit_cell': np.array([[c] for c in cells]),
+        'volume': np.array([c**3 for c in cells]),
+        'reciprocal_volume': np.array([c**-3 for c in cells]),
+        'spacegroup': [f'SG{i}' for i in range(n)],
+        'M20': np.array(m20, dtype=float),
+        'n_indexed': np.arange(n, dtype=np.int64),
+        'final_rank': np.arange(n, dtype=np.int64),
+        'in_top_n': np.ones(n, dtype=bool),
+        }
+
+
+def _entries(entry_id='AAAAAA', bundle='b1_error1_cont0', a=5.0):
+    return pd.DataFrame([{
+        'entry_id': entry_id, 'condition_bundle': bundle, 'q2_digest': 'deadbeefdeadbeef',
+        'source_db': 'csd', 'split': 'fom-dev', 'q2_obs': np.linspace(0.05, 0.5, 10),
+        'n_peaks_available': 20, 'bravais_lattice_true': 'cP', 'lattice_system_true': 'cubic',
+        'unit_cell_true': np.array([a, a, a, 90.0, 90.0, 90.0]), 'volume_true': a**3,
+        'is_degenerate': False, 'pool_size_full': 99,
+        }])
+
+
+def _manifest(**overrides):
+    base = {name: 'x' for name in Benchmark.IDENTITY_FIELDS}
+    base.update(schema_version=Benchmark.SCHEMA_VERSION, pool_size=1, prune_threshold=1.5,
+                search_seed=12345, seed=12345)
+    base.update(overrides)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Records to a frame
+# ---------------------------------------------------------------------------
+
+
+def test_block_wide_values_are_broadcast_and_per_candidate_arrays_are_not():
+    frame = Benchmark.records_to_frame([_record(), _record(entry_id='BBBBBB')])
+
+    assert frame.shape[0] == 4
+    assert frame['entry_id'].tolist() == ['AAAAAA']*2 + ['BBBBBB']*2
+    assert frame['n_entering'].tolist() == [99]*4
+    assert frame['M20'].tolist() == [30.0, 10.0, 30.0, 10.0]
+    # A cell stays one value per candidate, not one number per frame.
+    assert [list(cell) for cell in frame['unit_cell']] == [[5.0], [7.0]]*2
+
+
+def test_no_records_still_gives_the_declared_columns():
+    """An arm that indexed nothing must not produce a frame whose columns depend on that."""
+    frame = Benchmark.records_to_frame([])
+    assert list(frame.columns) == list(Benchmark.CANDIDATE_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
+# Labelling
+# ---------------------------------------------------------------------------
+
+
+def test_the_true_cell_is_labelled_correct_and_a_wrong_one_is_not():
+    frame = Benchmark.records_to_frame([_record(cells=(5.0, 7.0))])
+    labelled = Benchmark.label_frame(frame, _entries(a=5.0))
+
+    assert labelled['is_correct'].tolist() == [True, False]
+
+
+def test_a_candidate_whose_pattern_has_no_truth_is_refused():
+    """Labelling it would leave `is_correct` false for a reason that has nothing to do with the
+    cell, and false is what the overwhelming majority of rows carry legitimately."""
+    frame = Benchmark.records_to_frame([_record(entry_id='ZZZZZZ')])
+
+    with pytest.raises(ValueError, match='no row in the entry table'):
+        Benchmark.label_frame(frame, _entries(entry_id='AAAAAA'))
+
+
+def test_a_cell_of_the_wrong_width_is_refused_rather_than_compared():
+    """A candidate carries the partial cell for its own lattice system. If that ever stops
+    matching the sliced truth the labeller would compare different quantities and report it as an
+    answer."""
+    record = _record()
+    record['unit_cell'] = np.array([[5.0, 90.0], [7.0, 90.0]])
+    frame = Benchmark.records_to_frame([record])
+
+    with pytest.raises(ValueError, match='cell parameters'):
+        Benchmark.label_frame(frame, _entries())
+
+
+# ---------------------------------------------------------------------------
+# The round trip
+# ---------------------------------------------------------------------------
+
+
+def test_two_pools_stripe_an_arm_and_consolidate_into_one_shard_per_lattice(tmp_path):
+    """An arm is generated by several pools at once. Each writes its own stripe under the same
+    names, and consolidation streams them into the shard a reader rebuilds by name."""
+    entries = pd.concat([_entries('AAAAAA'), _entries('BBBBBB')], ignore_index=True)
+    for part, entry_id in enumerate(('AAAAAA', 'BBBBBB')):
+        directory = Benchmark.part_dir(tmp_path, part)
+        frame = Benchmark.records_to_frame([_record(entry_id=entry_id)])
+        frame = Benchmark.label_frame(frame, entries)
+        Benchmark.write_candidate_shard(frame, directory, 'b1_error1_cont0', 'cP')
+        Benchmark.write_entry_table(entries.iloc[[part]], directory)
+
+    Benchmark.consolidate(tmp_path)
+    Benchmark.write_manifest(tmp_path, **_manifest())
+    Benchmark.stamp_complete(tmp_path, n_entries=2)
+
+    assert not (tmp_path / Benchmark.PART_DIR).exists()
+    assert Benchmark.available_bundles(tmp_path) == ['b1_error1_cont0']
+    assert Benchmark.check_complete(tmp_path)['n_entries'] == 2
+
+    read = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0', sidecars=())
+    assert read.shape[0] == 4
+    assert sorted(read['entry_id'].unique()) == ['AAAAAA', 'BBBBBB']
+    assert read['is_correct'].sum() == 2
+    assert list(read.columns)[:6] == list(Benchmark.CANDIDATE_COLUMNS)[:6]
+
+    read_entries = Benchmark.load_entries(tmp_path)
+    assert sorted(read_entries['entry_id']) == ['AAAAAA', 'BBBBBB']
+    Benchmark.check_peak_digests(read, read_entries)
+
+
+def test_an_unconsolidated_arm_is_not_silently_readable(tmp_path):
+    """Nothing may read the stripes as though they were the arm: they hold different crystals,
+    and a pool killed halfway leaves some of them."""
+    with pytest.raises(FileNotFoundError):
+        Benchmark.consolidate(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+
+def test_a_manifest_missing_an_identity_field_is_refused(tmp_path):
+    """An omitted field cannot be refused a pairing it should be refused, and the omission is
+    invisible at the point it matters."""
+    incomplete = _manifest()
+    del incomplete['arch']
+
+    with pytest.raises(ValueError, match='arch'):
+        Benchmark.write_manifest(tmp_path, **incomplete)
+
+
+def test_arms_from_different_machines_are_not_paired():
+    arms = {'a': _manifest(arch='x86_64'), 'b': _manifest(arch='arm64')}
+
+    with pytest.raises(ValueError, match='arch'):
+        Benchmark.manifest_identity(arms)
+
+
+def test_the_axis_under_study_is_named_and_everything_else_still_checked():
+    """A run-to-run floor varies the search seed on purpose; it must not also vary the commit."""
+    arms = {'a': _manifest(search_seed=12345), 'b': _manifest(search_seed=202)}
+    assert Benchmark.manifest_identity(arms, allow=('search_seed',))
+
+    with pytest.raises(ValueError, match='search_seed'):
+        Benchmark.manifest_identity(arms)
+
+    moved = {'a': _manifest(search_seed=12345), 'b': _manifest(search_seed=202, commit='other')}
+    with pytest.raises(ValueError, match='commit'):
+        Benchmark.manifest_identity(moved, allow=('search_seed',))
+
+
+def test_one_arm_needs_no_agreement():
+    assert Benchmark.manifest_identity({'a': _manifest()})
+
+
+def test_a_manifest_round_trips_through_disk(tmp_path):
+    Benchmark.write_manifest(tmp_path, **_manifest())
+    loaded = Benchmark.load_manifest(tmp_path)
+
+    assert loaded['schema_version'] == Benchmark.SCHEMA_VERSION
+    assert loaded['candidate_columns'] == list(Benchmark.CANDIDATE_COLUMNS)
+    assert Benchmark.manifest_identity({'a': loaded, 'b': _manifest()})
