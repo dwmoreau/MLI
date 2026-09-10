@@ -280,11 +280,10 @@ def test_a_dropped_nan_cell_does_not_shift_the_spacegroups():
     manager = _downsample_manager()
     xnn = [np.array([[1.0], [2.0], [np.nan], [3.0]])]
     M20 = [np.array([10.0, 20.0, 999.0, 30.0])]
-    Minfo = [np.array([1.0, 2.0, 3.0, 4.0])]
     n_indexed = [np.array([5, 6, 7, 8])]
     spacegroup = ['A', 'B', 'BAD', 'D']
 
-    manager._downsample_computation(M20, Minfo, xnn, n_indexed, spacegroup,
+    manager._downsample_computation(M20, xnn, n_indexed, spacegroup,
                                     n_top_candidates=10)
 
     assert 'BAD' not in manager.top_spacegroup
@@ -309,12 +308,11 @@ def test_a_short_return_does_not_desynchronise_the_pool():
     # Four rows of numbers against three spacegroups: what a padded receive looked like.
     xnn = [np.array([[1.0], [2.0], [3.0], [0.0]])]
     M20 = [np.array([10.0, 20.0, 30.0, 0.0])]
-    Minfo = [np.array([1.0, 2.0, 3.0, 0.0])]
     n_indexed = [np.array([5, 6, 7, 0])]
     spacegroup = ['A', 'B', 'C']
 
     with pytest.raises(ValueError, match='spacegroup'):
-        manager._downsample_computation(M20, Minfo, xnn, n_indexed, spacegroup,
+        manager._downsample_computation(M20, xnn, n_indexed, spacegroup,
                                         n_top_candidates=10)
 
 
@@ -323,11 +321,10 @@ def test_a_matched_return_still_downsamples():
     manager = _downsample_manager()
     xnn = [np.array([[1.0], [2.0], [3.0]])]
     M20 = [np.array([10.0, 20.0, 30.0])]
-    Minfo = [np.array([1.0, 2.0, 3.0])]
     n_indexed = [np.array([5, 6, 7])]
     spacegroup = ['A', 'B', 'C']
 
-    manager._downsample_computation(M20, Minfo, xnn, n_indexed, spacegroup,
+    manager._downsample_computation(M20, xnn, n_indexed, spacegroup,
                                     n_top_candidates=10)
 
     assert manager.top_M20.tolist() == [30.0, 20.0, 10.0]

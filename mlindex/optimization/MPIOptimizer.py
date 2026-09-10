@@ -33,11 +33,10 @@ def _downsample_chunk(args):
     permutes it in a specific way (survivors keep their relative order, the
     kept point moves to the end).
     """
-    (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk,
-     downsample_radius) = args
+    (xnn_chunk, M20_chunk, n_indexed_chunk, spacegroup_chunk, downsample_radius) = args
     n = xnn_chunk.shape[0]
     if n == 0:
-        return (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk)
+        return (xnn_chunk, M20_chunk, n_indexed_chunk, spacegroup_chunk)
 
     neighbor_array = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk) < downsample_radius
     order = np.arange(n)
@@ -64,8 +63,8 @@ def _downsample_chunk(args):
         survivors[neighbor_positions] = False
         order = np.concatenate((order[survivors], [keep_index]))
 
-    return (xnn_chunk[order], M20_chunk[order], Minfo_chunk[order],
-            n_indexed_chunk[order], [spacegroup_chunk[i] for i in order])
+    return (xnn_chunk[order], M20_chunk[order], n_indexed_chunk[order],
+            [spacegroup_chunk[i] for i in order])
 
 
 class OptimizerBase:
@@ -226,7 +225,6 @@ class OptimizerWorker(OptimizerBase):
         self.comm.send(
             {
                 'M20': candidates.best_M20,
-                'Minfo': candidates.best_Minfo,
                 'xnn': candidates.best_xnn,
                 'n_indexed': candidates.n_indexed,
                 'spacegroup': list(candidates.best_spacegroup),
@@ -560,11 +558,10 @@ class OptimizerManager(OptimizerBase):
             )
         return xnn
 
-    def _downsample_computation(self, best_M20_all, best_Minfo_all, best_xnn_all,
+    def _downsample_computation(self, best_M20_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
                                 n_top_candidates):
         best_M20_all = np.concatenate(best_M20_all, axis=0)
-        best_Minfo_all = np.concatenate(best_Minfo_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
 
@@ -586,7 +583,6 @@ class OptimizerManager(OptimizerBase):
         # Selling reduction
         good_indices = np.invert(np.any(np.isnan(best_xnn_all), axis=1))
         best_M20_all = best_M20_all[good_indices]
-        best_Minfo_all = best_Minfo_all[good_indices]
         best_xnn_all = best_xnn_all[good_indices]
         best_n_indexed_all = best_n_indexed_all[good_indices]
         # best_spacegroup_all is a list and was left unfiltered here, while sort_indices
@@ -607,7 +603,6 @@ class OptimizerManager(OptimizerBase):
 
         best_xnn_all = best_xnn_all[sort_indices]
         best_M20_all = best_M20_all[sort_indices]
-        best_Minfo_all = best_Minfo_all[sort_indices]
         best_n_indexed_all = best_n_indexed_all[sort_indices]
         best_spacegroup_all = [best_spacegroup_all[i] for i in sort_indices]
         chunk_size = 1000
@@ -622,7 +617,6 @@ class OptimizerManager(OptimizerBase):
             chunk_args.append((
                 best_xnn_all[start:end],
                 best_M20_all[start:end],
-                best_Minfo_all[start:end],
                 best_n_indexed_all[start:end],
                 best_spacegroup_all[start:end],
                 downsample_radius,
@@ -633,24 +627,20 @@ class OptimizerManager(OptimizerBase):
 
         xnn_downsampled = []
         M20_downsampled = []
-        Minfo_downsampled = []
         n_indexed_downsampled = []
         spacegroup_downsampled = []
-        for (xnn_chunk, M20_chunk, Minfo_chunk, n_indexed_chunk, spacegroup_chunk) in chunk_results:
+        for (xnn_chunk, M20_chunk, n_indexed_chunk, spacegroup_chunk) in chunk_results:
             xnn_downsampled.append(xnn_chunk)
             M20_downsampled.append(M20_chunk)
-            Minfo_downsampled.append(Minfo_chunk)
             n_indexed_downsampled.append(n_indexed_chunk)
             spacegroup_downsampled += spacegroup_chunk
         xnn_downsampled = np.vstack(xnn_downsampled)
         M20_downsampled = np.concatenate(M20_downsampled)
-        Minfo_downsampled = np.concatenate(Minfo_downsampled)
         n_indexed_downsampled = np.concatenate(n_indexed_downsampled)
 
         sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
         self.top_M20 = M20_downsampled[sort_indices]
-        self.top_Minfo = Minfo_downsampled[sort_indices]
         self.top_n_indexed = n_indexed_downsampled[sort_indices]
         self.top_spacegroup = [spacegroup_downsampled[i] for i in sort_indices]
         self.top_unit_cell = get_unit_cell_from_xnn(
@@ -661,14 +651,12 @@ class OptimizerManager(OptimizerBase):
 
     def downsample_candidates(self, candidates, n_top_candidates):
         best_M20_all = []
-        best_Minfo_all = []
         best_xnn_all = []
         best_n_indexed_all = []
         best_spacegroup_all = []
         for rank_index in range(self.n_ranks):
             if rank_index == self.root:
                 best_M20_all.append(candidates.best_M20)
-                best_Minfo_all.append(candidates.best_Minfo)
                 best_xnn_all.append(candidates.best_xnn)
                 best_n_indexed_all.append(candidates.n_indexed)
                 best_spacegroup_all += candidates.best_spacegroup
@@ -681,12 +669,11 @@ class OptimizerManager(OptimizerBase):
                 # `_downsample_computation`.
                 result = self.comm.recv(source=rank_index)
                 best_M20_all.append(result['M20'])
-                best_Minfo_all.append(result['Minfo'])
                 best_xnn_all.append(result['xnn'])
                 best_n_indexed_all.append(result['n_indexed'])
                 best_spacegroup_all += result['spacegroup']
 
-        self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
+        self._downsample_computation(best_M20_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
                                      n_top_candidates)
 

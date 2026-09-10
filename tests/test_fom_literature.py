@@ -27,6 +27,7 @@ from mlindex.utilities.FigureOfMerits import WU88_SYMMETRY_FACTOR_CORRECTED  # n
 from mlindex.utilities.FigureOfMerits import compute_all  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M20  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M_nn  # noqa: E402
+from mlindex.utilities.FigureOfMerits import get_M_rev_sym  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_delta_dewolff61  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_F_N  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_g_min_werner  # noqa: E402
@@ -478,12 +479,25 @@ def _synthetic_pool(seed=0, n_candidates=40):
     return q2_obs, q2_calc, q2_ref, xnn
 
 
-def test_compute_all_does_not_modify_its_arguments():
-    """get_M20 writes zeros into q2_ref_calc in place. compute_all must contain that.
+def test_get_M20_leaves_the_reference_array_untouched():
+    """The guarantee that replaced compute_all's defensive copy.
 
-    get_M20 is inner-loop code and is deliberately left as it is, so ownership of the copy sits
-    here instead.
+    get_M20 used to take its count and its maximum by zeroing the excluded reference lines in
+    place, so the array came back destroyed. That made evaluation order load-bearing: any merit
+    run after it saw a zeroed reference list and every count collapsed. It now masks into a
+    temporary and the array survives the call byte for byte.
+
+    Asserted directly on get_M20 rather than only through compute_all, because compute_all could
+    hide a returning mutation behind a copy and this is the property the callers rely on.
     """
+    q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
+    before = q2_ref.copy()
+    get_M20(q2_obs, q2_calc, q2_ref)
+    assert np.array_equal(q2_ref, before)
+
+
+def test_compute_all_does_not_modify_its_arguments():
+    """No merit in the frame may write to the arrays it is handed."""
     q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
     before = q2_ref.copy()
     compute_all(q2_obs, q2_calc, q2_ref, xnn, "orthorhombic", "oP")
@@ -520,6 +534,79 @@ def test_get_M20_degenerate_guard_preserved():
     q2_calc = np.zeros((1, 20))
     q2_ref = np.linspace(0.01, 2.0, 50)[np.newaxis]
     assert get_M20(q2_obs, q2_calc, q2_ref.copy())[0] == 0.0
+
+
+def _m_rev_blowup_case():
+    """The real 6.2e11 candidate, frozen from the pool that measured it.
+
+    JAVDOA / oI / `error1_cont0`, candidate 1467 of S03's threshold-0 general arm -- the row
+    this was found in. Kept as arrays rather than as a recipe because the pool it came
+    from is regenerable run output and is not in the repository.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expected",
+                        "m_rev_blowup_saturated_fit.npz")
+    return np.load(path)
+
+
+def test_M_rev_blows_up_on_a_saturated_fit_when_the_floor_is_lifted():
+    """The defect itself, so it cannot silently stop happening.
+
+    Three reference lines in a window that has to support a three-parameter orthorhombic cell:
+    the refinement interpolates them exactly, M_rev's denominator goes to float rounding, and a
+    cell M20 scores at 1.85 comes out at 6.2e11. M_tilde is unharmed, which is what says the
+    defect is in the reversed term and not in the candidate.
+
+    `min_n_cal=None` is what a caller asking for the unfloored value passes, and it is how every
+    column stored before 2026-08-27 was computed.
+    """
+    case = _m_rev_blowup_case()
+    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
+                                          min_n_cal=None)
+    assert case["n_cal"] == 3
+    assert M_rev[0] == pytest.approx(620579830241.0692, rel=1e-12)
+    assert M_rev[0] == case["M_rev_raw"]
+    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-12)
+    assert get_M20(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"].copy())[0] < 2.0
+    # M_sym is the product, so it carries the blow-up into the leading classical merit.
+    assert M_sym[0] == pytest.approx(M_tilde[0]*M_rev[0], rel=1e-12)
+
+
+def test_M_rev_support_floor_is_on_by_default():
+    """The default floors the saturated fit, and does not touch M_tilde.
+
+    This test is what holds the default: a caller
+    who passes nothing must get the floored value, because a floor every caller has to remember is
+    a floor the next caller forgets.
+    """
+    case = _m_rev_blowup_case()
+    M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"])
+    # Undefined is signalled the way the pre-existing N_cal == 0 guard signals it.
+    assert M_rev[0] == 0.0
+    assert M_sym[0] == 0.0
+    # Only the reversed term is floored: M_tilde divides by the residual over all twenty assigned
+    # lines and is well conditioned however few reference lines the window holds.
+    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-12)
+    # And the default is ten, not merely "some floor" -- N_cal is 3 here, so a floor of 3 would
+    # let it through and this test would pass for the wrong reason.
+    assert get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
+                         min_n_cal=3)[1][0] > 1e11
+
+
+def test_M_rev_support_floor_spares_a_well_supported_candidate():
+    """The floor must not be a blanket clip: a candidate with real support is untouched.
+
+    Built by widening the window rather than by changing the cell, so the only thing that differs
+    between this and the case above is N_cal.
+    """
+    q2_obs = np.linspace(0.1, 2.0, 20)
+    q2_ref = np.linspace(0.1, 2.0, 200)[np.newaxis]
+    q2_calc = np.take_along_axis(
+        q2_ref, np.abs(q2_ref[0][np.newaxis] - q2_obs[:, np.newaxis]).argmin(axis=1)[np.newaxis],
+        axis=1)
+    unfloored = get_M_rev_sym(q2_obs, q2_calc, q2_ref, min_n_cal=None)[1]
+    default = get_M_rev_sym(q2_obs, q2_calc, q2_ref)[1]
+    assert unfloored[0] > 0.0
+    assert default[0] == unfloored[0]
 
 
 def test_the_correct_candidate_wins_on_the_position_only_merits():

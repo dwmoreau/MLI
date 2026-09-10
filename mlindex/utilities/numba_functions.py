@@ -92,6 +92,33 @@ def fast_assign(q2_obs, q2_ref):
     return hkl_assign
 
 
+# Both reductions get_M20 needs over the reference lines, in one pass and without writing to
+# the input: how many lines fall below the last assigned line, and the largest of those.
+#
+# No fastmath, for the reason given above fast_assign. `value < cutoff` is False for NaN, so NaN
+# lines are excluded from both the count and the maximum. The maximum starts at 0.0 rather than
+# -inf, so a row with no line below the cut-off, or one whose lines below it are all negative,
+# yields 0.0.
+@jit
+def lines_below_cutoff(q2_ref_calc, cutoff):
+    n_candidates = q2_ref_calc.shape[0]
+    n_ref = q2_ref_calc.shape[1]
+    counts = np.zeros(n_candidates, dtype=np.int64)
+    largest = np.zeros(n_candidates, dtype=np.float64)
+    for candidate_index in range(n_candidates):
+        limit = cutoff[candidate_index]
+        count = 0
+        best = 0.0
+        for ref_index in range(n_ref):
+            value = q2_ref_calc[candidate_index, ref_index]
+            if value < limit:
+                count += 1
+                if value > best:
+                    best = value
+        counts[candidate_index] = count
+        largest[candidate_index] = best
+    return counts, largest
+
 @jit(fastmath=True)
 def fast_assign_top_n(q2_obs, q2_ref, top_n):
     n_obs = q2_obs.size
@@ -254,3 +281,224 @@ def gauss_newton_solve(hkl2, q2_obs, sigma, xnn, pivot_tolerance):
         ok[candidate] = True
 
     return delta_gn, ok
+
+
+
+# ---------------------------------------------------------------------------------------
+# Shared by every kernel below that has to score a calculated line against the peak list.
+# ---------------------------------------------------------------------------------------
+
+@jit
+def nearest_peak_distance(q2_obs_sorted, value):
+    """min_j |value - q2_obs_sorted[j]|, by binary search rather than by a scan.
+
+    |value - peak| is a V over a sorted peak list, so the minimum is at one of the two peaks
+    bracketing `value`. Both candidate distances are formed by the same subtract-and-abs a full
+    scan would use, so the result is the same float and not merely the same number.
+
+    The search is branchless and the final selection is a conditional expression rather than two
+    branches: which of the bracketing pair is nearer is a coin flip, so a branch there mispredicts
+    half the time.
+
+    `q2_obs_sorted` must be sorted ascending and finite; callers check.
+    """
+    n_peaks = q2_obs_sorted.size
+    left = 0
+    width = n_peaks
+    while width > 1:
+        half = width >> 1
+        left += half*(q2_obs_sorted[left + half - 1] < value)
+        width -= half
+    left += q2_obs_sorted[left] < value
+
+    below = left - 1
+    if below < 0:
+        below = 0
+    above = left
+    if above > n_peaks - 1:
+        above = n_peaks - 1
+    distance_below = abs(value - q2_obs_sorted[below])
+    distance_above = abs(value - q2_obs_sorted[above])
+    # One value selected by a conditional expression, not two stores in two branches:
+    # which of the pair is nearer is a coin flip, so the branch form mispredicts half the
+    # time and measured 2x slower.
+    return distance_above if distance_above < distance_below else distance_below
+
+
+# Same no-fastmath rule as fast_assign, and for the same reason: q2_ref is xnn @ hkl2.T,
+# NaN rows are routine, and the whole point of this kernel is that it agrees with the
+# array expression it replaced to the last bit.
+@jit
+def reversed_line_scores(q2_ref, q_max, q2_obs_sorted, first_peak,
+                         scored, in_range, q_n, counts, q_min):
+    """Everything get_M_rev_sym's reversed term needs, in one row-local pass.
+
+    Fills, per candidate row of ``q2_ref``:
+
+      q_min      the reference line closest to the first observed peak (de Wolff's q_I);
+      in_range   whether each reference line lies in [q_min, q_max];
+      counts     how many do, which is N_cal when the weights are all 1;
+      q_n        the largest reference line in range, or -inf if none is;
+      scored     min_j |q2_ref - q2_obs[j]| where in range and 0.0 where not.
+
+    The row is read twice, once to locate q_min and once to score against it. Nothing here
+    reassociates a float addition and the row sums stay in numpy, so the output is bit-identical
+    to the array expressions in `_reversed_line_terms`.
+    """
+    n_candidates, n_ref = q2_ref.shape
+    n_peaks = q2_obs_sorted.size
+    # A NaN peak makes every distance NaN, because np.min over the broadcast difference
+    # propagates it. Tested once rather than per line.
+    peaks_defined = True
+    for peak in range(n_peaks):
+        if q2_obs_sorted[peak] != q2_obs_sorted[peak]:
+            peaks_defined = False
+    for candidate in range(n_candidates):
+        # np.argmin returns the first occurrence of the minimum, so this scans forwards
+        # and updates on a strict '<'.
+        best_index = 0
+        best_deviation = np.inf
+        for reference in range(n_ref):
+            deviation = abs(q2_ref[candidate, reference] - first_peak)
+            if deviation < best_deviation:
+                best_deviation = deviation
+                best_index = reference
+        lower_bound = q2_ref[candidate, best_index]
+        q_min[candidate] = lower_bound
+        upper_bound = q_max[candidate]
+
+        count = 0
+        highest = -np.inf
+        for reference in range(n_ref):
+            value = q2_ref[candidate, reference]
+            # NaN fails both comparisons, which is what the array expression does too.
+            if value >= lower_bound and value <= upper_bound:
+                in_range[candidate, reference] = True
+                count += 1
+                if value > highest:
+                    highest = value
+
+                if peaks_defined:
+                    scored[candidate, reference] = nearest_peak_distance(q2_obs_sorted, value)
+                else:
+                    scored[candidate, reference] = np.nan
+            else:
+                in_range[candidate, reference] = False
+                scored[candidate, reference] = 0.0
+        counts[candidate] = count
+        q_n[candidate] = highest
+
+
+@jit
+def over_prediction_runs(lines, counts, q2_obs_sorted, tolerance_factor, n_over, max_gap):
+    """Calculated lines no observation accounts for, and the longest consecutive run of them.
+
+    Same inputs as `sorted_line_gap_squares`. A line counts as unaccounted for when the
+    nearest observed peak is further away than `tolerance_factor` times the gap to the
+    previous line -- so the whole test is local, and one forward pass over the sorted row
+    computes the gap, the nearest peak, the count and the run length together.
+
+    Both outputs are integers, so unlike the merits that sum floats there is no grouping to
+    preserve here: reproducing the boolean `unaccounted` per line reproduces both exactly.
+    """
+    n_candidates = lines.shape[0]
+    # A NaN peak makes every distance NaN, and `NaN > x` is False, so nothing counts as
+    # unaccounted for -- which is what the array expression produces.
+    peaks_defined = True
+    for peak in range(q2_obs_sorted.size):
+        if q2_obs_sorted[peak] != q2_obs_sorted[peak]:
+            peaks_defined = False
+    for candidate in range(n_candidates):
+        count = counts[candidate]
+        previous = 0.0
+        unaccounted = 0
+        run = 0
+        longest = 0
+        for line in range(count):
+            value = lines[candidate, line]
+            local_gap = value - previous
+            previous = value
+            if (peaks_defined
+                    and nearest_peak_distance(q2_obs_sorted, value)
+                    > tolerance_factor*local_gap):
+                unaccounted += 1
+                run += 1
+                if run > longest:
+                    longest = run
+            else:
+                run = 0
+        n_over[candidate] = unaccounted
+        max_gap[candidate] = longest
+
+
+@jit
+def nearest_line_distances(q2_obs, q2_ref, d1):
+    """d1[i, p] = min_j |q2_ref[i, j] - q2_obs[p]|, the nearest calculated line to each peak.
+
+    One pass carrying n_peaks running minima, so each reference row is read once rather than once
+    per peak. A minimum is a selection, not an accumulation, so scan order cannot change the
+    result.
+
+    NaN is propagated deliberately: `NaN < running` is false, so a plain running minimum would
+    skip it and return the minimum of the rest where `.min()` returns NaN. One test per reference
+    entry catches it, and a NaN peak is a whole column, which the caller fills in.
+    """
+    n_candidates, n_ref = q2_ref.shape
+    n_peaks = q2_obs.size
+    running = np.empty(n_peaks, dtype=np.float64)
+    for candidate in range(n_candidates):
+        for peak in range(n_peaks):
+            running[peak] = np.inf
+        undefined = False
+        for reference in range(n_ref):
+            value = q2_ref[candidate, reference]
+            if value != value:
+                undefined = True
+            else:
+                for peak in range(n_peaks):
+                    distance = abs(value - q2_obs[peak])
+                    if distance < running[peak]:
+                        running[peak] = distance
+        for peak in range(n_peaks):
+            d1[candidate, peak] = np.nan if undefined else running[peak]
+
+
+# np.exp returns exactly 0.0 for arguments at or below -745.1332191019412 -- the first
+# nonzero result is the smallest subnormal, 5e-324. Anything below this bound therefore
+# contributes an exact zero to the sum, so it can be filled in rather than computed. The
+# bound is deliberately a little under the true one: it has to be safe, not tight, and no
+# term between the two is skipped.
+EXP_UNDERFLOW_BOUND = -746.0
+
+
+@jit
+def posterior_exponent_terms(q2_ref_block, q2_obs_peak, d1_peak, block_scale, terms, computable):
+    """The log-sum-exp arguments for one peak, with the terms that underflow already zeroed.
+
+    Fills, for every calculated line of every candidate in the block:
+
+      terms       -(|line - peak|^2 - d1^2)/scale where np.exp of that is not identically zero,
+                  and 0.0 where it is, so the caller runs `np.exp(terms, out=terms,
+                  where=computable)` and the zeros are already in place;
+      computable  which entries the exponential still has to be taken of.
+
+    Only exact operations here, performed in the same order as the array expression, so the
+    argument handed to numpy's exp is the same float. The exponential itself stays in numpy:
+    numba would call a different libm and the last bit is not guaranteed to agree.
+    """
+    n_candidates, n_ref = q2_ref_block.shape
+    for candidate in range(n_candidates):
+        scale = block_scale[candidate]
+        nearest_squared = d1_peak[candidate]*d1_peak[candidate]
+        for reference in range(n_ref):
+            distance = abs(q2_ref_block[candidate, reference] - q2_obs_peak)
+            value = -(distance*distance - nearest_squared)/scale
+            # Written as `<=` rather than `>` so that NaN falls through to the branch that
+            # keeps it: numpy's exp turns it into a NaN term and the sum propagates it, which
+            # is what the expression this replaces did with a NaN peak or reference line.
+            if value <= EXP_UNDERFLOW_BOUND:
+                terms[candidate, reference] = 0.0
+                computable[candidate, reference] = False
+            else:
+                terms[candidate, reference] = value
+                computable[candidate, reference] = True

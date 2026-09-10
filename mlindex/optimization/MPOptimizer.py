@@ -96,7 +96,6 @@ class MPOptimizerManager(OptimizerManager):
 
     def downsample_candidates(self, candidates, n_top_candidates):
         best_M20_all = [candidates.best_M20]
-        best_Minfo_all = [candidates.best_Minfo]
         best_xnn_all = [candidates.best_xnn]
         best_n_indexed_all = [candidates.n_indexed]
         best_spacegroup_all = list(candidates.best_spacegroup)
@@ -105,11 +104,10 @@ class MPOptimizerManager(OptimizerManager):
             if isinstance(result, Exception):
                 raise RuntimeError(f"Worker {r} failed: {result}") from result
             best_M20_all.append(result['M20'])
-            best_Minfo_all.append(result['Minfo'])
             best_xnn_all.append(result['xnn'])
             best_n_indexed_all.append(result['n_indexed'])
             best_spacegroup_all += result['spacegroup']
-        self._downsample_computation(best_M20_all, best_Minfo_all, best_xnn_all,
+        self._downsample_computation(best_M20_all, best_xnn_all,
                                      best_n_indexed_all, best_spacegroup_all,
                                      n_top_candidates)
 
@@ -159,7 +157,6 @@ class MPOptimizerWorker(OptimizerWorker):
     def downsample_candidates(self, candidates, n_top_candidates):
         result = {
             'M20': candidates.best_M20,
-            'Minfo': candidates.best_Minfo,
             'xnn': candidates.best_xnn,
             'n_indexed': candidates.n_indexed,
             'spacegroup': list(candidates.best_spacegroup),
@@ -309,11 +306,10 @@ def _build_group_optimizers(bl_list, group_size, data_queues, result_queues,
 
 
 def _group_result(optimizer):
-    """The five arrays `run.py` needs back from a lattice, ready to pickle."""
+    """The four arrays `run.py` needs back from a lattice, ready to pickle."""
     return {
         'top_unit_cell': optimizer.top_unit_cell,
         'top_M20': optimizer.top_M20,
-        'top_Minfo': optimizer.top_Minfo,
         'top_spacegroup': optimizer.top_spacegroup,
         'top_n_indexed': optimizer.top_n_indexed,
         }
