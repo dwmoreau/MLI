@@ -33,11 +33,15 @@ def _downsample_chunk(args):
     best-neighbour choice depend on the current ordering, and the collapse
     permutes it in a specific way (survivors keep their relative order, the
     kept point moves to the end).
+
+    ``carried_chunk`` is a per-row list the collapse never looks at; it is
+    permuted and filtered with the numeric arrays and handed back, so the
+    caller can carry whatever identifies a row alongside it.
     """
-    (xnn_chunk, M20_chunk, n_indexed_chunk, spacegroup_chunk, downsample_radius) = args
+    (xnn_chunk, M20_chunk, n_indexed_chunk, carried_chunk, downsample_radius) = args
     n = xnn_chunk.shape[0]
     if n == 0:
-        return (xnn_chunk, M20_chunk, n_indexed_chunk, spacegroup_chunk)
+        return (xnn_chunk, M20_chunk, n_indexed_chunk, carried_chunk)
 
     neighbor_array = scipy.spatial.distance.cdist(xnn_chunk, xnn_chunk) < downsample_radius
     order = np.arange(n)
@@ -65,7 +69,7 @@ def _downsample_chunk(args):
         order = np.concatenate((order[survivors], [keep_index]))
 
     return (xnn_chunk[order], M20_chunk[order], n_indexed_chunk[order],
-            [spacegroup_chunk[i] for i in order])
+            [carried_chunk[i] for i in order])
 
 
 class OptimizerBase:
@@ -588,13 +592,17 @@ class OptimizerManager(OptimizerBase):
         best_M20_all = best_M20_all[good_indices]
         best_xnn_all = best_xnn_all[good_indices]
         best_n_indexed_all = best_n_indexed_all[good_indices]
-        # best_spacegroup_all is a list and was left unfiltered here, while sort_indices
-        # below index the *filtered* arrays -- so a single dropped row slid every later
-        # spacegroup onto a different candidate's cell, silently, including onto the
-        # highest-M20 candidate that ranking goes on to report.
-        best_spacegroup_all = [
-            spacegroup for spacegroup, keep in zip(best_spacegroup_all, good_indices) if keep
-            ]
+        # Where each surviving row sits in `best_spacegroup_all`. The spacegroups are a list
+        # rather than an array, so every filter and sort below would otherwise have to be
+        # applied to it a second time, by hand, in step -- and a step that was missed once
+        # slid every later spacegroup onto a different candidate's cell, silently, including
+        # onto the highest-M20 candidate that ranking goes on to report. Carrying positions
+        # instead means the list is indexed exactly once, at the end.
+        positions = np.flatnonzero(good_indices)
+        # How many candidates reach deduplication. Counted here, after the NaN filter and
+        # before anything is collapsed, so it is the size of the pool the search actually
+        # produced for this lattice.
+        n_entering = int(best_M20_all.shape[0])
 
         # Next remove nearly identical xnn's by selecting the xnn within an arbitrary radius
         # with the highest M20 score. The candidates are sorted by reciprocal volume so the
@@ -607,11 +615,19 @@ class OptimizerManager(OptimizerBase):
         best_xnn_all = best_xnn_all[sort_indices]
         best_M20_all = best_M20_all[sort_indices]
         best_n_indexed_all = best_n_indexed_all[sort_indices]
-        best_spacegroup_all = [best_spacegroup_all[i] for i in sort_indices]
+        positions = positions[sort_indices]
         chunk_size = 1000
         n_chunks = best_xnn_all.shape[0] // chunk_size + 1
 
         downsample_radius = self.opt_params['downsample_radius']
+
+        # `_downsample_chunk`'s fourth slot is carried through untouched -- its only use is
+        # `[slot[i] for i in order]` -- so the positions ride in it and come back as the
+        # surviving rows' positions, in survivor order. Handing it the spacegroups instead
+        # would work equally well and tell us nothing about which rows survived; this way
+        # the collapse is unchanged and the mapping is free. It is sliced with the arrays,
+        # so each chunk holds the global positions of its own rows.
+        chunk_positions = positions.tolist()
 
         chunk_args = []
         for chunk_index in range(n_chunks):
@@ -621,7 +637,7 @@ class OptimizerManager(OptimizerBase):
                 best_xnn_all[start:end],
                 best_M20_all[start:end],
                 best_n_indexed_all[start:end],
-                best_spacegroup_all[start:end],
+                chunk_positions[start:end],
                 downsample_radius,
             ))
 
@@ -631,17 +647,26 @@ class OptimizerManager(OptimizerBase):
         xnn_downsampled = []
         M20_downsampled = []
         n_indexed_downsampled = []
-        spacegroup_downsampled = []
-        for (xnn_chunk, M20_chunk, n_indexed_chunk, spacegroup_chunk) in chunk_results:
+        survivor_positions = []
+        for (xnn_chunk, M20_chunk, n_indexed_chunk, position_chunk) in chunk_results:
             xnn_downsampled.append(xnn_chunk)
             M20_downsampled.append(M20_chunk)
             n_indexed_downsampled.append(n_indexed_chunk)
-            spacegroup_downsampled += spacegroup_chunk
+            survivor_positions += position_chunk
         xnn_downsampled = np.vstack(xnn_downsampled)
         M20_downsampled = np.concatenate(M20_downsampled)
         n_indexed_downsampled = np.concatenate(n_indexed_downsampled)
+        spacegroup_downsampled = [best_spacegroup_all[i] for i in survivor_positions]
 
-        sort_indices = np.argsort(M20_downsampled)[::-1][:n_top_candidates]
+        order = np.argsort(M20_downsampled)[::-1]
+        self._on_downsample(
+            {'xnn': xnn_downsampled, 'M20': M20_downsampled,
+             'n_indexed': n_indexed_downsampled, 'spacegroup': spacegroup_downsampled,
+             'positions': survivor_positions},
+            order, n_entering, n_top_candidates,
+            )
+
+        sort_indices = order[:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
         self.top_M20 = M20_downsampled[sort_indices]
         self.top_n_indexed = n_indexed_downsampled[sort_indices]
@@ -651,6 +676,15 @@ class OptimizerManager(OptimizerBase):
             partial_unit_cell=True,
             lattice_system=self.lattice_system,
             )
+
+    def _on_downsample(self, survivors, order, n_entering, n_top_candidates):
+        """Observation point for a benchmark run. Does nothing on the shipped path.
+
+        Called with every candidate that came through deduplication, before the truncation
+        to `n_top_candidates` below it, and with the descending-M20 `order` the truncation
+        is about to use. A research driver subclasses this to record them; the indexer
+        itself neither overrides it nor reads anything it is given.
+        """
 
     def downsample_candidates(self, candidates, n_top_candidates):
         best_M20_all = []

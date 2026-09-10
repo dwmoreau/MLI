@@ -331,6 +331,61 @@ def test_a_matched_return_still_downsamples():
     assert manager.top_spacegroup == ['C', 'B', 'A']
 
 
+def test_a_collapsed_neighbourhood_keeps_each_survivor_s_spacegroup():
+    """The deduplication permutes rows and drops them, and the spacegroups are a list beside
+    the arrays rather than a column of them. Row identity is carried through the collapse so
+    the list is indexed once, at the end; this pins that a survivor keeps its own label."""
+    manager = _downsample_manager()
+    manager.opt_params['downsample_radius'] = 1e-3
+    # The first two cells are near-duplicates, so one of them is collapsed away.
+    xnn = [np.array([[1.0], [1.0000001], [5.0]])]
+    M20 = [np.array([10.0, 20.0, 30.0])]
+    n_indexed = [np.array([5, 6, 7])]
+    spacegroup = ['A', 'B', 'C']
+
+    manager._downsample_computation(M20, xnn, n_indexed, spacegroup,
+                                    n_top_candidates=10)
+
+    assert manager.top_M20.tolist() == [30.0, 20.0]
+    assert manager.top_spacegroup == ['C', 'B']
+    assert manager.top_n_indexed.tolist() == [7, 6]
+
+
+def test_the_downsample_hook_is_inert_and_sees_the_pool_before_truncation():
+    """The shipped indexer keeps twenty candidates a lattice; a benchmark needs every
+    survivor and the size of the pool they came from. The hook is where a research subclass
+    reads them, and it must do nothing at all unless something overrides it."""
+    from mlindex.optimization.MPIOptimizer import OptimizerManager
+
+    seen = {}
+
+    class Recording(OptimizerManager):
+        def _on_downsample(self, survivors, order, n_entering, n_top_candidates):
+            seen.update(survivors=survivors, order=order, n_entering=n_entering)
+
+    manager = Recording.__new__(Recording)
+    manager.lattice_system = 'cubic'
+    manager.n_ranks = 1
+    manager.zero_error = False
+    manager.opt_params = {'downsample_radius': 1e-9}
+    xnn = [np.array([[1.0], [2.0], [np.nan], [3.0]])]
+    M20 = [np.array([10.0, 20.0, 999.0, 30.0])]
+    n_indexed = [np.array([5, 6, 7, 8])]
+    spacegroup = ['A', 'B', 'BAD', 'D']
+
+    manager._downsample_computation(M20, xnn, n_indexed, spacegroup,
+                                    n_top_candidates=1)
+
+    # Truncation keeps one; the hook saw all three that reached deduplication.
+    assert manager.top_M20.tolist() == [30.0]
+    assert seen['n_entering'] == 3
+    assert seen['survivors']['spacegroup'] == ['A', 'B', 'D']
+    assert seen['survivors']['M20'].tolist() == [10.0, 20.0, 30.0]
+    assert seen['order'].tolist() == [2, 1, 0]
+    # The base class reads nothing and returns nothing.
+    assert OptimizerManager._on_downsample(manager, {}, None, 0, 0) is None
+
+
 def _triclinic_candidates(xnn_values, seed=7):
     """A triclinic Candidates over a synthetic peak list, built straight from given cells.
 
