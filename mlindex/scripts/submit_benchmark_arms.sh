@@ -35,6 +35,17 @@
 # NOT wrapped in srun: a bare `srun -n 1` pins CPU affinity to one core and strangles the pools.
 # Read SLURM_CPUS_ON_NODE, not nproc, and halve it -- it counts both hyperthreads.
 #
+# MEMORY. One pool manager holding all fourteen lattices measures 0.8-1.0 GB resident, so 128 of
+# them fit a 512 GB node with room to spare. Do not halve MLI_POOLS out of caution: the models are
+# smaller than the ~3 GB this project's notes used to quote, and the pools are what the throughput
+# is made of.
+#
+# WALLTIME. A pattern costs 59 s of one core on the development laptop, measured. A node core runs
+# it in at most ~1.5x that -- derived from the campaign's own arm, 1 590 patterns over 64 pools in
+# 2 124 s, which is 85.5 s a pattern at --pool-size 2 -- so ~90 s is the pessimistic figure. An arm
+# of 1 590 over 128 pools is then ~20 min, and a hard arm of 1 800 is ~22 min. Four hours is
+# deliberately generous: a job killed at the limit leaves an unstamped arm and the work is lost.
+#
 # Variable names are MLI_-prefixed because bash silently discards an assignment to one of its own
 # built-ins, and GROUPS cost this project a 62 core-hour pass.
 

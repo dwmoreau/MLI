@@ -256,6 +256,11 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     import mlindex
 
     pool_dir = Path(pool_dir)
+    # Read before a single pattern is indexed, not at the end beside the rest of the manifest.
+    # An arm takes hours, and a commit made while it runs would be recorded as the revision that
+    # produced it -- which is both wrong and invisible, since the manifest still parses and the
+    # identity check still compares it against other arms.
+    commit = _commit()
     design = POPULATIONS[population]
     bundles = list(bundles or design['bundles'])
     unknown = [bundle for bundle in bundles if bundle not in BenchmarkConditions.BY_TAG]
@@ -307,7 +312,7 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
         'split_manifest': str(split_manifest),
         'split_manifest_sha256': file_digest(split_manifest),
         'degeneracy_rule': degeneracy_rule,
-        'commit': _commit(),
+        'commit': commit,
         'arch': platform.machine(),
         'platform': platform.platform(),
         'python_version': platform.python_version(),
