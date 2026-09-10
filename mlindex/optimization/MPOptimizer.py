@@ -197,7 +197,7 @@ def _mp_worker_fn(rank, n_ranks, data_queue, result_queue, task_queue, fom=None,
 
 
 def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None, seed=12345,
-                        options=None):
+                        options=None, optimizer_class=None):
     """Spawn worker processes and construct manager optimizers for all 14 BLs.
 
     Returns (optimizers, processes, task_queues).
@@ -206,6 +206,10 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
     `options` is merged into every lattice's opt_params by the factories. Workers need
     no separate delivery: _init_workers ships the merged opt_params, so whatever a
     driver sets here reaches every rank.
+
+    `optimizer_class` defaults to MPOptimizerManager. A benchmark run passes a subclass
+    that keeps every candidate rather than the twenty this returns; the queue plumbing
+    below is injected on MPOptimizerManager, which a subclass inherits.
     """
     from mlindex.optimization.UtilitiesOptimizer import get_optimizers
     import mlindex
@@ -236,8 +240,9 @@ def setup_mp_optimizers(n_procs, broadening_tag, n_candidates_scale, logger=None
                      for bl in bravais_lattices}
 
     optimizers = get_optimizers(0, mp_organizers, broadening_tag, n_candidates_scale,
-                                logger=logger, optimizer_class=MPOptimizerManager, seed=seed,
-                                options=options)
+                                logger=logger,
+                                optimizer_class=optimizer_class or MPOptimizerManager,
+                                seed=seed, options=options)
 
     # Clean up class-level injection
     MPOptimizerManager._mp_data_queues   = None
