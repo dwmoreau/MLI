@@ -12,6 +12,7 @@ on their peaks, so every arm of a comparison must share it or the arms differ in
 """
 
 import hashlib
+import time
 from itertools import combinations
 from pathlib import Path
 
@@ -34,6 +35,10 @@ POPULATIONS = {
     }
 
 REPORTING_SPLIT = 'fom-dev'
+
+# How often a pool says where it has got to. A pattern takes tens of seconds, so this is
+# a line every few minutes per pool.
+PROGRESS_EVERY = 10
 
 
 def file_digest(path):
@@ -169,6 +174,9 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
         optimizer_class=BenchmarkOptimizer)
 
     entry_rows = []
+    started = time.perf_counter()
+    done = 0
+    total = len(bundles)*source_rows.shape[0]
     try:
         for bundle in bundles:
             condition = BenchmarkConditions.BY_TAG[bundle]
@@ -192,6 +200,9 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
                     pool_size_full += sum(int(record['M20'].shape[0]) for record in drained)
                 entry_rows.append(entry_record(entry, condition, pattern, digest,
                                                pool_size_full=pool_size_full))
+                done += 1
+                if done % PROGRESS_EVERY == 0 or done == total:
+                    _report_progress(part, done, total, started)
             _write_bundle(directory, bundle, records, entry_rows)
             del records
     finally:
@@ -200,6 +211,19 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
     Benchmark.write_entry_table(pd.DataFrame(entry_rows, columns=list(Benchmark.ENTRY_COLUMNS)),
                                 directory)
     return directory
+
+
+def _report_progress(part, done, total, started):
+    """How far a pool has got, and when it expects to finish.
+
+    A pool writes nothing until it finishes a whole condition bundle, so without this a cluster
+    job that will take hours is indistinguishable from one that hung in its first minute. Flushed,
+    because the output is a file that somebody is tailing.
+    """
+    elapsed = time.perf_counter() - started
+    rate = elapsed/done
+    print(f'pool {part:02d}: {done}/{total} patterns, {rate:.1f} s each, '
+          f'{(total - done)*rate/60:.1f} min left', flush=True)
 
 
 def _write_bundle(directory, bundle, records, entry_rows):
