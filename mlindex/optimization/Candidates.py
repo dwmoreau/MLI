@@ -1,3 +1,4 @@
+import itertools
 import numpy as np
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
@@ -9,6 +10,8 @@ from mlindex.utilities.FigureOfMerits import get_X_N
 from mlindex.utilities.MillerIndexAssignment import vectorized_subsampling
 from mlindex.utilities.numba_functions import fast_assign
 from mlindex.utilities.Q2Calculator import Q2Calculator
+from mlindex.utilities.UnitCellTools import n_axis_factors
+from mlindex.utilities.UnitCellTools import xnn_axis_multipliers
 from mlindex.utilities.Reindexing import monoclinic_standardization
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.Reindexing import selling_reduction
@@ -426,38 +429,14 @@ class Candidates:
             self.best_xnn[~failed] = best_standardized_xnn[~failed]
 
     def correct_off_by_two(self):
-        #mult_factor = np.array([1, 1/2, np.sqrt(2), 2, 3, 4])
+        # The sub- and super-cells a refined candidate is retried at. Row 0 is the identity, which
+        # the acceptance test below depends on. The grid is over the independent axis lengths; the
+        # xnn components follow from them, because a component is a product of two reciprocal axes
+        # and this is applied as `mult_factors**2 * xnn`.
         mult_factor = np.array([1, 1/2, np.sqrt(2), 2])
-        if self.lattice_system == 'cubic':
-            mult_factors = mult_factor[:, np.newaxis]
-        elif self.lattice_system in ['hexagonal', 'tetragonal']:
-            mult_factors = np.ones((mult_factor.size**2, 2))
-            mf_index = 0
-            for mf0 in mult_factor:
-                for mf1 in mult_factor:
-                    mult_factors[mf_index, 0] = mf0
-                    mult_factors[mf_index, 1] = mf1
-                    mf_index += 1
-        elif self.lattice_system == 'rhombohedral':
-            mult_factors = np.ones((mult_factor.size, 2))
-            mult_factors[:, 0] = mult_factor
-            mult_factors[:, 1] = mult_factor
-        elif self.lattice_system in ['orthorhombic', 'monoclinic', 'triclinic']:
-            mult_factors = np.ones((mult_factor.size**3, self.xnn.shape[1]))
-            mf_index = 0
-            for mf0 in mult_factor:
-                for mf1 in mult_factor:
-                    for mf2 in mult_factor:
-                        mult_factors[mf_index, 0] = mf0
-                        mult_factors[mf_index, 1] = mf1
-                        mult_factors[mf_index, 2] = mf2
-                        if self.lattice_system == 'monoclinic':
-                            mult_factors[mf_index, 3] = np.sqrt(mf0 * mf2)
-                        elif self.lattice_system == 'triclinic':
-                            mult_factors[mf_index, 3] = np.sqrt(mf1 * mf2)
-                            mult_factors[mf_index, 4] = np.sqrt(mf0 * mf2)
-                            mult_factors[mf_index, 5] = np.sqrt(mf0 * mf1)
-                        mf_index += 1
+        axis_grid = np.array(list(
+            itertools.product(mult_factor, repeat=n_axis_factors(self.lattice_system))))
+        mult_factors = xnn_axis_multipliers(axis_grid, self.lattice_system)
 
         # Only the winning factor per candidate is ever read, so a running best
         # replaces the per-factor arrays. Those were [n, n_mult, n_peaks, 3] and

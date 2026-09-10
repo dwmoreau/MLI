@@ -15,15 +15,7 @@ import subprocess
 
 
 
-_BL_TO_LATTICE_SYSTEM = {
-    'cP': 'cubic',  'cI': 'cubic',  'cF': 'cubic',
-    'tP': 'tetragonal', 'tI': 'tetragonal',
-    'hP': 'hexagonal',
-    'hR': 'rhombohedral',
-    'oP': 'orthorhombic', 'oC': 'orthorhombic', 'oF': 'orthorhombic', 'oI': 'orthorhombic',
-    'mP': 'monoclinic', 'mC': 'monoclinic',
-    'aP': 'triclinic',
-}
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM as _BL_TO_LATTICE_SYSTEM
 
 
 class PeakListCreator:

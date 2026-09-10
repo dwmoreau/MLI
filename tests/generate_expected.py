@@ -28,22 +28,7 @@ TEST_DATA_DIR = REPO_ROOT / "mlindex" / "data" / "test_data"
 
 EXPECTED_DIR.mkdir(exist_ok=True)
 
-BL_TO_LATTICE_SYSTEM = {
-    "cF": "cubic",
-    "cI": "cubic",
-    "cP": "cubic",
-    "hP": "hexagonal",
-    "hR": "rhombohedral",
-    "tI": "tetragonal",
-    "tP": "tetragonal",
-    "oC": "orthorhombic",
-    "oF": "orthorhombic",
-    "oI": "orthorhombic",
-    "oP": "orthorhombic",
-    "mC": "monoclinic",
-    "mP": "monoclinic",
-    "aP": "triclinic",
-}
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
 
 def load_test_case(row):

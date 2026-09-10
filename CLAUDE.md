@@ -26,6 +26,14 @@ has shipped exactly that twice.
 default: a default has to invent an unseeded generator, so a caller who forgets one gets a result
 that cannot be reproduced, and no error.
 
+**Reusable code lives in `mlindex/utilities/`, and that is the first place to look.** Search there
+before writing anything; if what you are about to write would be useful to a second caller, it goes
+there rather than on the class or module that happens to need it first. `validate_candidate_known_bl`
+(`optimization/CandidateValidation.py`) is the standing example of the cost: it re-implements
+`utilities/UnitCellTools.get_partial_unit_cell` inline as an if/elif chain, and hardcodes reindexing
+matrices that `utilities/Reindexing.py` is the home for. A second implementation does not announce
+itself when it drifts from the first.
+
 ## Installation
 
 ```bash

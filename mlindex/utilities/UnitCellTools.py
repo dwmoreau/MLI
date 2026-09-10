@@ -1,33 +1,98 @@
 import numpy as np
 
 
+# The fourteen Bravais lattices in the order the indexer reports them, and the lattice system each
+# belongs to. Defined here because this module is what turns one into the other, and imported
+# rather than restated: the list was written out in four places and the mapping in two before this.
+BRAVAIS_LATTICES = ('cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                    'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP')
+
+BL_TO_LATTICE_SYSTEM = {
+    'cF': 'cubic', 'cI': 'cubic', 'cP': 'cubic',
+    'hP': 'hexagonal',
+    'hR': 'rhombohedral',
+    'tI': 'tetragonal', 'tP': 'tetragonal',
+    'oC': 'orthorhombic', 'oF': 'orthorhombic', 'oI': 'orthorhombic', 'oP': 'orthorhombic',
+    'mC': 'monoclinic', 'mP': 'monoclinic',
+    'aP': 'triclinic',
+    }
+
+# Which entries of a full [a, b, c, alpha, beta, gamma] a lattice system leaves free. Triclinic is
+# absent on purpose: all six are free, so `get_partial_unit_cell` hands back the array it was given
+# rather than a fancy-indexed copy, which is what it has always done.
+_FREE_UNIT_CELL_INDICES = {
+    'cubic': [0],
+    'tetragonal': [0, 2],
+    'hexagonal': [0, 2],
+    'rhombohedral': [0, 3],
+    'orthorhombic': [0, 1, 2],
+    'monoclinic': [0, 1, 2, 4],
+    }
+
+
+# Which two reciprocal axes each free xnn component is built from. An xnn component is a product
+# of two reciprocal basis vectors, so scaling axis i by f_i scales component (i, j) by f_i * f_j.
+# The order is `get_hkl_matrix`'s: [h2, k2, l2] then the cross terms it appends, because q2 is
+# `hkl_matrix @ xnn` and the two have to agree component for component.
+XNN_AXIS_PAIRS = {
+    'cubic': ((0, 0),),
+    'tetragonal': ((0, 0), (2, 2)),
+    'hexagonal': ((0, 0), (2, 2)),
+    'rhombohedral': ((0, 0), (0, 0)),
+    'orthorhombic': ((0, 0), (1, 1), (2, 2)),
+    'monoclinic': ((0, 0), (1, 1), (2, 2), (0, 2)),
+    'triclinic': ((0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1)),
+    }
+
+# How a lattice system's independent axis scale factors expand onto (a, b, c). Cubic and
+# rhombohedral have one length, so one factor drives all three; tetragonal and hexagonal have two.
+AXIS_FACTOR_EXPANSION = {
+    'cubic': (0, 0, 0),
+    'tetragonal': (0, 0, 1),
+    'hexagonal': (0, 0, 1),
+    'rhombohedral': (0, 0, 0),
+    'orthorhombic': (0, 1, 2),
+    'monoclinic': (0, 1, 2),
+    'triclinic': (0, 1, 2),
+    }
+
+
+def n_axis_factors(lattice_system):
+    """How many independent axis lengths a lattice system has: 1 cubic, 2 tetragonal, 3 triclinic."""
+    return len(set(AXIS_FACTOR_EXPANSION[lattice_system]))
+
+
+def xnn_axis_multipliers(axis_factors, lattice_system):
+    """Per-component multipliers `m` such that `m**2 * xnn` is the axis-scaled cell's metric.
+
+    `axis_factors` is (..., n_axis_factors(lattice_system)) of scale factors on the independent
+    reciprocal axes. Returns (..., n_xnn_components).
+
+    The square root is why this is worth having in one place: a caller squares the result, so a
+    diagonal component (i, i) needs `f_i` and a cross component (i, j) needs `sqrt(f_i * f_j)`.
+    Writing those roots out by hand per lattice system is how the relation gets restated.
+    """
+    expansion = AXIS_FACTOR_EXPANSION[lattice_system]
+    factors = np.asarray(axis_factors, dtype=float)
+    abc = factors[..., expansion]
+    return np.stack([np.sqrt(abc[..., i] * abc[..., j])
+                     for i, j in XNN_AXIS_PAIRS[lattice_system]], axis=-1)
+
+
 def get_partial_unit_cell(unit_cell, lattice_system=None, bravais_lattice=None):
-    if lattice_system:
-        if lattice_system == 'cubic':
-            return unit_cell[[0]]
-        elif lattice_system in ['hexagonal', 'tetragonal']:
-            return unit_cell[[0, 2]]
-        elif lattice_system == 'rhombohedral':
-            return unit_cell[[0, 3]]
-        elif lattice_system == 'orthorhombic':
-            return unit_cell[[0, 1, 2]]
-        elif lattice_system == 'monoclinic':
-            return unit_cell[[0, 1, 2, 4]]
-        else:
-            return unit_cell
-    elif bravais_lattice:
-        if bravais_lattice in ['cP', 'cI', 'cF']:
-            return unit_cell[[0]]
-        elif bravais_lattice in ['hP', 'tP', 'tI']:
-            return unit_cell[[0, 2]]
-        elif bravais_lattice in ['hR']:
-            return unit_cell[[0, 3]]
-        elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            return unit_cell[[0, 1, 2]]
-        elif bravais_lattice in ['mP', 'mC']:
-            return unit_cell[[0, 1, 2, 4]]
-        else:
-            return unit_cell
+    """The free parameters of `unit_cell`, given either a lattice system or a Bravais lattice.
+
+    Returns the array unchanged for triclinic and for any system or lattice not recognised, and
+    None if neither argument is given.
+    """
+    if not lattice_system:
+        if not bravais_lattice:
+            return None
+        lattice_system = BL_TO_LATTICE_SYSTEM.get(bravais_lattice)
+    indices = _FREE_UNIT_CELL_INDICES.get(lattice_system)
+    if indices is None:
+        return unit_cell
+    return unit_cell[indices]
 
 
 def get_full_unit_cell(partial_unit_cell, lattice_system):
