@@ -57,7 +57,9 @@ MONOCLINIC_BASIS_CHANGES = np.stack([
     ])
 
 # The rhombohedral sub- and super-cell relations the validator tests a candidate against.
-RHOMBOHEDRAL_TRANSFORMATIONS = (
+# Stacked, like MONOCLINIC_BASIS_CHANGES: iterating it yields the individual matrices, and a
+# batched caller can contract against the whole set at once.
+RHOMBOHEDRAL_TRANSFORMATIONS = np.stack([
     np.eye(3),
     np.array([
         [-1, 1, 1],
@@ -79,7 +81,7 @@ RHOMBOHEDRAL_TRANSFORMATIONS = (
         [0.25, 0.50, 0.25],
         [0.25, 0.25, 0.50],
         ]),
-    )
+    ])
 
 
 def monoclinic_cell_matrix(unit_cell, partial_unit_cell=False):
@@ -96,13 +98,21 @@ def monoclinic_cell_matrix(unit_cell, partial_unit_cell=False):
 
 
 def rhombohedral_cell_matrix(unit_cell):
-    """The Cartesian basis of a rhombohedral cell from its partial form [a, alpha]."""
+    """The Cartesian basis of a rhombohedral cell from its partial form [a, alpha].
+
+    All three axes are equal and all three angles are alpha, so the second and third columns share
+    the same cosine. An alpha that no rhombohedral cell can have makes the last term the square
+    root of a negative number; the resulting NaN compares False everywhere downstream, which is
+    the intended answer for an impossible cell, so it is left to propagate rather than raised on.
+    """
     a, alpha = unit_cell[0], unit_cell[1]
-    arg = (np.cos(alpha) - np.cos(alpha) ** 2) / np.sin(alpha)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        arg = (np.cos(alpha) - np.cos(alpha) ** 2) / np.sin(alpha)
+        cz = a * np.sqrt(np.sin(alpha) ** 2 - arg ** 2)
     return np.array([
         [a, a * np.cos(alpha), a * np.cos(alpha)],
         [0, a * np.sin(alpha), a * arg],
-        [0, 0, a * np.sqrt(np.sin(alpha) ** 2 - arg ** 2)],
+        [0, 0, cz],
         ])
 
 
