@@ -3,6 +3,9 @@ import numpy as np
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_assignment_posterior
+from mlindex.utilities.FigureOfMerits import get_M_rev_sym
+from mlindex.utilities.FigureOfMerits import get_n_over
+from mlindex.utilities.FigureOfMerits import get_X_N
 from mlindex.utilities.MillerIndexAssignment import vectorized_subsampling
 from mlindex.utilities.numba_functions import fast_assign
 from mlindex.utilities.Q2Calculator import Q2Calculator
@@ -16,6 +19,17 @@ from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
+
+
+# RESEARCH CODE THAT NEEDS TO BE DELETED. Required by sessions P04 and P12 of the
+# fom_production campaign, which restrict a generated pool to higher thresholds without
+# re-running it. Delete this constant, `prune_criterion_capture`, `_capture_merits_at_prune`
+# and the carry-forward in `correct_off_by_two` together once those are done.
+#
+# Order is part of the contract: `merit_at_prune` stores a list per candidate, so position is
+# the only thing identifying an entry. `n_cal` is last and is not a merit; it is the support
+# `M_rev`'s floor tested, without which a stored 0.0 cannot be told from a floored one.
+PRUNE_CAPTURE_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap', 'n_cal')
 
 
 class Candidates:
@@ -34,6 +48,11 @@ class Candidates:
         self.wavelength = wavelength
         self.hkl_ref = hkl_ref
         self.hkl_ref_length = hkl_ref.shape[0]
+
+        # RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS.
+        self.prune_criterion_capture = bool(opt_params.get('prune_criterion_capture', False))
+        self.m20_at_prune = None
+        self.merit_at_prune = None
 
         self.q2_obs = q2_obs
         self.n_peaks = self.q2_obs.size
@@ -286,15 +305,68 @@ class Candidates:
             self.best_zeropoint[improved] = refined_zeropoint[improved]
 
     def prune_below_m20(self, threshold=5.0):
+        """Drop every candidate below the bar, keeping the best one if nothing clears it.
+
+        `threshold` is a scalar, or a mapping keyed by Bravais lattice for a per-lattice cut.
+
+        The bar is applied to `best_M20`, the running maximum over the search's iterates against
+        the full reference list. That is not the M20 the candidate finally reports: `refine_cell`
+        runs after this, and `assign_extinction_group` then replaces the stored value with the
+        maximum over extinction groups.
+        """
+        if isinstance(threshold, dict):
+            threshold = threshold[self.bravais_lattice]
         keep = self.best_M20 >= threshold
         if not np.any(keep):
             keep[np.argmax(self.best_M20)] = True
+
+        # RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS. Captured before
+        # the mask is applied, so a survivor carries the values that decided its survival.
+        if self.prune_criterion_capture:
+            self.merit_at_prune = {name: values[keep] for name, values
+                                   in self._capture_merits_at_prune().items()}
+            self.m20_at_prune = self.best_M20[keep].copy()
+
         self.best_xnn = self.best_xnn[keep]
         self.best_M20 = self.best_M20[keep]
         self.best_hkl = self.best_hkl[keep]
         if self.zero_error:
             self.best_zeropoint = self.best_zeropoint[keep]
         self.n = self.best_xnn.shape[0]
+
+    def _capture_merits_at_prune(self):
+        """RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS.
+
+        Every candidate criterion, on the cells as they stand at the cut.
+
+        `q2_ref_calc` is rebuilt from `best_xnn` and the assignment redone with `fast_assign`, so
+        the recomputed M20 matches `best_M20` bit for bit. Rebuilding `q2_calc` from the stored
+        Miller indices instead differs by an ULP, which is enough to move a line across M20's own
+        cut-off.
+        """
+        if self.zero_error:
+            raise NotImplementedError(
+                'prune_criterion_capture does not support zero-error refinement: the per-'
+                'candidate zeropoint would have to be applied to q2_ref_calc here, and the '
+                'captured merits would not reproduce the pipeline value without it.'
+                )
+        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
+        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
+        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+
+        M_tilde, M_rev, M_sym, n_cal = get_M_rev_sym(
+            self.q2_obs, q2_calc, q2_ref_calc, return_n_cal=True)
+        n_over, max_gap = get_n_over(self.q2_obs, q2_calc, q2_ref_calc)
+        X_N = get_X_N(self.q2_obs, q2_calc, q2_ref_calc)
+        M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
+
+        captured = {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
+                    'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
+                    'max_gap': max_gap.astype(np.float64),
+                    'n_cal': n_cal.astype(np.float64)}
+        assert tuple(captured) == PRUNE_CAPTURE_MERITS, (
+            f'capture order drifted from PRUNE_CAPTURE_MERITS: {tuple(captured)}')
+        return captured
 
     def standardize_cell(self):
         # These do a quick standardization of monoclinic and triclinic candidates. It is just a
@@ -453,6 +525,14 @@ class Candidates:
             if self.zero_error:
                 self.best_zeropoint = np.concatenate(
                     [self.best_zeropoint, best_mf_zeropoint[improved]])
+            # RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS. An appended
+            # row is a rescaling of its parent, so it inherits the parent's at-prune values.
+            if self.m20_at_prune is not None:
+                self.m20_at_prune = np.concatenate(
+                    [self.m20_at_prune, self.m20_at_prune[improved]])
+                self.merit_at_prune = {
+                    name: np.concatenate([values, values[improved]])
+                    for name, values in self.merit_at_prune.items()}
             self.n = self.best_xnn.shape[0]
 
         # do quick reindexing to enforce constraints
