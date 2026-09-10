@@ -1451,3 +1451,33 @@ def compute_all(
             for name in features
         },
     }
+
+
+def merit_set(q2_obs, q2_ref_calc):
+    """Every candidate merit the benchmark stores, from the lines each candidate predicts.
+
+    Two callers, and they must not drift apart: `Candidates._capture_merits_at_prune` records
+    these on the cells as they stand at the M20 cut, and the benchmark's merit sidecar recomputes
+    them on the refined cells a pool stores. A second implementation of this would be a second
+    definition of `M_sym`.
+
+    The assignment is redone here with `fast_assign` rather than rebuilt from stored Miller
+    indices: the two differ by an ULP, which is enough to move a line across M20's own cut-off.
+
+    Returns a dict in a fixed order; position is what identifies an entry once these are stored
+    as a list per candidate.
+    """
+    from mlindex.utilities.numba_functions import fast_assign
+
+    hkl_assign = fast_assign(q2_obs, q2_ref_calc)
+    q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
+
+    M_tilde, M_rev, M_sym, n_cal = get_M_rev_sym(
+        q2_obs, q2_calc, q2_ref_calc, return_n_cal=True)
+    n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc)
+    X_N = get_X_N(q2_obs, q2_calc, q2_ref_calc)
+    M20 = get_M20(q2_obs, q2_calc, q2_ref_calc)
+
+    return {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
+            'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
+            'max_gap': max_gap.astype(np.float64), 'n_cal': n_cal.astype(np.float64)}

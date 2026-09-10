@@ -204,3 +204,31 @@ def test_the_floor_can_be_reconstructed_from_what_is_stored():
     assert np.all(candidates.merit_at_prune['M_rev'][touched] == 0.0)
     if touched.any():
         assert np.all(unfloored[touched] > 0), 'the floor should only zero non-zero values'
+
+
+def test_the_stored_order_is_what_merit_set_returns():
+    """`merit_at_prune` stores a list per candidate, so position is the only thing naming an
+    entry. The capture asserts this in process; this pins the tuple the assert is read against, so
+    a reordering of `merit_set` cannot be made to agree by editing the constant beside it."""
+    from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
+    from mlindex.utilities.FigureOfMerits import merit_set
+
+    q2_obs = np.linspace(0.05, 0.5, 20)
+    q2_ref_calc = np.linspace(0.04, 0.6, 40)[np.newaxis].repeat(3, axis=0)
+
+    assert tuple(merit_set(q2_obs, q2_ref_calc)) == PRUNE_CAPTURE_MERITS
+
+
+def test_the_benchmark_sidecar_scores_the_same_merits_and_does_not_redefine_M20():
+    """One definition of `M_sym` in this repository. The sidecar and the at-prune capture read the
+    same function; the sidecar drops M20 because the candidate table already stores the value the
+    pipeline computed, and a recomputed column of the same name would be a second definition."""
+    from mlindex.model_training.BenchmarkRuns import SIDECAR_MERITS
+    from mlindex.utilities.FigureOfMerits import merit_set
+
+    q2_obs = np.linspace(0.05, 0.5, 20)
+    q2_ref_calc = np.linspace(0.04, 0.6, 40)[np.newaxis].repeat(3, axis=0)
+    names = tuple(merit_set(q2_obs, q2_ref_calc))
+
+    assert set(SIDECAR_MERITS) == set(names) - {'M20'}
+    assert 'M20' not in SIDECAR_MERITS

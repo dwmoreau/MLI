@@ -27,6 +27,11 @@ COMPLETION_NAME = 'complete.json'
 MERIT_SIDECAR = 'merits'
 PART_DIR = 'parts'
 
+# What production keeps per Bravais lattice. A benchmark stores every survivor and marks
+# this many of them `in_top_n`, so the truncation is a column rather than a missing row and
+# a later session can ask what a different depth would have reported.
+N_TOP_CANDIDATES = 20
+
 # The schema a pool written here carries. Bumped when a column is added, removed or redefined;
 # `manifest_identity` refuses to pair two arms that disagree on it.
 SCHEMA_VERSION = '4'
@@ -398,13 +403,13 @@ def write_manifest(pool_dir, **metadata):
     cannot be refused a pairing it should be refused, and the omission is invisible at the point
     it matters.
     """
-    missing = [name for name in IDENTITY_FIELDS if name not in metadata]
-    if missing:
-        raise ValueError(f'The manifest is missing {missing}, which pairing is decided on.')
     payload = dict(metadata)
     payload['schema_version'] = SCHEMA_VERSION
     payload['candidate_columns'] = list(CANDIDATE_COLUMNS)
     payload['entry_columns'] = list(ENTRY_COLUMNS)
+    missing = [name for name in IDENTITY_FIELDS if name not in payload]
+    if missing:
+        raise ValueError(f'The manifest is missing {missing}, which pairing is decided on.')
     Path(pool_dir).mkdir(parents=True, exist_ok=True)
     path = Path(pool_dir) / MANIFEST_NAME
     with open(path, 'w', encoding='utf-8') as handle:

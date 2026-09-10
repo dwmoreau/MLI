@@ -195,3 +195,40 @@ def test_a_manifest_round_trips_through_disk(tmp_path):
     assert loaded['schema_version'] == Benchmark.SCHEMA_VERSION
     assert loaded['candidate_columns'] == list(Benchmark.CANDIDATE_COLUMNS)
     assert Benchmark.manifest_identity({'a': loaded, 'b': _manifest()})
+
+
+# ---------------------------------------------------------------------------
+# The merit sidecar
+# ---------------------------------------------------------------------------
+
+
+def test_a_sidecar_column_carries_the_value_its_name_claims(tmp_path, models_dir):
+    """The sidecar is written beside the pool and joined back on the candidate key. A column that
+    arrived under the wrong name would rank the pool by something else and read as a measurement,
+    which is why the join is checked and why this checks the values through a real round trip."""
+    from mlindex.model_training.BenchmarkRuns import SIDECAR_MERITS, merit_sidecar
+    from mlindex.utilities.FigureOfMerits import merit_set
+    from mlindex.utilities.Q2Calculator import Q2Calculator
+
+    q2_obs = np.linspace(0.05, 0.5, 10)
+    xnn = np.array([[0.04], [0.0402], [0.0399]])
+    frame = pd.DataFrame({
+        'entry_id': ['AAAAAA']*3, 'condition_bundle': ['b1_error1_cont0']*3,
+        'bravais_lattice': ['cP']*3, 'candidate_id': np.arange(3),
+        'lattice_system': ['cubic']*3, 'xnn': list(xnn),
+        })
+    entries = pd.DataFrame([{'entry_id': 'AAAAAA', 'condition_bundle': 'b1_error1_cont0',
+                             'q2_obs': q2_obs}])
+    Benchmark.write_candidate_shard(frame, tmp_path, 'b1_error1_cont0', 'cP')
+    Benchmark.write_entry_table(entries, tmp_path)
+
+    merit_sidecar(tmp_path)
+    joined = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0')
+
+    hkl_ref = np.load(models_dir / 'cubic_1' / 'data' / 'hkl_ref_cP.npy')
+    calculator = Q2Calculator(lattice_system='cubic', hkl=hkl_ref, tensorflow=False,
+                              representation='xnn')
+    expected = merit_set(q2_obs, calculator.get_q2(xnn))
+    for name in SIDECAR_MERITS:
+        np.testing.assert_allclose(joined[name].to_numpy(), expected[name], rtol=0, atol=0,
+                                   err_msg=name)

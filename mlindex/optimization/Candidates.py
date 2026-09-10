@@ -4,9 +4,7 @@ import numpy as np
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_assignment_posterior
-from mlindex.utilities.FigureOfMerits import get_M_rev_sym
-from mlindex.utilities.FigureOfMerits import get_n_over
-from mlindex.utilities.FigureOfMerits import get_X_N
+from mlindex.utilities.FigureOfMerits import merit_set
 from mlindex.utilities.MillerIndexAssignment import vectorized_subsampling
 from mlindex.utilities.numba_functions import fast_assign
 from mlindex.utilities.Q2Calculator import Q2Calculator
@@ -342,10 +340,9 @@ class Candidates:
 
         Every candidate criterion, on the cells as they stand at the cut.
 
-        `q2_ref_calc` is rebuilt from `best_xnn` and the assignment redone with `fast_assign`, so
-        the recomputed M20 matches `best_M20` bit for bit. Rebuilding `q2_calc` from the stored
-        Miller indices instead differs by an ULP, which is enough to move a line across M20's own
-        cut-off.
+        `q2_ref_calc` is rebuilt from `best_xnn`, so the recomputed M20 matches `best_M20` bit
+        for bit. `merit_set` is shared with the benchmark's merit sidecar, which computes the
+        same eight on the refined cells.
         """
         if self.zero_error:
             raise NotImplementedError(
@@ -353,20 +350,7 @@ class Candidates:
                 'candidate zeropoint would have to be applied to q2_ref_calc here, and the '
                 'captured merits would not reproduce the pipeline value without it.'
                 )
-        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
-        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
-        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
-
-        M_tilde, M_rev, M_sym, n_cal = get_M_rev_sym(
-            self.q2_obs, q2_calc, q2_ref_calc, return_n_cal=True)
-        n_over, max_gap = get_n_over(self.q2_obs, q2_calc, q2_ref_calc)
-        X_N = get_X_N(self.q2_obs, q2_calc, q2_ref_calc)
-        M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
-
-        captured = {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
-                    'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
-                    'max_gap': max_gap.astype(np.float64),
-                    'n_cal': n_cal.astype(np.float64)}
+        captured = merit_set(self.q2_obs, self.q2_calculator.get_q2(self.best_xnn))
         assert tuple(captured) == PRUNE_CAPTURE_MERITS, (
             f'capture order drifted from PRUNE_CAPTURE_MERITS: {tuple(captured)}')
         return captured
