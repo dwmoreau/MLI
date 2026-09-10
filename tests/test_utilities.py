@@ -414,3 +414,57 @@ def test_load_peaks_npy(test_metadata):
         np.testing.assert_array_equal(
             result, expected, err_msg=f"load_peaks_npy mismatch for {bl}"
         )
+
+
+def test_every_bravais_lattice_has_a_lattice_system():
+    """The two constants describe the same fourteen lattices.
+
+    They are read by the CLI, the multiprocessing planner, the peak-list builder and the test
+    fixtures. A lattice present in one and missing from the other raises `KeyError` deep in a
+    run rather than here.
+    """
+    from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES, BL_TO_LATTICE_SYSTEM
+
+    assert len(BRAVAIS_LATTICES) == 14
+    assert len(set(BRAVAIS_LATTICES)) == 14
+    assert set(BRAVAIS_LATTICES) == set(BL_TO_LATTICE_SYSTEM)
+
+
+def test_partial_unit_cell_agrees_whether_asked_by_lattice_or_by_system():
+    """`get_partial_unit_cell` accepts either key and must slice identically for both.
+
+    The two used to be separate if/elif chains, so a change to one could miss the other. They now
+    share `BL_TO_LATTICE_SYSTEM`, and this is what fails if they are ever split again.
+    """
+    from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES, BL_TO_LATTICE_SYSTEM
+
+    unit_cell = np.array([5.1, 6.2, 7.3, 1.1, 1.2, 1.3])
+    for bravais_lattice in BRAVAIS_LATTICES:
+        by_lattice = get_partial_unit_cell(unit_cell, bravais_lattice=bravais_lattice)
+        by_system = get_partial_unit_cell(
+            unit_cell, lattice_system=BL_TO_LATTICE_SYSTEM[bravais_lattice]
+        )
+        np.testing.assert_array_equal(
+            by_lattice, by_system, err_msg=f"{bravais_lattice} slices differently by system"
+        )
+
+
+def test_partial_unit_cell_keeps_the_angle_each_system_actually_has():
+    """Monoclinic keeps beta and drops alpha; rhombohedral keeps alpha and drops c.
+
+    Getting either wrong compares the wrong angle and mislabels a candidate silently, which is
+    why the free-parameter indices are asserted and not only used.
+    """
+    unit_cell = np.array([5.0, 6.0, 7.0, 1.1, 1.2, 1.3])
+    expected = {
+        "cubic": [5.0],
+        "tetragonal": [5.0, 7.0],
+        "hexagonal": [5.0, 7.0],
+        "rhombohedral": [5.0, 1.1],
+        "orthorhombic": [5.0, 6.0, 7.0],
+        "monoclinic": [5.0, 6.0, 7.0, 1.2],
+        "triclinic": [5.0, 6.0, 7.0, 1.1, 1.2, 1.3],
+    }
+    for lattice_system, want in expected.items():
+        got = get_partial_unit_cell(unit_cell, lattice_system=lattice_system)
+        np.testing.assert_array_equal(got, np.array(want), err_msg=lattice_system)

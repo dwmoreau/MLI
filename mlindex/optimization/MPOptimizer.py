@@ -3,10 +3,7 @@ from multiprocessing import Process, Queue
 
 from mlindex.optimization.MPIOptimizer import OptimizerManager, OptimizerWorker
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
-
-
-BRAVAIS_LATTICES_ALL = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
-                        'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
+from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES as BRAVAIS_LATTICES_ALL
 
 
 class LocalComm:

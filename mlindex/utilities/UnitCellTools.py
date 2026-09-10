@@ -1,33 +1,49 @@
 import numpy as np
 
 
+# The fourteen Bravais lattices in the order the indexer reports them, and the lattice system each
+# belongs to. Defined here because this module is what turns one into the other, and imported
+# rather than restated: the list was written out in four places and the mapping in two before this.
+BRAVAIS_LATTICES = ('cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                    'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP')
+
+BL_TO_LATTICE_SYSTEM = {
+    'cF': 'cubic', 'cI': 'cubic', 'cP': 'cubic',
+    'hP': 'hexagonal',
+    'hR': 'rhombohedral',
+    'tI': 'tetragonal', 'tP': 'tetragonal',
+    'oC': 'orthorhombic', 'oF': 'orthorhombic', 'oI': 'orthorhombic', 'oP': 'orthorhombic',
+    'mC': 'monoclinic', 'mP': 'monoclinic',
+    'aP': 'triclinic',
+    }
+
+# Which entries of a full [a, b, c, alpha, beta, gamma] a lattice system leaves free. Triclinic is
+# absent on purpose: all six are free, so `get_partial_unit_cell` hands back the array it was given
+# rather than a fancy-indexed copy, which is what it has always done.
+_FREE_UNIT_CELL_INDICES = {
+    'cubic': [0],
+    'tetragonal': [0, 2],
+    'hexagonal': [0, 2],
+    'rhombohedral': [0, 3],
+    'orthorhombic': [0, 1, 2],
+    'monoclinic': [0, 1, 2, 4],
+    }
+
+
 def get_partial_unit_cell(unit_cell, lattice_system=None, bravais_lattice=None):
-    if lattice_system:
-        if lattice_system == 'cubic':
-            return unit_cell[[0]]
-        elif lattice_system in ['hexagonal', 'tetragonal']:
-            return unit_cell[[0, 2]]
-        elif lattice_system == 'rhombohedral':
-            return unit_cell[[0, 3]]
-        elif lattice_system == 'orthorhombic':
-            return unit_cell[[0, 1, 2]]
-        elif lattice_system == 'monoclinic':
-            return unit_cell[[0, 1, 2, 4]]
-        else:
-            return unit_cell
-    elif bravais_lattice:
-        if bravais_lattice in ['cP', 'cI', 'cF']:
-            return unit_cell[[0]]
-        elif bravais_lattice in ['hP', 'tP', 'tI']:
-            return unit_cell[[0, 2]]
-        elif bravais_lattice in ['hR']:
-            return unit_cell[[0, 3]]
-        elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            return unit_cell[[0, 1, 2]]
-        elif bravais_lattice in ['mP', 'mC']:
-            return unit_cell[[0, 1, 2, 4]]
-        else:
-            return unit_cell
+    """The free parameters of `unit_cell`, given either a lattice system or a Bravais lattice.
+
+    Returns the array unchanged for triclinic and for any system or lattice not recognised, and
+    None if neither argument is given.
+    """
+    if not lattice_system:
+        if not bravais_lattice:
+            return None
+        lattice_system = BL_TO_LATTICE_SYSTEM.get(bravais_lattice)
+    indices = _FREE_UNIT_CELL_INDICES.get(lattice_system)
+    if indices is None:
+        return unit_cell
+    return unit_cell[indices]
 
 
 def get_full_unit_cell(partial_unit_cell, lattice_system):

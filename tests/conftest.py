@@ -4,22 +4,7 @@ import pandas as pd
 import pytest
 from pathlib import Path
 
-BL_TO_LATTICE_SYSTEM = {
-    "cF": "cubic",
-    "cI": "cubic",
-    "cP": "cubic",
-    "hP": "hexagonal",
-    "hR": "rhombohedral",
-    "tI": "tetragonal",
-    "tP": "tetragonal",
-    "oC": "orthorhombic",
-    "oF": "orthorhombic",
-    "oI": "orthorhombic",
-    "oP": "orthorhombic",
-    "mC": "monoclinic",
-    "mP": "monoclinic",
-    "aP": "triclinic",
-}
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
 _TEST_DATA_DIR = Path(__file__).parent.parent / "mlindex" / "data" / "test_data"
 

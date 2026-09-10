@@ -16,10 +16,8 @@ from mlindex.optimization.UtilitiesOptimizer import get_optimizers
 from mlindex.optimization.CandidateValidation import validate_candidate
 from mlindex.utilities.gsas import load_pkslst
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
+from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 from mlindex.utilities.Reindexing import rhombohedral_to_hexagonal
-
-
-BRAVAIS_LATTICES = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
 
 _BL_MPI6_CFG = {
     'cF': (0, True),  'cI': (0, True),  'cP': (0, True),
