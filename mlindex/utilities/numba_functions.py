@@ -431,9 +431,74 @@ def over_prediction_runs(lines, counts, q2_obs_sorted, tolerance_factor, n_over,
         max_gap[candidate] = longest
 
 
+@jit
+def nearest_line_distances(q2_obs, q2_ref, d1):
+    """d1[i, p] = min_j |q2_ref[i, j] - q2_obs[p]|, the nearest calculated line to each peak.
+
+    One pass carrying n_peaks running minima, so each reference row is read once rather than once
+    per peak. A minimum is a selection, not an accumulation, so scan order cannot change the
+    result.
+
+    NaN is propagated deliberately: `NaN < running` is false, so a plain running minimum would
+    skip it and return the minimum of the rest where `.min()` returns NaN. One test per reference
+    entry catches it, and a NaN peak is a whole column, which the caller fills in.
+    """
+    n_candidates, n_ref = q2_ref.shape
+    n_peaks = q2_obs.size
+    running = np.empty(n_peaks, dtype=np.float64)
+    for candidate in range(n_candidates):
+        for peak in range(n_peaks):
+            running[peak] = np.inf
+        undefined = False
+        for reference in range(n_ref):
+            value = q2_ref[candidate, reference]
+            if value != value:
+                undefined = True
+            else:
+                for peak in range(n_peaks):
+                    distance = abs(value - q2_obs[peak])
+                    if distance < running[peak]:
+                        running[peak] = distance
+        for peak in range(n_peaks):
+            d1[candidate, peak] = np.nan if undefined else running[peak]
+
+
 # np.exp returns exactly 0.0 for arguments at or below -745.1332191019412 -- the first
 # nonzero result is the smallest subnormal, 5e-324. Anything below this bound therefore
 # contributes an exact zero to the sum, so it can be filled in rather than computed. The
 # bound is deliberately a little under the true one: it has to be safe, not tight, and no
 # term between the two is skipped.
+EXP_UNDERFLOW_BOUND = -746.0
 
+
+@jit
+def posterior_exponent_terms(q2_ref_block, q2_obs_peak, d1_peak, block_scale, terms, computable):
+    """The log-sum-exp arguments for one peak, with the terms that underflow already zeroed.
+
+    Fills, for every calculated line of every candidate in the block:
+
+      terms       -(|line - peak|^2 - d1^2)/scale where np.exp of that is not identically zero,
+                  and 0.0 where it is, so the caller runs `np.exp(terms, out=terms,
+                  where=computable)` and the zeros are already in place;
+      computable  which entries the exponential still has to be taken of.
+
+    Only exact operations here, performed in the same order as the array expression, so the
+    argument handed to numpy's exp is the same float. The exponential itself stays in numpy:
+    numba would call a different libm and the last bit is not guaranteed to agree.
+    """
+    n_candidates, n_ref = q2_ref_block.shape
+    for candidate in range(n_candidates):
+        scale = block_scale[candidate]
+        nearest_squared = d1_peak[candidate]*d1_peak[candidate]
+        for reference in range(n_ref):
+            distance = abs(q2_ref_block[candidate, reference] - q2_obs_peak)
+            value = -(distance*distance - nearest_squared)/scale
+            # Written as `<=` rather than `>` so that NaN falls through to the branch that
+            # keeps it: numpy's exp turns it into a NaN term and the sum propagates it, which
+            # is what the expression this replaces did with a NaN peak or reference line.
+            if value <= EXP_UNDERFLOW_BOUND:
+                terms[candidate, reference] = 0.0
+                computable[candidate, reference] = False
+            else:
+                terms[candidate, reference] = value
+                computable[candidate, reference] = True

@@ -1,7 +1,9 @@
 import numpy as np
 
 from mlindex.utilities.numba_functions import lines_below_cutoff
+from mlindex.utilities.numba_functions import nearest_line_distances
 from mlindex.utilities.numba_functions import over_prediction_runs
+from mlindex.utilities.numba_functions import posterior_exponent_terms
 from mlindex.utilities.numba_functions import reversed_line_scores
 from mlindex.utilities.UnitCellTools import get_hkl_matrix
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
@@ -556,6 +558,11 @@ def get_M20_likelihood_from_xnn(q2_obs, xnn, hkl, lattice_system, bravais_lattic
     return log_likelihood, probability, M
 
 
+# THE LAST CONSUMER OF `rho` IS MITemplates, AND IT IS SLATED TO SWITCH TO THE POSTERIOR.
+# `get_assignment_posterior` is the per-peak assignment probability everywhere else. This pair
+# survives only because MITemplates.calibrate_templates was TRAINED on rho's 20 per-peak values,
+# so swapping the input needs the regressor refitted rather than an edit here. Delete both once
+# that refit has landed.
 def get_M20_likelihood(q2_obs, q2_calc, bravais_lattice, reciprocal_volume):
     # This was inspired by Taupin 1988
     # Probability that a peak is correctly assigned:
@@ -620,14 +627,165 @@ def get_multiplicity_taupin88(bravais_lattice):
         return 1 * 1.8, 6
 
 
+# ---------------------------------------------------------------------------------------------
+# Per-peak assignment probability
+#
+# These answer "is THIS PEAK assigned to the right Miller index", one number per observed line,
+# rather than "is this cell right". The model is a Gaussian mixture responsibility: one calculated
+# line produced each peak, a uniform prior over lines, and one error scale per candidate estimated
+# from its own residuals. Its MAP estimate is the nearest-line rule, so `fast_assign` is this
+# model's point estimate.
+#
+# Distances here are in q^2, matching get_M20 and get_M_info_clipped. The classical null family
+# (de Wolff's Delta, Taupin's P, and the value get_M20_likelihood returns) works in q, so a
+# threshold does not carry between the two.
+# ---------------------------------------------------------------------------------------------
 
+
+# Free cell parameters per lattice system -- Taupin's nu, the divisor in the reduced chi-square.
+N_FREE_PARAMETERS = {
+    'cubic': 1, 'tetragonal': 2, 'hexagonal': 2, 'rhombohedral': 2,
+    'orthorhombic': 3, 'monoclinic': 4, 'triclinic': 6,
+    }
+
+
+def get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system, robust=False, chunk=256):
+    """In-sample estimate of the measurement scale, from the candidate's own residuals.
+
+    Taupin 1988's reduced chi-square: sigma^2 = sum(dQ_i^2)/(N - nu), with dQ_i the distance from
+    each observed peak to its nearest calculated line and nu the number of free cell parameters.
+    Estimated per candidate, so nothing about the instrument is assumed.
+
+    `robust=True` uses 1.4826 x median|dQ| instead, which mis-assigned peaks cannot inflate but
+    which measures worse calibrated than the chi-square form.
+
+    Returns (sigma, d1) -- the scale per candidate and the nearest-line distance per peak.
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    n_candidates, n_peaks = q2_ref_calc.shape[0], q2_obs.size
+    d1 = np.empty((n_candidates, n_peaks), dtype=np.float64)
+    # One pass over each reference row carrying n_peaks running minima, in place of n_peaks
+    # passes each building a (chunk, n_ref) temporary. A minimum is a selection, so this is
+    # the same float; `chunk` no longer bounds anything here, since nothing is materialised.
+    nearest_line_distances(q2_obs, q2_ref_calc, d1)
+    # A NaN peak makes every distance to it NaN, which is a whole column rather than something
+    # the row scan can see. `.min()` would have returned NaN there, so it is put back.
+    undefined_peaks = np.isnan(q2_obs)
+    if undefined_peaks.any():
+        d1[:, undefined_peaks] = np.nan
+    n_free = N_FREE_PARAMETERS[lattice_system]
+    if robust:
+        sigma = 1.4826*np.median(d1, axis=1)
+    else:
+        sigma = np.sqrt(np.sum(d1**2, axis=1)/max(n_peaks - n_free, 1))
+    return np.maximum(sigma, 1e-300), d1
+
+
+def _posterior_scale(sigma, sigma_multiplier):
+    """2 sigma^2, floored so that a candidate which fits exactly does not divide by zero.
+
+    `get_assignment_sigma` clamps sigma at 1e-300, which looks like it has handled the degenerate
+    case and has not: this squares it, and 1e-600 underflows to exactly 0.0. The kernel then
+    divides by it, which in numba raises rather than returning inf.
+
+    Flooring at the smallest positive normal float makes an exact fit return a posterior of 1 --
+    every competing line's exponent underflows and the nearest line's term is 1. The floor binds
+    only where the unfloored scale would be zero or subnormal, so no ordinary value moves.
+    """
+    return np.maximum(2*(np.asarray(sigma, dtype=np.float64)*sigma_multiplier)**2,
+                      np.finfo(np.float64).tiny)
+
+
+def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
+                             sigma_multiplier=1.0, robust=False, chunk=256, d1=None):
+    """P(each observed peak is assigned its correct Miller index), over the competing lines.
+
+        P_i = exp(-d_i^2/2 sigma^2) / sum_j exp(-d_j^2/2 sigma^2),  evaluated at the nearest line
+
+    d_j is the distance in q^2 from the peak to reference line j, and sigma is estimated from the
+    candidate's own residuals by `get_assignment_sigma`. The sum runs over every reference line,
+    not only the assigned one, which is what lets the result depend on how crowded the peak's
+    neighbourhood is rather than on the residual alone.
+
+    Two consequences of estimating sigma in-sample. A cell that fits badly gets a large sigma and
+    so a flat posterior on every peak, without anything having to detect that it is wrong. And the
+    result is invariant under scaling all residuals by a constant, so it carries no information
+    about absolute fit quality -- a caller ranking CANDIDATES must carry sigma alongside it.
+
+    `sigma_multiplier` scales the fitted sigma, for sensitivity curves. `sigma` overrides the
+    in-sample estimate entirely. `sigma` and `d1` may both be passed from a previous
+    `get_assignment_sigma` call so the nearest-line scan, which is the whole cost of this
+    function, is paid once rather than twice; doing so changes no result.
+
+    Returns (n_candidates, n_peaks) in (0, 1].
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    if sigma is None or d1 is None:
+        estimated, distances = get_assignment_sigma(
+            q2_obs, q2_ref_calc, lattice_system, robust=robust, chunk=chunk
+            )
+        sigma = estimated if sigma is None else sigma
+        d1 = distances if d1 is None else d1
+    sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
+                            (q2_ref_calc.shape[0],))
+    d1 = np.asarray(d1, dtype=np.float64)
+    scale = _posterior_scale(sigma, sigma_multiplier)
+
+    posterior = np.empty(d1.shape, dtype=np.float64)
+    # Subtracting the nearest distance before exponentiating is the standard log-sum-exp shift:
+    # the nearest line's own term becomes exactly 1 and nothing underflows, so the sum is exact
+    # where a direct exp(-d^2/2s^2) would be 0/0 for a well-fitting candidate.
+    #
+    # The kernel builds that argument in one pass and marks the entries whose exponential is
+    # identically zero, which is 98.8% of them on a real pool; `where=` then takes the
+    # exponential of the rest in place, over the zeros the kernel has already written. The
+    # summed array keeps its full width and is still reduced by numpy, because pairwise
+    # summation groups a full row differently from a compacted one. `chunk` still matters:
+    # it keeps the block small enough to sum out of cache.
+    #
+    # The fast path is taken only for a C-contiguous reference array. `np.sum(axis=1)` does not
+    # group its additions the same way over an F-ordered block, and which order the expression
+    # below produces depends on how numpy resolves a binary op between operands of different
+    # orders -- not something to reproduce by construction. Everything this project builds is
+    # C-contiguous, so the other branch is a safety net rather than a path.
+    block_width = max(1, min(chunk, q2_ref_calc.shape[0]))
+    if q2_ref_calc.flags.c_contiguous:
+        terms = np.empty((block_width, q2_ref_calc.shape[1]), dtype=np.float64)
+        computable = np.empty(terms.shape, dtype=bool)
+    for start in range(0, q2_ref_calc.shape[0], chunk):
+        stop = min(start + chunk, q2_ref_calc.shape[0])
+        block = q2_ref_calc[start:stop]
+        block_scale = scale[start:stop][:, np.newaxis]
+        for peak in range(q2_obs.size):
+            if not q2_ref_calc.flags.c_contiguous:
+                excess = np.abs(block - q2_obs[peak])**2 - (d1[start:stop, peak]**2)[:, np.newaxis]
+                posterior[start:stop, peak] = 1.0/np.sum(np.exp(-excess/block_scale), axis=1)
+                continue
+            term_view = terms[:stop - start]
+            computable_view = computable[:stop - start]
+            posterior_exponent_terms(block, q2_obs[peak], d1[start:stop, peak],
+                                     scale[start:stop], term_view, computable_view)
+            np.exp(term_view, out=term_view, where=computable_view)
+            posterior[start:stop, peak] = 1.0/np.sum(term_view, axis=1)
+    return posterior
 
 
 # ---------------------------------------------------------------------------------------------
-# The rest of the zoo (S01 Part A items 5-15). Everything below follows get_M20's conventions:
-# q2_obs is (n_peaks,), q2_calc is (n_candidates, n_peaks) holding the computed position of the
-# line assigned to each observed peak, q2_ref_calc is (n_candidates, n_ref) holding every
-# reference line. Nothing below modifies its arguments.
+# THE MERIT ZOO -- NOT ON THE SHIPPED PATH, AND MOST OF IT IS SCHEDULED FOR DELETION AT P15.
+#
+# The indexer itself computes only get_M20 and get_assignment_posterior. Everything from here to
+# the end of the file is reachable only through `compute_all`, and exists because sessions P12 to
+# P14 of the fom_production campaign fit a learned figure of merit whose inputs are these merits.
+# `M_sym` additionally ships at P15 as the fallback ranker.
+#
+# P15 is where this stops being a holding area: whatever P14's ablation drops is deleted then,
+# along with the merit behind it. Anything still here after that with no consumer is dead.
+#
+# Conventions below follow get_M20: q2_obs is (n_peaks,), q2_calc is (n_candidates, n_peaks)
+# holding the computed position of the line assigned to each observed peak, q2_ref_calc is
+# (n_candidates, n_ref) holding every reference line. Nothing below modifies its arguments.
 # ---------------------------------------------------------------------------------------------
 
 
