@@ -225,21 +225,28 @@ def main(argv=None):
         print(f"generated {metadata['n_source_entries']} crystals x "
               f"{len(metadata['bundles'])} bundles into {args.out_pool}")
         pools = [args.out_pool]
+        generated = [args.out_pool]
     elif args.stage == 'generate':
         raise SystemExit('--stage generate needs --out-pool.')
     else:
         pools = list(args.pool or [])
+        generated = []
 
-    if args.stage in ('all', 'sidecars') and pools:
-        for pool in pools:
-            written = runs.merit_sidecar(pool, bundles=bundles, bravais_lattices=lattices)
-            print(f'scored {len(written)} shards of {pool}')
-        if args.stage == 'sidecars':
-            return 0
-    elif args.stage == 'sidecars':
-        raise SystemExit('--stage sidecars needs --pool.')
+    # Scored only where this invocation generated the pool, or where --stage sidecars asks for it
+    # by name. `--stage all --pool <existing>` must not rewrite a sidecar somebody already has:
+    # the merit columns are an input to whatever is being measured, and silently replacing them
+    # would change a stored arm rather than read it.
+    if args.stage == 'sidecars':
+        if not pools:
+            raise SystemExit('--stage sidecars needs --pool.')
+        to_score = pools
+    else:
+        to_score = generated if args.stage == 'all' else []
+    for pool in to_score:
+        written = runs.merit_sidecar(pool, bundles=bundles, bravais_lattices=lattices)
+        print(f'scored {len(written)} shards of {pool}')
 
-    if args.stage == 'generate':
+    if args.stage in ('generate', 'sidecars'):
         return 0
 
     if args.stage == 'floor':

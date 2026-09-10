@@ -232,3 +232,25 @@ def test_a_sidecar_column_carries_the_value_its_name_claims(tmp_path, models_dir
     for name in SIDECAR_MERITS:
         np.testing.assert_allclose(joined[name].to_numpy(), expected[name], rtol=0, atol=0,
                                    err_msg=name)
+
+
+def test_reducing_an_existing_pool_does_not_rewrite_its_merit_sidecar(tmp_path):
+    """`--stage all --pool <existing>` reads an arm; it must not replace part of it. The merit
+    columns are an input to whatever is being measured, so silently recomputing them would change
+    a stored arm rather than report on it -- and the arms this reads were generated elsewhere, on
+    another machine, at a commit that is not this one."""
+    from mlindex.scripts.run_benchmark import main
+
+    entries = _entries()
+    frame = Benchmark.label_frame(Benchmark.records_to_frame([_record()]), entries)
+    Benchmark.write_candidate_shard(frame, tmp_path, 'b1_error1_cont0', 'cP')
+    Benchmark.write_entry_table(entries, tmp_path)
+    sidecar = frame[list(Benchmark.CANDIDATE_KEY)].copy()
+    sidecar['M_sym'] = [123.0, 456.0]
+    Benchmark.write_candidate_shard(sidecar, tmp_path / Benchmark.MERIT_SIDECAR,
+                                    'b1_error1_cont0', 'cP')
+
+    main(['--pool', str(tmp_path), '--scores', 'M20,M_sym', '--allow-incomplete'])
+
+    read = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0')
+    assert read['M_sym'].tolist() == [123.0, 456.0]
