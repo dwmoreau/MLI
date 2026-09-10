@@ -188,7 +188,6 @@ for index in range(n):
     if rank == 0:
         top_unit_cell = dict.fromkeys(bravais_lattices)
         top_M20 = dict.fromkeys(bravais_lattices)
-        top_Minfo = dict.fromkeys(bravais_lattices)
         top_spacegroup = dict.fromkeys(bravais_lattices)
         top_n_indexed = dict.fromkeys(bravais_lattices)
 
@@ -216,20 +215,17 @@ for index in range(n):
         if rank == 0 and mpi_organizers[bravais_lattice].manager == 0:
             top_unit_cell[bravais_lattice] = optimizer[bravais_lattice].top_unit_cell
             top_M20[bravais_lattice] = optimizer[bravais_lattice].top_M20
-            top_Minfo[bravais_lattice] = optimizer[bravais_lattice].top_Minfo
             top_spacegroup[bravais_lattice] = optimizer[bravais_lattice].top_spacegroup
             top_n_indexed[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed
         else:
             if rank == 0:
                 top_unit_cell[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_M20[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                top_Minfo[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_spacegroup[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_n_indexed[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
             elif rank == mpi_organizers[bravais_lattice].manager:
                 comm.send(optimizer[bravais_lattice].top_unit_cell, dest=0)
                 comm.send(optimizer[bravais_lattice].top_M20, dest=0)
-                comm.send(optimizer[bravais_lattice].top_Minfo, dest=0)
                 comm.send(optimizer[bravais_lattice].top_spacegroup, dest=0)
                 comm.send(optimizer[bravais_lattice].top_n_indexed, dest=0)
     if rank == 0:
@@ -271,7 +267,6 @@ for index in range(n):
                     unit_cell = partial_unit_cell
                 output_data.append({
                     'M20': top_M20[bravais_lattice][result_index],
-                    'Minfo': top_Minfo[bravais_lattice][result_index],
                     'n_indexed': top_n_indexed[bravais_lattice][result_index],
                     'bravais_lattice': bravais_lattice,
                     'spacegroup': top_spacegroup[bravais_lattice][result_index],

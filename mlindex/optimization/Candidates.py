@@ -2,9 +2,7 @@ import numpy as np
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20
-from mlindex.utilities.FigureOfMerits import get_M20_likelihood
-from mlindex.utilities.FigureOfMerits import get_M20_likelihood_from_xnn
-from mlindex.utilities.FigureOfMerits import get_multiplicity_taupin88
+from mlindex.utilities.FigureOfMerits import get_assignment_posterior
 from mlindex.utilities.MillerIndexAssignment import vectorized_subsampling
 from mlindex.utilities.numba_functions import fast_assign
 from mlindex.utilities.Q2Calculator import Q2Calculator
@@ -13,12 +11,10 @@ from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.Reindexing import selling_reduction
 from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 from mlindex.utilities.UnitCellTools import fix_unphysical
-from mlindex.utilities.UnitCellTools import get_hkl_matrix
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
-from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
@@ -28,6 +24,8 @@ class Candidates:
         self.bravais_lattice = bravais_lattice
         self.minimum_unit_cell = opt_params['minimum_uc']
         self.maximum_unit_cell = opt_params['maximum_uc']
+        # Minimum assignment posterior for a peak to enter the final refinement and to count
+        # towards the reported n_indexed.
         self.assignment_threshold = opt_params['assignment_threshold']
         self.figure_of_merit = opt_params['figure_of_merit']
         self.rng = rng
@@ -217,13 +215,8 @@ class Candidates:
 
     def refine_cell(self):
         # This updates the unit cell only with the peaks assigned at > threshold probability.
-        _, probability, _ = get_M20_likelihood_from_xnn(
-            q2_obs=self.q2_obs,
-            xnn=self.best_xnn,
-            hkl=self.best_hkl,
-            lattice_system=self.lattice_system,
-            bravais_lattice=self.bravais_lattice,
-            )
+        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
+        probability = get_assignment_posterior(self.q2_obs, q2_ref_calc, self.lattice_system)
         indexed_peaks = probability > self.assignment_threshold
         n_indexed_peaks = np.sum(indexed_peaks, axis=1)
         unique_n_indexed_peaks = np.unique(n_indexed_peaks)
@@ -541,35 +534,17 @@ class Candidates:
 
 
     def calculate_peaks_indexed(self):
+        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
         if self.zero_error:
             target_function_zp = CandidateOptLoss(
                 np.repeat(self.q2_obs[np.newaxis], self.n, axis=0),
                 lattice_system=self.lattice_system,
                 )
-            hkl2 = get_hkl_matrix(self.best_hkl, self.lattice_system)
-            q2_calc = np.sum(hkl2 * self.best_xnn[:, np.newaxis, :], axis=2)
-            q2_calc = target_function_zp.apply_zeropoint(self.best_zeropoint, self.wavelength, q2_calc)
-
-            reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-                self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
+            q2_ref_calc = target_function_zp.apply_zeropoint(
+                self.best_zeropoint, self.wavelength, q2_ref_calc
                 )
-            reciprocal_volume = get_unit_cell_volume(
-                reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-                )
-            _, probability, self.best_Minfo = get_M20_likelihood(
-                self.q2_obs, q2_calc, self.bravais_lattice, reciprocal_volume
-                )
-        else:
-            _, probability, self.best_Minfo = get_M20_likelihood_from_xnn(
-                q2_obs=self.q2_obs,
-                xnn=self.best_xnn,
-                hkl=self.best_hkl,
-                lattice_system=self.lattice_system,
-                bravais_lattice=self.bravais_lattice,
-                )
-
+        probability = get_assignment_posterior(self.q2_obs, q2_ref_calc, self.lattice_system)
         self.n_indexed = np.sum(
             probability > self.assignment_threshold,
             axis=1, dtype=int
             )
-        probability_ = probability.copy()

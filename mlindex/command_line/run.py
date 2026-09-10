@@ -233,8 +233,7 @@ def _load_peaks(args):
     return peak_list
 
 
-def _collect_results(optimizer, bl, all_results,
-                     Minfos=None, spacegroups=None):
+def _collect_results(optimizer, bl, all_results, spacegroups=None):
     for i in range(optimizer.top_M20.size):
         partial = optimizer.top_unit_cell[i]
         if bl in ['cF', 'cI', 'cP']:
@@ -262,7 +261,6 @@ def _collect_results(optimizer, bl, all_results,
             'beta':  180/np.pi * unit_cell[4],
             'gamma': 180/np.pi * unit_cell[5],
         }
-        if Minfos is not None:             entry['Minfo']             = Minfos[i]
         if spacegroups is not None:        entry['spacegroup']        = spacegroups[i]
         all_results.append(entry)
     return all_results
@@ -275,8 +273,6 @@ def _write_results(output_data, output_file_base='indexing_results'):
 
     output_df = pd.DataFrame(output_data)
     output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
-    drop_columns = [c for c in ['Minfo'] if c in output_df.columns]
-    output_df.drop(columns=drop_columns, inplace=True)
     output_df.to_json(output_file_base + '.json')
     txt_cols = [c for c in ['bravais_lattice', 'M20', 'n_indexed', 'a', 'b', 'c',
                              'alpha', 'beta', 'gamma', 'volume', 'spacegroup'] if c in output_df.columns]
@@ -436,7 +432,7 @@ def _conventional_cell(output_data, delta=0.1, promote=None):
     return kept
 
 
-def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
+def _write_output(args, top_unit_cell, top_M20, top_spacegroup,
                   top_n_indexed, promote=None):
     output_data = []
     for bl in args.bravais_lattices:
@@ -447,7 +443,6 @@ def _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
         )
         _collect_results(
             mock, bl, output_data,
-            Minfos=top_Minfo[bl],
             spacegroups=top_spacegroup[bl],
         )
     output_data = _conventional_cell(output_data, promote=promote)
@@ -489,7 +484,6 @@ def _run_mpi(args, peak_list, seed=12345):
     if rank == 0:
         top_unit_cell = dict.fromkeys(bravais_lattices)
         top_M20 = dict.fromkeys(bravais_lattices)
-        top_Minfo = dict.fromkeys(bravais_lattices)
         top_spacegroup = dict.fromkeys(bravais_lattices)
         top_n_indexed = dict.fromkeys(bravais_lattices)
 
@@ -515,25 +509,22 @@ def _run_mpi(args, peak_list, seed=12345):
         if rank == 0 and mpi_organizers[bravais_lattice].manager == 0:
             top_unit_cell[bravais_lattice] = optimizer[bravais_lattice].top_unit_cell
             top_M20[bravais_lattice] = optimizer[bravais_lattice].top_M20
-            top_Minfo[bravais_lattice] = optimizer[bravais_lattice].top_Minfo
             top_spacegroup[bravais_lattice] = optimizer[bravais_lattice].top_spacegroup
             top_n_indexed[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed
         else:
             if rank == 0:
                 top_unit_cell[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_M20[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                top_Minfo[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_spacegroup[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
                 top_n_indexed[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
             elif rank == mpi_organizers[bravais_lattice].manager:
                 comm.send(optimizer[bravais_lattice].top_unit_cell, dest=0)
                 comm.send(optimizer[bravais_lattice].top_M20, dest=0)
-                comm.send(optimizer[bravais_lattice].top_Minfo, dest=0)
                 comm.send(optimizer[bravais_lattice].top_spacegroup, dest=0)
                 comm.send(optimizer[bravais_lattice].top_n_indexed, dest=0)
 
     if rank == 0:
-        _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
+        _write_output(args, top_unit_cell, top_M20, top_spacegroup,
                       top_n_indexed)
     logger.info('Finished gathering optimization results')
 
@@ -568,20 +559,18 @@ def _run_mp(args, peak_list, n_procs, seed=12345):
 
     top_unit_cell = {}
     top_M20 = {}
-    top_Minfo = {}
     top_spacegroup = {}
     top_n_indexed = {}
     for bravais_lattice in args.bravais_lattices:
         result = results[bravais_lattice]
         top_unit_cell[bravais_lattice] = result['top_unit_cell']
         top_M20[bravais_lattice] = result['top_M20']
-        top_Minfo[bravais_lattice] = result['top_Minfo']
         top_spacegroup[bravais_lattice] = result['top_spacegroup']
         top_n_indexed[bravais_lattice] = result['top_n_indexed']
 
     # Before the shutdown, not after: promotion is 6.5 ms of cctbx per candidate
     # over roughly 280 of them, and the groups are idle by this point.
-    _write_output(args, top_unit_cell, top_M20, top_Minfo, top_spacegroup,
+    _write_output(args, top_unit_cell, top_M20, top_spacegroup,
                   top_n_indexed,
                   promote=lambda entries, delta: promote_over_groups(
                       groups, entries, delta))
