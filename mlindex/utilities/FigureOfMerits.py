@@ -1,5 +1,8 @@
 import numpy as np
 
+from mlindex.utilities.numba_functions import lines_below_cutoff
+from mlindex.utilities.numba_functions import over_prediction_runs
+from mlindex.utilities.numba_functions import reversed_line_scores
 from mlindex.utilities.UnitCellTools import get_hkl_matrix
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
@@ -371,32 +374,71 @@ def get_N_cal(q2_ref_calc, q_min, q_max, weights=None):
     return (in_range*weights[np.newaxis, :]).sum(axis=1)
 
 
-def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
-    """Oishi-Tomiyasu 2013 eqs (5), (7), (9)-(11): the restricted, reversed and symmetric FOMs.
+def _reversed_line_terms(q2_obs, q_max, q2_ref_calc):
+    """The five row-wise quantities get_M_rev_sym builds out of the reference list.
 
-    Replaces the dead `get_M20_sym_reversed`, which called an undefined `get_multiplicity` and
-    hardcoded 'monoclinic' for the reference multiplicities (F-003).
+    Returns, per candidate:
+
+      q_min      q_I, the reference line closest to the first observed peak;
+      in_range   whether each reference line lies in [q_min, q_max];
+      counts     how many do -- N_cal when the weights are all 1 (see get_N_cal);
+      q_n        the largest reference line in range, -inf if none is;
+      scored     min_j |q2_ref_calc - q2_obs[j]| where in range and 0.0 where not.
+
+    The kernel and the array expressions below it produce bit-identical output, and two details
+    of the fast path are what make that true rather than approximately true. `scored` and
+    `in_range` are allocated with `empty_like` so they inherit q2_ref_calc's memory order, because
+    `.sum(axis=1)` groups its additions differently over a C-ordered array than over an F-ordered
+    one and the caller's row sums consume both. And `scored` keeps its zeros rather than being
+    compacted to the in-range entries, because numpy's pairwise summation groups a full row
+    differently from a short one even where the dropped terms are exact zeros.
+
+    The kernel needs the peaks sorted and finite, so that its binary search lands on the same two
+    neighbours a full scan would have minimised over, and floating-point input so -inf is
+    representable in q_n. Anything else takes the array expressions instead.
+    """
+    n_candidates = q2_ref_calc.shape[0]
+    dtype = np.result_type(q2_ref_calc, q2_obs, 0.0)
+    scored = np.empty_like(q2_ref_calc, dtype=dtype)
+    in_range = np.empty_like(q2_ref_calc, dtype=bool)
+    q_n = np.empty(n_candidates, dtype=dtype)
+    q_min = np.empty(n_candidates, dtype=q2_ref_calc.dtype)
+    counts = np.empty(n_candidates, dtype=np.int64)
+    reversed_line_scores(q2_ref_calc, np.ascontiguousarray(q_max), np.sort(q2_obs),
+                         q2_obs[0], scored, in_range, q_n, counts, q_min)
+    return q_min, in_range, counts, q_n, scored
+
+
+def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10,
+                  return_n_cal=False):
+    """Oishi-Tomiyasu 2013 eqs (5), (7), (9)-(11): the restricted, reversed and symmetric FOMs.
 
     Three merits, all sigma-free:
 
-      M_tilde  de Wolff's M_n with N_cal and the range restricted to [q_I, q_N], where q_I is the
-               computed line nearest the *first* observed peak. Corrects for patterns missing
-               low-index reflections, and for the calculated-line density growing with q rather
-               than being uniform. Her best single FOM over 24 real patterns.
-      M_rev    the same construction with the roles of observed and computed lines exchanged: it
-               asks whether every *computed* line is accounted for by an observation. It is
-               therefore blind to impurity peaks and sensitive to over-predicted reflections --
-               exactly the axis on which over-prediction currently escapes punishment, and the
-               reason this is the most likely quick win in the zoo.
-      M_sym    M_tilde * M_rev, invariant under exchanging the two line sets. Rescued the true
-               cell in both of her impurity-peak cases where M_tilde picked a false one.
+      M_tilde  de Wolff's M_n with N_cal and the range restricted to [q_I, q_N], q_I being the
+               computed line nearest the first observed peak.
+      M_rev    the same construction with observed and computed lines exchanged, so it asks
+               whether every computed line is accounted for by an observation. Blind to impurity
+               peaks, sensitive to over-predicted reflections.
+      M_sym    M_tilde * M_rev, invariant under exchanging the two line sets.
 
     Arguments follow get_M20: q2_obs is (n_peaks,), q2_calc (n_candidates, n_peaks) the computed
     positions of the assigned lines, q2_ref_calc (n_candidates, n_ref) every reference line.
-    `weights` is 1/m per reference entry and defaults to 1 -- see get_N_cal for why that is right
-    here. Returns (M_tilde, M_rev, M_sym), each (n_candidates,).
+    `weights` is 1/m per reference entry and defaults to 1; see get_N_cal. Returns
+    (M_tilde, M_rev, M_sym), each (n_candidates,), or those plus N_cal with `return_n_cal`.
 
-    Unlike get_M20 this does not modify q2_ref_calc.
+    `min_n_cal` is the support floor below which M_rev is undefined, signalled as 0.0 -- the same
+    value the N_cal == 0 guard already returns. Pass None for the unfloored value.
+
+    The floor is needed because M_rev's numerator does not depend on N_cal while its denominator
+    is a mean over N_cal terms. When the counting window holds no more lines than the cell has
+    free parameters the refinement interpolates them exactly, the denominator vanishes into float
+    rounding, and M_rev reaches 1e11-1e14 on a cell M20 scores below 2. Only M_rev is floored;
+    M_tilde divides by the residual over all assigned lines and is well conditioned however few
+    reference lines the window holds. M_sym inherits the floor through the product.
+
+    A caller persisting M_rev should persist N_cal with it: a stored 0.0 otherwise cannot be told
+    apart from a floored one.
     """
     n_peaks = q2_obs.shape[0]
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
@@ -404,23 +446,20 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
     # The cut-off is the calculated position of the last assigned line, as in get_M20 -- Audit C
     # measured the alternatives as differing by less than the reproducibility floor.
     q_max = q2_calc[:, -1]
-    # q_I: the computed line closest to the first observed peak.
-    q_min = np.take_along_axis(
-        q2_ref_calc,
-        np.argmin(np.abs(q2_ref_calc - q2_obs[0]), axis=1)[:, np.newaxis],
-        axis=1,
-    )[:, 0]
 
-    in_range = (q2_ref_calc >= q_min[:, np.newaxis]) & (q2_ref_calc <= q_max[:, np.newaxis])
-    row_weights = np.ones(q2_ref_calc.shape[1]) if weights is None else weights
-    n_cal = (in_range*row_weights[np.newaxis, :]).sum(axis=1)
-    q_n = np.max(np.where(in_range, q2_ref_calc, -np.inf), axis=1)
+    # q_I, the in-range mask, N_cal, q_N, and the reversed score of every reference line in
+    # range (eq. 10) -- the reversal being that observed lines no computed line explains cost
+    # nothing, while computed lines no observation explains cost everything.
+    q_min, in_range, counts, q_n, scored = _reversed_line_terms(q2_obs, q_max, q2_ref_calc)
 
-    # Every reference line in range is scored against its nearest observed peak (eq. 10), which is
-    # the reversal: observed lines that no computed line explains cost nothing, computed lines that
-    # no observation explains cost everything.
-    nearest = np.min(np.abs(q2_ref_calc[:, :, np.newaxis] - q2_obs[np.newaxis, np.newaxis]), axis=2)
-    reversed_sum = (np.where(in_range, nearest, 0.0)*row_weights[np.newaxis, :]).sum(axis=1)
+    if weights is None:
+        # `counts` are exact integers below 2**53, so this is the same float the
+        # multiply-by-ones-and-sum below produces, and the same one it always produced.
+        n_cal = counts.astype(float)
+        reversed_sum = scored.sum(axis=1)
+    else:
+        n_cal = (in_range*weights[np.newaxis, :]).sum(axis=1)
+        reversed_sum = (scored*weights[np.newaxis, :]).sum(axis=1)
 
     good = (n_cal > 0) & np.isfinite(q_n) & (discrepancy > 0) & (q2_calc.sum(axis=1) != 0)
     M_tilde = np.zeros(q2_calc.shape[0])
@@ -431,7 +470,17 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None):
         discrepancy_reversed = reversed_sum/np.where(n_cal > 0, n_cal, 1)
         epsilon_reversed = (q2_obs[-1] - q2_obs[0])/(2*n_peaks)
         usable = good & (discrepancy_reversed > 0)
+        if min_n_cal is not None:
+            # Only M_rev is floored. M_tilde divides by the mean residual over all n_peaks
+            # assigned lines, which is well conditioned however few reference lines the window
+            # holds; M_sym inherits the floor through the product, which is the intent.
+            usable &= n_cal >= min_n_cal
         M_rev[usable] = epsilon_reversed/discrepancy_reversed[usable]
+    if return_n_cal:
+        # The support the floor tested. M_rev = 0.0 means "floored", "N_cal was zero" and
+        # "degenerate" alike, so a stored column without N_cal beside it cannot be asked
+        # afterwards which rows the floor touched.
+        return M_tilde, M_rev, M_tilde*M_rev, n_cal
     return M_tilde, M_rev, M_tilde*M_rev
 
 
@@ -470,11 +519,15 @@ def get_M20_from_xnn(q2_obs, xnn, hkl, hkl_ref, lattice_system):
 
 
 def get_M20(q2_obs, q2_calc, q2_ref_calc):
+    """de Wolff's M20.
+
+    `lines_below_cutoff` counts the reference lines below the last assigned line and returns the
+    largest of them, in one pass and without writing to `q2_ref_calc`. Its maximum starts at 0.0
+    rather than -inf so that a row with no line below the cut-off yields 0.0, and `value < limit`
+    excludes NaN from both the count and the maximum.
+    """
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
-    smaller_ref_peaks = q2_ref_calc < q2_calc[:, -1][:, np.newaxis]
-    np.putmask(q2_ref_calc, ~smaller_ref_peaks, 0)
-    last_smaller_ref_peak = np.max(q2_ref_calc, axis=1)
-    N = np.sum(smaller_ref_peaks, axis=1)
+    N, last_smaller_ref_peak = lines_below_cutoff(q2_ref_calc, q2_calc[:, -1])
 
     # There is an unknown issue that causes q2_calc to be all zero
     # These cases are caught and the M20 score is returned as zero.
@@ -567,50 +620,7 @@ def get_multiplicity_taupin88(bravais_lattice):
         return 1 * 1.8, 6
 
 
-def get_M20_sym_reversed(q2_obs, xnn, hkl, hkl_ref, lattice_system):
-    """SUPERSEDED by get_M_rev_sym. Dead code, kept only so the name still resolves.
 
-    This never ran: it calls an undefined `get_multiplicity` and hardcodes 'monoclinic' for the
-    reference multiplicities (F-003). get_M_rev_sym implements Oishi-Tomiyasu 2013 eqs (5), (7),
-    (9)-(11) properly, follows get_M20's calling convention, and is vectorised over candidates.
-    """
-    # This function is broken because there is no get_multiplicity function
-    hkl2 = get_hkl_matrix(hkl, lattice_system)
-    q2_calc = np.sum(hkl2 * xnn[:, np.newaxis, :], axis=2)
-    hkl2_ref = get_hkl_matrix(hkl_ref, lattice_system)
-    q2_ref_calc = np.sum(hkl2_ref * xnn[:, np.newaxis, :], axis=2)
-    multiplicity = get_multiplicity(
-        hkl.reshape((hkl.shape[0] * hkl.shape[1], hkl.shape[2])), lattice_system
-    ).reshape(hkl.shape[:2])
-    multiplicity_ref = get_multiplicity(hkl_ref, "monoclinic")
-
-    discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
-    smaller_ref_peaks = q2_ref_calc < q2_calc[:, -1][:, np.newaxis]
-    last_smaller_ref_peak = np.zeros(q2_calc.shape[0])
-    expected_discrepancy_reversed = (q2_obs[-1] - q2_obs[0]) / (2 * 20)
-    discrepancy_reversed = np.zeros(q2_calc.shape[0])
-    for i in range(q2_calc.shape[0]):
-        q2_ref_smaller = q2_ref_calc[i, smaller_ref_peaks[i]]
-        multiplicities_ref_smaller = multiplicity_ref[smaller_ref_peaks[i]]
-        sort_indices = np.argsort(q2_ref_smaller)
-        q2_ref_smaller = q2_ref_smaller[sort_indices]
-        multiplicities_ref_smaller = multiplicities_ref_smaller[sort_indices]
-        last_smaller_ref_peak[i] = q2_ref_smaller[-1]
-
-        N_calc = np.sum(1 / multiplicities_ref_smaller)
-        differences = np.min(
-            np.abs(q2_ref_smaller[np.newaxis] - q2_obs[:, np.newaxis]), axis=0
-        )
-        discrepancy_reversed[i] = (
-            np.sum(differences / multiplicities_ref_smaller) / N_calc
-        )
-
-    N = np.sum(smaller_ref_peaks, axis=1)
-    expected_discrepancy = last_smaller_ref_peak / (2 * N)
-    M20 = expected_discrepancy / discrepancy
-    M20_reversed = expected_discrepancy_reversed / discrepancy_reversed
-    M20_sym = M20 * M20_reversed
-    return M20, M20_sym, M20_reversed
 
 
 # ---------------------------------------------------------------------------------------------
@@ -702,7 +712,7 @@ def _sorted_lines_in_range(q2_ref_calc, cutoff, floor=None):
     return np.sort(lines, axis=1), in_range.sum(axis=1)
 
 
-def get_M_wu(q2_obs, q2_calc, q2_ref_calc):
+def get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
     """Wu 1988 eqs (5), (6): the de Wolff FOM with the exact mean arbitrary discrepancy.
 
         g_n  = sum_k (Q_(k) - Q_(k-1))^2 / 4 / Q_(N)
@@ -718,11 +728,15 @@ def get_M_wu(q2_obs, q2_calc, q2_ref_calc):
     Oishi-Tomiyasu found it a worse *ranker* than M_tilde precisely because that continuity lets
     lower-symmetry cells reach the highest values; both properties are worth having measured.
 
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
+    compute_all already built avoids re-sorting the same array. See its note there.
+
     Returns (n_candidates,).
     """
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
     cutoff = q2_calc[:, -1]
-    lines, count = _sorted_lines_in_range(q2_ref_calc, cutoff)
+    lines, count = (_sorted_lines_in_range(q2_ref_calc, cutoff) if sorted_lines is None
+                    else sorted_lines)
 
     # The k = 1 interval runs from Q = 0, matching Wu's sum starting at k = 1.
     finite = np.isfinite(lines)
@@ -761,7 +775,7 @@ def get_M_star(q2_obs, q2_calc, volume, lattice_system, corrected=False):
     return merit
 
 
-def get_M_1(q2_obs, q2_calc, q2_ref_calc):
+def get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
     """Shirley 1980 section 2.2: the de Wolff family with a *per-line local* epsilon.
 
         delta_i = |Q_obs_i - nearest calculated line|
@@ -776,10 +790,14 @@ def get_M_1(q2_obs, q2_calc, q2_ref_calc):
     It is the empirical counterpart of get_delta_dewolff61, which gives the same local quantity
     analytically. Where both are computable they should agree, and they can be cross-plotted.
 
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
+    compute_all already built avoids re-sorting the same array. See its note there.
+
     Returns (n_candidates,).
     """
     cutoff = q2_calc[:, -1]
-    lines, count = _sorted_lines_in_range(q2_ref_calc, cutoff)
+    lines, count = (_sorted_lines_in_range(q2_ref_calc, cutoff) if sorted_lines is None
+                    else sorted_lines)
 
     # For each observed peak, the bracketing pair of calculated lines. searchsorted on a row-sorted
     # array with the out-of-range entries at +inf gives the insertion point directly.
@@ -847,7 +865,7 @@ def get_M_info_clipped(
     return -1/np.log(2)*np.sum(np.log(1 - np.exp(-argument) + 1e-100), axis=1)
 
 
-def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5):
+def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5, sorted_lines=None):
     """Calculated lines in range that no observation accounts for, and the longest such run.
 
     The ingredient of M_rev, useful on its own as a cheap over-prediction detector, and -- in the
@@ -858,31 +876,21 @@ def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5):
     calculated line counts as unaccounted for when the nearest observed peak is further away than
     tolerance_factor times the local gap between calculated lines. Sigma-free by construction.
 
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
+    compute_all already built avoids re-sorting the same array. See its note there.
+
     Returns (n_over, max_gap), each (n_candidates,).
     """
     cutoff = q2_calc[:, -1]
-    lines, count = _sorted_lines_in_range(q2_ref_calc, cutoff)
-    finite = np.isfinite(lines)
+    lines, count = (_sorted_lines_in_range(q2_ref_calc, cutoff) if sorted_lines is None
+                    else sorted_lines)
 
-    previous = np.concatenate(
-        [np.zeros((lines.shape[0], 1)), np.where(finite, lines, 0.0)[:, :-1]], axis=1
-    )
-    local_gap = np.where(finite, np.where(finite, lines, 0.0) - previous, np.inf)
-    nearest = np.min(
-        np.abs(np.where(finite, lines, np.inf)[:, :, np.newaxis] - q2_obs[np.newaxis, np.newaxis]),
-        axis=2,
-    )
-    unaccounted = finite & (nearest > tolerance_factor*local_gap)
-
-    n_over = unaccounted.sum(axis=1)
-    # Longest run of consecutive unaccounted-for calculated lines.
-    max_gap = np.zeros(lines.shape[0], dtype=int)
-    for row in range(lines.shape[0]):
-        run = best = 0
-        for flag in unaccounted[row, : count[row]]:
-            run = run + 1 if flag else 0
-            best = max(best, run)
-        max_gap[row] = best
+    # Both outputs are counts, so nothing here has a summation order to preserve: reproducing
+    # the per-line "is this one unaccounted for" decision reproduces both exactly.
+    n_over = np.empty(lines.shape[0], dtype=np.int64)
+    max_gap = np.empty(lines.shape[0], dtype=np.int64)
+    over_prediction_runs(lines, count, np.sort(q2_obs), float(tolerance_factor),
+                         n_over, max_gap)
     return n_over, max_gap
 
 
@@ -1181,11 +1189,12 @@ def compute_all(
     maps to an array of shape (n_candidates,); `sigma_treatment` maps each key to 'free',
     'in-sample' or 'assumed' so that a sigma-dependent column can never be read as sigma-free.
 
-    **get_M20 is evaluated last, and on a copy.** It writes zeros into q2_ref_calc in place
-    (FigureOfMerits.py:19) as part of its own arithmetic, which is fine for the inner loop -- it is
-    performance-critical code and is deliberately left untouched -- but would silently corrupt
-    every other FOM in this frame. Ordering it last and handing it a copy contains that, and
-    tests/test_fom_literature.py asserts the frame is invariant to evaluation order.
+    **Evaluation order no longer matters.** get_M20 used to write zeros into q2_ref_calc in
+    place as part of its own arithmetic, which would have silently corrupted every other FOM in
+    this frame, so it was ordered last and handed a copy. It no longer touches its argument, and
+    no merit here does. M20 stays in last position only so that the key order of the returned
+    frame does not move; tests/test_fom_literature.py asserts both that the frame is invariant
+    to evaluation order and that nothing modifies its arguments.
 
     Optional arguments degrade gracefully: without `wavelength` the published-units F_N is omitted,
     without `sigma_entrywise` the entrywise chi-squared is omitted, and without `g_min` the Werner
@@ -1203,18 +1212,23 @@ def compute_all(
     )
     volume = 1/np.maximum(reciprocal_volume, 1e-300)
 
+    # get_M_wu, get_M_1 and get_n_over each need the calculated lines sorted within the cut-off.
+    # Sorting once here and passing it down replaces three identical sorts of the same array; each
+    # still sorts for itself when called directly.
+    sorted_lines = _sorted_lines_in_range(q2_ref_calc, q2_calc[:, -1])
+
     features = {}
     M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc)
     features["M_tilde"] = M_tilde
     features["M_rev"] = M_rev
     features["M_sym"] = M_sym
     features["X_N"] = get_X_N(q2_obs, q2_calc, q2_ref_calc).astype(float)
-    features["M_wu"] = get_M_wu(q2_obs, q2_calc, q2_ref_calc)
+    features["M_wu"] = get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
     features["M_star"] = get_M_star(q2_obs, q2_calc, volume, lattice_system)
     features["M_star_corrected"] = get_M_star(
         q2_obs, q2_calc, volume, lattice_system, corrected=True
     )
-    features["M_1"] = get_M_1(q2_obs, q2_calc, q2_ref_calc)
+    features["M_1"] = get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
     features["M_nn"] = get_M_nn(q2_obs, q2_calc, q2_ref_calc)
     features["M_info_clipped"] = get_M_info_clipped(
         q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=min_discrepancy
@@ -1226,7 +1240,7 @@ def compute_all(
         q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=min_discrepancy
     )
     features["bic"] = get_bic(q2_obs, q2_calc, xnn, lattice_system, bravais_lattice)
-    n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc)
+    n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
     features["n_over"] = n_over.astype(float)
     features["max_gap"] = max_gap.astype(float)
     features["zone_dominance"] = get_zone_dominance(xnn, lattice_system)
@@ -1266,8 +1280,7 @@ def compute_all(
         features["V_over_Vcrit"] = over_critical
         features["M_werner_max"] = m_max
 
-    # Last, and on a copy -- see the docstring.
-    features["M20"] = get_M20(q2_obs, q2_calc, q2_ref_calc.copy())
+    features["M20"] = get_M20(q2_obs, q2_calc, q2_ref_calc)
     if g_min is not None:
         features["M_werner_frac"] = np.where(
             features["M_werner_max"] > 0, features["M20"]/features["M_werner_max"], 0.0
