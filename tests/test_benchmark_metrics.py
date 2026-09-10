@@ -203,3 +203,25 @@ def test_the_bootstrap_resamples_crystals_not_pattern_conditions():
     b = np.where(flip, ~a, a)
     low, high = metrics.paired_delta_ci(a, b, clusters, n_bootstrap=400, seed=1)
     assert high - low > 0.05
+
+
+def test_the_resampling_unit_is_the_crystal_not_the_pattern_condition():
+    """A crystal under three conditions is one draw. Reporting them as three would make every
+    interval too tight by up to sqrt(n_conditions)."""
+    frame = pd.DataFrame({
+        'entry_id': ['A', 'A', 'A', 'B', 'B', 'B'],
+        'condition_bundle': ['c1', 'c2', 'c3']*2,
+        'found': [True]*6, 'top1': [True]*6, 'top5': [True]*6, 'top10': [True]*6,
+        'reciprocal_rank': [1.0]*6,
+    })
+    row = metrics.summarise(frame)
+    assert row['n_entries'] == 6
+    assert row['n_clusters'] == 2
+
+
+def test_an_empty_scope_reports_no_clusters_rather_than_a_null():
+    empty = pd.DataFrame({'entry_id': [], 'found': [], 'top1': [], 'top5': [], 'top10': [],
+                          'reciprocal_rank': []})
+    row = metrics.summarise(empty)
+    assert row['n_entries'] == 0
+    assert row['n_clusters'] == 0

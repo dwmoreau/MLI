@@ -256,15 +256,28 @@ def unweighted_mean(frame, column):
     return float(np.nanmean(values))
 
 
+def cluster_of(flagged):
+    """The resampling unit: the source crystal.
+
+    A crystal appears once per condition bundle with correlated noise, so it is one draw and not
+    several. Reported beside `n_entries` because the two differ by the number of conditions, and a
+    reader comparing intervals needs to know which one an interval was built from.
+    """
+    if 'cluster' in flagged:
+        return flagged['cluster']
+    return flagged['entry_id']
+
+
 def summarise(flagged, scope='aggregate'):
     """One row of metrics for one scope."""
     row = {'scope': scope, 'n_entries': int(flagged.shape[0])}
     if flagged.shape[0] == 0:
         row.update({name: np.nan for name in RANK_METRICS})
+        row['n_clusters'] = 0
         return row
     for name in RANK_METRICS:
         row[name] = unweighted_mean(flagged, 'reciprocal_rank' if name == 'mrr' else name)
-    row['n_clusters'] = int(flagged['cluster'].nunique()) if 'cluster' in flagged else np.nan
+    row['n_clusters'] = int(cluster_of(flagged).nunique())
     return row
 
 
