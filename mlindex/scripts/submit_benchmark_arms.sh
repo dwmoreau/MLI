@@ -103,6 +103,11 @@ if [ "$MLI_POPULATION" = "general" ]; then
     MLI_BUNDLE_ARGS=(--bundles "$MLI_GENERAL_BUNDLES")
     MLI_PER_LATTICE="$MLI_GENERAL_PER_LATTICE"
 else
+    # The hard population takes the driver's own default, which is every bundle flagged severe --
+    # so no --bundles argument at all. The array stays EMPTY, and `set -u` makes expanding an
+    # empty array an error on bash 3.2 (what macOS ships); the `+` form expands to nothing
+    # instead. Without it every hard task dies on its first line and only the general half of the
+    # job runs.
     MLI_BUNDLE_ARGS=()
     MLI_PER_LATTICE="$MLI_HARD_PER_LATTICE"
 fi
@@ -116,7 +121,7 @@ cd "$MLI_REPO"
     --split-manifest "$MLI_SPLIT_MANIFEST" \
     --population "$MLI_POPULATION" \
     --per-lattice "$MLI_PER_LATTICE" \
-    "${MLI_BUNDLE_ARGS[@]}" \
+    ${MLI_BUNDLE_ARGS[@]+"${MLI_BUNDLE_ARGS[@]}"} \
     --cut "$MLI_CUT" \
     --seed "$MLI_SEED" \
     --search-seed "$MLI_SEARCH_SEED" \
