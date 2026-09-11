@@ -376,3 +376,18 @@ def test_refusals_are_counted_against_their_own_bundle():
     failures = [{'entry_id': f'C{i}', 'condition_bundle': bundles[0], 'reason': 'x'}
                 for i in range(30)]
     _refuse_a_broken_bundle(failures, bundles, n_crystals=360)
+
+
+def test_generating_into_an_occupied_directory_is_refused(tmp_path):
+    """An arm that died leaves its finished pools' stripes behind. Re-running into the same place
+    would consolidate them with the new ones, and nothing in the result would say which run a
+    shard came from."""
+    from mlindex.model_training.BenchmarkRuns import _refuse_an_occupied_directory
+
+    _refuse_an_occupied_directory(tmp_path/'never_used')      # absent is fine
+    (tmp_path/'arm').mkdir()
+    _refuse_an_occupied_directory(tmp_path/'arm')             # empty is fine
+
+    (tmp_path/'arm'/'parts').mkdir()
+    with pytest.raises(FileExistsError, match='parts'):
+        _refuse_an_occupied_directory(tmp_path/'arm')

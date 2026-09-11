@@ -285,6 +285,7 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     import mlindex
 
     pool_dir = Path(pool_dir)
+    _refuse_an_occupied_directory(pool_dir)
     # Read before a single pattern is indexed, not at the end beside the rest of the manifest.
     # An arm takes hours, and a commit made while it runs would be recorded as the revision that
     # produced it -- which is both wrong and invisible, since the manifest still parses and the
@@ -355,6 +356,26 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     Benchmark.stamp_complete(pool_dir, n_source_entries=metadata['n_source_entries'],
                              n_bundles=len(bundles))
     return metadata
+
+
+def _refuse_an_occupied_directory(pool_dir):
+    """Refuse to generate into a directory that already holds something.
+
+    An arm that died leaves its finished pools' stripes under `parts/`, and a re-run writing into
+    the same place would consolidate those stale stripes together with the new ones. Nothing in the
+    result would say which run a given shard came from, and the arm would carry a manifest
+    describing only the second. Remove the directory and start it again.
+    """
+    pool_dir = Path(pool_dir)
+    if not pool_dir.exists():
+        return
+    occupants = sorted(path.name for path in pool_dir.iterdir())
+    if occupants:
+        raise FileExistsError(
+            f'{pool_dir} already holds {occupants[:4]}{"..." if len(occupants) > 4 else ""}. '
+            'Generating into it would mix this run with whatever is there -- a failed arm leaves '
+            'its finished pools behind, and consolidation cannot tell them apart. Remove the '
+            'directory and re-run.')
 
 
 def _refuse_a_broken_bundle(failures, bundles, n_crystals):
