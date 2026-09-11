@@ -392,7 +392,7 @@ def contrast_table(reductions, baseline, top_n=10, depth='all'):
     return pd.DataFrame(rows)
 
 
-def floor_from_arms(arm_reductions, score, baseline, top_n=10, depth='all'):
+def floor_from_arms(arm_reductions, score, baseline, top_n=10, depth='all', lattices=None):
     """The run-to-run floor: how much the answer moves between arms that differ only in the seed.
 
     A gate is read in multiples of this, never in percentage points. The shift between two arms is
@@ -402,6 +402,15 @@ def floor_from_arms(arm_reductions, score, baseline, top_n=10, depth='all'):
 
     The effect size beside it is the plain mean over arms. The campaign's version took it from the
     left arm of each ordered pair, which weights four arms 3:2:1:0 and drops the last one.
+
+    `lattices` maps an entry to its TRUE Bravais lattice, and adds a row per lattice beside the
+    aggregate. A per-lattice claim is read against that lattice's own floor and never against the
+    aggregate: the spread is set mostly by how many crystals a lattice contributes, which is capped
+    by the split for the scarce ones. No rescaling is applied, unlike the campaign's version --
+    these arms are drawn from the same reporting sample the gates are read on, so the count the
+    floor is measured at is already the count it will be used at.
+
+    Returns one row per scope, aggregate first.
     """
     names = list(arm_reductions)
     contrasts = {}
@@ -418,31 +427,66 @@ def floor_from_arms(arm_reductions, score, baseline, top_n=10, depth='all'):
         contrasts[arm] = merged[['entry_id', 'condition_bundle', 'contrast']]
         effects.append(100.0*float(merged['contrast'].mean()))
 
+    scopes = {'aggregate': None}
+    if lattices is not None:
+        for lattice in sorted(set(pd.Series(lattices).dropna())):
+            scopes[lattice] = lattice
+
+    rows = []
+    for scope, lattice in scopes.items():
+        rows.append(_floor_over(contrasts, effects, names, score, baseline, scope, lattice,
+                                lattices))
+    return pd.DataFrame(rows)
+
+
+def _floor_over(contrasts, effects, names, score, baseline, scope, lattice, lattices):
+    """The floor within one scope: the whole sample, or one true Bravais lattice."""
+    if lattice is None:
+        restricted = contrasts
+        scope_effects = effects
+    else:
+        wanted = set(pd.Series(lattices)[pd.Series(lattices) == lattice].index)
+        restricted = {name: frame.loc[frame['entry_id'].isin(wanted)]
+                      for name, frame in contrasts.items()}
+        scope_effects = [100.0*float(frame['contrast'].mean()) if frame.shape[0] else float('nan')
+                         for frame in restricted.values()]
+
     floors = []
     for left_name, right_name in combinations(names, 2):
-        joined = contrasts[left_name].merge(contrasts[right_name],
-                                            on=['entry_id', 'condition_bundle'],
-                                            suffixes=('_a', '_b'), validate='1:1')
+        joined = restricted[left_name].merge(restricted[right_name],
+                                             on=['entry_id', 'condition_bundle'],
+                                             suffixes=('_a', '_b'), validate='1:1')
+        if joined.empty:
+            continue
         joined['shift'] = joined['contrast_a'] - joined['contrast_b']
         clustered = joined.groupby('entry_id', as_index=False)['shift'].mean()
         shift = clustered['shift'].to_numpy(dtype=np.float64)*100.0
         if shift.size > 1:
             floors.append(float(np.std(shift, ddof=1)/np.sqrt(shift.size)))
+    n_entries = int(pd.concat(restricted.values())['entry_id'].nunique()) if restricted else 0
     if not floors:
+        if lattice is not None:
+            # A lattice with one crystal has no spread to take; say so in the row rather than
+            # refusing the whole table, and let the reader see which lattice it was.
+            return {'score': score, 'baseline': baseline, 'metric': 'top10', 'scope': scope,
+                    'n_entries': n_entries, 'n_arms': len(names), 'n_pairs': 0,
+                    'effect_pp': float('nan'), 'floor_pp': float('nan'),
+                    'standard_errors': float('nan')}
         raise ValueError(
             f'No arm pair produced a floor from {len(names)} arm(s). A floor needs at least two '
             'arms that share their patterns, and at least two source crystals to take a spread '
             'over.')
     floor_pp = float(np.mean(floors))
-    effect_pp = float(np.mean(effects))
-    if not floor_pp > 0:
+    effect_pp = float(np.nanmean(scope_effects))
+    if lattice is None and not floor_pp > 0:
         raise ValueError(
             f'The measured floor is {floor_pp}, so every gate read against it would be infinite '
             f'or undefined. With {len(names)} arms and {len(floors)} pair(s) the arms did not '
             'differ anywhere, which at this size means the sample is too small rather than that '
             'the search is noiseless. Use four arms over the full reporting sample.')
-    return {'score': score, 'baseline': baseline, 'metric': 'top10', 'n_arms': len(names),
-            'n_pairs': len(floors), 'effect_pp': effect_pp, 'floor_pp': floor_pp,
+    return {'score': score, 'baseline': baseline, 'metric': 'top10', 'scope': scope,
+            'n_entries': n_entries, 'n_arms': len(names), 'n_pairs': len(floors),
+            'effect_pp': effect_pp, 'floor_pp': floor_pp,
             'standard_errors': abs(effect_pp)/floor_pp if floor_pp else float('nan')}
 
 

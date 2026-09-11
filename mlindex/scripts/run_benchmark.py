@@ -263,17 +263,22 @@ def main(argv=None):
                                          for name, path in arms},
                                         allow=('search_seed',))
         arm_reductions = {}
+        truth = None
         for name, path in arms:
-            reductions, _ = reduce_arm(path, scores, bundles=bundles, bravais_lattices=lattices,
-                                       limit_entries=args.limit_entries,
-                                       entry_seed=args.entry_seed,
-                                       require_complete=not args.allow_incomplete)
+            reductions, entries = reduce_arm(
+                path, scores, bundles=bundles, bravais_lattices=lattices,
+                limit_entries=args.limit_entries, entry_seed=args.entry_seed,
+                require_complete=not args.allow_incomplete)
             arm_reductions[name] = reductions
+            if truth is None:
+                truth = entries.drop_duplicates('entry_id').set_index(
+                    'entry_id')['bravais_lattice_true']
             print(f'reduced arm {name}')
-        rows = [runs.floor_from_arms(arm_reductions, score, args.baseline,
-                                     top_n=args.top_n, depth=args.depth)
-                for score in scores if score != args.baseline]
-        table = pd.DataFrame(rows)
+        table = pd.concat(
+            [runs.floor_from_arms(arm_reductions, score, args.baseline, top_n=args.top_n,
+                                  depth=args.depth, lattices=truth)
+             for score in scores if score != args.baseline],
+            ignore_index=True)
         print(table.to_string(index=False))
         _write(args.out_dir, 'floor.csv', table)
         return 0
