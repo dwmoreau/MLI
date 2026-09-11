@@ -351,3 +351,28 @@ def test_the_floor_stage_refuses_arms_that_differ_in_more_than_the_seed(tmp_path
     with pytest.raises(ValueError, match='commit'):
         main(['--stage', 'floor', '--arm', f'armA={tmp_path/"armA"}',
               '--arm', f'armB={tmp_path/"armB"}', '--scores', 'M20,M_sym'])
+
+
+def test_a_bundle_that_mostly_fails_is_refused_but_a_few_refusals_are_not():
+    """The guard is for a condition that cannot be applied at all, not for the handful of large
+    cells that legitimately have no partner. It is checked over the whole arm: at 128 pools a hard
+    stripe is under three crystals, so any fraction of a stripe would abort on the first refusal."""
+    from mlindex.model_training.BenchmarkRuns import _refuse_a_broken_bundle
+
+    bundles = ['b1_error1_cont0_phase3']
+    few = [{'entry_id': f'C{i}', 'condition_bundle': bundles[0], 'reason': 'x'} for i in range(20)]
+    _refuse_a_broken_bundle(few, bundles, n_crystals=360)          # 5.6 %, the real tail
+
+    many = [{'entry_id': f'C{i}', 'condition_bundle': bundles[0], 'reason': 'x'} for i in range(100)]
+    with pytest.raises(RuntimeError, match='27.8 %'):
+        _refuse_a_broken_bundle(many, bundles, n_crystals=360)
+
+
+def test_refusals_are_counted_against_their_own_bundle():
+    """A bundle is not condemned by another bundle's refusals."""
+    from mlindex.model_training.BenchmarkRuns import _refuse_a_broken_bundle
+
+    bundles = ['b1_error1_cont0_phase3', 'b1_error2_cont0']
+    failures = [{'entry_id': f'C{i}', 'condition_bundle': bundles[0], 'reason': 'x'}
+                for i in range(30)]
+    _refuse_a_broken_bundle(failures, bundles, n_crystals=360)
