@@ -382,6 +382,13 @@ class OptimizerManager(OptimizerBase):
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         model=generator_info['generator'],
                         )
+                else:
+                    # Without this the loop appends the previous generator's cells a second
+                    # time, so a mistyped or renamed generator duplicates candidates instead
+                    # of failing, and the pool is silently wrong rather than absent.
+                    raise ValueError(
+                        f"unknown generator {generator_info['generator']!r} in generator_info"
+                        )
                 candidate_unit_cells_all.append(generator_unit_cells)
             candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)
 

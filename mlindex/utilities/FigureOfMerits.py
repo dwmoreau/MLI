@@ -754,11 +754,12 @@ def _assignment_term_blocks(q2_obs, q2_ref_calc, scale, d1, chunk):
     for start in range(0, n_candidates, chunk):
         stop = min(start + chunk, n_candidates)
         block = q2_ref_calc[start:stop]
-        block_scale = scale[start:stop][:, np.newaxis]
         for peak in range(q2_obs.size):
             if not q2_ref_calc.flags.c_contiguous:
                 excess = np.abs(block - q2_obs[peak])**2 - (d1[start:stop, peak]**2)[:, np.newaxis]
-                yield start, stop, peak, np.exp(-excess/block_scale)
+                yield start, stop, peak, np.exp(
+                    -excess/scale[start:stop][:, np.newaxis]
+                    )
                 continue
             term_view = terms[:stop - start]
             computable_view = computable[:stop - start]

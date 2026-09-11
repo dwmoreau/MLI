@@ -76,6 +76,11 @@ def evaluate_regression(optimizer, entry, candidates_per_model, rng):
             generator_unit_cells = optimizer.wrapper.miller_index_templator[optimizer.bravais_lattice].generate(
                 candidates_per_sub_model[generator_info['generator']], rng, q2, 
                 )
+        else:
+            # As in MPIOptimizer: without this the previous generator's cells are reused.
+            raise ValueError(
+                f"unknown generator {generator_info['generator']!r} in generator_info"
+                )
 
         generator_unit_cells = fix_unphysical(
             unit_cell=generator_unit_cells,

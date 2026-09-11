@@ -215,6 +215,36 @@ def test_abnn_generate_resamples_miller_indices(
         _assert_candidates_match(result, expected, f"abnn resampled {bl}")
 
 
+def test_an_unknown_generator_name_raises_rather_than_duplicating_candidates(
+    unique_test_metadata, all_optimizers
+):
+    """The dispatch had no else, so an unknown name reused the previous generator's cells.
+
+    A valid generator comes first on purpose. That is the case that mattered: with nothing to
+    catch the unknown name the loop appended the *random* generator's cells a second time, so a
+    mistyped or renamed generator gave a pool with one generator counted twice and another absent
+    -- silently wrong rather than absent. With the bogus entry alone it merely raised NameError.
+
+    The old name is used as the bogus one, which also pins that `integral_filter` no longer
+    reaches a generator by accident after the rename to `abnn`.
+    """
+    opt = all_optimizers["aP"]
+    q2_obs = _cases(
+        unique_test_metadata[unique_test_metadata["bravais lattice"] == "aP"]
+    )[0][0]
+    original = opt.opt_params["generator_info"]
+    opt.q2_obs = q2_obs[: opt.n_peaks]
+    opt.opt_params["generator_info"] = [
+        {"generator": "random", "split_group": "aP_00", "n_unit_cells": 4},
+        {"generator": "integral_filter", "split_group": "aP_00", "n_unit_cells": 4},
+    ]
+    try:
+        with pytest.raises(ValueError, match="unknown generator 'integral_filter'"):
+            opt._generate_candidates_xnn()
+    finally:
+        opt.opt_params["generator_info"] = original
+
+
 def test_candidate_matcher_rejects_a_real_regression():
     """Guard on the tolerance above: it must not let a genuine change through.
 
