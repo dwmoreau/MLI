@@ -284,3 +284,70 @@ def test_several_bundles_and_several_pools_consolidate_without_colliding(tmp_pat
         assert sorted(read['entry_id'].unique()) == ['AAAAAA', 'BBBBBB']
         assert read['condition_bundle'].unique().tolist() == [bundle]
         assert read.shape[0] == 4
+
+
+# ---------------------------------------------------------------------------
+# The floor stage
+# ---------------------------------------------------------------------------
+
+
+def _floor_reduction(values):
+    """One arm's per-entry reduction, built by the real reduction so the columns are the real ones.
+
+    `values[i]` is whether crystal i's correct cell ranks first under the score.
+    """
+    from mlindex.model_training import BenchmarkMetrics as metrics
+
+    rows = []
+    for index, correct_first in enumerate(values):
+        for position in range(2):
+            rows.append({
+                'entry_id': f'C{index:03d}', 'condition_bundle': 'b1_error1_cont0',
+                'bravais_lattice': 'cP', 'candidate_id': position,
+                'in_top_n': True, 'is_degenerate': False,
+                'is_correct': (position == 0) if correct_first else (position == 1),
+                'score': 10.0 - position,
+                })
+    frame = pd.DataFrame(rows)
+    return metrics.reduce_many(frame, {'M20': 'score', 'M_sym': 'score'})
+
+
+def test_a_floor_that_comes_out_zero_is_refused_rather_than_reported():
+    """A floor of zero makes every gate read against it infinite or undefined, and the NaN it
+    produces looks like a missing number rather than a broken one. At a real sample size it means
+    too few arms or too few crystals, not a noiseless search."""
+    from mlindex.model_training.BenchmarkRuns import floor_from_arms
+
+    # Two arms that agree everywhere: the pairwise shift is identically zero.
+    arms = {name: _floor_reduction([True]*8) for name in ('a', 'b')}
+
+    with pytest.raises(ValueError, match='floor is'):
+        floor_from_arms(arms, 'M_sym', 'M20')
+
+
+def test_one_arm_cannot_produce_a_floor():
+    from mlindex.model_training.BenchmarkRuns import floor_from_arms
+
+    arms = {'a': _floor_reduction([True, False])}
+
+    with pytest.raises(ValueError, match='at least two arms'):
+        floor_from_arms(arms, 'M_sym', 'M20')
+
+
+def test_the_floor_stage_refuses_arms_that_differ_in_more_than_the_seed(tmp_path, monkeypatch):
+    """A floor is the spread between arms that differ only in the search seed. Nothing downstream
+    can tell that spread from a machine-to-machine or commit-to-commit one."""
+    from mlindex.scripts.run_benchmark import main
+
+    for name, commit in (('armA', 'aaaa'), ('armB', 'bbbb')):
+        directory = tmp_path / name
+        entries = _entries()
+        frame = Benchmark.label_frame(Benchmark.records_to_frame([_record()]), entries)
+        Benchmark.write_candidate_shard(frame, directory, 'b1_error1_cont0', 'cP')
+        Benchmark.write_entry_table(entries, directory)
+        Benchmark.write_manifest(directory, **_manifest(commit=commit, search_seed=12345))
+        Benchmark.stamp_complete(directory, n_entries=1)
+
+    with pytest.raises(ValueError, match='commit'):
+        main(['--stage', 'floor', '--arm', f'armA={tmp_path/"armA"}',
+              '--arm', f'armB={tmp_path/"armB"}', '--scores', 'M20,M_sym'])

@@ -101,8 +101,10 @@ def build_parser():
     parser.add_argument('--entry-seed', type=int, default=12345, metavar='N',
                         help='Seed for --limit-entries (default: 12345).')
     parser.add_argument('--allow-incomplete', action='store_true',
-                        help='Read an arm with no completion stamp. Off by default: a killed run '
-                             'looks finished by its contents.')
+                        help='Read an arm with no completion stamp, and skip the check that the '
+                             'arms of a floor differ only in the search seed. Off by default: a '
+                             'killed run looks finished by its contents, and arms from different '
+                             'machines or commits pair silently.')
 
     generate = parser.add_argument_group(
         'generating an arm',
@@ -253,6 +255,13 @@ def main(argv=None):
         arms = _parse_arms(args.arm)
         if len(arms) < 2:
             raise SystemExit('--stage floor needs at least two --arm NAME=PATH values.')
+        if not args.allow_incomplete:
+            # The arms of a floor must differ in the search seed and in nothing else. Nothing
+            # downstream can tell a seed-to-seed spread from a machine-to-machine or
+            # commit-to-commit one, so it is checked here rather than reported.
+            Benchmark.manifest_identity({name: Benchmark.load_manifest(path)
+                                         for name, path in arms},
+                                        allow=('search_seed',))
         arm_reductions = {}
         for name, path in arms:
             reductions, _ = reduce_arm(path, scores, bundles=bundles, bravais_lattices=lattices,

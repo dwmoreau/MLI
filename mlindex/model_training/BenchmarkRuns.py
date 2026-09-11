@@ -428,8 +428,19 @@ def floor_from_arms(arm_reductions, score, baseline, top_n=10, depth='all'):
         shift = clustered['shift'].to_numpy(dtype=np.float64)*100.0
         if shift.size > 1:
             floors.append(float(np.std(shift, ddof=1)/np.sqrt(shift.size)))
-    floor_pp = float(np.mean(floors)) if floors else float('nan')
+    if not floors:
+        raise ValueError(
+            f'No arm pair produced a floor from {len(names)} arm(s). A floor needs at least two '
+            'arms that share their patterns, and at least two source crystals to take a spread '
+            'over.')
+    floor_pp = float(np.mean(floors))
     effect_pp = float(np.mean(effects))
+    if not floor_pp > 0:
+        raise ValueError(
+            f'The measured floor is {floor_pp}, so every gate read against it would be infinite '
+            f'or undefined. With {len(names)} arms and {len(floors)} pair(s) the arms did not '
+            'differ anywhere, which at this size means the sample is too small rather than that '
+            'the search is noiseless. Use four arms over the full reporting sample.')
     return {'score': score, 'baseline': baseline, 'metric': 'top10', 'n_arms': len(names),
             'n_pairs': len(floors), 'effect_pp': effect_pp, 'floor_pp': floor_pp,
             'standard_errors': abs(effect_pp)/floor_pp if floor_pp else float('nan')}
