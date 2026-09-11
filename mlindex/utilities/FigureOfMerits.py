@@ -697,6 +697,77 @@ def _posterior_scale(sigma, sigma_multiplier):
                       np.finfo(np.float64).tiny)
 
 
+def _assignment_setup(q2_obs, q2_ref_calc, lattice_system, sigma, sigma_multiplier, robust,
+                      chunk, d1):
+    """Coerce the inputs and resolve the scale both assignment estimators are built on.
+
+    Returns (q2_obs, q2_ref_calc, scale, d1). `scale` is 2 sigma^2 per candidate and `d1` the
+    nearest-line distance per (candidate, peak); passing `sigma` and `d1` in from an earlier
+    `get_assignment_sigma` call skips the nearest-line scan, which is the whole cost.
+    """
+    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
+    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
+    if sigma is None or d1 is None:
+        estimated, distances = get_assignment_sigma(
+            q2_obs, q2_ref_calc, lattice_system, robust=robust, chunk=chunk
+            )
+        sigma = estimated if sigma is None else sigma
+        d1 = distances if d1 is None else d1
+    sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
+                            (q2_ref_calc.shape[0],))
+    d1 = np.asarray(d1, dtype=np.float64)
+    return q2_obs, q2_ref_calc, _posterior_scale(sigma, sigma_multiplier), d1
+
+
+def _assignment_term_blocks(q2_obs, q2_ref_calc, scale, d1, chunk):
+    """Yield (start, stop, peak, terms) of exp(-(d_j^2 - d_1^2)/2 sigma^2) over every line j.
+
+    `terms` is the (stop - start, n_ref) block of unnormalised exponentials for one peak. Summing
+    it gives the denominator of the assignment posterior; keeping it gives the distribution over
+    the reference list. Both estimators read this one loop, so a column of the distribution and
+    the scalar posterior are the same float by construction rather than by agreement.
+
+    Subtracting the nearest distance before exponentiating is the standard log-sum-exp shift: the
+    nearest line's own term becomes exactly 1 and nothing underflows, so the sum is exact where a
+    direct exp(-d^2/2s^2) would be 0/0 for a well-fitting candidate.
+
+    The kernel builds that argument in one pass and marks the entries whose exponential is
+    identically zero, which is 98.8% of them on a real pool; `where=` then takes the exponential
+    of the rest in place, over the zeros the kernel has already written. The block keeps its full
+    width and is reduced by numpy, because pairwise summation groups a full row differently from
+    a compacted one. `chunk` keeps the block small enough to sum out of cache.
+
+    The fast path is taken only for a C-contiguous reference array. `np.sum(axis=1)` does not
+    group its additions the same way over an F-ordered block, and which order the expression
+    below produces depends on how numpy resolves a binary op between operands of different
+    orders -- not something to reproduce by construction. Everything this project builds is
+    C-contiguous, so the other branch is a safety net rather than a path.
+
+    `terms` is a view on a buffer this generator reuses, so a consumer must reduce or copy it
+    before asking for the next block.
+    """
+    n_candidates, n_ref = q2_ref_calc.shape
+    block_width = max(1, min(chunk, n_candidates))
+    if q2_ref_calc.flags.c_contiguous:
+        terms = np.empty((block_width, n_ref), dtype=np.float64)
+        computable = np.empty(terms.shape, dtype=bool)
+    for start in range(0, n_candidates, chunk):
+        stop = min(start + chunk, n_candidates)
+        block = q2_ref_calc[start:stop]
+        block_scale = scale[start:stop][:, np.newaxis]
+        for peak in range(q2_obs.size):
+            if not q2_ref_calc.flags.c_contiguous:
+                excess = np.abs(block - q2_obs[peak])**2 - (d1[start:stop, peak]**2)[:, np.newaxis]
+                yield start, stop, peak, np.exp(-excess/block_scale)
+                continue
+            term_view = terms[:stop - start]
+            computable_view = computable[:stop - start]
+            posterior_exponent_terms(block, q2_obs[peak], d1[start:stop, peak],
+                                     scale[start:stop], term_view, computable_view)
+            np.exp(term_view, out=term_view, where=computable_view)
+            yield start, stop, peak, term_view
+
+
 def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
                              sigma_multiplier=1.0, robust=False, chunk=256, d1=None):
     """P(each observed peak is assigned its correct Miller index), over the competing lines.
@@ -718,58 +789,57 @@ def get_assignment_posterior(q2_obs, q2_ref_calc, lattice_system, sigma=None,
     `get_assignment_sigma` call so the nearest-line scan, which is the whole cost of this
     function, is paid once rather than twice; doing so changes no result.
 
+    This is the form to call over a candidate pool: it reduces each peak's row as it is built and
+    so holds one block, where `get_assignment_distribution` holds the whole
+    (candidates x peaks x lines) array.
+
     Returns (n_candidates, n_peaks) in (0, 1].
     """
-    q2_obs = np.atleast_1d(np.asarray(q2_obs, dtype=np.float64))
-    q2_ref_calc = np.atleast_2d(np.asarray(q2_ref_calc, dtype=np.float64))
-    if sigma is None or d1 is None:
-        estimated, distances = get_assignment_sigma(
-            q2_obs, q2_ref_calc, lattice_system, robust=robust, chunk=chunk
-            )
-        sigma = estimated if sigma is None else sigma
-        d1 = distances if d1 is None else d1
-    sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, dtype=np.float64)),
-                            (q2_ref_calc.shape[0],))
-    d1 = np.asarray(d1, dtype=np.float64)
-    scale = _posterior_scale(sigma, sigma_multiplier)
-
+    q2_obs, q2_ref_calc, scale, d1 = _assignment_setup(
+        q2_obs, q2_ref_calc, lattice_system, sigma, sigma_multiplier, robust, chunk, d1
+        )
     posterior = np.empty(d1.shape, dtype=np.float64)
-    # Subtracting the nearest distance before exponentiating is the standard log-sum-exp shift:
-    # the nearest line's own term becomes exactly 1 and nothing underflows, so the sum is exact
-    # where a direct exp(-d^2/2s^2) would be 0/0 for a well-fitting candidate.
-    #
-    # The kernel builds that argument in one pass and marks the entries whose exponential is
-    # identically zero, which is 98.8% of them on a real pool; `where=` then takes the
-    # exponential of the rest in place, over the zeros the kernel has already written. The
-    # summed array keeps its full width and is still reduced by numpy, because pairwise
-    # summation groups a full row differently from a compacted one. `chunk` still matters:
-    # it keeps the block small enough to sum out of cache.
-    #
-    # The fast path is taken only for a C-contiguous reference array. `np.sum(axis=1)` does not
-    # group its additions the same way over an F-ordered block, and which order the expression
-    # below produces depends on how numpy resolves a binary op between operands of different
-    # orders -- not something to reproduce by construction. Everything this project builds is
-    # C-contiguous, so the other branch is a safety net rather than a path.
-    block_width = max(1, min(chunk, q2_ref_calc.shape[0]))
-    if q2_ref_calc.flags.c_contiguous:
-        terms = np.empty((block_width, q2_ref_calc.shape[1]), dtype=np.float64)
-        computable = np.empty(terms.shape, dtype=bool)
-    for start in range(0, q2_ref_calc.shape[0], chunk):
-        stop = min(start + chunk, q2_ref_calc.shape[0])
-        block = q2_ref_calc[start:stop]
-        block_scale = scale[start:stop][:, np.newaxis]
-        for peak in range(q2_obs.size):
-            if not q2_ref_calc.flags.c_contiguous:
-                excess = np.abs(block - q2_obs[peak])**2 - (d1[start:stop, peak]**2)[:, np.newaxis]
-                posterior[start:stop, peak] = 1.0/np.sum(np.exp(-excess/block_scale), axis=1)
-                continue
-            term_view = terms[:stop - start]
-            computable_view = computable[:stop - start]
-            posterior_exponent_terms(block, q2_obs[peak], d1[start:stop, peak],
-                                     scale[start:stop], term_view, computable_view)
-            np.exp(term_view, out=term_view, where=computable_view)
-            posterior[start:stop, peak] = 1.0/np.sum(term_view, axis=1)
+    for start, stop, peak, terms in _assignment_term_blocks(
+            q2_obs, q2_ref_calc, scale, d1, chunk):
+        posterior[start:stop, peak] = 1.0/np.sum(terms, axis=1)
     return posterior
+
+
+def get_assignment_distribution(q2_obs, q2_ref_calc, lattice_system, sigma=None,
+                                sigma_multiplier=1.0, robust=False, chunk=256, d1=None,
+                                normalise=True):
+    """The whole assignment posterior over the reference list, not its value at the nearest line.
+
+        P_ij = exp(-d_ij^2/2 sigma_i^2) / sum_k exp(-d_ik^2/2 sigma_i^2)
+
+    `get_assignment_posterior` answers "was peak i assigned correctly" and returns one number per
+    (candidate, peak), the value of P_ij at the argmin over j. This returns the row, which is what
+    a consumer choosing BETWEEN lines needs: `MillerIndexAssignment.vectorized_resampling` draws a
+    Miller index per peak and masks the drawn line out of every other peak's row, so it needs the
+    competing lines and not only the winner.
+
+    That consumer rescales each draw by the row's own cumulative total, so `normalise=False` is
+    exactly as correct there and one array pass cheaper. The default normalises, because a
+    probability that does not sum to one is a trap for any other reader.
+
+    **Memory is why this is not the only form.** The result is n_candidates x n_peaks x n_ref
+    float64 -- 24 MB at the 150 cells x 20 peaks x 1 000 lines a generator asks for, and linear in
+    all three. Call it on a generator's predicted cells, never on a candidate pool.
+
+    Returns (n_candidates, n_peaks, n_ref); each [:, peak, :] row sums to 1 when `normalise`.
+    """
+    q2_obs, q2_ref_calc, scale, d1 = _assignment_setup(
+        q2_obs, q2_ref_calc, lattice_system, sigma, sigma_multiplier, robust, chunk, d1
+        )
+    distribution = np.empty((q2_ref_calc.shape[0], q2_obs.size, q2_ref_calc.shape[1]),
+                            dtype=np.float64)
+    for start, stop, peak, terms in _assignment_term_blocks(
+            q2_obs, q2_ref_calc, scale, d1, chunk):
+        if normalise:
+            distribution[start:stop, peak] = terms/np.sum(terms, axis=1)[:, np.newaxis]
+        else:
+            distribution[start:stop, peak] = terms
+    return distribution
 
 
 # ---------------------------------------------------------------------------------------------
