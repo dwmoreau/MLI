@@ -269,3 +269,34 @@ def test_options_reach_opt_params(monkeypatch, fake_models_dir):
         options={"prune_m20_threshold": 2.5},
     )
     assert captured["prune_m20_threshold"] == 2.5
+
+
+def test_measure_model_cost_counts_the_tree_and_skips_ds_store(tmp_path, capsys):
+    """The size half of the model-cost probe, which P07, P15 and P18 all re-run.
+
+    .DS_Store is skipped by name because this laptop creates them inside the model tree and they
+    would otherwise inflate a file count that gets quoted against the hub's.
+    """
+    from mlindex.scripts.measure_model_cost import measure_tree
+
+    for system in ("cubic_1", "triclinic_1"):
+        directory = tmp_path / system / "abnn" / "sg"
+        directory.mkdir(parents=True)
+        (directory / "weights.onnx").write_bytes(b"x" * 1000)
+        (directory / ".DS_Store").write_bytes(b"y" * 500)
+    (tmp_path / "not_a_lattice_system").mkdir()
+    (tmp_path / "not_a_lattice_system" / "big.bin").write_bytes(b"z" * 999999)
+
+    files, total = measure_tree(tmp_path)
+
+    assert files == 2, "one weights file per system, and no .DS_Store"
+    assert total == 2000, "bytes exclude .DS_Store and anything outside *_1"
+    assert "443.4 MiB" not in capsys.readouterr().out
+
+
+def test_resident_bytes_is_bytes_on_every_platform():
+    """getrusage reports bytes on macOS and kibibytes on Linux, a factor of 1024 apart."""
+    from mlindex.scripts.measure_model_cost import resident_bytes
+
+    value = resident_bytes()
+    assert value > 10_000_000, f"{value} is too small to be a resident set size in bytes"
