@@ -23,6 +23,7 @@ from mlindex.model_training import BenchmarkConditions
 from mlindex.utilities.ErrorAdder import add_contaminants
 from mlindex.utilities.ErrorAdder import add_q2_error
 from mlindex.utilities.ErrorAdder import add_second_phase
+from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.ErrorAdder import select_peaks_with_nested_dropout
 
 
@@ -116,15 +117,32 @@ def build_second_phase_pool(entries):
             [np.asarray(q2, dtype=float) for q2 in entries[f'q2_{BROADENING_TAG}']])
 
 
-def choose_second_phase(entry_id, second_phase_pool, base_seed):
-    """This entry's contaminating phase, deterministically and never itself."""
+# How many partner phases to try before giving up on an entry. Not every pair works: a partner can
+# only contaminate a pattern if some of its lines fall inside the pattern's observed range, and a
+# very large cell observes a range so low that most partners have nothing there. Drawing one
+# partner and failing is what killed two of 128 pools on the first cluster run.
+SECOND_PHASE_ATTEMPTS = 24
+
+
+def second_phase_candidates(entry_id, second_phase_pool, base_seed,
+                            attempts=SECOND_PHASE_ATTEMPTS):
+    """Successive partner phases for this entry, deterministically and never itself.
+
+    A generator rather than a single draw, because whether a partner can contaminate this pattern
+    is a property of the *pair* -- its lines have to fall inside this pattern's observed range and
+    not sit on top of its peaks -- and that is not knowable here. The caller tries them in order
+    and stops at the first that works, so the choice stays deterministic and the same entry gets
+    the same partner in every arm.
+    """
     rng = mechanism_rng('phase2_partner', entry_id, base_seed)
     identifiers, line_lists = second_phase_pool
-    for _ in range(10):
+    seen = set()
+    for _ in range(attempts):
         index = int(rng.integers(len(line_lists)))
-        if identifiers[index] != entry_id:
-            return identifiers[index], line_lists[index]
-    raise ValueError(f'Could not draw a partner phase for {entry_id}')
+        if identifiers[index] == entry_id or index in seen:
+            continue
+        seen.add(index)
+        yield identifiers[index], line_lists[index]
 
 
 class PreparedPattern:
@@ -242,13 +260,29 @@ def prepare_peak_list(entry, condition, base_seed, hkl=None, second_phase_pool=N
     if condition.second_phase_lines > 0:
         if second_phase_pool is None:
             raise ValueError('A second-phase bundle needs a partner pool; none was passed')
-        partner_id, partner_q2 = choose_second_phase(entry_id, second_phase_pool, base_seed)
-        rng_phase = mechanism_rng('phase', entry_id, base_seed)
         before = window[0].copy()
-        result = add_second_phase(window, window_hkl, partner_q2, condition.second_phase_lines,
-                                  rng_phase, low_angle_bias=condition.second_phase_bias)
-        window, window_hkl = _unpack(result, window_hkl)
-        n_second_phase_achieved = int(np.count_nonzero(np.isin(window[0], before, invert=True)))
+        refusal = None
+        for partner_id, partner_q2 in second_phase_candidates(
+                entry_id, second_phase_pool, base_seed):
+            # The generator draws from its own stream, so every attempt uses the same placement
+            # randomness and the partner that lands is the first usable one rather than the first
+            # one whose draw happened to come up.
+            rng_phase = mechanism_rng('phase', entry_id, base_seed)
+            try:
+                result = add_second_phase(
+                    window, window_hkl, partner_q2, condition.second_phase_lines,
+                    rng_phase, low_angle_bias=condition.second_phase_bias)
+            except ContaminantPlacementError as error:
+                refusal = error
+                continue
+            window, window_hkl = _unpack(result, window_hkl)
+            n_second_phase_achieved = int(
+                np.count_nonzero(np.isin(window[0], before, invert=True)))
+            break
+        else:
+            raise ContaminantPlacementError(
+                f'No partner phase among {SECOND_PHASE_ATTEMPTS} tried can contaminate '
+                f'{entry_id}: {refusal}') from refusal
 
     return PreparedPattern(
         q2_obs=window[0],

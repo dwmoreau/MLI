@@ -389,6 +389,13 @@ def consolidate(pool_dir):
         written.append(pool_dir / name)
 
     for part in parts:
+        leftover = sorted(path.name for path in part.iterdir()
+                          if path.suffix != '.parquet')
+        if leftover:
+            raise ValueError(
+                f'{part} still holds {leftover} after its shards were consolidated. Anything a '
+                'pool writes beside its shards has to be gathered before this point, or it is '
+                'destroyed with the directory.')
         for path in part.glob('*.parquet'):
             path.unlink()
         part.rmdir()

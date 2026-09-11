@@ -12,6 +12,7 @@ on their peaks, so every arm of a comparison must share it or the arms differ in
 """
 
 import hashlib
+import json
 import time
 from itertools import combinations
 from pathlib import Path
@@ -24,6 +25,7 @@ from mlindex.model_training import BenchmarkConditions
 from mlindex.model_training import BenchmarkMetrics as metrics
 from mlindex.model_training import BenchmarkPatterns
 from mlindex.utilities.Digests import q2_digest
+from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
 # Which condition bundles and which true lattices each population is made of. `hard` is the severe
@@ -35,6 +37,14 @@ POPULATIONS = {
     }
 
 REPORTING_SPLIT = 'fom-dev'
+
+# How much of a condition bundle may fail to synthesise before the bundle itself is suspect. A
+# second phase can only contaminate a pattern whose observed range its lines reach, and for the
+# largest cells that range is low enough that some partners have nothing there -- so a handful of
+# crystals legitimately have no pattern under that bundle. Losing many is a different thing: it
+# means the condition is not producing what it claims, and a floor measured on the survivors would
+# be a floor for a population nobody chose.
+MAX_BUNDLE_FAILURE_FRACTION = 0.05
 
 # How often a pool says where it has got to. A pattern takes tens of seconds, so this is
 # a line every few minutes per pool.
@@ -174,6 +184,7 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
         optimizer_class=BenchmarkOptimizer)
 
     entry_rows = []
+    failures = []
     started = time.perf_counter()
     done = 0
     total = len(bundles)*source_rows.shape[0]
@@ -181,10 +192,21 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
         for bundle in bundles:
             condition = BenchmarkConditions.BY_TAG[bundle]
             records = []
+            bundle_failures = 0
             for _, entry in source_rows.iterrows():
-                pattern = BenchmarkPatterns.prepare_peak_list(
-                    entry, condition, seed, hkl=_hkl_of(entry),
-                    second_phase_pool=second_phase_pool)
+                try:
+                    pattern = BenchmarkPatterns.prepare_peak_list(
+                        entry, condition, seed, hkl=_hkl_of(entry),
+                        second_phase_pool=second_phase_pool)
+                except ContaminantPlacementError as error:
+                    # This crystal has no pattern under this condition. Recorded and skipped
+                    # rather than raised: one unlucky crystal must not cost a node-hours run, and
+                    # the skip is deterministic, so every arm of a comparison skips the same one.
+                    failures.append({'entry_id': entry['identifier'],
+                                     'condition_bundle': bundle, 'reason': str(error)})
+                    bundle_failures += 1
+                    done += 1
+                    continue
                 q2 = np.asarray(pattern.q2_obs, dtype=np.float64)
                 digest = q2_digest(q2)
                 context = {'entry_id': entry['identifier'], 'condition_bundle': bundle,
@@ -203,6 +225,12 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
                 done += 1
                 if done % PROGRESS_EVERY == 0 or done == total:
                     _report_progress(part, done, total, started)
+            if bundle_failures > MAX_BUNDLE_FAILURE_FRACTION*source_rows.shape[0]:
+                raise RuntimeError(
+                    f'{bundle_failures} of {source_rows.shape[0]} crystals could not be given a '
+                    f'pattern under {bundle}. That is past the point where this reads as a few '
+                    'unlucky crystals; the condition is not producing what it claims, and a '
+                    'number measured on the survivors would describe a population nobody chose.')
             _write_bundle(directory, bundle, records, entry_rows)
             del records
     finally:
@@ -210,6 +238,9 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
 
     Benchmark.write_entry_table(pd.DataFrame(entry_rows, columns=list(Benchmark.ENTRY_COLUMNS)),
                                 directory)
+    # Written even when empty, so a reader can tell "nothing failed" from "nobody looked".
+    with open(directory/'failures.json', 'w', encoding='utf-8') as handle:
+        json.dump(failures, handle, indent=2, sort_keys=True)
     return directory
 
 
@@ -294,12 +325,14 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
                 f'{len(failed)} of {len(processes)} pools exited non-zero: {failed}. The arm is '
                 'left unstamped, so nothing will read it as finished.')
 
+    failures = _collect_failures(pool_dir)
     Benchmark.consolidate(pool_dir)
     metadata = {
         'population': population,
         'bundles': bundles,
         'bravais_lattices': list(BRAVAIS_LATTICES),
         'n_source_entries': int(source_rows.shape[0]),
+        'n_patterns_refused': len(failures),
         'per_lattice': int(per_lattice),
         'seed': int(seed),
         'search_seed': int(search_seed),
@@ -323,6 +356,25 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     Benchmark.stamp_complete(pool_dir, n_source_entries=metadata['n_source_entries'],
                              n_bundles=len(bundles))
     return metadata
+
+
+def _collect_failures(pool_dir):
+    """Merge every pool's refused patterns into one file at the arm's root, before consolidation.
+
+    Each pool writes its own, and `consolidate` removes the part directories -- so they have to be
+    gathered first. The merged file is written even when empty: a reader can then tell "nothing was
+    refused" from "nobody recorded it", which for a population that may be smaller than it looks is
+    the difference that matters.
+    """
+    pool_dir = Path(pool_dir)
+    failures = []
+    for path in sorted((pool_dir/Benchmark.PART_DIR).glob('*/failures.json')):
+        with open(path, encoding='utf-8') as handle:
+            failures += json.load(handle)
+        path.unlink()
+    with open(pool_dir/'failures.json', 'w', encoding='utf-8') as handle:
+        json.dump(failures, handle, indent=2, sort_keys=True)
+    return failures
 
 
 def _commit():
