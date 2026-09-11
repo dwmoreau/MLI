@@ -196,7 +196,7 @@ for entry_tag in entry_tags.keys():
     print(split_group)
     print('Integral Filter')
     print_results(
-        base_dir, entry_tag, 'integral_filter', broadening_tag,
+        base_dir, entry_tag, 'abnn', broadening_tag,
         lattice_system, unit_cell_partial, unit_cell_pred, False, True
         )
     print('Template')

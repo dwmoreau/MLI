@@ -74,7 +74,7 @@ if __name__ == '__main__':
         'aP_00': rf_group_params,
         }
 
-    integral_filter_group_params = {
+    abnn_group_params = {
         'tag': f'triclinic_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 20,
@@ -94,8 +94,8 @@ if __name__ == '__main__':
         'model_type': 'metric',
         }
 
-    integral_filter_params = {
-        'aP_00': integral_filter_group_params,
+    abnn_params = {
+        'aP_00': abnn_group_params,
         }
 
     random_params_bl = {
@@ -116,7 +116,7 @@ if __name__ == '__main__':
         data_params=data_params,
         rf_params=rf_params, 
         template_params=template_params,
-        integral_filter_params=integral_filter_params,
+        abnn_params=abnn_params,
         random_params=random_params,
         seed=12345, 
         )
@@ -129,4 +129,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('training')
+    wrapper.setup_abnn('training')

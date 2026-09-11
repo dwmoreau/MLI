@@ -211,7 +211,7 @@ def generate_model_training_expected(test_metadata):
     # MLINDEX_MODELS_DIR, then $XDG_DATA_HOME/mlindex/models, then the package -- so on a
     # machine that has ever run mlindex.download_models it silently regenerates every
     # fixture against a possibly older release than the checkout. It did exactly that
-    # here, replacing all ten candidates in all fourteen integral_filter fixtures.
+    # here, replacing all ten candidates in all fourteen abnn fixtures.
     models_dir = resolve_models_dir()
     bl_to_factory = {
         "cF": get_cubic_optimizer,
@@ -260,17 +260,17 @@ def generate_model_training_expected(test_metadata):
         result = opt.wrapper.miller_index_templator[bl].generate(10, rng, q2_obs)
         np.save(EXPECTED_DIR / f"mi_templates_{bl}.npy", result)
 
-        # integral filter
+        # ABNN
         rng = np.random.default_rng(12345)
-        result = opt.wrapper.integral_filter_generator[sg].generate(
+        result = opt.wrapper.abnn_generator[sg].generate(
             10,
             rng,
             q2_obs,
             batch_size=2,
         )
-        np.save(EXPECTED_DIR / f"integral_filter_{bl}.npy", result)
+        np.save(EXPECTED_DIR / f"abnn_{bl}.npy", result)
 
-        # integral filter, resampling branch. The fixture above asks for ten cells against an
+        # ABNN, resampling branch. The fixture above asks for ten cells against an
         # n_volumes of 100-200, so it takes the branch that assigns Miller indices once and
         # never resamples -- it has never covered the assignment half of the generator at all.
         # top_n=3 with ten cells forces it: three predicted cells, two full resampling passes
@@ -280,14 +280,14 @@ def generate_model_training_expected(test_metadata):
         # twenty for the rest. The resampling branch requires that; the branch above happens to
         # tolerate a longer list, so the two disagree about their contract.
         rng = np.random.default_rng(12345)
-        result = opt.wrapper.integral_filter_generator[sg].generate(
+        result = opt.wrapper.abnn_generator[sg].generate(
             10,
             rng,
             q2_obs[: opt.n_peaks],
             top_n=3,
             batch_size=2,
         )
-        np.save(EXPECTED_DIR / f"integral_filter_resampled_{bl}.npy", result)
+        np.save(EXPECTED_DIR / f"abnn_resampled_{bl}.npy", result)
 
         print(f"  {bl}")
     print("Done.")

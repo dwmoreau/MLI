@@ -338,7 +338,7 @@ class ExtractionLayer(keras.layers.Layer):
         axes.set_xlabel('Maximum metric per entry')
         axes.set_ylabel('Counts')
         fig.tight_layout()
-        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_metric_max_{tag}.png'))
+        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_abnn_metric_max_{tag}.png'))
         plt.close()
 
         if not self.filters_init is None:
@@ -364,7 +364,7 @@ class ExtractionLayer(keras.layers.Layer):
             axes[0].legend()
             axes[1].legend()
             fig.tight_layout()
-            fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_weights_{tag}.png'))
+            fig.savefig(os.path.join(f'{save_to}', f'{split_group}_abnn_weights_{tag}.png'))
             plt.close()
         else:
             print(self.filters_init)
@@ -391,7 +391,7 @@ class ExtractionLayer(keras.layers.Layer):
             )
         axes.legend()
         fig.tight_layout()
-        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_volume_diff_{tag}.png'))
+        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_abnn_volume_diff_{tag}.png'))
         plt.close()
 
         # The volume-normalized peak separations sigma was fitted to, against the 2*sigma resolution
@@ -406,7 +406,7 @@ class ExtractionLayer(keras.layers.Layer):
             axes.set_xlabel('Volume-normalized peak separation')
             axes.set_ylabel('distribution')
             fig.tight_layout()
-            fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_separations_{tag}.png'))
+            fig.savefig(os.path.join(f'{save_to}', f'{split_group}_abnn_separations_{tag}.png'))
             plt.close()
 
         # Grid coverage. Post-fix the grid is fixed and what moves across it is q2_obs / v, so that
@@ -431,7 +431,7 @@ class ExtractionLayer(keras.layers.Layer):
         axes.set_ylabel('distribution')
         axes.legend()
         fig.tight_layout()
-        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_filter_init_{tag}.png'))
+        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_abnn_filter_init_{tag}.png'))
         plt.close()
 
         bins = np.linspace(0, 2, 101)
@@ -474,7 +474,7 @@ class ExtractionLayer(keras.layers.Layer):
         axes.set_xlabel('Metric')
         axes.set_ylabel('distribution')
         fig.tight_layout()
-        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_pitf_metric_init_{tag}.png'))
+        fig.savefig(os.path.join(f'{save_to}', f'{split_group}_abnn_metric_init_{tag}.png'))
         plt.close()
 
 

@@ -5,7 +5,7 @@ import pandas as pd
 
 
 class Wrapper:
-    def __init__(self, aug_params=None, data_params=None, rf_params=None, template_params=None, integral_filter_params=None, random_params=None, seed=12345, load_bravais_lattice='all'):
+    def __init__(self, aug_params=None, data_params=None, rf_params=None, template_params=None, abnn_params=None, random_params=None, seed=12345, load_bravais_lattice='all'):
         self.random_seed = seed
         self.rng = np.random.default_rng(self.random_seed)
         self.n_generated_points = 60  # This is the peak length of the generated dataset.
@@ -14,7 +14,7 @@ class Wrapper:
         self.random_params = random_params
         self.rf_params = rf_params
         self.template_params = template_params
-        self.integral_filter_params = integral_filter_params
+        self.abnn_params = abnn_params
 
         # Popped, not read: Wrapper.save() persists data_params to data_params.csv, and a
         # machine-specific absolute path must not be baked into the distributed models.
@@ -34,7 +34,7 @@ class Wrapper:
             'random': os.path.join(results_directory, 'random'),
             'random_forest': os.path.join(results_directory, 'random_forest'),
             'template': os.path.join(results_directory, 'template'),
-            'integral_filter': os.path.join(results_directory, 'integral_filter'),
+            'abnn': os.path.join(results_directory, 'abnn'),
             }
 
         if self.data_params.get('load_from_tag'):
@@ -1009,8 +1009,8 @@ class Wrapper:
         self.data['reindexed_unit_cell_pred'] = list(reindexed_uc_pred)
         self.data['reindexed_unit_cell_pred_var'] = list(reindexed_uc_pred_var)
 
-    def setup_integral_filter(self, mode, resume=False):
-        """Train or load the integral filter for every split group.
+    def setup_abnn(self, mode, resume=False):
+        """Train or load the ABNN for every split group.
 
         resume skips groups that already finished, which is what a script needs after a job is
         killed part way down its list. Completion is judged by the quantized graph inference
@@ -1021,33 +1021,33 @@ class Wrapper:
         finished a minute ago or in March, so defaulting it on would silently skip everything on a
         run that was meant to retrain from scratch.
         """
-        from mlindex.model_training.IntegralFilter import IntegralFilter
-        self.integral_filter_generator = dict.fromkeys(self.data_params['split_groups'])
+        from mlindex.model_training.ABNN import ABNN
+        self.abnn_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
-            if resume and not self.integral_filter_params[split_group]['load_from_tag']:
+            if resume and not self.abnn_params[split_group]['load_from_tag']:
                 # The quantized graph is what inference loads, and it is written last, after the
                 # model is trained and saved, so its presence means the group is usable. The
                 # evaluation plots are deliberately not the test: they are diagnostics written
                 # after the model, and a group missing only its plots has nothing left worth
                 # recomputing.
                 tag = self.data_params['tag']
-                directory = os.path.join(self.save_to['integral_filter'], split_group)
+                directory = os.path.join(self.save_to['abnn'], split_group)
                 finished = os.path.exists(os.path.join(
-                    directory, f'{split_group}_pitf_weights_{tag}_quantized.onnx'
+                    directory, f'{split_group}_abnn_weights_{tag}_quantized.onnx'
                     ))
                 if finished:
                     print(f'{split_group} already trained, skipping')
                     continue
-            self.integral_filter_generator[split_group] = IntegralFilter(
+            self.abnn_generator[split_group] = ABNN(
                 split_group,
                 self.data_params,
-                self.integral_filter_params[split_group],
-                self.save_to['integral_filter'],
+                self.abnn_params[split_group],
+                self.save_to['abnn'],
                 self.hkl_ref[bravais_lattice]
                 )
-            if self.integral_filter_params[split_group]['load_from_tag']:
-                self.integral_filter_generator[split_group].load_from_tag(mode=mode)
+            if self.abnn_params[split_group]['load_from_tag']:
+                self.abnn_generator[split_group].load_from_tag(mode=mode)
             else:
                 split_group_data = self.data[self.data['split_group'] == split_group]
                 if mode != 'training':
@@ -1056,17 +1056,17 @@ class Wrapper:
                         f'not {mode!r}. An unrecognised mode used to fall through to the fit '
                         'with no model built.'
                         )
-                self.integral_filter_generator[split_group].setup(split_group_data)
-                self.integral_filter_generator[split_group].train(data=split_group_data)
-                self.integral_filter_generator[split_group].load_from_tag(mode='training')
-                self.integral_filter_generator[split_group].evaluate(split_group_data)
-                self.integral_filter_generator[split_group].load_from_tag(mode='inference')
-                self.integral_filter_generator[split_group].evaluate(split_group_data, quantitized_model=True)
+                self.abnn_generator[split_group].setup(split_group_data)
+                self.abnn_generator[split_group].train(data=split_group_data)
+                self.abnn_generator[split_group].load_from_tag(mode='training')
+                self.abnn_generator[split_group].evaluate(split_group_data)
+                self.abnn_generator[split_group].load_from_tag(mode='inference')
+                self.abnn_generator[split_group].evaluate(split_group_data, quantitized_model=True)
 
-    def evaluate_integral_filter(self, quantitized_model=True, split_groups=None):
-        """Re-run the integral filter evaluation against models that are already trained.
+    def evaluate_abnn(self, quantitized_model=True, split_groups=None):
+        """Re-run the ABNN evaluation against models that are already trained.
 
-        setup_integral_filter only evaluates the groups it just trained, so a group loaded from tag
+        setup_abnn only evaluates the groups it just trained, so a group loaded from tag
         never writes evaluation artifacts. This runs that last step on its own, which is what is
         needed when the evaluation itself changed -- a new output, a corrected metric -- and the
         models behind it did not. Nothing here fits or overwrites a model.
@@ -1075,19 +1075,19 @@ class Wrapper:
         that inference actually loads, and is the one to report, False is the Keras model and needs
         that training stack installed. The artifacts are named apart, so neither clobbers the other.
         """
-        from mlindex.model_training.IntegralFilter import IntegralFilter
+        from mlindex.model_training.ABNN import ABNN
         if split_groups is None:
             split_groups = self.data_params['split_groups']
-        if not hasattr(self, 'integral_filter_generator') or self.integral_filter_generator is None:
-            self.integral_filter_generator = dict.fromkeys(self.data_params['split_groups'])
+        if not hasattr(self, 'abnn_generator') or self.abnn_generator is None:
+            self.abnn_generator = dict.fromkeys(self.data_params['split_groups'])
         for split_group in split_groups:
             print(f'Evaluating {split_group}')
             bravais_lattice = split_group[:2]
-            generator = IntegralFilter(
+            generator = ABNN(
                 split_group,
                 self.data_params,
-                self.integral_filter_params[split_group],
-                self.save_to['integral_filter'],
+                self.abnn_params[split_group],
+                self.save_to['abnn'],
                 self.hkl_ref[bravais_lattice]
                 )
             generator.load_from_tag(mode='inference' if quantitized_model else 'training')
@@ -1095,7 +1095,7 @@ class Wrapper:
                 self.data[self.data['split_group'] == split_group],
                 quantitized_model=quantitized_model
                 )
-            self.integral_filter_generator[split_group] = generator
+            self.abnn_generator[split_group] = generator
 
     def evaluate_random_forest(self):
         from mlindex.model_training.Evaluations import evaluate_regression

@@ -170,24 +170,24 @@ def test_mi_templates_generate(unique_test_metadata, all_optimizers):
         _assert_candidates_match(result, expected, f"mi_templates {bl}")
 
 
-def test_integral_filter_generate(unique_test_metadata, all_optimizers):
+def test_abnn_generate(unique_test_metadata, all_optimizers):
     for q2_obs, unit_cell, wavelength, bl, lattice_system in _cases(
         unique_test_metadata
     ):
         opt = all_optimizers[bl]
         sg = opt.wrapper.data_params["split_groups"][0]
         rng = np.random.default_rng(12345)
-        result = opt.wrapper.integral_filter_generator[sg].generate(
+        result = opt.wrapper.abnn_generator[sg].generate(
             N_GENERATE,
             rng,
             q2_obs,
             batch_size=2,
         )
-        expected = np.load(EXPECTED_DIR / f"integral_filter_{bl}.npy")
-        _assert_candidates_match(result, expected, f"integral_filter {bl}")
+        expected = np.load(EXPECTED_DIR / f"abnn_{bl}.npy")
+        _assert_candidates_match(result, expected, f"abnn {bl}")
 
 
-def test_integral_filter_generate_resamples_miller_indices(
+def test_abnn_generate_resamples_miller_indices(
     unique_test_metadata, all_optimizers
 ):
     """The branch that draws Miller index labellings, which the test above never reaches.
@@ -203,7 +203,7 @@ def test_integral_filter_generate_resamples_miller_indices(
         opt = all_optimizers[bl]
         sg = opt.wrapper.data_params["split_groups"][0]
         rng = np.random.default_rng(12345)
-        result = opt.wrapper.integral_filter_generator[sg].generate(
+        result = opt.wrapper.abnn_generator[sg].generate(
             N_GENERATE,
             rng,
             q2_obs[: opt.n_peaks],
@@ -211,8 +211,8 @@ def test_integral_filter_generate_resamples_miller_indices(
             batch_size=2,
         )
         assert result.shape[0] == N_GENERATE
-        expected = np.load(EXPECTED_DIR / f"integral_filter_resampled_{bl}.npy")
-        _assert_candidates_match(result, expected, f"integral_filter resampled {bl}")
+        expected = np.load(EXPECTED_DIR / f"abnn_resampled_{bl}.npy")
+        _assert_candidates_match(result, expected, f"abnn resampled {bl}")
 
 
 def test_candidate_matcher_rejects_a_real_regression():
@@ -277,21 +277,21 @@ def test_mi_templates_draws_only_from_the_rng_it_is_given(
         ), f"mi_templates {bl}: output depends on state the object carries, not on its rng"
 
 
-def test_integral_filter_draws_only_from_the_rng_it_is_given(
+def test_abnn_draws_only_from_the_rng_it_is_given(
     unique_test_metadata, all_optimizers
 ):
     for q2_obs, unit_cell, wavelength, bl, lattice_system in _cases(unique_test_metadata):
         opt = all_optimizers[bl]
-        generator = opt.wrapper.integral_filter_generator[
+        generator = opt.wrapper.abnn_generator[
             opt.wrapper.data_params["split_groups"][0]
         ]
         assert not hasattr(generator, "rng"), (
-            "IntegralFilter should hold no generator of its own; everything it draws "
+            "ABNN should hold no generator of its own; everything it draws "
             "comes from the rng its caller passes in"
         )
         assert _generator_is_stateless(
             lambda rng, q2: generator.generate(N_GENERATE, rng, q2, batch_size=2), q2_obs
-        ), f"integral_filter {bl}: output depends on state the object carries, not on its rng"
+        ), f"abnn {bl}: output depends on state the object carries, not on its rng"
 
 
 # --- the search does not carry state from one pattern to the next -------------------

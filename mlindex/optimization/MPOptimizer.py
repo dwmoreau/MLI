@@ -58,14 +58,14 @@ class MPOptimizerManager(OptimizerManager):
     _mp_n_ranks = None
 
     def __init__(self, data_params, opt_params, rf_params, template_params,
-                 integral_filter_params, random_params, bravais_lattice, comm, fom,
+                 abnn_params, random_params, bravais_lattice, comm, fom,
                  seed=12345):
         self._data_queues = MPOptimizerManager._mp_data_queues
         self._result_queues = MPOptimizerManager._mp_result_queues
         n_ranks = MPOptimizerManager._mp_n_ranks
         # comm arg is ignored; LocalComm lets OptimizerBase.__init__ run without MPI
         super().__init__(data_params, opt_params, rf_params, template_params,
-                         integral_filter_params, random_params, bravais_lattice,
+                         abnn_params, random_params, bravais_lattice,
                          comm=LocalComm(n_ranks), fom=fom, seed=seed)
         self._init_workers()
 

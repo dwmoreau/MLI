@@ -20,7 +20,7 @@ LATTICE_SYSTEMS = (
     "cubic", "hexagonal", "monoclinic", "orthorhombic",
     "rhombohedral", "tetragonal", "triclinic",
 )
-MODEL_SUBDIRS = ("data", "integral_filter", "random_forest", "template", "random", "augmentor")
+MODEL_SUBDIRS = ("data", "abnn", "random_forest", "template", "random", "augmentor")
 
 
 def _build_models_tree(root):
@@ -205,7 +205,7 @@ def test_training_path_creates_dirs(quiet_wrapper, tmp_path):
         "models_directory": str(target),
         "load_from_tag": False,
     })
-    for subdir in ("augmentor", "data", "random", "random_forest", "template", "integral_filter"):
+    for subdir in ("augmentor", "data", "random", "random_forest", "template", "abnn"):
         assert (target / "cubic_1" / subdir).is_dir()
 
 

@@ -50,6 +50,6 @@ def looks_like_models_dir(path):
 
     The wheel always ships a *partial* mlindex/models/ tree (the hkl_ref_*.npy files
     used by the analytic optimizer), so the presence of `models/` proves nothing.
-    cubic_1/integral_filter/ only exists after a real download or a training run.
+    cubic_1/abnn/ only exists after a real download or a training run.
     """
-    return (Path(path) / 'cubic_1' / 'integral_filter').is_dir()
+    return (Path(path) / 'cubic_1' / 'abnn').is_dir()

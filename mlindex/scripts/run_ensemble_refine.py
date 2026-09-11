@@ -36,7 +36,7 @@ from mlindex.utilities.ErrorAdder import add_q2_error
 
 
 def evaluate_regression(optimizer, entry, candidates_per_model, rng):
-    integral_filter_top_n = None
+    abnn_top_n = None
     n_sub_generators = dict()
     candidates_per_sub_model = dict()
     generator_names = []
@@ -64,12 +64,12 @@ def evaluate_regression(optimizer, entry, candidates_per_model, rng):
             generator_unit_cells = optimizer.wrapper.random_forest_generator[generator_info['split_group']].generate(
                 candidates_per_sub_model[generator_info['generator']], rng,  q2,
                 )
-        elif generator_info['generator'] == 'integral_filter':
-            if integral_filter_top_n is None:
-                integral_filter_top_n = optimizer.wrapper.integral_filter_generator[generator_info['split_group']].model_params['n_volumes']
-            generator_unit_cells = optimizer.wrapper.integral_filter_generator[generator_info['split_group']].generate(
+        elif generator_info['generator'] == 'abnn':
+            if abnn_top_n is None:
+                abnn_top_n = optimizer.wrapper.abnn_generator[generator_info['split_group']].model_params['n_volumes']
+            generator_unit_cells = optimizer.wrapper.abnn_generator[generator_info['split_group']].generate(
                 candidates_per_sub_model[generator_info['generator']], rng, q2,
-                top_n=integral_filter_top_n,
+                top_n=abnn_top_n,
                 batch_size=2,
                 )
         elif generator_info['generator'] == 'templates':
@@ -105,41 +105,41 @@ def evaluate_regression(optimizer, entry, candidates_per_model, rng):
     tree_index = list(n_sub_generators.keys()).index('trees')
     distance[:, tree_index] = rng.permutation(distance[:, tree_index])
 
-    # The integral filter model distances are also ordered based on the split group.
+    # The ABNN model distances are also ordered based on the split group.
     # There is also an ordering based on the "top_n" predictions. The first top_n predictions
     # are the top_n most probable unit cells. The rest of the predictions are based on
     # randomly sampling their Miller Indices.
     # Create groupings of the top_n and rest of the predictions. Permute separately. Then
     # combine with the top_n first.
-    integral_filter_index = list(n_sub_generators.keys()).index('integral_filter')
+    abnn_index = list(n_sub_generators.keys()).index('abnn')
 
-    if integral_filter_top_n < candidates_per_sub_model['integral_filter']:
-        n_lower = (candidates_per_sub_model['integral_filter'] - integral_filter_top_n)
-        distance_top_n = np.zeros(integral_filter_top_n * n_sub_generators['integral_filter'])
-        distance_lower = np.zeros(n_lower * n_sub_generators['integral_filter'])
+    if abnn_top_n < candidates_per_sub_model['abnn']:
+        n_lower = (candidates_per_sub_model['abnn'] - abnn_top_n)
+        distance_top_n = np.zeros(abnn_top_n * n_sub_generators['abnn'])
+        distance_lower = np.zeros(n_lower * n_sub_generators['abnn'])
     
         start = 0
-        for sub_index in range(n_sub_generators['integral_filter']):
-            distance_top_n[sub_index*integral_filter_top_n: (sub_index+1)*integral_filter_top_n] = distance[
-                start: start + integral_filter_top_n,
-                integral_filter_index
+        for sub_index in range(n_sub_generators['abnn']):
+            distance_top_n[sub_index*abnn_top_n: (sub_index+1)*abnn_top_n] = distance[
+                start: start + abnn_top_n,
+                abnn_index
                 ]
             distance_lower[sub_index*n_lower: (sub_index+1)*n_lower] = distance[
-                start + integral_filter_top_n: start + candidates_per_sub_model['integral_filter'],
-                integral_filter_index
+                start + abnn_top_n: start + candidates_per_sub_model['abnn'],
+                abnn_index
                 ]
-            start += candidates_per_sub_model['integral_filter']
-        n_total_candidates = n_sub_generators['integral_filter']*candidates_per_sub_model['integral_filter']
-        distance[:n_total_candidates, integral_filter_index] = np.concatenate([
+            start += candidates_per_sub_model['abnn']
+        n_total_candidates = n_sub_generators['abnn']*candidates_per_sub_model['abnn']
+        distance[:n_total_candidates, abnn_index] = np.concatenate([
             rng.permutation(distance_top_n),
             rng.permutation(distance_lower)
             ])
 
     #print('Distance Evaluation')
-    #print('Tree', 'integral_filter', 'Template')
+    #print('Tree', 'abnn', 'Template')
     #print(
     #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('trees')]), decimals=3),
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('integral_filter')]), decimals=3),
+    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('abnn')]), decimals=3),
     #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('templates')]), decimals=3),
     #    )
     return distance, generator_names
