@@ -4,6 +4,7 @@ import os
 import scipy.special
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+from mlindex.utilities.FigureOfMerits import get_assignment_distribution
 from mlindex.utilities.IOManagers import NeuralNetworkManager
 from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
@@ -981,12 +982,17 @@ class IntegralFilter:
             q2_ref_calc = q2_calculator.get_q2(xnn_pred)
             hkl_assign[:top_n] = fast_assign(q2_obs, q2_ref_calc)
 
-            # Resampling needs to generate n_unit_cells_per_pred - 1 unit cells from each prediction
+            # Resampling needs to generate n_unit_cells_per_pred - 1 unit cells from each
+            # prediction, drawing a different Miller index labelling each time, so it needs a
+            # distribution over this cell's reference lines for every peak.
+            #
+            # q2_ref_calc above is self.hkl_ref evaluated on exactly these predicted cells, so
+            # the distribution is over exactly the lines fast_assign just chose between.
+            # vectorized_resampling rescales its draws by each row's own cumulative total, so the
+            # unnormalised form is what it wants and is one array pass cheaper.
             # hkl_softmax: top_n, n_peaks, hkl_ref_length
-            hkl_softmax = self.predict_hkl(
-                np.repeat(q2_obs[np.newaxis], repeats=top_n, axis=0),
-                xnn_pred,
-                batch_size=batch_size
+            hkl_softmax = get_assignment_distribution(
+                q2_obs, q2_ref_calc, self.lattice_system, normalise=False
                 )
             start = top_n
             for gen_index in range(n_unit_cells_per_pred - 1):

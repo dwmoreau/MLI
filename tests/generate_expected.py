@@ -270,6 +270,25 @@ def generate_model_training_expected(test_metadata):
         )
         np.save(EXPECTED_DIR / f"integral_filter_{bl}.npy", result)
 
+        # integral filter, resampling branch. The fixture above asks for ten cells against an
+        # n_volumes of 100-200, so it takes the branch that assigns Miller indices once and
+        # never resamples -- it has never covered the assignment half of the generator at all.
+        # top_n=3 with ten cells forces it: three predicted cells, two full resampling passes
+        # over them, then a partial pass for the remaining one.
+        #
+        # The peak list is truncated the way a manager truncates it -- ten lines for cubic,
+        # twenty for the rest. The resampling branch requires that; the branch above happens to
+        # tolerate a longer list, so the two disagree about their contract.
+        rng = np.random.default_rng(12345)
+        result = opt.wrapper.integral_filter_generator[sg].generate(
+            10,
+            rng,
+            q2_obs[: opt.n_peaks],
+            top_n=3,
+            batch_size=2,
+        )
+        np.save(EXPECTED_DIR / f"integral_filter_resampled_{bl}.npy", result)
+
         print(f"  {bl}")
     print("Done.")
 

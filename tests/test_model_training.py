@@ -7,6 +7,9 @@ from conftest import load_test_case, _TEST_DATA_DIR
 EXPECTED_DIR = Path(__file__).parent / "expected"
 
 N_GENERATE = 10
+# Below n_volumes, so generate() takes its resampling branch: three predicted
+# cells, two full passes of resampled labellings, then a partial one.
+N_RESAMPLE_TOP_N = 3
 
 
 def _cases(test_metadata):
@@ -182,6 +185,34 @@ def test_integral_filter_generate(unique_test_metadata, all_optimizers):
         )
         expected = np.load(EXPECTED_DIR / f"integral_filter_{bl}.npy")
         _assert_candidates_match(result, expected, f"integral_filter {bl}")
+
+
+def test_integral_filter_generate_resamples_miller_indices(
+    unique_test_metadata, all_optimizers
+):
+    """The branch that draws Miller index labellings, which the test above never reaches.
+
+    n_volumes is 100-200 per split group, so asking for N_GENERATE cells takes the branch that
+    assigns once from the nearest line and returns. Every resampled candidate -- which is most
+    of what the generator contributes to a real run -- went untested until this. Passing top_n
+    explicitly is what forces the other branch at a size a test can afford.
+    """
+    for q2_obs, unit_cell, wavelength, bl, lattice_system in _cases(
+        unique_test_metadata
+    ):
+        opt = all_optimizers[bl]
+        sg = opt.wrapper.data_params["split_groups"][0]
+        rng = np.random.default_rng(12345)
+        result = opt.wrapper.integral_filter_generator[sg].generate(
+            N_GENERATE,
+            rng,
+            q2_obs[: opt.n_peaks],
+            top_n=N_RESAMPLE_TOP_N,
+            batch_size=2,
+        )
+        assert result.shape[0] == N_GENERATE
+        expected = np.load(EXPECTED_DIR / f"integral_filter_resampled_{bl}.npy")
+        _assert_candidates_match(result, expected, f"integral_filter resampled {bl}")
 
 
 def test_candidate_matcher_rejects_a_real_regression():
