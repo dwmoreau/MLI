@@ -10,7 +10,6 @@ from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
 from mlindex.utilities.MillerIndexAssignment import vectorized_resampling
 from mlindex.utilities.Q2Calculator import Q2Calculator
-from mlindex.utilities.Q2Calculator import PairwiseDifferenceCalculator
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
@@ -65,7 +64,7 @@ class IntegralFilter:
             )
         return self.extraction_layer.get_branch_labels(reciprocal_volume)
 
-    def _setup_integral_filter(self, data):
+    def setup(self, data):
         model_params_defaults = {
             'peak_length': 20,
             'extraction_peak_length': 6,
@@ -104,32 +103,6 @@ class IntegralFilter:
 
         self.model_params['unit_cell_length'] = self.unit_cell_length
         self.build_model(data=data)
-
-    def _setup_calibration(self):
-        calibration_params_defaults = {
-            'layers': 3,
-            'n_peaks': self.n_peaks,
-            'epsilon_pds': 0.1,
-            'epochs': 20,
-            'learning_rate': 0.0001,
-            'batch_size': 64,
-            'l1_regularization': 0.0,
-            'n_heads': 5,
-            # Epochs of no validation improvement before the miller index model stops. 'epochs' is
-            # now an upper bound rather than the number actually run.
-            'early_stopping_patience': 5,
-            }
-
-        for key in calibration_params_defaults.keys():
-            if key not in self.model_params['calibration_params'].keys():
-                self.model_params['calibration_params'][key] = calibration_params_defaults[key]
-
-        self.model_params['unit_cell_length'] = self.unit_cell_length
-        self.build_calibration_model()
-
-    def setup(self, data):
-        self._setup_integral_filter(data)
-        self._setup_calibration()
 
     def save(self, train_inputs):
         import keras
@@ -174,48 +147,7 @@ class IntegralFilter:
             calibration_data=train_inputs
             )
 
-    def save_calibration(self, train_inputs):
-        import keras
-        write_params(
-            self.model_params,
-            os.path.join(
-                f'{self.save_to_split_group}',
-                f'{self.split_group}_pitf_params_{self.model_params["tag"]}.csv'
-                )
-            )
-        self.calibration_model.save_weights(
-            os.path.join(
-                f'{self.save_to_split_group}',
-                f'{self.split_group}_calibration_weights_{self.model_params["tag"]}.weights.h5'
-                )
-            )
-        model_manager = NeuralNetworkManager(
-            model_name=f'{self.split_group}_calibration_weights_{self.model_params["tag"]}',
-            save_dir=f'{self.save_to_split_group}',
-            )
-        model_manager.save_keras_weights(self.calibration_model)
-        model_manager.convert_to_onnx(
-            self.calibration_model,
-            example_inputs=train_inputs,
-            input_signature=(
-                keras.Input(
-                    shape=(self.data_params['n_peaks'],),
-                    name='q2_obs_scaled',
-                    dtype='float32',
-                    ),
-                keras.Input(
-                    shape=(self.unit_cell_length,),
-                    name='xnn',
-                    dtype='float32',
-                    ),
-                )
-            )
-        model_manager.quantize_onnx(
-            method='dynamic',
-            calibration_data=train_inputs
-            )
-
-    def _load_from_tag_integral_filter(self, mode):
+    def load_from_tag(self, mode):
         params = read_params(os.path.join(
             f'{self.save_to_split_group}',
             f'{self.split_group}_pitf_params_{self.model_params["tag"]}.csv'
@@ -295,52 +227,6 @@ class IntegralFilter:
         elif mode == 'inference':
             self.onnx_model = model_manager.load_onnx_model(quantized=True)
 
-    def _load_from_tag_calibration(self, mode):
-        params = read_params(os.path.join(
-            f'{self.save_to_split_group}',
-            f'{self.split_group}_pitf_params_{self.model_params["tag"]}.csv'
-            ))
-        calibration_params_keys = [
-            'layers',
-            'l1_regularization',
-            'n_peaks',
-            'epsilon_pds',
-            'epochs',
-            'learning_rate',
-            'batch_size',
-            'n_heads',
-            'early_stopping_patience',
-            ]
-        self.model_params['calibration_params'] = dict.fromkeys(calibration_params_keys)
-        self.model_params['calibration_params']['l1_regularization'] = 0.0
-        for element in params['calibration_params'].split('{')[1].split('}')[0].split(", '"):
-            key = element.replace("'", "").split(':')[0]
-            value = element.replace("'", "").split(':')[1]
-            if key in ['dropout_rate', 'epsilon_pds', 'learning_rate', 'l1_regularization']:
-                self.model_params['calibration_params'][key] = float(value)
-            elif key in ['n_components', 'n_peaks', 'epochs', 'batch_size', 'layers', 'n_heads',
-                         'early_stopping_patience']:
-                self.model_params['calibration_params'][key] = int(value)
-        # Models saved before early stopping existed have no such column, so dict.fromkeys leaves
-        # it None, which would be passed straight to EarlyStopping.
-        if self.model_params['calibration_params']['early_stopping_patience'] is None:
-            self.model_params['calibration_params']['early_stopping_patience'] = 5
-        if self.model_params['model_type'] != 'base_line':
-            model_manager = NeuralNetworkManager(
-                model_name=f'{self.split_group}_calibration_weights_{self.model_params["tag"]}',
-                save_dir=self.save_to_split_group,
-                )
-            if mode == 'training':
-                self.build_calibration_model()
-                self.compile_calibration_model()
-                self.calibration_model = model_manager.load_keras_model(self.calibration_model)
-            else:
-                self.calibration_onnx_model = model_manager.load_onnx_model(quantized=True)
-
-    def load_from_tag(self, mode):
-        self._load_from_tag_integral_filter(mode)
-        self._load_from_tag_calibration(mode)
-
     def build_model(self, data=None):
         from mlindex.model_training.Networks import ExtractionLayer
         import keras
@@ -375,7 +261,7 @@ class IntegralFilter:
             self.xnn_mean = np.median(train_xnn, axis=0)[np.newaxis]
             self.xnn_scale = np.median(np.abs(train_xnn - self.xnn_mean), axis=0)[np.newaxis]
         else:
-            # _load_from_tag_integral_filter loads the scalers from .npy before calling build_model.
+            # load_from_tag loads the scalers from .npy before calling build_model.
             assert hasattr(self, 'xnn_mean') and hasattr(self, 'xnn_scale'), (
                 'build_model(data=None) needs xnn_mean and xnn_scale to already be set, because the '
                 'regression head bakes them into the graph.'
@@ -395,36 +281,6 @@ class IntegralFilter:
             self.model = keras.Model(inputs, self.model_builder_base_line(inputs))
         self.compile_model()
         #self.model.summary()
-
-    def build_calibration_model(self):
-        import keras
-        self.pairwise_difference_calculator = PairwiseDifferenceCalculator(
-            lattice_system=self.data_params['lattice_system'],
-            hkl_ref=self.hkl_ref,
-            tensorflow=True,
-            q2_scaler=self.q2_obs_scale,
-            )
-        self.pairwise_difference_calculation_numpy = PairwiseDifferenceCalculator(
-            lattice_system=self.data_params['lattice_system'],
-            hkl_ref=self.hkl_ref,
-            tensorflow=False,
-            q2_scaler=self.q2_obs_scale,
-            )
-        inputs = (
-            keras.Input(
-                shape=(self.data_params['n_peaks'],),
-                name='q2_obs_scaled',
-                dtype='float32',
-                ),
-            keras.Input(
-                shape=(self.unit_cell_length,),
-                name='xnn',
-                dtype='float32',
-                ),
-            )
-        self.calibration_model = keras.Model(inputs, self.model_builder_calibration(inputs))
-        self.compile_calibration_model()
-        #self.calibration_model.summary()
 
     def model_builder_base_line(self, inputs):
         import keras
@@ -513,61 +369,6 @@ class IntegralFilter:
             )(raw)
         return output
 
-    def transform_pairwise_differences(self, pairwise_differences_scaled, tensorflow):
-        if tensorflow:
-            import keras
-            abs_func = keras.ops.absolute
-        else:
-            abs_func = np.abs
-        epsilon = self.model_params['calibration_params']['epsilon_pds']
-        return epsilon / (abs_func(pairwise_differences_scaled) + epsilon)
-
-    def model_builder_calibration(self, inputs):
-        import keras
-        from mlindex.model_training.Networks import IntraVolume_MultiHeadAttention
-        pairwise_differences_scaled, q2_ref = self.pairwise_difference_calculator.get_pairwise_differences(
-            inputs[1], inputs[0], return_q2_ref=True
-            )
-
-        # hkl_logits:               n_batch x n_peaks x hkl_ref_length
-        # pairwise_differences:     n_batch x n_peaks x hkl_ref_length
-        # q2_ref:                   n_batch x hkl_ref_length
-        pairwise_differences_transformed = self.transform_pairwise_differences(
-            pairwise_differences_scaled, True
-            )
-        # Attention here has potential to outperform just a dense network
-        #x = IntraVolume_MultiHeadAttention(
-        #    d_model=self.hkl_ref.shape[0],
-        #    n_heads=self.model_params['calibration_params']['n_heads'],
-        #)(pairwise_differences_transformed)
-        #x = keras.layers.UnitNormalization(axis=2)(x)
-        x = pairwise_differences_transformed
-
-        for index in range(self.model_params['calibration_params']['layers']):
-            x = keras.layers.Dense(
-                self.hkl_ref.shape[0],
-                activation=keras.activations.elu,
-                name=f'dense_{index}',
-                use_bias=False,
-                kernel_initializer=keras.initializers.HeUniform,
-                kernel_regularizer=keras.regularizers.L1(
-                    l1=self.model_params['calibration_params']['l1_regularization']
-                    ),
-                )(x)
-
-        hkl_logits = keras.layers.Dense(
-            self.hkl_ref.shape[0],
-            activation='linear',
-            name=f'hkl_logits',
-            use_bias=False,
-            )(x)
-
-        hkl_softmax = keras.layers.Softmax(
-            name='hkl_softmax',
-            axis=2
-            )(hkl_logits)
-        return hkl_softmax
-
     def compile_model(self):
         import keras
         # Create learning rate scheduler
@@ -597,21 +398,6 @@ class IntegralFilter:
             loss=loss_functions,
             metrics=loss_metrics,
             run_eagerly=False,
-            )
-
-    def compile_calibration_model(self):
-        import keras
-        optimizer = keras.optimizers.Adam(self.model_params['calibration_params']['learning_rate'])
-        loss_metrics = {
-            'hkl_softmax': 'accuracy',
-            }
-        loss_functions = {
-            'hkl_softmax': keras.losses.SparseCategoricalCrossentropy(from_logits=False),
-            }
-        self.calibration_model.compile(
-            optimizer=optimizer, 
-            loss=loss_functions,
-            metrics=loss_metrics
             )
 
     def train(self, data):
@@ -760,90 +546,6 @@ class IntegralFilter:
                 self.model_params["tag"]
                 )
 
-    def train_calibration(self, data):
-        import keras
-        if self.model_params['model_type'] == 'base_line':
-            return None
-        train = data[data['train']]
-        val = data[~data['train']]
-
-        # Get predictions
-        val_q2_obs = np.stack(val['q2'])[:, :self.model_params['peak_length']]
-        val_q2_obs_scaled = val_q2_obs / self.q2_obs_scale
-        val_inputs = val_q2_obs_scaled
-        val_pred = self.model.predict(val_inputs)
-        val_all_xnn_scaled_pred = val_pred[:, :, :self.unit_cell_length]
-        val_logits = val_pred[:, :, self.unit_cell_length]
-        val_softmax = scipy.special.softmax(val_logits, axis=1)
-        val_xnn_scaled_pred_top5 = np.take_along_axis(
-            val_all_xnn_scaled_pred,
-            np.argsort(val_softmax, axis=1)[:, ::-1][:, :5, np.newaxis],
-            axis=1
-            )
-        val_xnn_pred_top5 = val_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
-
-        train_q2_obs = np.stack(train['q2'])[:, :self.model_params['peak_length']]
-        train_q2_obs_scaled = train_q2_obs / self.q2_obs_scale
-        train_inputs = train_q2_obs_scaled
-        train_pred = self.model.predict(train_inputs)
-        train_all_xnn_scaled_pred = train_pred[:, :, :self.unit_cell_length]
-        train_logits = train_pred[:, :, self.unit_cell_length]
-        train_softmax = scipy.special.softmax(train_logits, axis=1)
-        train_xnn_scaled_pred_top5 = np.take_along_axis(
-            train_all_xnn_scaled_pred,
-            np.argsort(train_softmax, axis=1)[:, ::-1][:, :5, np.newaxis],
-            axis=1
-            )
-        train_xnn_pred_top5 = train_xnn_scaled_pred_top5*self.xnn_scale + self.xnn_mean
-
-        train_inputs_calibration = (
-            np.stack(train['q2']) / self.q2_obs_scale,
-            train_xnn_pred_top5[:, 0],
-            )
-        val_inputs_calibration = (
-            np.stack(val['q2']) / self.q2_obs_scale,
-            val_xnn_pred_top5[:, 0],
-            )
-        train_true_calibration = np.stack(train['hkl_labels'])
-        val_true_calibration = np.stack(val['hkl_labels'])
-        # The validation loss flattens within about eight epochs while training keeps falling, so
-        # the back two thirds of a fixed forty epoch run buy nothing but overfitting. min_delta is
-        # set above the epoch to epoch noise in the validation loss so it stops on a real plateau
-        # rather than on a lucky dip, and the best weights are restored rather than the last ones.
-        calibration_callbacks = [keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=self.model_params['calibration_params']['early_stopping_patience'],
-            min_delta=0.001,
-            restore_best_weights=True,
-            verbose=1,
-            )]
-        self.calibration_fit_history = self.calibration_model.fit(
-            x=train_inputs_calibration,
-            y=train_true_calibration,
-            epochs=self.model_params['calibration_params']['epochs'],
-            shuffle=True,
-            batch_size=self.model_params['calibration_params']['batch_size'],
-            validation_data=(val_inputs_calibration, val_true_calibration),
-            callbacks=calibration_callbacks,
-            )
-        self.save_calibration(train_inputs_calibration)
-
-        fig, axes = plt.subplots(2, 1, figsize=(6, 5), sharex=True)
-        axes[0].plot(self.calibration_fit_history.history['loss'], label='Training', marker='.')
-        axes[0].plot(self.calibration_fit_history.history['val_loss'], label='Validation', marker='.')
-        axes[1].plot(self.calibration_fit_history.history['accuracy'], label='Training', marker='.')
-        axes[1].plot(self.calibration_fit_history.history['val_accuracy'], label='Validation', marker='.')
-        axes[1].set_xlabel('Epochs')
-        axes[0].set_ylabel('Loss')
-        axes[1].set_ylabel('Accuracy')
-        axes[0].legend()
-        fig.tight_layout()
-        fig.savefig(os.path.join(
-            f'{self.save_to_split_group}',
-            f'{self.split_group}_calibration_training_loss_{self.model_params["tag"]}.png'
-            ))
-        plt.close()
-
     def predict_xnn(self, top_n, rng, data=None, inputs=None, q2_obs=None, batch_size=None):
         if not data is None:
             q2_obs = np.stack(data['q2'])[:, :self.model_params['peak_length']]
@@ -901,53 +603,6 @@ class IntegralFilter:
                 rng=rng
                 )
         return xnn_pred_top_n, softmax_pred_top_n
-
-    def predict_hkl(self, q2_obs, xnn, batch_size=None):
-        q2_obs_scaled = q2_obs / self.q2_obs_scale
-
-        #print(f'\n Regression inferences for {self.split_group}')
-        if batch_size is None:
-            batch_size = self.model_params['batch_size']
-
-        # predict_on_batch helps with a memory leak...
-        N = q2_obs_scaled.shape[0]
-        hkl_softmax = np.zeros((N, self.data_params['n_peaks'], self.hkl_ref.shape[0]))
-        if self.model_params['mode'] == 'inference':
-            q2_obs_scaled_f32 = q2_obs_scaled.astype(np.float32)
-            xnn_f32 = xnn.astype(np.float32)
-            for pred_index in range(xnn.shape[0]):
-                inputs = {
-                    'input_0': q2_obs_scaled_f32[pred_index][np.newaxis],
-                    'input_1': xnn_f32[pred_index][np.newaxis]
-                    }
-                hkl_softmax[pred_index] = self.calibration_onnx_model.run(None, inputs)[0]
-        elif self.model_params['mode'] == 'training':
-            n_batches = N // batch_size
-            left_over = N % batch_size
-
-            for batch_index in range(n_batches + 1):
-                start = batch_index * batch_size
-                if batch_index == n_batches:
-                    batch_inputs = (
-                        np.zeros((batch_size, self.data_params['n_peaks'])),
-                        np.zeros((batch_size, self.unit_cell_length))
-                        )
-                    batch_inputs[0][:left_over] = q2_obs_scaled[start: start + left_over]
-                    batch_inputs[0][left_over:] = q2_obs_scaled[0]
-                    batch_inputs[1][:left_over] = xnn[start: start + left_over]
-                    batch_inputs[1][left_over:] = xnn[0]
-                else:
-                    batch_inputs = (
-                        q2_obs_scaled[start: start + batch_size],
-                        xnn[start: start + batch_size]
-                        )
-
-                outputs = self.calibration_model.predict_on_batch(batch_inputs)
-                if batch_index == n_batches:
-                    hkl_softmax[start:] = outputs[:left_over]
-                else:
-                    hkl_softmax[start: start + batch_size] = outputs
-        return hkl_softmax
 
     def generate(self, n_unit_cells, rng, q2_obs, top_n=None, batch_size=None):
         from mlindex.utilities.Q2Calculator import Q2Calculator
@@ -1110,11 +765,6 @@ class IntegralFilter:
                     val_softmax[index],
                     index
                     )
-
-        if self.model_params['model_type'] != 'base_line':
-            self.evaluate_indexing(
-                train, val, train_xnn_pred_top5[:, 0, :], val_xnn_pred_top5[:, 0, :], quantitized_model
-                )
 
         ################################
         # Output unit cell evaluations #
@@ -1430,167 +1080,3 @@ class IntegralFilter:
             ))
         plt.close()
 
-    def evaluate_indexing(self, train, val, train_xnn, val_xnn, quantitized_model):
-        hkl_labels_true_train = np.stack(train['hkl_labels'])
-        hkl_labels_true_val = np.stack(val['hkl_labels'])
-
-        train_q2_obs_scaled = np.stack(train['q2']) / self.q2_obs_scale
-        val_q2_obs_scaled = np.stack(val['q2']) / self.q2_obs_scale
-        train_inputs_calibration = (
-            train_q2_obs_scaled,
-            train_xnn,
-            )
-        val_inputs_calibration = (
-            val_q2_obs_scaled,
-            val_xnn,
-            )
-
-        # Everything downstream needs only the winning hkl and how confident the model was in it,
-        # so each entry's distribution over hkl_ref is reduced to those two numbers as it is
-        # produced and never all held at once. Keeping the full softmax costs
-        # n_entries * n_peaks * len(hkl_ref) floats, which is 10 GB for triclinic and gets the
-        # process killed; this is a few MB and gives identical results.
-        def reduce_softmax(hkl_softmax):
-            hkl_softmax = np.reshape(
-                hkl_softmax, (-1, self.data_params['n_peaks'], self.hkl_ref.shape[0])
-                )
-            return hkl_softmax.argmax(axis=2), hkl_softmax.max(axis=2)
-
-        def predict_onnx(inputs_calibration):
-            n_entries = inputs_calibration[0].shape[0]
-            hkl_labels_pred = np.zeros((n_entries, self.data_params['n_peaks']), dtype=int)
-            hkl_confidence = np.zeros((n_entries, self.data_params['n_peaks']))
-            for pred_index in range(n_entries):
-                inputs = {
-                    'input_0': inputs_calibration[0][pred_index].astype(np.float32)[np.newaxis],
-                    'input_1': inputs_calibration[1][pred_index].astype(np.float32)[np.newaxis]
-                    }
-                labels, confidence = reduce_softmax(
-                    self.calibration_onnx_model.run(None, inputs)[0]
-                    )
-                hkl_labels_pred[pred_index] = labels[0]
-                hkl_confidence[pred_index] = confidence[0]
-            return hkl_labels_pred, hkl_confidence
-
-        def predict_keras(inputs_calibration, batch_size=4096):
-            # Batched for the same reason, since predict on the whole set would build the array
-            # this function exists to avoid.
-            n_entries = inputs_calibration[0].shape[0]
-            hkl_labels_pred = np.zeros((n_entries, self.data_params['n_peaks']), dtype=int)
-            hkl_confidence = np.zeros((n_entries, self.data_params['n_peaks']))
-            for start in range(0, n_entries, batch_size):
-                stop = min(start + batch_size, n_entries)
-                labels, confidence = reduce_softmax(self.calibration_model.predict(
-                    (inputs_calibration[0][start:stop], inputs_calibration[1][start:stop])
-                    ))
-                hkl_labels_pred[start:stop] = labels
-                hkl_confidence[start:stop] = confidence
-            return hkl_labels_pred, hkl_confidence
-
-        if quantitized_model:
-            hkl_labels_pred_train, hkl_confidence_train = predict_onnx(train_inputs_calibration)
-            hkl_labels_pred_val, hkl_confidence_val = predict_onnx(val_inputs_calibration)
-        else:
-            hkl_labels_pred_train, hkl_confidence_train = predict_keras(train_inputs_calibration)
-            hkl_labels_pred_val, hkl_confidence_val = predict_keras(val_inputs_calibration)
-
-        # correct shape: n_entries, n_peaks
-        correct_pred_train = hkl_labels_true_train == hkl_labels_pred_train
-        correct_pred_val = hkl_labels_true_val == hkl_labels_pred_val
-        accuracy_pred_train = correct_pred_train.sum() / correct_pred_train.size
-        accuracy_pred_val = correct_pred_val.sum() / correct_pred_val.size
-        # accuracy for each entry
-        accuracy_entry_train = correct_pred_train.sum(axis=1) / self.n_peaks
-        accuracy_entry_val = correct_pred_val.sum(axis=1) / self.n_peaks
-        # accuracy per peak position
-        accuracy_peak_position_train = correct_pred_train.sum(axis=0) / correct_pred_train.shape[0]
-        accuracy_peak_position_val = correct_pred_val.sum(axis=0) / correct_pred_val.shape[0]
-
-        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-        bins = (np.arange(self.n_peaks + 2) - 0.5) / self.n_peaks
-        centers = (bins[1:] + bins[:-1]) / 2
-        dbin = bins[1] - bins[0]
-        hist_train, _ = np.histogram(accuracy_entry_train, bins=bins, density=True)
-        hist_val, _ = np.histogram(accuracy_entry_val, bins=bins, density=True)
-        axes[0].bar(centers, hist_train, width=dbin, label='Predicted: Training')
-        axes[0].bar(centers, hist_val, width=dbin, alpha=0.5, label='Predicted: Validation')
-        axes[1].bar(
-            np.arange(self.n_peaks), accuracy_peak_position_train,
-            width=1, label='Predicted: Training'
-            )
-        axes[1].bar(
-            np.arange(self.n_peaks), accuracy_peak_position_val,
-            width=1, alpha=0.5, label='Predicted: Validation'
-            )
-
-        axes[1].legend(frameon=False)
-        axes[0].set_title(f'Predicted accuracy: {accuracy_pred_train:0.3f}/{accuracy_pred_val:0.3f}')
-
-        axes[0].set_xlabel('Accuracy')
-        axes[1].set_xlabel('Peak Position')
-        axes[0].set_ylabel('Entry Accuracy')
-        axes[1].set_ylabel('Peak Accuracy')
-        axes[1].set_ylim([0, 1])
-        fig.tight_layout()
-        if quantitized_model:
-            fig.savefig(os.path.join(
-                f'{self.save_to_split_group}',
-                f'{self.split_group}_calibration_accuracy_quantitized_{self.model_params["tag"]}.png'
-                ))
-        else:
-            fig.savefig(os.path.join(
-                f'{self.save_to_split_group}',
-                f'{self.split_group}_calibration_accuracy_{self.model_params["tag"]}.png'
-                ))
-        plt.close()    
-
-        def calibration_plots(hkl_labels_true, hkl_labels_pred, p_pred, n_bins=25):
-            # p_pred is the probability the model gave the hkl it picked, which is what the
-            # entry by point loop this replaced was reading out of the full softmax.
-            metrics = np.zeros((n_bins, 4))
-            ece = 0
-
-            bins = np.linspace(p_pred.min(), p_pred.max(), n_bins + 1)
-            centers = (bins[1:] + bins[:-1]) / 2
-            metrics[:, 0] = centers
-            for bin_index in range(n_bins):
-                indices = np.logical_and(
-                    p_pred >= bins[bin_index],
-                    p_pred < bins[bin_index + 1],
-                    )
-                if np.sum(indices) > 0:
-                    p_pred_bin = p_pred[indices]
-                    hkl_labels_pred_bin = hkl_labels_pred[indices]
-                    hkl_labels_true_bin = hkl_labels_true[indices]
-                    metrics[bin_index, 1] = np.sum(hkl_labels_pred_bin == hkl_labels_true_bin) / hkl_labels_true_bin.size
-                    metrics[bin_index, 2] = p_pred_bin.mean()
-                    metrics[bin_index, 3] = p_pred_bin.std()
-                    prefactor = indices.sum() / indices.size
-                    ece += prefactor * np.abs(metrics[bin_index, 2] - metrics[bin_index, 1])
-            return metrics, ece
-
-        metrics_train, ece_train = calibration_plots(
-            hkl_labels_true_train, hkl_labels_pred_train, hkl_confidence_train
-            )
-        metrics_val, ece_val = calibration_plots(
-            hkl_labels_true_val, hkl_labels_pred_val, hkl_confidence_val
-            )
-        fig, axes = plt.subplots(1, 2, figsize=(6, 3))
-        for i in range(2):
-            axes[i].plot([0, 1], [0, 1], linestyle='dotted', color=[0, 0, 0])
-            axes[i].set_xlabel('Confidence')
-        axes[0].errorbar(metrics_train[:, 2], metrics_train[:, 1], yerr=metrics_train[:, 3], marker='.')
-        axes[0].set_title(f'Expected Confidence Error: {ece_train:0.4f}')
-        axes[0].set_ylabel('Accuracy')
-        fig.tight_layout()
-        if quantitized_model:
-            fig.savefig(os.path.join(
-                f'{self.save_to_split_group}',
-                f'{self.split_group}_calibration_cal_quantitized_{self.model_params["tag"]}.png'
-                ))
-        else:
-            fig.savefig(os.path.join(
-                f'{self.save_to_split_group}',
-                f'{self.split_group}_calibration_cal_{self.model_params["tag"]}.png'
-                ))
-        plt.close()

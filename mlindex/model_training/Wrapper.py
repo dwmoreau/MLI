@@ -1013,10 +1013,9 @@ class Wrapper:
         """Train or load the integral filter for every split group.
 
         resume skips groups that already finished, which is what a script needs after a job is
-        killed part way down its list. Completion is judged by the last artifact the per group
-        pipeline writes, the quantized evaluation plot, so a group interrupted anywhere earlier is
-        redone rather than left half built. Within a group, an interrupted fit picks up from its
-        backup regardless of this flag.
+        killed part way down its list. Completion is judged by the quantized graph inference
+        loads, so a group interrupted anywhere earlier is redone rather than left half built.
+        Within a group, an interrupted fit picks up from its backup regardless of this flag.
 
         It is off by default because the artifacts of a finished group look the same whether it
         finished a minute ago or in March, so defaulting it on would silently skip everything on a
@@ -1027,18 +1026,16 @@ class Wrapper:
         for split_group_index, split_group in enumerate(self.data_params['split_groups']):
             bravais_lattice = split_group[:2]
             if resume and not self.integral_filter_params[split_group]['load_from_tag']:
-                # The two quantized graphs are what inference loads, and the calibration one is
-                # written last, after the integral filter is already trained and saved. Both are
-                # checked rather than just the later one so that a group is only skipped when it is
-                # actually usable. The evaluation plots are deliberately not the test: they are
-                # diagnostics written after the models, and a group missing only its plots has
-                # nothing left worth recomputing.
+                # The quantized graph is what inference loads, and it is written last, after the
+                # model is trained and saved, so its presence means the group is usable. The
+                # evaluation plots are deliberately not the test: they are diagnostics written
+                # after the model, and a group missing only its plots has nothing left worth
+                # recomputing.
                 tag = self.data_params['tag']
                 directory = os.path.join(self.save_to['integral_filter'], split_group)
-                finished = all(os.path.exists(os.path.join(directory, name)) for name in [
-                    f'{split_group}_pitf_weights_{tag}_quantized.onnx',
-                    f'{split_group}_calibration_weights_{tag}_quantized.onnx',
-                    ])
+                finished = os.path.exists(os.path.join(
+                    directory, f'{split_group}_pitf_weights_{tag}_quantized.onnx'
+                    ))
                 if finished:
                     print(f'{split_group} already trained, skipping')
                     continue
@@ -1053,13 +1050,14 @@ class Wrapper:
                 self.integral_filter_generator[split_group].load_from_tag(mode=mode)
             else:
                 split_group_data = self.data[self.data['split_group'] == split_group]
-                if mode == 'training':
-                    self.integral_filter_generator[split_group].setup(split_group_data)
-                    self.integral_filter_generator[split_group].train(data=split_group_data)
-                elif mode == 'calibration_training':
-                    self.integral_filter_generator[split_group]._load_from_tag_integral_filter(mode='training')
-                    self.integral_filter_generator[split_group]._setup_calibration()
-                self.integral_filter_generator[split_group].train_calibration(data=split_group_data)
+                if mode != 'training':
+                    raise ValueError(
+                        f"{split_group} is not loaded from tag, so mode must be 'training', "
+                        f'not {mode!r}. An unrecognised mode used to fall through to the fit '
+                        'with no model built.'
+                        )
+                self.integral_filter_generator[split_group].setup(split_group_data)
+                self.integral_filter_generator[split_group].train(data=split_group_data)
                 self.integral_filter_generator[split_group].load_from_tag(mode='training')
                 self.integral_filter_generator[split_group].evaluate(split_group_data)
                 self.integral_filter_generator[split_group].load_from_tag(mode='inference')

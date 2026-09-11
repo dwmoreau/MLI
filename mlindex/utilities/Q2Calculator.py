@@ -242,25 +242,3 @@ class Q2Calculator:
         l = self.hkl[:, 2]
         q2_ref = 4 / 3 * (h**2 + h * k + k**2) / a**2 + l**2 / c**2
         return q2_ref
-
-
-class PairwiseDifferenceCalculator(Q2Calculator):
-    def __init__(self, lattice_system, hkl_ref, tensorflow, q2_scaler):
-        super().__init__(lattice_system, hkl_ref, tensorflow, "xnn")
-        # The conversion to float prevents a failure if the q2_scaler is a numpy object
-        # This would occur if it was calculated from np.std() for example.
-        self.q2_scaler = float(q2_scaler)
-
-    def get_pairwise_differences(self, xnn, q2_scaled, return_q2_ref=False):
-        q2_ref = self.get_q2(xnn)
-        q2_ref_scaled = q2_ref / self.q2_scaler
-        # d_spacing_ref: n_entries x hkl_ref_length
-        # x: n_entries x n_peaks
-        # differences = n_entries x n_peaks x hkl_ref_length
-        q2_ref_scaled = self._expand_dims(q2_ref_scaled, axis=1)
-        q2_scaled = self._expand_dims(q2_scaled, axis=2)
-        pairwise_differences_scaled = q2_ref_scaled - q2_scaled
-        if return_q2_ref:
-            return pairwise_differences_scaled, q2_ref
-        else:
-            return pairwise_differences_scaled

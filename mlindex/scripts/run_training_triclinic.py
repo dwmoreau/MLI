@@ -92,14 +92,6 @@ if __name__ == '__main__':
         'batch_size': 128,
         'loss_type': 'log_cosh',
         'model_type': 'metric',
-        'calibration_params': {
-            'layers': 3,
-            'epsilon_pds': 0.1,
-            'epochs': 10,
-            'learning_rate': 0.0002,
-            'batch_size': 64,
-            'n_heads': 5,
-            },
         }
 
     integral_filter_params = {
