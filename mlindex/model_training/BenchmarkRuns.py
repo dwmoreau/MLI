@@ -609,12 +609,23 @@ def _hkl_reference(bravais_lattice, lattice_system):
 def merit_sidecar(pool_dir, bundles=None, bravais_lattices=None):
     """Score every stored candidate under every merit, beside the pool rather than inside it.
 
-    One pass per (bundle, lattice) shard, reading `xnn` back and rebuilding the lines each
-    candidate predicts. The merits are `FigureOfMerits.merit_set`, the same computation the
-    at-prune capture uses, so `M_sym` has one definition in this repository.
+    A merit has to be computed on exactly what the pipeline computed its M20 on, and two things
+    make that narrower than "the cell and the peak list":
+
+    * **The peak list is truncated to what the lattice system is fitted on** -- ten lines for
+      cubic, twenty for the rest. The entry table stores the full twenty.
+    * **The reference lines are the candidate's own extinction group's**, not the whole list.
+      `assign_extinction_group` picks the group that maximises M20 and the stored M20 is the one
+      with that group's absences removed. Scoring against the full list answers a different
+      question, and silently: the numbers are all finite and ordered.
+
+    Both are checked rather than trusted. The recomputed M20 must equal the stored M20 candidate
+    for candidate, and a mismatch raises -- a merit sidecar that disagrees with its own pool is
+    indistinguishable from a measurement once it is written.
     """
     from mlindex.utilities.FigureOfMerits import merit_set
     from mlindex.utilities.Q2Calculator import Q2Calculator
+    from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 
     pool_dir = Path(pool_dir)
     sidecar_dir = pool_dir / Benchmark.MERIT_SIDECAR
@@ -626,21 +637,31 @@ def merit_sidecar(pool_dir, bundles=None, bravais_lattices=None):
     for bundle in (bundles or Benchmark.available_bundles(pool_dir)):
         for lattice, path in Benchmark.candidate_shards(pool_dir, bundle, bravais_lattices):
             frame = pd.read_parquet(path, columns=list(Benchmark.CANDIDATE_KEY)
-                                    + ['lattice_system', 'xnn'])
+                                    + ['lattice_system', 'xnn', 'spacegroup', 'n_peaks', 'M20'])
             if frame.empty:
                 continue
             lattice_system = frame['lattice_system'].iloc[0]
-            calculator = Q2Calculator(
-                lattice_system=lattice_system, hkl=_hkl_reference(lattice, lattice_system),
-                tensorflow=False, representation='xnn')
+            n_peaks = int(frame['n_peaks'].iloc[0])
+            by_group = get_spacegroup_hkl_ref(_hkl_reference(lattice, lattice_system),
+                                              bravais_lattice=lattice)
+            calculators = {}
             columns = {name: np.empty(frame.shape[0]) for name in SIDECAR_MERITS}
-            for key, block in frame.groupby(['entry_id', 'condition_bundle'], sort=False):
-                q2_obs = peaks[key]
+            recomputed = np.empty(frame.shape[0])
+            for (entry_id, bundle_tag, spacegroup), block in frame.groupby(
+                    ['entry_id', 'condition_bundle', 'spacegroup'], sort=False):
+                if spacegroup not in calculators:
+                    calculators[spacegroup] = Q2Calculator(
+                        lattice_system=lattice_system, hkl=by_group[spacegroup],
+                        tensorflow=False, representation='xnn')
+                q2_obs = peaks[(entry_id, bundle_tag)][:n_peaks]
                 xnn = np.stack([np.asarray(row, dtype=np.float64) for row in block['xnn']])
-                merits = merit_set(q2_obs, calculator.get_q2(xnn))
+                merits = merit_set(q2_obs, calculators[spacegroup].get_q2(xnn))
                 positions = frame.index.get_indexer(block.index)
+                recomputed[positions] = merits['M20']
                 for name in SIDECAR_MERITS:
                     columns[name][positions] = merits[name]
+            _refuse_a_disagreeing_sidecar(recomputed, frame['M20'].to_numpy(dtype=np.float64),
+                                          bundle, lattice)
             sidecar = frame[list(Benchmark.CANDIDATE_KEY)].copy()
             for name in SIDECAR_MERITS:
                 sidecar[name] = columns[name]
@@ -648,3 +669,23 @@ def merit_sidecar(pool_dir, bundles=None, bravais_lattices=None):
     if not written:
         raise FileNotFoundError(f'No candidate shards to score under {pool_dir}.')
     return written
+
+
+def _refuse_a_disagreeing_sidecar(recomputed, stored, bundle, lattice):
+    """The merits must be computed on what the pipeline computed its own M20 on.
+
+    M20 is the one merit that exists on both sides, so recomputing it is a free check that the
+    peak list, the reference lines and the cell are all the ones the search used. Every other merit
+    in the sidecar rides on the same three, so if M20 agrees they are being asked the same
+    question.
+    """
+    difference = np.abs(recomputed - stored)
+    worst = float(np.nanmax(difference)) if difference.size else 0.0
+    if worst > 1e-6:
+        n_bad = int(np.count_nonzero(difference > 1e-6))
+        raise ValueError(
+            f'The merit sidecar for {bundle}/{lattice} disagrees with the pool it sits beside: '
+            f'{n_bad} of {difference.size} candidates recompute a different M20, worst '
+            f'{worst:.4g}. The merits are being computed on a different peak list, a different '
+            'reference list or a different cell from the one the search used, and every column '
+            'written here would be a plausible number answering the wrong question.')

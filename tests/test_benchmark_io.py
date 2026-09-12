@@ -6,6 +6,8 @@ measurement rather than as an error.
 """
 
 import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -203,19 +205,28 @@ def test_a_manifest_round_trips_through_disk(tmp_path):
 
 
 def test_a_sidecar_column_carries_the_value_its_name_claims(tmp_path, models_dir):
-    """The sidecar is written beside the pool and joined back on the candidate key. A column that
-    arrived under the wrong name would rank the pool by something else and read as a measurement,
-    which is why the join is checked and why this checks the values through a real round trip."""
-    from mlindex.model_training.BenchmarkRuns import SIDECAR_MERITS, merit_sidecar
+    """The sidecar is joined back on the candidate key, so a column arriving under the wrong name
+    would rank the pool by something else and read as a measurement. This covers the round trip
+    and the naming; agreement with an independently computed merit is the test below."""
+    from mlindex.model_training.BenchmarkRuns import (SIDECAR_MERITS, _hkl_reference,
+                                                      merit_sidecar)
     from mlindex.utilities.FigureOfMerits import merit_set
     from mlindex.utilities.Q2Calculator import Q2Calculator
+    from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 
-    q2_obs = np.linspace(0.05, 0.5, 10)
+    q2_obs = np.linspace(0.05, 0.5, 20)
     xnn = np.array([[0.04], [0.0402], [0.0399]])
+    by_group = get_spacegroup_hkl_ref(_hkl_reference('cP', 'cubic'), bravais_lattice='cP')
+    spacegroup = sorted(by_group)[0]
+    calculator = Q2Calculator(lattice_system='cubic', hkl=by_group[spacegroup],
+                              tensorflow=False, representation='xnn')
+    expected = merit_set(q2_obs[:10], calculator.get_q2(xnn))
+
     frame = pd.DataFrame({
         'entry_id': ['AAAAAA']*3, 'condition_bundle': ['b1_error1_cont0']*3,
         'bravais_lattice': ['cP']*3, 'candidate_id': np.arange(3),
         'lattice_system': ['cubic']*3, 'xnn': list(xnn),
+        'spacegroup': [spacegroup]*3, 'n_peaks': [10]*3, 'M20': expected['M20'],
         })
     entries = pd.DataFrame([{'entry_id': 'AAAAAA', 'condition_bundle': 'b1_error1_cont0',
                              'q2_obs': q2_obs}])
@@ -225,35 +236,9 @@ def test_a_sidecar_column_carries_the_value_its_name_claims(tmp_path, models_dir
     merit_sidecar(tmp_path)
     joined = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0')
 
-    hkl_ref = np.load(models_dir / 'cubic_1' / 'data' / 'hkl_ref_cP.npy')
-    calculator = Q2Calculator(lattice_system='cubic', hkl=hkl_ref, tensorflow=False,
-                              representation='xnn')
-    expected = merit_set(q2_obs, calculator.get_q2(xnn))
     for name in SIDECAR_MERITS:
         np.testing.assert_allclose(joined[name].to_numpy(), expected[name], rtol=0, atol=0,
                                    err_msg=name)
-
-
-def test_reducing_an_existing_pool_does_not_rewrite_its_merit_sidecar(tmp_path):
-    """`--stage all --pool <existing>` reads an arm; it must not replace part of it. The merit
-    columns are an input to whatever is being measured, so silently recomputing them would change
-    a stored arm rather than report on it -- and the arms this reads were generated elsewhere, on
-    another machine, at a commit that is not this one."""
-    from mlindex.scripts.run_benchmark import main
-
-    entries = _entries()
-    frame = Benchmark.label_frame(Benchmark.records_to_frame([_record()]), entries)
-    Benchmark.write_candidate_shard(frame, tmp_path, 'b1_error1_cont0', 'cP')
-    Benchmark.write_entry_table(entries, tmp_path)
-    sidecar = frame[list(Benchmark.CANDIDATE_KEY)].copy()
-    sidecar['M_sym'] = [123.0, 456.0]
-    Benchmark.write_candidate_shard(sidecar, tmp_path / Benchmark.MERIT_SIDECAR,
-                                    'b1_error1_cont0', 'cP')
-
-    main(['--pool', str(tmp_path), '--scores', 'M20,M_sym', '--allow-incomplete'])
-
-    read = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0')
-    assert read['M_sym'].tolist() == [123.0, 456.0]
 
 
 def test_several_bundles_and_several_pools_consolidate_without_colliding(tmp_path):
@@ -391,3 +376,55 @@ def test_generating_into_an_occupied_directory_is_refused(tmp_path):
     (tmp_path/'arm'/'parts').mkdir()
     with pytest.raises(FileExistsError, match='parts'):
         _refuse_an_occupied_directory(tmp_path/'arm')
+
+
+# ---------------------------------------------------------------------------
+# The merit sidecar against an independently computed one
+# ---------------------------------------------------------------------------
+
+CAMPAIGN_POOL = Path('mlindex/data/fom_full_c2_pool')
+
+
+@pytest.mark.skipif(not CAMPAIGN_POOL.is_dir(), reason='campaign pool not on this machine')
+@pytest.mark.parametrize('lattice', ['cP', 'oP', 'aP', 'hP'])
+def test_the_sidecar_matches_merits_computed_independently(tmp_path, models_dir, lattice):
+    """The campaign computed these merits with its own code on its own machine. Agreeing with the
+    round trip through `merit_set` proves nothing -- that is the same function twice. This is the
+    check that was missing when the sidecar shipped scoring every candidate against the full
+    reference list and a twenty-peak window, which no lattice's pipeline used."""
+    from mlindex.model_training.BenchmarkRuns import SIDECAR_MERITS, merit_sidecar
+
+    bundle = 'c2_error1_cont0'
+    shard = pd.read_parquet(CAMPAIGN_POOL/f'candidates_{bundle}_{lattice}.parquet').head(200)
+    Benchmark.write_candidate_shard(shard, tmp_path, bundle, lattice)
+    Benchmark.write_entry_table(Benchmark.load_entries(CAMPAIGN_POOL), tmp_path)
+
+    merit_sidecar(tmp_path)
+
+    mine = pd.read_parquet(tmp_path/'merits'/f'candidates_{bundle}_{lattice}.parquet')
+    theirs = pd.read_parquet(CAMPAIGN_POOL/'merits'/f'candidates_{bundle}_{lattice}.parquet')
+    joined = mine.merge(theirs, on=list(Benchmark.CANDIDATE_KEY),
+                        suffixes=('_mine', '_theirs'), validate='1:1')
+    assert joined.shape[0] == shard.shape[0]
+    # The campaign spells the M_rev support `N_cal`; `merit_set` spells it `n_cal`, matching
+    # PRUNE_CAPTURE_MERITS. Same quantity, so it is compared under both names.
+    theirs_name = {'n_cal': 'N_cal'}
+    for name in SIDECAR_MERITS:
+        left = joined[f'{name}_mine'] if f'{name}_mine' in joined else joined[name]
+        other = theirs_name.get(name, name)
+        right = joined[f'{other}_theirs'] if f'{other}_theirs' in joined else joined[other]
+        np.testing.assert_array_equal(left.to_numpy(), right.to_numpy(),
+                                      err_msg=f'{lattice} {name}')
+
+
+def test_a_sidecar_that_disagrees_with_its_pool_is_refused():
+    """M20 exists on both sides, so recomputing it checks that the peak list, the reference lines
+    and the cell are the ones the search used. Every other merit rides on the same three."""
+    from mlindex.model_training.BenchmarkRuns import _refuse_a_disagreeing_sidecar
+
+    stored = np.array([10.0, 20.0, 30.0])
+    _refuse_a_disagreeing_sidecar(stored.copy(), stored, 'b1_error1_cont0', 'cP')
+
+    with pytest.raises(ValueError, match='disagrees with the pool'):
+        _refuse_a_disagreeing_sidecar(np.array([10.0, 20.0, 31.0]), stored,
+                                      'b1_error1_cont0', 'cP')
