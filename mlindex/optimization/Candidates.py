@@ -4,6 +4,7 @@ import numpy as np
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_assignment_posterior
+from mlindex.utilities.FigureOfMerits import get_M20_likelihood_from_xnn
 from mlindex.utilities.FigureOfMerits import merit_set
 from mlindex.utilities.MillerIndexAssignment import vectorized_subsampling
 from mlindex.utilities.numba_functions import fast_assign
@@ -31,6 +32,9 @@ from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 # the only thing identifying an entry. `n_cal` is last and is not a merit; it is the support
 # `M_rev`'s floor tested, without which a stored 0.0 cannot be told from a floored one.
 PRUNE_CAPTURE_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap', 'n_cal')
+
+
+PEAK_FILTER_STATISTIC = 'rho'  # throwaway P-Q-007 arm
 
 
 class Candidates:
@@ -267,8 +271,13 @@ class Candidates:
 
     def refine_cell(self):
         # This updates the unit cell only with the peaks assigned at > threshold probability.
-        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
-        probability = get_assignment_posterior(self.q2_obs, q2_ref_calc, self.lattice_system)
+        _, probability, _ = get_M20_likelihood_from_xnn(
+            q2_obs=self.q2_obs,
+            xnn=self.best_xnn,
+            hkl=self.best_hkl,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            )
         indexed_peaks = probability > self.assignment_threshold
         n_indexed_peaks = np.sum(indexed_peaks, axis=1)
         unique_n_indexed_peaks = np.unique(n_indexed_peaks)
@@ -618,7 +627,13 @@ class Candidates:
             q2_ref_calc = target_function_zp.apply_zeropoint(
                 self.best_zeropoint, self.wavelength, q2_ref_calc
                 )
-        probability = get_assignment_posterior(self.q2_obs, q2_ref_calc, self.lattice_system)
+        _, probability, _ = get_M20_likelihood_from_xnn(
+            q2_obs=self.q2_obs,
+            xnn=self.best_xnn,
+            hkl=self.best_hkl,
+            lattice_system=self.lattice_system,
+            bravais_lattice=self.bravais_lattice,
+            )
         self.n_indexed = np.sum(
             probability > self.assignment_threshold,
             axis=1, dtype=int
