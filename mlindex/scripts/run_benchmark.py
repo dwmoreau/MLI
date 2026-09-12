@@ -77,7 +77,8 @@ def build_parser():
     parser.add_argument('--out-dir', default=None, metavar='PATH',
                         help='Where to write the tables (default: print only).')
     parser.add_argument('--stage', default='all',
-                        choices=('all', 'generate', 'sidecars', 'reduce', 'report', 'floor'),
+                        choices=('all', 'generate', 'sidecars', 'reduce', 'report', 'floor',
+                                 'contrast'),
                         help='Which part to run (default: all, which is the whole chain). The '
                              'stages exist because a cluster needs them as separate jobs with '
                              'different walltimes.')
@@ -100,6 +101,19 @@ def build_parser():
                              'arm of a comparison sees the same ones.')
     parser.add_argument('--entry-seed', type=int, default=12345, metavar='N',
                         help='Seed for --limit-entries (default: 12345).')
+    parser.add_argument('--vary', default=None, metavar='A,B',
+                        help='Fields the arms of a comparison differ in ON PURPOSE, so the '
+                             'identity check permits them: e.g. commit for a before/after pair, '
+                             'pool_size for a question about splitting a lattice. A floor varies '
+                             'search_seed and needs nothing here. Everything not named must match, '
+                             'and an unknown field is refused rather than ignored.')
+    parser.add_argument('--reference', default=None, metavar='NAME',
+                        help='For --stage contrast: the arm the others are measured against, '
+                             'named as in --arm (default: the first --arm given).')
+    parser.add_argument('--floor-table', default=None, metavar='PATH',
+                        help='For --stage contrast: a floor.csv this harness wrote, so the '
+                             'difference is reported in multiples of the measured run-to-run '
+                             'floor rather than in percentage points.')
     parser.add_argument('--allow-incomplete', action='store_true',
                         help='Read an arm with no completion stamp, and skip the check that the '
                              'arms of a floor differ only in the search seed. Off by default: a '
@@ -251,17 +265,25 @@ def main(argv=None):
     if args.stage in ('generate', 'sidecars'):
         return 0
 
-    if args.stage == 'floor':
+    if args.stage in ('floor', 'contrast'):
         arms = _parse_arms(args.arm)
         if len(arms) < 2:
-            raise SystemExit('--stage floor needs at least two --arm NAME=PATH values.')
+            raise SystemExit(f'--stage {args.stage} needs at least two --arm NAME=PATH values.')
+        varied = tuple(_split(args.vary))
+        unknown = [name for name in varied if name not in Benchmark.IDENTITY_FIELDS]
+        if unknown:
+            raise SystemExit(
+                f'--vary names {unknown}, which the identity check does not compare, so naming '
+                f'them permits nothing. It compares {list(Benchmark.IDENTITY_FIELDS)}.')
+        # A floor varies the search seed by definition; a contrast varies whatever --vary names.
+        allow = ('search_seed',) if args.stage == 'floor' else varied
         if not args.allow_incomplete:
             # The arms of a floor must differ in the search seed and in nothing else. Nothing
             # downstream can tell a seed-to-seed spread from a machine-to-machine or
             # commit-to-commit one, so it is checked here rather than reported.
             Benchmark.manifest_identity({name: Benchmark.load_manifest(path)
                                          for name, path in arms},
-                                        allow=('search_seed',))
+                                        allow=allow)
         arm_reductions = {}
         truth = None
         for name, path in arms:
@@ -274,6 +296,22 @@ def main(argv=None):
                 truth = entries.drop_duplicates('entry_id').set_index(
                     'entry_id')['bravais_lattice_true']
             print(f'reduced arm {name}')
+        if args.stage == 'contrast':
+            floors = None
+            if args.floor_table:
+                floors = runs.floors_from_table(
+                    pd.read_csv(args.floor_table, float_precision='round_trip'),
+                    score=scores[0])
+            reference = args.reference or arms[0][0]
+            table = pd.concat(
+                [runs.arm_contrast(arm_reductions, score, reference, top_n=args.top_n,
+                                   depth=args.depth, lattices=truth, floors=floors)
+                 for score in scores],
+                ignore_index=True)
+            print(table.loc[table['scope'] == 'aggregate'].to_string(index=False))
+            _write(args.out_dir, 'arm_contrast.csv', table)
+            return 0
+
         table = pd.concat(
             [runs.floor_from_arms(arm_reductions, score, args.baseline, top_n=args.top_n,
                                   depth=args.depth, lattices=truth)

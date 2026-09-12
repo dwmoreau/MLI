@@ -428,3 +428,77 @@ def test_a_sidecar_that_disagrees_with_its_pool_is_refused():
     with pytest.raises(ValueError, match='disagrees with the pool'):
         _refuse_a_disagreeing_sidecar(np.array([10.0, 20.0, 31.0]), stored,
                                       'b1_error1_cont0', 'cP')
+
+
+# ---------------------------------------------------------------------------
+# Arm against arm
+# ---------------------------------------------------------------------------
+
+
+def test_an_arm_contrast_pairs_two_arms_under_one_score():
+    """The comparison every session after P04b needs: arm A is the code before a change, arm B
+    after it. `contrast_table` compares two scores inside one arm and `floor_from_arms` compares a
+    score-contrast across arms; neither answers this."""
+    from mlindex.model_training.BenchmarkRuns import arm_contrast
+
+    before = _floor_reduction([True]*4 + [False]*4)
+    after = _floor_reduction([True]*7 + [False])
+    table = arm_contrast({'before': before, 'after': after}, 'M20', 'before')
+    row = table[(table.scope == 'aggregate') & (table.metric == 'top1')].iloc[0]
+
+    assert row['reference_pct'] == 50.0
+    assert row['arm_pct'] == 87.5
+    assert row['delta_pp'] == pytest.approx(37.5)
+    assert row['n_discordant'] == 3
+
+
+def test_a_contrast_is_reported_in_multiples_of_the_measured_floor():
+    """A gate is read in standard errors of the run-to-run floor, never in percentage points. If
+    no floor is supplied the column is NaN rather than a number that looks like one."""
+    from mlindex.model_training.BenchmarkRuns import arm_contrast, floors_from_table
+
+    arms = {'before': _floor_reduction([True]*4 + [False]*4),
+            'after': _floor_reduction([True]*7 + [False])}
+    floor_table = pd.DataFrame([{'score': 'M20', 'scope': 'aggregate', 'floor_pp': 2.5}])
+
+    with_floor = arm_contrast(arms, 'M20', 'before',
+                              floors=floors_from_table(floor_table, score='M20'))
+    row = with_floor[(with_floor.scope == 'aggregate') & (with_floor.metric == 'top1')].iloc[0]
+    assert row['standard_errors'] == pytest.approx(37.5/2.5)
+
+    without = arm_contrast(arms, 'M20', 'before')
+    assert np.isnan(without[without.metric == 'top1'].iloc[0]['standard_errors'])
+
+
+def test_an_arm_contrast_needs_a_reference_that_exists_and_something_to_compare():
+    from mlindex.model_training.BenchmarkRuns import arm_contrast
+
+    arms = {'before': _floor_reduction([True, False])}
+    with pytest.raises(ValueError, match='needs two arms'):
+        arm_contrast(arms, 'M20', 'before')
+    with pytest.raises(ValueError, match='No arm named'):
+        arm_contrast({'a': arms['before'], 'b': arms['before']}, 'M20', 'missing')
+
+
+def test_vary_names_a_field_the_identity_check_actually_compares(tmp_path):
+    """Naming a field that is not compared permits nothing, so it is refused rather than accepted
+    as though it had widened anything."""
+    from mlindex.scripts.run_benchmark import main
+
+    for name in ('a', 'b'):
+        directory = tmp_path/name
+        entries = _entries()
+        frame = Benchmark.label_frame(Benchmark.records_to_frame([_record()]), entries)
+        Benchmark.write_candidate_shard(frame, directory, 'b1_error1_cont0', 'cP')
+        Benchmark.write_entry_table(entries, directory)
+        Benchmark.write_manifest(directory, **_manifest(commit=name))
+        Benchmark.stamp_complete(directory, n_entries=1)
+
+    with pytest.raises(SystemExit, match='does not compare'):
+        main(['--stage', 'contrast', '--arm', f'a={tmp_path/"a"}', '--arm', f'b={tmp_path/"b"}',
+              '--scores', 'M20', '--vary', 'wallclock'])
+
+    # `commit` IS compared, so naming it permits the pair the floor stage would refuse.
+    main(['--stage', 'contrast', '--arm', f'a={tmp_path/"a"}', '--arm', f'b={tmp_path/"b"}',
+          '--scores', 'M20', '--vary', 'commit', '--out-dir', str(tmp_path/'out')])
+    assert (tmp_path/'out'/'arm_contrast.csv').is_file()

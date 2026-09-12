@@ -480,6 +480,76 @@ def contrast_table(reductions, baseline, top_n=10, depth='all'):
     return pd.DataFrame(rows)
 
 
+def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattices=None,
+                 floors=None):
+    """One arm's outcome against another's, under the same score, paired on the pattern.
+
+    This is the comparison every session after P04b actually needs: arm A is the code before a
+    change and arm B after it, and the question is whether B finds and ranks the correct cell more
+    often. `contrast_table` answers a different one -- two scores inside one arm -- and
+    `floor_from_arms` a third, the spread of a score-contrast across arms that differ only by seed.
+
+    `floors` maps a scope to that scope's measured run-to-run floor, and turns the difference into
+    the multiple of it that a gate is actually read in. Without it the size is reported in
+    percentage points and the caller is told, rather than left to assume the points mean something.
+
+    Returns one row per metric per scope, aggregate first.
+    """
+    if reference not in arm_reductions:
+        raise ValueError(f'No arm named {reference!r} to compare against; '
+                         f'have {sorted(arm_reductions)}.')
+    others = [name for name in arm_reductions if name != reference]
+    if not others:
+        raise ValueError('An arm contrast needs two arms.')
+
+    base = metrics.derive_flags(arm_reductions[reference][score], depth=depth, top_n=top_n)
+    scopes = {'aggregate': None}
+    if lattices is not None:
+        for lattice in sorted(set(pd.Series(lattices).dropna())):
+            scopes[lattice] = lattice
+
+    rows = []
+    for name in others:
+        arm = metrics.derive_flags(arm_reductions[name][score], depth=depth, top_n=top_n)
+        merged = base[['entry_id', 'condition_bundle', 'found', 'top10', 'top1']].merge(
+            arm[['entry_id', 'condition_bundle', 'found', 'top10', 'top1']],
+            on=['entry_id', 'condition_bundle'], suffixes=('_base', '_arm'), validate='1:1')
+        if lattices is not None:
+            merged['lattice'] = [pd.Series(lattices).get(entry)
+                                 for entry in merged['entry_id']]
+        for scope, lattice in scopes.items():
+            block = merged if lattice is None else merged.loc[merged['lattice'] == lattice]
+            if block.empty:
+                continue
+            for metric in ('found', 'top10', 'top1'):
+                left = block[f'{metric}_base'].to_numpy()
+                right = block[f'{metric}_arm'].to_numpy()
+                test = metrics.mcnemar(left, right)
+                low, high = metrics.paired_delta_ci(
+                    left.astype(float), right.astype(float),
+                    block['entry_id'].to_numpy())
+                floor = (floors or {}).get(scope)
+                rows.append({
+                    'arm': name, 'reference': reference, 'score': score, 'scope': scope,
+                    'metric': metric, 'n_pairs': test['n_pairs'],
+                    'reference_pct': 100.0*left.mean(), 'arm_pct': 100.0*right.mean(),
+                    'delta_pp': 100.0*test['delta'],
+                    'ci_low_pp': 100.0*low, 'ci_high_pp': 100.0*high,
+                    'n_discordant': test['n_discordant'], 'p_value': test['p_value'],
+                    'floor_pp': floor,
+                    'standard_errors': (100.0*test['delta']/floor) if floor else float('nan'),
+                    })
+    return pd.DataFrame(rows)
+
+
+def floors_from_table(table, score=None):
+    """{scope: floor_pp} from a `floor.csv` this harness wrote, for reading a contrast against."""
+    if score is not None:
+        table = table.loc[table['score'] == score]
+    return {row.scope: float(row.floor_pp) for row in table.itertuples()
+            if np.isfinite(row.floor_pp)}
+
+
 def floor_from_arms(arm_reductions, score, baseline, top_n=10, depth='all', lattices=None):
     """The run-to-run floor: how much the answer moves between arms that differ only in the seed.
 

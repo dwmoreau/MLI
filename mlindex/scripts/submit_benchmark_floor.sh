@@ -11,7 +11,7 @@
 #   export MLI_OUT=$SCRATCH/benchmark_p04b                     # where the arms were written
 #   sbatch mlindex/scripts/submit_benchmark_floor.sh
 #
-#   MLI_CAMPAIGN=fom_production docs/sync_record.sh pull-artifacts   # from the laptop, afterwards
+#   docs/sync_record.sh pull-artifacts 'P04b_arms'                   # from the laptop, afterwards
 #
 # WHY IT RUNS HERE AND NOT ON THE LAPTOP. The floor reads every candidate of every arm -- about
 # 73 GB across the eight -- and returns an aggregate and fourteen per-lattice numbers, which is
@@ -46,7 +46,11 @@ export NUMEXPR_NUM_THREADS=1
 : "${MLI_PYTHON:?set MLI_PYTHON to the interpreter that has mlindex installed}"
 : "${MLI_REPO:?set MLI_REPO to the checkout to run}"
 : "${MLI_OUT:?set MLI_OUT to the directory the arms were written to}"
-MLI_RESULTS="${MLI_RESULTS:-$MLI_OUT/results}"
+# Written where `docs/sync_record.sh pull-artifacts` already looks, so pulling them needs no
+# override. The first run wrote to $MLI_OUT/results instead, pull-artifacts looked at its own
+# default and found nothing, and the two routes then left a stale copy beside a fresh one --
+# byte-identical numbers were what gave it away. One destination.
+MLI_RESULTS="${MLI_RESULTS:-$SCRATCH/fom_production/artifacts/P04b_arms}"
 MLI_SEARCH_SEEDS=(${MLI_SEARCH_SEEDS:-12345 202 303 404})
 MLI_SCORES="${MLI_SCORES:-M20,M_sym}"
 
