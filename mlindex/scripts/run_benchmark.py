@@ -42,6 +42,7 @@ rather than reported.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -178,6 +179,48 @@ def _parse_arms(values):
     return arms
 
 
+def load_arm(path, scores, **kwargs):
+    """One arm's per-entry outcomes, from its pool or from tables already reduced from it.
+
+    `path` is either a pool directory, which is read and reduced, or the prefix of per-entry tables
+    a previous `--stage reduce` wrote -- `.../general_per_entry/general_seed12345`. The second form
+    is what lets a comparison run anywhere: reducing a pool reads every candidate and must happen
+    where the pool is, but contrasting two arms is arithmetic over a few thousand rows.
+
+    The arm's manifest travels with the tables, so an arm read this way is still identity-checked.
+    """
+    path = Path(path)
+    if (path / Benchmark.MANIFEST_NAME).is_file():
+        return reduce_arm(path, scores, **kwargs)
+
+    tables, missing = {}, []
+    for score in scores:
+        table = path.with_name(f'{path.name}_per_entry_{score}.csv')
+        if not table.is_file():
+            missing.append(table.name)
+            continue
+        tables[score] = pd.read_csv(table, float_precision='round_trip')
+    if missing:
+        raise FileNotFoundError(
+            f'{path} is neither a pool (no {Benchmark.MANIFEST_NAME}) nor a set of per-entry '
+            f'tables: {missing} not found beside it.')
+    entry_columns = [name for name in ENTRY_COLUMNS if name in next(iter(tables.values())).columns]
+    entries = next(iter(tables.values()))[entry_columns].drop_duplicates()
+    return tables, entries
+
+
+def arm_manifest(path):
+    """The manifest of an arm given as a pool or as reduced tables, or None if it has neither."""
+    path = Path(path)
+    if (path / Benchmark.MANIFEST_NAME).is_file():
+        return Benchmark.load_manifest(path)
+    beside = path.with_name(f'{path.name}_manifest.json')
+    if beside.is_file():
+        with open(beside, encoding='utf-8') as handle:
+            return json.load(handle)
+    return None
+
+
 def reduce_arm(pool_dir, scores, bundles=None, bravais_lattices=None, limit_entries=None,
                entry_seed=12345, require_complete=True):
     """Reduce one pool to per-pattern outcomes, one row per (crystal, condition) per score."""
@@ -278,24 +321,29 @@ def main(argv=None):
         # A floor varies the search seed by definition; a contrast varies whatever --vary names.
         allow = ('search_seed',) if args.stage == 'floor' else varied
         if not args.allow_incomplete:
-            # The arms of a floor must differ in the search seed and in nothing else. Nothing
-            # downstream can tell a seed-to-seed spread from a machine-to-machine or
-            # commit-to-commit one, so it is checked here rather than reported.
-            Benchmark.manifest_identity({name: Benchmark.load_manifest(path)
-                                         for name, path in arms},
-                                        allow=allow)
+            # The arms of a comparison must differ only in what --vary names. Nothing downstream
+            # can tell a seed-to-seed spread from a machine-to-machine or commit-to-commit one,
+            # so it is checked here rather than reported.
+            manifests = {name: arm_manifest(path) for name, path in arms}
+            unknown = [name for name, manifest in manifests.items() if manifest is None]
+            if unknown:
+                raise SystemExit(
+                    f'No manifest for arm(s) {unknown}. An arm read from reduced tables carries '
+                    'its manifest beside them; one written before that did not, and pairing it '
+                    'would compare arms nothing has checked are comparable.')
+            Benchmark.manifest_identity(manifests, allow=allow)
         arm_reductions = {}
         truth = None
         for name, path in arms:
-            reductions, entries = reduce_arm(
+            reductions, entries = load_arm(
                 path, scores, bundles=bundles, bravais_lattices=lattices,
                 limit_entries=args.limit_entries, entry_seed=args.entry_seed,
                 require_complete=not args.allow_incomplete)
             arm_reductions[name] = reductions
-            if truth is None:
+            if truth is None and 'bravais_lattice_true' in entries.columns:
                 truth = entries.drop_duplicates('entry_id').set_index(
                     'entry_id')['bravais_lattice_true']
-            print(f'reduced arm {name}')
+            print(f'loaded arm {name}')
         if args.stage == 'contrast':
             floors = None
             if args.floor_table:
@@ -331,8 +379,21 @@ def main(argv=None):
             require_complete=not args.allow_incomplete)
         tag = Path(pool).name
         if args.stage in ('all', 'reduce'):
+            truth = entries.drop_duplicates('entry_id').set_index(
+                'entry_id')['bravais_lattice_true']
             for name, per_entry in reductions.items():
-                _write(args.out_dir, f'{tag}_per_entry_{name}.csv', per_entry)
+                # The true lattice rides along so a per-lattice contrast can be computed from these
+                # tables alone, without the pool they came from.
+                carried = per_entry.copy()
+                carried['bravais_lattice_true'] = [truth.get(e) for e in carried['entry_id']]
+                _write(args.out_dir, f'{tag}_per_entry_{name}.csv', carried)
+            manifest = Benchmark.load_manifest(pool)
+            if args.out_dir:
+                path = Path(args.out_dir) / f'{tag}_manifest.json'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as handle:
+                    json.dump(manifest, handle, indent=2, sort_keys=True)
+                print(f'wrote {path}')
         if args.stage in ('all', 'report'):
             tables = runs.report_arm(reductions, entries, top_n=args.top_n,
                                      depth=args.depth)

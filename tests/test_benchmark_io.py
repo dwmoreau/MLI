@@ -502,3 +502,50 @@ def test_vary_names_a_field_the_identity_check_actually_compares(tmp_path):
     main(['--stage', 'contrast', '--arm', f'a={tmp_path/"a"}', '--arm', f'b={tmp_path/"b"}',
           '--scores', 'M20', '--vary', 'commit', '--out-dir', str(tmp_path/'out')])
     assert (tmp_path/'out'/'arm_contrast.csv').is_file()
+
+
+def test_an_arm_can_be_read_from_reduced_tables_and_is_still_identity_checked(tmp_path):
+    """Reducing a pool reads every candidate and must run where the pool is; contrasting two arms
+    is arithmetic over a few thousand rows and should run anywhere. The manifest travels with the
+    tables so the second form is still checked for comparability."""
+    from mlindex.scripts.run_benchmark import main, load_arm, arm_manifest
+
+    entries = _entries()
+    pool = tmp_path/'pool'
+    frame = Benchmark.label_frame(Benchmark.records_to_frame([_record()]), entries)
+    Benchmark.write_candidate_shard(frame, pool, 'b1_error1_cont0', 'cP')
+    Benchmark.write_entry_table(entries, pool)
+    Benchmark.write_manifest(pool, **_manifest())
+    Benchmark.stamp_complete(pool, n_entries=1)
+
+    main(['--stage', 'reduce', '--pool', str(pool), '--scores', 'M20',
+          '--out-dir', str(tmp_path/'reduced')])
+
+    prefix = tmp_path/'reduced'/'pool'
+    assert (tmp_path/'reduced'/'pool_manifest.json').is_file()
+    assert arm_manifest(prefix)['commit'] == _manifest()['commit']
+
+    from_pool, _ = load_arm(pool, ['M20'])
+    from_tables, entries_back = load_arm(prefix, ['M20'])
+    pd.testing.assert_frame_equal(
+        from_pool['M20'].reset_index(drop=True),
+        from_tables['M20'][from_pool['M20'].columns].reset_index(drop=True))
+    # The true lattice rides along, so a per-lattice contrast works without the pool.
+    assert 'bravais_lattice_true' in entries_back.columns
+
+
+def test_an_arm_with_no_manifest_beside_its_tables_is_refused(tmp_path):
+    """Tables written before the manifest travelled with them cannot be checked for comparability,
+    and pairing them would compare arms nothing has verified are comparable."""
+    from mlindex.scripts.run_benchmark import main
+
+    (tmp_path/'a').mkdir()
+    for name in ('a', 'b'):
+        pd.DataFrame({'entry_id': ['C0'], 'condition_bundle': ['b1_error1_cont0'],
+                      'rank_best_correct_all': [0], 'has_correct_all': [True],
+                      'n_candidates_all': [5]}).to_csv(
+            tmp_path/'a'/f'{name}_per_entry_M20.csv', index=False)
+
+    with pytest.raises(SystemExit, match='No manifest for arm'):
+        main(['--stage', 'contrast', '--arm', f'a={tmp_path/"a"/"a"}',
+              '--arm', f'b={tmp_path/"a"/"b"}', '--scores', 'M20', '--vary', 'commit'])
