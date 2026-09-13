@@ -537,3 +537,43 @@ def test_the_xnn_component_map_matches_the_hkl_design_matrix():
     for lattice_system, pairs in XNN_AXIS_PAIRS.items():
         design = get_hkl_matrix(hkl, lattice_system)
         assert design.shape[-1] == len(pairs), lattice_system
+
+
+# ---------------------------------------------------------------------------
+# Peak-list digests
+# ---------------------------------------------------------------------------
+
+
+def test_peak_list_bytes_are_the_same_for_any_memory_layout():
+    """The search keys its generator on these bytes and the benchmark joins shards on their
+    digest. Both are compared across machines and across processes, so the bytes must depend on
+    the values alone -- not on dtype, stride or byte order."""
+    from mlindex.utilities.Digests import peak_list_bytes
+
+    values = [0.05, 0.1, 0.15, 0.2]
+    contiguous = np.array(values, dtype=np.float64)
+    strided = np.array([[v, np.nan] for v in values], dtype=np.float64)[:, 0]
+    big_endian = np.array(values, dtype='>f8')
+
+    assert peak_list_bytes(strided) == peak_list_bytes(contiguous)
+    assert peak_list_bytes(big_endian) == peak_list_bytes(contiguous)
+    assert peak_list_bytes(values) == peak_list_bytes(contiguous)
+
+
+def test_q2_digest_is_stable_across_processes():
+    """`hash()` is salted per process, so a digest built on it would differ on every run and a
+    mis-joined shard would look like a fresh pattern. This value is pinned."""
+    from mlindex.utilities.Digests import q2_digest
+
+    digest = q2_digest(np.array([0.05, 0.1, 0.15, 0.2]))
+    assert digest == '097ad568deb92441'
+    assert len(digest) == 16
+
+
+def test_q2_digest_separates_peak_lists_that_differ_in_one_line():
+    from mlindex.utilities.Digests import q2_digest
+
+    base = np.array([0.05, 0.1, 0.15, 0.2])
+    moved = base.copy()
+    moved[2] += 1e-9
+    assert q2_digest(base) != q2_digest(moved)
