@@ -7,7 +7,13 @@ import sklearn.ensemble
 from sklearn.model_selection import GridSearchCV
 
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+from mlindex.utilities.FigureOfMerits import get_assignment_posterior
+from mlindex.utilities.FigureOfMerits import get_assignment_sigma
+from mlindex.utilities.FigureOfMerits import get_delta_dewolff61
 from mlindex.utilities.FigureOfMerits import get_M20_likelihood
+from mlindex.utilities.FigureOfMerits import get_n_dewolff61
+from mlindex.utilities.FigureOfMerits import get_zone_dominance
+from mlindex.utilities.FigureOfMerits import merit_set
 from mlindex.utilities.IOManagers import read_params
 from mlindex.utilities.IOManagers import write_params
 from mlindex.utilities.IOManagers import SKLearnManager
@@ -19,6 +25,116 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
+
+
+# RESEARCH CODE THAT NEEDS TO BE DELETED at P07. P06 screens which inputs the template regressor
+# reads and P07 refits the chosen set; once those regressors ship, TEMPLATE_INPUT_SETS, the
+# 'template_inputs' setting and the 'rho' family are removed, and get_M20_likelihood with them.
+#
+# An input set is an ordered tuple of feature families, and its columns appear in that order.
+TEMPLATE_INPUT_SETS = {
+    'rho': ('rho', 'line_count'),
+    'rho_sigma': ('rho', 'line_count', 'log_sigma'),
+    'posterior_sigma': ('posterior', 'line_count', 'log_sigma'),
+    'merits': ('posterior', 'line_count', 'log_sigma', 'merits'),
+    'merits_structure': ('posterior', 'line_count', 'log_sigma', 'merits', 'structure'),
+    'merits_structure_context': (
+        'posterior', 'line_count', 'log_sigma', 'merits', 'structure', 'context'),
+    'scalars_only': ('line_count', 'log_sigma', 'merits', 'structure', 'context'),
+    }
+MERIT_NAMES = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap', 'n_cal')
+STRUCTURE_NAMES = ('log_volume', 'zone_dominance', 'n_dewolff61', 'delta_dewolff61')
+# Each context feature is a merit's distance from its best value over the pattern's template
+# cells: the largest M20 and M_sym, the smallest n_over and max_gap.
+CONTEXT_MERITS = (('M20', np.max), ('M_sym', np.max), ('n_over', np.min), ('max_gap', np.min))
+
+
+def check_input_set(input_set):
+    if input_set not in TEMPLATE_INPUT_SETS:
+        raise ValueError(
+            f'Unknown template input set {input_set!r}; known: {sorted(TEMPLATE_INPUT_SETS)}')
+    return input_set
+
+
+def family_width(family, n_peaks_calibration):
+    widths = {
+        'rho': n_peaks_calibration,
+        'posterior': n_peaks_calibration,
+        'line_count': 2,
+        'log_sigma': 1,
+        'merits': len(MERIT_NAMES),
+        'structure': len(STRUCTURE_NAMES),
+        'context': len(CONTEXT_MERITS),
+        }
+    return widths[family]
+
+
+def n_template_features(template_params):
+    """The regressor's input width under `template_params`' input set."""
+    families = TEMPLATE_INPUT_SETS[check_input_set(template_params['template_inputs'])]
+    return sum(family_width(family, template_params['n_peaks_calibration']) for family in families)
+
+
+def template_features(families, q2_obs, xnn, q2_calc, q2_ref_calc, lattice_system, bravais_lattice):
+    """Each requested feature family for a set of template cells, as (n_cells, width) arrays.
+
+    `q2_obs` is the calibration peak list, `q2_calc` the lines the templates assigned to those
+    peaks, and `q2_ref_calc` every reference line of each cell. A computation shared by several
+    families runs once: sigma and the posterior come from one nearest-line scan, and the merits
+    and their context from one `merit_set` call.
+    """
+    families = set(families)
+    features = {}
+    if families & {'rho', 'structure'}:
+        reciprocal_volume = get_unit_cell_volume(get_reciprocal_unit_cell_from_xnn(
+            xnn, partial_unit_cell=True, lattice_system=lattice_system
+            ), partial_unit_cell=True, lattice_system=lattice_system)
+    if 'rho' in families:
+        _, features['rho'], _ = get_M20_likelihood(
+            q2_obs=q2_obs,
+            q2_calc=q2_calc,
+            bravais_lattice=bravais_lattice,
+            reciprocal_volume=reciprocal_volume
+            )
+    if 'line_count' in families:
+        # How many reference lines fall below the highest assigned line, and that line.
+        q2_calc_max = q2_calc.max(axis=1)
+        N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
+        features['line_count'] = np.stack((N_pred, q2_calc_max), axis=1)
+    if families & {'posterior', 'log_sigma'}:
+        sigma, d1 = get_assignment_sigma(q2_obs, q2_ref_calc, lattice_system)
+        if 'posterior' in families:
+            features['posterior'] = get_assignment_posterior(
+                q2_obs, q2_ref_calc, lattice_system, sigma=sigma, d1=d1)
+        if 'log_sigma' in families:
+            features['log_sigma'] = np.log(sigma)[:, np.newaxis]
+    if families & {'merits', 'context'}:
+        merits = merit_set(q2_obs, q2_ref_calc)
+        if 'merits' in families:
+            features['merits'] = np.stack([merits[name] for name in MERIT_NAMES], axis=1)
+        if 'context' in families:
+            features['context'] = np.stack(
+                [merits[name] - best(merits[name]) for name, best in CONTEXT_MERITS], axis=1)
+    if 'structure' in families:
+        # de Wolff's expected line count and discrepancy are evaluated at the last peak.
+        q2_last = q2_obs[-1:]
+        features['structure'] = np.stack((
+            -np.log(reciprocal_volume),
+            get_zone_dominance(xnn, lattice_system),
+            get_n_dewolff61(q2_last, xnn, lattice_system, bravais_lattice)[:, 0],
+            get_delta_dewolff61(q2_last, xnn, lattice_system, bravais_lattice)[:, 0],
+            ), axis=1)
+    return features
+
+
+def regressor_inputs(features, input_set):
+    """The input set's families side by side, in float32.
+
+    float32 is what makes the ONNX graph and the sklearn model return the same predictions.
+    """
+    return np.concatenate(
+        [features[family] for family in TEMPLATE_INPUT_SETS[input_set]], axis=1
+        ).astype(np.float32)
 
 
 class MITemplates:
@@ -55,10 +171,12 @@ class MITemplates:
             'max_distance': 0.05,
             'grid_search': None,
             'load_training_data': False,
+            'template_inputs': 'rho',
             }
         for key in template_params_defaults.keys():
             if key not in self.template_params.keys():
                 self.template_params[key] = template_params_defaults[key]
+        check_input_set(self.template_params['template_inputs'])
 
     def save(self, train_inputs):
         write_params(
@@ -77,7 +195,7 @@ class MITemplates:
             )
         model_manager.save(
             model=self.hgbc_regressor,
-            n_features=2 + self.template_params['n_peaks_calibration'],
+            n_features=n_template_features(self.template_params),
             )
         model_manager._save_sklearn(
             model=self.hgbc_regressor,
@@ -110,9 +228,13 @@ class MITemplates:
             'n_peaks',
             'n_peaks_template',
             'n_peaks_calibration',
+            'template_inputs',
             ]
         self.template_params = dict.fromkeys(params_keys)
         self.template_params['tag'] = params['tag']
+        # A model saved before this setting existed was fitted on 'rho'.
+        self.template_params['template_inputs'] = check_input_set(
+            params.get('template_inputs') or 'rho')
         self.template_params['templates_per_dominant_zone_bin'] = int(params['templates_per_dominant_zone_bin'])
         self.template_params['n_templates'] = self.miller_index_templates.shape[0]
         if self.lattice_system == 'cubic':
@@ -530,39 +652,31 @@ class MITemplates:
         # while also being reasonably fast.
         for _ in range(2):
             xnn, q2_calc = self.downsample_candidates(xnn, q2_calc, residuals)
-        # Third, calculate the values needed for calibration
-        reciprocal_volume = get_unit_cell_volume(get_reciprocal_unit_cell_from_xnn(
-            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
-            ), partial_unit_cell=True, lattice_system=self.lattice_system)
+        # Every reference line of each surviving cell, which the regressor's inputs are built from.
         q2_ref_calc = q2_calculator.get_q2(xnn)
-        q2_calc_max = q2_calc.max(axis=1)
-        N_pred = np.count_nonzero(q2_ref_calc < q2_calc_max[:, np.newaxis], axis=1)
-        _, probability, _ = get_M20_likelihood(
-            q2_obs=q2_obs_calibration,
-            q2_calc=q2_calc,
-            bravais_lattice=self.bravais_lattice,
-            reciprocal_volume=reciprocal_volume
+        return xnn, q2_calc, q2_ref_calc
+
+    def _inputs(self, q2_obs, xnn, q2_calc, q2_ref_calc):
+        """The regressor's input matrix for these template cells, under this model's input set."""
+        input_set = self.template_params['template_inputs']
+        features = template_features(
+            TEMPLATE_INPUT_SETS[input_set],
+            q2_obs[:self.template_params['n_peaks_calibration']],
+            xnn, q2_calc, q2_ref_calc, self.lattice_system, self.bravais_lattice,
             )
-        return xnn, probability, N_pred, q2_calc_max
+        return regressor_inputs(features, input_set)
 
     def generate(self, n_templates, rng, q2_obs):
-        xnn_templates_all, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs, rng)
+        xnn_templates_all, q2_calc, q2_ref_calc = self.generate_xnn(q2_obs, rng)
         if n_templates == 'all':
             xnn_templates = xnn_templates_all
         elif n_templates <= xnn_templates_all.shape[0]:
+            inputs = self._inputs(q2_obs, xnn_templates_all, q2_calc, q2_ref_calc)
             _, unique_indices = np.unique(
                 np.round(xnn_templates_all, decimals=6), return_index=True, axis=0
                 )
             xnn_templates_all = xnn_templates_all[unique_indices]
-            probability = probability[unique_indices]
-            N_pred = N_pred[unique_indices]
-            q2_calc_max = q2_calc_max[unique_indices]
-
-            inputs = np.concatenate((
-                probability,
-                N_pred[:, np.newaxis],
-                q2_calc_max[:, np.newaxis],
-                ), axis=1).astype(np.float32)
+            inputs = inputs[unique_indices]
             success_pred_templates = self.hgbc_regressor.predict(inputs)[:, 0]    
             top_n_indices = np.argsort(success_pred_templates)[::-1][:n_templates]
             xnn_templates = xnn_templates_all[top_n_indices]
@@ -659,37 +773,18 @@ class MITemplates:
             random_n_contaminants=True
         )[0]
 
-        xnn, probability, N_pred, q2_calc_max = self.generate_xnn(q2_obs, self.rng)
-        """
-        if type(train) != bool:
-            train = train[0]
-        if train == True:
-            xnn1, probability1, N_pred1, q2_calc_max1 = self.generate_xnn_true(q2_obs, xnn_true, self.rng)
-            xnn = np.concatenate((xnn, xnn1), axis=0)
-            probability = np.concatenate((probability, probability1), axis=0)
-            N_pred = np.concatenate((N_pred, N_pred1))
-            q2_calc_max = np.concatenate((q2_calc_max, q2_calc_max1))
-        """
-
+        xnn, q2_calc, q2_ref_calc = self.generate_xnn(q2_obs, self.rng)
+        inputs = self._inputs(q2_obs, xnn, q2_calc, q2_ref_calc)
         distance = scipy.spatial.distance.cdist(xnn, xnn_true[np.newaxis])[:, 0]
-
         select = distance < self.template_params['max_distance']
-        probability = probability[select]
-        distance = distance[select]
-        xnn = xnn[select]
-        N_pred = N_pred[select]
-        q2_calc_max = q2_calc_max[select]
-
-        return probability, distance, xnn, N_pred, q2_calc_max
+        return inputs[select], distance[select], xnn[select]
 
     def get_inputs(self, data, n_entries, train=False):
         from tqdm import tqdm
         q2_obs = np.stack(data['q2'])
-        probability = []
+        inputs = []
         distance = []
         xnn = []
-        N_pred = []
-        q2_calc_max = []
         if n_entries is None:
             n_entries = len(data)
             indices = np.arange(n_entries)
@@ -700,13 +795,11 @@ class MITemplates:
         if self.template_params['parallelization'] is None:
             print(f'Setting up {n_entries} entries serially')
             for index in tqdm(indices):
-                probability_entry, distance_entry, xnn_entry, N_pred_entry, q2_calc_max_entry = \
+                inputs_entry, distance_entry, xnn_entry = \
                     self._get_inputs_worker([q2_obs[index], xnn_true[index], train])
-                probability.append(probability_entry)
+                inputs.append(inputs_entry)
                 distance.append(distance_entry)
                 xnn.append(xnn_entry)
-                N_pred.append(N_pred_entry)
-                q2_calc_max.append(q2_calc_max_entry)
         elif self.template_params['parallelization'] == 'multiprocessing':
             print(f'Setting up {n_entries} entries using multiprocessing')
             with multiprocessing.Pool(self.template_params['n_processes']) as p:
@@ -716,35 +809,27 @@ class MITemplates:
                     train_array = np.zeros(indices.size, dtype=bool)
                 outputs = p.map(self._get_inputs_worker, zip(q2_obs[indices], xnn_true[indices], train_array))
             for i in range(n_entries):
-                probability.append(outputs[i][0])
+                inputs.append(outputs[i][0])
                 distance.append(outputs[i][1])
                 xnn.append(outputs[i][2])
-                N_pred.append(outputs[i][3])
-                q2_calc_max.append(outputs[i][4])
 
-        probability = np.vstack(probability)
+        inputs = np.vstack(inputs)
         distance = np.concatenate(distance)
         xnn = np.vstack(xnn)
-        N_pred = np.concatenate(N_pred)
-        q2_calc_max = np.concatenate(q2_calc_max)
-        return probability, distance, xnn, xnn_true[indices], N_pred, q2_calc_max
+        return inputs, distance, xnn, xnn_true[indices]
 
-    def _sample_training_val_data(self, distance, probability, N_pred, q2_calc_max):
+    def _sample_training_val_data(self, distance, inputs):
         # Select only training and validation entries that are within a distance (1/A**2)
         # of the correct values.
         # distance_train has shape N
         select = distance < self.template_params['max_distance']
-        probability = probability[select]
+        inputs = inputs[select]
         distance = distance[select]
-        N_pred = N_pred[select]
-        q2_calc_max = q2_calc_max[select]
         if distance.size > self.template_params['n_instances_train']:
             n_bins = 10
             distance_bins = np.linspace(0, self.template_params['max_distance'], n_bins + 1)
-            probability_new = []
+            inputs_new = []
             distance_new = []
-            N_pred_new = []
-            q2_calc_max_new = []
             n_per_bin = self.template_params['n_instances_train'] // n_bins
             n_instances = 0
             for bin_index in range(n_bins):
@@ -759,27 +844,21 @@ class MITemplates:
                             size=n_per_bin,
                             replace=False
                             )
-                        probability_new.append(probability[bin_indices][select])
+                        inputs_new.append(inputs[bin_indices][select])
                         distance_new.append(distance[bin_indices][select])
-                        N_pred_new.append(N_pred[bin_indices][select])
-                        q2_calc_max_new.append(q2_calc_max[bin_indices][select])
                         n_instances += n_per_bin
                     else:
-                        probability_new.append(probability[bin_indices])
+                        inputs_new.append(inputs[bin_indices])
                         distance_new.append(distance[bin_indices])
-                        N_pred_new.append(N_pred[bin_indices])
-                        q2_calc_max_new.append(q2_calc_max[bin_indices])
                         if bin_index < (n_bins - 1):
                             n_instances += bin_indices.sum()
                             n_per_bins = (self.template_params['n_instances_train'] - n_instances) // (n_bins - bin_index)
                 else:
                     if bin_index < (n_bins - 1):
                         n_per_bins = (self.template_params['n_instances_train'] - n_instances) // (n_bins - bin_index)
-            probability = np.concatenate(probability_new, axis=0)
+            inputs = np.concatenate(inputs_new, axis=0)
             distance = np.concatenate(distance_new)
-            N_pred = np.concatenate(N_pred_new)
-            q2_calc_max = np.concatenate(q2_calc_max_new)
-        return distance, probability, N_pred, q2_calc_max
+        return distance, inputs
     
     def calibrate_templates(self, data):
         unaugmented_data = data[~data['augmented']]
@@ -787,63 +866,33 @@ class MITemplates:
         val_data = unaugmented_data[~unaugmented_data['train']]
         n_val = int(0.2*self.template_params['n_entries_train'])
 
+        # The cache holds the distance in column 0 and the inputs after it, so it is named for the
+        # input set: a cache of one set read by another would be the wrong width or the wrong columns.
+        cache_directory = os.path.join(f'{self.save_to}', 'data_cache')
+        cache_name = f'{self.bravais_lattice}_{self.template_params["template_inputs"]}'
         if self.template_params['load_training_data']:
-            training_cache = np.load(os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_train.npy'))
+            training_cache = np.load(os.path.join(cache_directory, f'{cache_name}_train.npy'))
             distance_train = training_cache[:, 0]
-            N_pred_train = training_cache[:, 1]
-            q2_calc_max_train = training_cache[:, 2]
-            probability_train = training_cache[:, 3:]
-            
-            val_cache = np.load(os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_val.npy'))
+            train_inputs = training_cache[:, 1:].astype(np.float32)
+            val_cache = np.load(os.path.join(cache_directory, f'{cache_name}_val.npy'))
             distance_val = val_cache[:, 0]
-            N_pred_val = val_cache[:, 1]
-            q2_calc_max_val = val_cache[:, 2]
-            probability_val = val_cache[:, 3:]
+            val_inputs = val_cache[:, 1:].astype(np.float32)
         else:
-            probability_train, distance_train, xnn_train_pred, xnn_train_true, N_pred_train, q2_calc_max_train = \
+            train_inputs, distance_train, _, _ = \
                 self.get_inputs(training_data, self.template_params['n_entries_train'], train=True)
-            probability_val, distance_val, xnn_val_pred, xnn_val_true, N_pred_val, q2_calc_max_val = \
-                self.get_inputs(val_data, n_val)
-    
-            distance_train, probability_train, N_pred_train, q2_calc_max_train = self._sample_training_val_data(
-                distance_train, probability_train, N_pred_train, q2_calc_max_train
-            )
-            distance_val, probability_val, N_pred_val, q2_calc_max_val = self._sample_training_val_data(
-                distance_val, probability_val, N_pred_val, q2_calc_max_val
-            )
-            if not os.path.exists(os.path.join(f'{self.save_to}', 'data_cache')):
-                os.mkdir(os.path.join(f'{self.save_to}', 'data_cache'))
+            val_inputs, distance_val, _, _ = self.get_inputs(val_data, n_val)
+            distance_train, train_inputs = self._sample_training_val_data(distance_train, train_inputs)
+            distance_val, val_inputs = self._sample_training_val_data(distance_val, val_inputs)
+            if not os.path.exists(cache_directory):
+                os.mkdir(cache_directory)
             np.save(
-                os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_train.npy'),
-                np.concatenate((
-                    distance_train[:, np.newaxis],
-                    N_pred_train[:, np.newaxis],
-                    q2_calc_max_train[:, np.newaxis],
-                    probability_train,
-                ), axis=1)
+                os.path.join(cache_directory, f'{cache_name}_train.npy'),
+                np.concatenate((distance_train[:, np.newaxis], train_inputs), axis=1)
             )
             np.save(
-                os.path.join(f'{self.save_to}', 'data_cache', f'{self.bravais_lattice}_val.npy'),
-                np.concatenate((
-                    distance_val[:, np.newaxis],
-                    N_pred_val[:, np.newaxis],
-                    q2_calc_max_val[:, np.newaxis],
-                    probability_val,
-                ), axis=1)
+                os.path.join(cache_directory, f'{cache_name}_val.npy'),
+                np.concatenate((distance_val[:, np.newaxis], val_inputs), axis=1)
             )
-
-        # Convert to float32 ensures that the ONNX conversion and the sklearn model
-        # provide the same inferences.
-        train_inputs = np.concatenate((
-            probability_train,
-            N_pred_train[:, np.newaxis],
-            q2_calc_max_train[:, np.newaxis],
-            ), axis=1).astype(np.float32)
-        val_inputs = np.concatenate((
-            probability_val,
-            N_pred_val[:, np.newaxis],
-            q2_calc_max_val[:, np.newaxis], 
-            ), axis=1).astype(np.float32)
 
         roc = np.load(self.template_params['roc_file_name'].replace('!!', self.bravais_lattice))
         distance_convergence = roc[0]
@@ -895,6 +944,13 @@ class MITemplates:
 
         success_pred_train = self.hgbc_regressor.predict(train_inputs)
         success_pred_val = self.hgbc_regressor.predict(val_inputs)
+        np.save(
+            os.path.join(
+                f'{self.save_to}',
+                f'{self.bravais_lattice}_regression_{self.template_params["tag"]}_val.npy'
+                ),
+            np.stack((val_outputs, success_pred_val), axis=1)
+            )
 
         alpha = 0.1
         ms = 0.1
