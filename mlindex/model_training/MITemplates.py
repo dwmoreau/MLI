@@ -921,7 +921,10 @@ class MITemplates:
                 min_samples_leaf=self.template_params['min_samples_leaf'],
                 l2_regularization=self.template_params['l2_regularization'],
                 verbose=2,
-                max_iter=25
+                max_iter=25,
+                # Above 10 000 rows the regressor holds out a random tenth for early stopping,
+                # so without a seed every fit is a different model.
+                random_state=self.seed,
                 )
             print('Fitting')
             self.hgbc_regressor.fit(train_inputs, train_outputs)
@@ -935,6 +938,7 @@ class MITemplates:
                     max_depth=self.template_params['max_depth'],
                     min_samples_leaf=self.template_params['min_samples_leaf'],
                     l2_regularization=self.template_params['l2_regularization'],
+                    random_state=self.seed,
                     ),
                 param_grid=self.template_params['grid_search'],
                 cv=3,

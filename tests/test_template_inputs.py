@@ -180,6 +180,43 @@ def test_a_model_saved_before_the_setting_loads_as_rho(templators, models_dir, t
     assert loaded.template_params["template_inputs"] == "rho"
 
 
+def test_the_regressor_fit_is_reproducible_from_the_templater_seed(tmp_path):
+    """Two fits on identical training rows give identical rankers.
+
+    Above 10 000 rows scikit-learn turns early stopping on and holds out a random tenth of the
+    rows, so an unseeded regressor is a different model on every fit.
+    """
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    n_rows = 12000
+    distance = rng.uniform(0, 0.05, n_rows)
+    inputs = rng.normal(size=(n_rows, 22))
+    inputs[:, 0] -= 40 * distance
+    cache_directory = tmp_path / "data_cache"
+    cache_directory.mkdir()
+    for split in ("train", "val"):
+        np.save(cache_directory / f"tP_rho_{split}.npy",
+                np.concatenate((distance[:, np.newaxis], inputs), axis=1))
+    grid = np.logspace(-7, np.log10(0.05), 400)
+    curve = tmp_path / "curve.npy"
+    np.save(curve, np.stack((grid, -np.log10(grid))))
+
+    data_params = {"lattice_system": "tetragonal", "unit_cell_length": 2,
+                   "unit_cell_indices": np.array([0, 2]), "hkl_ref_length": 10, "n_peaks": 20}
+    data = pd.DataFrame({"augmented": [False, False], "train": [True, False]})
+    predictions = []
+    for _ in range(2):
+        templator = MITemplates(
+            "tP", data_params,
+            {"tag": "seeded", "load_training_data": True, "roc_file_name": str(curve),
+             "n_entries_train": 10},
+            np.zeros((10, 3)), str(tmp_path), 7)
+        templator.calibrate_templates(data)
+        predictions.append(templator.hgbc_regressor.predict(inputs.astype(np.float32)))
+    np.testing.assert_array_equal(predictions[0], predictions[1])
+
+
 def test_an_unknown_input_set_is_refused_on_load(templators, models_dir, tmp_path):
     templator, data_params, _, _ = templators["aP"]
     _rewrite_params(_copy_shipped_aP_template(models_dir, tmp_path), template_inputs="nonsense")
