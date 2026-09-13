@@ -756,7 +756,7 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     return optimizer
 
 
-def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, logger=None, optimizer_class=None, seed=12345, options=None):
+def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, logger=None, optimizer_class=None, seed=12345, options=None, models_directory=None):
     """Build one optimizer per Bravais lattice this rank manages.
 
     `options` is a flat dict merged over each lattice's `opt_params` after the
@@ -764,10 +764,15 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
     deliberately not command-line flags -- they are research knobs, not user
     controls. The seven per-system factories already accept and merge it; this
     threads it through to them.
+
+    `models_directory` is the directory that directly contains the lattice systems'
+    model trees. It defaults to `_resolve_models_dir()`; a caller comparing models
+    passes each tree's own directory, which needs to hold only the lattices it builds.
     """
     from mlindex.optimization.MPIOptimizer import OptimizerWorker
 
-    models_dir = _resolve_models_dir()
+    models_dir = (Path(models_directory) if models_directory is not None
+                  else _resolve_models_dir())
     # Legacy base_directory, kept populated for callers that still read it. It is inert
     # on the inference path, where models_directory determines the model location.
     project_path = models_dir.parent.parent

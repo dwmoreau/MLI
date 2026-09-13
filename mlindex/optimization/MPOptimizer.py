@@ -281,11 +281,13 @@ def shutdown_mp_workers(processes, task_queues):
 
 def _build_group_optimizers(bl_list, group_size, data_queues, result_queues,
                             broadening_tag, n_candidates_scale, seed, options,
-                            logger=None):
+                            logger=None, optimizer_class=None, models_directory=None):
     """Construct the manager optimizers for one lattice group.
 
     Only `bl_list` is built, so a group loads only the models it will use:
-    12-222 MB per lattice against 1.29 GB for all fourteen.
+    12-222 MB per lattice against 1.29 GB for all fourteen. `optimizer_class` is a
+    subclass of MPOptimizerManager, as in `setup_mp_optimizers`, and
+    `models_directory` is passed to `get_optimizers`.
     """
     from mlindex.optimization.UtilitiesOptimizer import get_optimizers
     from types import SimpleNamespace
@@ -297,8 +299,10 @@ def _build_group_optimizers(bl_list, group_size, data_queues, result_queues,
                                       split_comm=None, color=None)
                   for bl in bl_list}
     optimizers = get_optimizers(0, organizers, broadening_tag, n_candidates_scale,
-                                logger=logger, optimizer_class=MPOptimizerManager,
-                                seed=seed, options=options)
+                                logger=logger,
+                                optimizer_class=optimizer_class or MPOptimizerManager,
+                                seed=seed, options=options,
+                                models_directory=models_directory)
     # Class attributes, so a manager left pointing at a dead group's queues would
     # be inherited by the next construction in this process.
     MPOptimizerManager._mp_data_queues = None
