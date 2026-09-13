@@ -97,7 +97,7 @@ if __name__ == '__main__':
         'oP_0_03': rf_group_params,
         }
 
-    integral_filter_group_params = {
+    abnn_group_params = {
         'tag': f'orthorhombic_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 20,
@@ -116,33 +116,24 @@ if __name__ == '__main__':
         'loss_type': 'log_cosh',
         'augment': True,
         'model_type': 'metric',
-        'calibration_params': {
-            'layers': 3,
-            'epsilon_pds': 0.1,
-            'epochs': 40,
-            'learning_rate': 0.0002,
-            'augment': True,
-            'batch_size': 64,
-            'n_heads': 5,
-            },
         }
 
 
-    integral_filter_group_params_load = {
+    abnn_group_params_load = {
         'tag': f'orthorhombic_{broadening_tag}',
         'load_from_tag': True,
         }
 
-    integral_filter_params = {
-        'oC_0_00': integral_filter_group_params_load,
-        'oC_2_00': integral_filter_group_params_load,
-        'oF_0_00': integral_filter_group_params_load,
-        'oF_0_01': integral_filter_group_params_load,
-        'oI_0_00': integral_filter_group_params_load,
-        'oP_0_00': integral_filter_group_params,
-        'oP_0_01': integral_filter_group_params,
-        'oP_0_02': integral_filter_group_params,
-        'oP_0_03': integral_filter_group_params,
+    abnn_params = {
+        'oC_0_00': abnn_group_params_load,
+        'oC_2_00': abnn_group_params_load,
+        'oF_0_00': abnn_group_params_load,
+        'oF_0_01': abnn_group_params_load,
+        'oI_0_00': abnn_group_params_load,
+        'oP_0_00': abnn_group_params,
+        'oP_0_01': abnn_group_params,
+        'oP_0_02': abnn_group_params,
+        'oP_0_03': abnn_group_params,
         }
 
     random_params_bl0 = {
@@ -180,7 +171,7 @@ if __name__ == '__main__':
         data_params=data_params,
         rf_params=rf_params, 
         template_params=template_params,
-        integral_filter_params=integral_filter_params,
+        abnn_params=abnn_params,
         random_params=random_params,
         seed=12345, 
         )
@@ -193,4 +184,4 @@ if __name__ == '__main__':
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
     #wrapper.setup_miller_index_templates()
-    wrapper.setup_integral_filter('training')
+    wrapper.setup_abnn('training')

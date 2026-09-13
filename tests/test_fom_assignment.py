@@ -73,6 +73,65 @@ def test_the_scale_floor_moves_nothing_that_was_not_degenerate():
     assert np.all(floored[~ordinary] == np.finfo(np.float64).tiny)
 
 
+@pytest.mark.parametrize('n_candidates, n_ref, n_peaks, lattice_system', [
+    (300, 700, 20, 'triclinic'),
+    (257, 1000, 20, 'monoclinic'),
+    (5, 40, 10, 'cubic'),
+    ])
+@pytest.mark.parametrize('order', ['C', 'F'])
+def test_the_distribution_at_the_nearest_line_is_the_scalar_posterior(
+        n_candidates, n_ref, n_peaks, lattice_system, order):
+    """The two estimators are one estimator, and this is the equality that says so.
+
+    The log-sum-exp shift makes the nearest line's own term exactly exp(0), so the normalised
+    distribution read at that line is 1/sum(terms) -- the scalar posterior, from the same sum
+    taken in the same place. Bit for bit, not to a tolerance: if these two ever drift, the peak
+    mask and the candidate generator are reading different estimators.
+    """
+    from mlindex.utilities.FigureOfMerits import get_assignment_distribution
+    from mlindex.utilities.FigureOfMerits import get_assignment_posterior
+
+    q2_obs, q2_ref_calc, system = _random_case(
+        11, n_candidates, n_ref, n_peaks, lattice_system
+        )
+    if order == 'F':
+        q2_ref_calc = np.asfortranarray(q2_ref_calc)
+    posterior = get_assignment_posterior(q2_obs, q2_ref_calc, system)
+    distribution = get_assignment_distribution(q2_obs, q2_ref_calc, system)
+    nearest = np.argmin(
+        np.abs(q2_ref_calc[:, np.newaxis, :] - q2_obs[np.newaxis, :, np.newaxis]), axis=2
+        )
+    at_nearest = np.take_along_axis(distribution, nearest[:, :, np.newaxis], axis=2)[:, :, 0]
+    assert np.array_equal(at_nearest, posterior)
+
+
+def test_the_normalised_distribution_sums_to_one_over_the_reference_list():
+    from mlindex.utilities.FigureOfMerits import get_assignment_distribution
+
+    q2_obs, q2_ref_calc, system = _random_case(12, 64, 300, 20, 'orthorhombic')
+    distribution = get_assignment_distribution(q2_obs, q2_ref_calc, system)
+    assert distribution.shape == (64, 20, 300)
+    assert np.allclose(np.sum(distribution, axis=2), 1.0, rtol=1e-14, atol=0)
+
+
+def test_the_unnormalised_form_draws_the_same_miller_indices():
+    """`vectorized_resampling` rescales each draw by the row's own cumulative total.
+
+    So the generator may pass `normalise=False` and save an array pass; this is what makes that
+    safe rather than merely plausible. A row of zeros cannot occur -- the nearest line's term is
+    exactly 1 -- so there is no degenerate case where the two forms could diverge.
+    """
+    from mlindex.utilities.FigureOfMerits import get_assignment_distribution
+    from mlindex.utilities.MillerIndexAssignment import vectorized_resampling
+
+    q2_obs, q2_ref_calc, system = _random_case(13, 24, 200, 20, 'tetragonal')
+    normalised = get_assignment_distribution(q2_obs, q2_ref_calc, system)
+    raw = get_assignment_distribution(q2_obs, q2_ref_calc, system, normalise=False)
+    assigned_normalised, _ = vectorized_resampling(normalised, np.random.default_rng(7))
+    assigned_raw, _ = vectorized_resampling(raw, np.random.default_rng(7))
+    assert np.array_equal(assigned_normalised, assigned_raw)
+
+
 # ------------------------------------------------------------------------------------------
 # The soft counting merit
 # ------------------------------------------------------------------------------------------

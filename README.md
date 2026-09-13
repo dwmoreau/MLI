@@ -13,7 +13,7 @@ pip install mlindex
 mlindex.download_models
 ```
 
-`mlindex.download_models` fetches the ML model files (~545 MB) from the [Hugging Face Hub](https://huggingface.co/dwmoreau/mlindex-models) and installs them to `~/.local/share/mlindex/models/`. No git or git-lfs is required. Each mlindex release pins a specific model revision, so you always get the models that version was tested against.
+`mlindex.download_models` fetches the ML model files (~465 MB) from the [Hugging Face Hub](https://huggingface.co/dwmoreau/mlindex-models) and installs them to `~/.local/share/mlindex/models/`. No git or git-lfs is required. Each mlindex release pins a specific model revision, so you always get the models that version was tested against.
 
 Re-running the command is cheap: files that are already present and up to date are not downloaded again, so an interrupted download can be resumed by simply running it again.
 

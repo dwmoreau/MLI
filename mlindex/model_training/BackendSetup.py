@@ -15,7 +15,7 @@ def enable_tf32():
     in fp32, so it is a reduction in mantissa width, not in range: no rescaling, no loss scaling,
     and nothing to tune.
 
-    Worth what the arithmetic intensity allows. Measured on the tetragonal integral filter, TF32
+    Worth what the arithmetic intensity allows. Measured on the tetragonal ABNN, TF32
     alone is ~1.2x at batch 64, where the step is dominated by kernel launch overhead rather than
     matmul, rising to ~1.8x at batch 512 where it is genuinely compute bound.
 

@@ -137,12 +137,12 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
         }
     template_params = {bravais_lattice: {'tag': f'cubic_{broadening_tag}'}}
     rf_params = {f'{bravais_lattice}_0': {'tag': f'cubic_{broadening_tag}'}}
-    integral_filter_params = {f'{bravais_lattice}_0': {'tag': f'cubic_{broadening_tag}'}}
+    abnn_params = {f'{bravais_lattice}_0': {'tag': f'cubic_{broadening_tag}'}}
     random_params = {bravais_lattice: {'tag': f'cubic_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 100)
     generator_info = [
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.45*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.45*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0', 'n_unit_cells': int(0.45*n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.1*n_candidates)},
         #{'generator': 'random', 'n_unit_cells': n_candidates},
         #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -179,7 +179,7 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
         opt_params,
         rf_params,
         template_params,
-        integral_filter_params,
+        abnn_params,
         random_params,
         bravais_lattice,
         comm,
@@ -205,12 +205,12 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         f'{bravais_lattice}_0_01': rf_group_params,
         f'{bravais_lattice}_1_01': rf_group_params,
         }
-    integral_filter_group_params = {'tag': f'tetragonal_{broadening_tag}'}
-    integral_filter_params = {
-        f'{bravais_lattice}_0_00': integral_filter_group_params,
-        f'{bravais_lattice}_1_00': integral_filter_group_params,
-        f'{bravais_lattice}_0_01': integral_filter_group_params,
-        f'{bravais_lattice}_1_01': integral_filter_group_params,
+    abnn_group_params = {'tag': f'tetragonal_{broadening_tag}'}
+    abnn_params = {
+        f'{bravais_lattice}_0_00': abnn_group_params,
+        f'{bravais_lattice}_1_00': abnn_group_params,
+        f'{bravais_lattice}_0_01': abnn_group_params,
+        f'{bravais_lattice}_1_01': abnn_group_params,
         }
     random_params = {bravais_lattice: {'tag': f'tetragonal_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 2000)
@@ -219,10 +219,10 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(1/4*0.05*n_candidates)},
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.05*n_candidates)},
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/4*0.05*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/4*0.7*n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.25*n_candidates)},
         #{'generator': 'random', 'n_unit_cells': n_candidates},
         #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -259,7 +259,7 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         opt_params,
         rf_params,
         template_params,
-        integral_filter_params,
+        abnn_params,
         random_params,
         bravais_lattice,
         comm,
@@ -289,16 +289,16 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         f'{bravais_lattice}_1_02': rf_group_params,
         f'{bravais_lattice}_1_03': rf_group_params,
         }
-    integral_filter_group_params = {'tag': f'hexagonal_{broadening_tag}'}
-    integral_filter_params = {
-        f'{bravais_lattice}_0_00': integral_filter_group_params,
-        f'{bravais_lattice}_0_01': integral_filter_group_params,
-        f'{bravais_lattice}_0_02': integral_filter_group_params,
-        f'{bravais_lattice}_0_03': integral_filter_group_params,
-        f'{bravais_lattice}_1_00': integral_filter_group_params,
-        f'{bravais_lattice}_1_01': integral_filter_group_params,
-        f'{bravais_lattice}_1_02': integral_filter_group_params,
-        f'{bravais_lattice}_1_03': integral_filter_group_params,
+    abnn_group_params = {'tag': f'hexagonal_{broadening_tag}'}
+    abnn_params = {
+        f'{bravais_lattice}_0_00': abnn_group_params,
+        f'{bravais_lattice}_0_01': abnn_group_params,
+        f'{bravais_lattice}_0_02': abnn_group_params,
+        f'{bravais_lattice}_0_03': abnn_group_params,
+        f'{bravais_lattice}_1_00': abnn_group_params,
+        f'{bravais_lattice}_1_01': abnn_group_params,
+        f'{bravais_lattice}_1_02': abnn_group_params,
+        f'{bravais_lattice}_1_03': abnn_group_params,
         }
     random_params = {bravais_lattice: {'tag': f'hexagonal_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 2000)
@@ -311,14 +311,14 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/8*0.05*n_candidates)},
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': int(1/8*0.05*n_candidates)},
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': int(1/8*0.05*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/8*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/8*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/8*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/8*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(1/8*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/8*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': int(1/8*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': int(1/8*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': int(1/8*0.7*n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.25*n_candidates)},
         #{'generator': 'random', 'n_unit_cells': n_candidates},
         #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -355,7 +355,7 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         opt_params,
         rf_params,
         template_params,
-        integral_filter_params,
+        abnn_params,
         random_params,
         bravais_lattice,
         comm,
@@ -379,18 +379,18 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         f'{bravais_lattice}_00': rf_group_params,
         f'{bravais_lattice}_01': rf_group_params,
         }
-    integral_filter_group_params = {'tag': f'rhombohedral_{broadening_tag}', 'quantitized_model': True}
-    integral_filter_params = {
-        f'{bravais_lattice}_00': integral_filter_group_params,
-        f'{bravais_lattice}_01': integral_filter_group_params,
+    abnn_group_params = {'tag': f'rhombohedral_{broadening_tag}', 'quantitized_model': True}
+    abnn_params = {
+        f'{bravais_lattice}_00': abnn_group_params,
+        f'{bravais_lattice}_01': abnn_group_params,
         }
     random_params = {bravais_lattice: {'tag': f'rhombohedral_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 2000)
     generator_info = [
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(1/2*0.05*n_candidates)},
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': int(1/2*0.05*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': int(1/2*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_01', 'n_unit_cells': int(1/2*0.7*n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.25*n_candidates)},
         #{'generator': 'random', 'n_unit_cells': n_candidates},
         #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -427,7 +427,7 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         opt_params,
         rf_params,
         template_params,
-        integral_filter_params,
+        abnn_params,
         random_params,
         bravais_lattice,
         comm,
@@ -447,7 +447,7 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         }
     template_params = {bravais_lattice: {'tag': f'orthorhombic_{broadening_tag}'}}
     rf_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
-    integral_filter_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
+    abnn_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'orthorhombic_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 4000)
     if bravais_lattice == 'oF':
@@ -455,25 +455,25 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
             f'{bravais_lattice}_0_00': rf_group_params,
             f'{bravais_lattice}_0_01': rf_group_params,
             }
-        integral_filter_params = {
-            f'{bravais_lattice}_0_00': integral_filter_group_params,
-            f'{bravais_lattice}_0_01': integral_filter_group_params,
+        abnn_params = {
+            f'{bravais_lattice}_0_00': abnn_group_params,
+            f'{bravais_lattice}_0_01': abnn_group_params,
             }
         generator_info = [
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/2*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/2*0.05*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/2*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/2*0.7*n_candidates)},
             {'generator': 'templates', 'n_unit_cells': int(0.25*n_candidates)},
             #{'generator': 'random', 'n_unit_cells': n_candidates},
             #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
             ]
     elif bravais_lattice == 'oI':
         rf_params = {f'{bravais_lattice}_0_00': rf_group_params,}
-        integral_filter_params = {f'{bravais_lattice}_0_00': integral_filter_group_params,}
+        abnn_params = {f'{bravais_lattice}_0_00': abnn_group_params,}
         generator_info = [
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(0.05*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(0.7*n_candidates)},
             {'generator': 'templates', 'n_unit_cells': int(0.25*n_candidates)},
             #{'generator': 'random', 'n_unit_cells': n_candidates},
             #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -483,15 +483,15 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
             f'{bravais_lattice}_0_00': rf_group_params,
             f'{bravais_lattice}_2_00': rf_group_params,
             }
-        integral_filter_params = {
-            f'{bravais_lattice}_0_00': integral_filter_group_params,
-            f'{bravais_lattice}_2_00': integral_filter_group_params,
+        abnn_params = {
+            f'{bravais_lattice}_0_00': abnn_group_params,
+            f'{bravais_lattice}_2_00': abnn_group_params,
             }
         generator_info = [
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/2*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': int(1/2*0.05*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_2_00', 'n_unit_cells': int(1/2*0.7*n_candidates)},
             {'generator': 'templates', 'n_unit_cells': int(0.25*n_candidates)},
             #{'generator': 'random', 'n_unit_cells': n_candidates},
             #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -503,21 +503,21 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
             f'{bravais_lattice}_0_02': rf_group_params,
             f'{bravais_lattice}_0_03': rf_group_params,
             }
-        integral_filter_params = {
-            f'{bravais_lattice}_0_00': integral_filter_group_params,
-            f'{bravais_lattice}_0_01': integral_filter_group_params,
-            f'{bravais_lattice}_0_02': integral_filter_group_params,
-            f'{bravais_lattice}_0_03': integral_filter_group_params,
+        abnn_params = {
+            f'{bravais_lattice}_0_00': abnn_group_params,
+            f'{bravais_lattice}_0_01': abnn_group_params,
+            f'{bravais_lattice}_0_02': abnn_group_params,
+            f'{bravais_lattice}_0_03': abnn_group_params,
             }
         generator_info = [
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/4*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/4*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/4*0.05*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/4*0.7*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/4*0.7*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/4*0.7*n_candidates)},
             {'generator': 'templates', 'n_unit_cells': int(0.25*n_candidates)},
             #{'generator': 'random', 'n_unit_cells': n_candidates},
             #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -554,7 +554,7 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         opt_params,
         rf_params,
         template_params,
-        integral_filter_params,
+        abnn_params,
         random_params,
         bravais_lattice,
         comm,
@@ -574,7 +574,7 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         }
     template_params = {bravais_lattice: {'tag': f'monoclinic_{broadening_tag}'}}
     rf_group_params = {'tag': f'monoclinic_{broadening_tag}'}
-    integral_filter_group_params = {'tag': f'monoclinic_{broadening_tag}'}
+    abnn_group_params = {'tag': f'monoclinic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'monoclinic_{broadening_tag}'}}
     n_candidates = int(n_candidates_scale * 6000)
     if bravais_lattice == 'mC':
@@ -586,13 +586,13 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
             f'{bravais_lattice}_4_02': rf_group_params,
             f'{bravais_lattice}_4_03': rf_group_params,
             }
-        integral_filter_params = {
-            f'{bravais_lattice}_0_02': integral_filter_group_params,
-            f'{bravais_lattice}_0_03': integral_filter_group_params,
-            f'{bravais_lattice}_1_02': integral_filter_group_params,
-            f'{bravais_lattice}_1_03': integral_filter_group_params,
-            f'{bravais_lattice}_4_02': integral_filter_group_params,
-            f'{bravais_lattice}_4_03': integral_filter_group_params,
+        abnn_params = {
+            f'{bravais_lattice}_0_02': abnn_group_params,
+            f'{bravais_lattice}_0_03': abnn_group_params,
+            f'{bravais_lattice}_1_02': abnn_group_params,
+            f'{bravais_lattice}_1_03': abnn_group_params,
+            f'{bravais_lattice}_4_02': abnn_group_params,
+            f'{bravais_lattice}_4_03': abnn_group_params,
             }
         generator_info = [
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/6*0.05*n_candidates)},
@@ -601,12 +601,12 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': int(1/6*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': int(1/6*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': int(1/6*0.05*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_02', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_03', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_02', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_03', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_4_02', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_4_03', 'n_unit_cells': int(1/6*0.55*n_candidates)},
             {'generator': 'templates', 'n_unit_cells': int(0.4*n_candidates)},
             #{'generator': 'random', 'n_unit_cells': n_candidates},
             #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -620,13 +620,13 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
             f'{bravais_lattice}_4_00': rf_group_params,
             f'{bravais_lattice}_4_01': rf_group_params,
             }
-        integral_filter_params = {
-            f'{bravais_lattice}_0_00': integral_filter_group_params,
-            f'{bravais_lattice}_0_01': integral_filter_group_params,
-            f'{bravais_lattice}_1_00': integral_filter_group_params,
-            f'{bravais_lattice}_1_01': integral_filter_group_params,
-            f'{bravais_lattice}_4_00': integral_filter_group_params,
-            f'{bravais_lattice}_4_01': integral_filter_group_params,
+        abnn_params = {
+            f'{bravais_lattice}_0_00': abnn_group_params,
+            f'{bravais_lattice}_0_01': abnn_group_params,
+            f'{bravais_lattice}_1_00': abnn_group_params,
+            f'{bravais_lattice}_1_01': abnn_group_params,
+            f'{bravais_lattice}_4_00': abnn_group_params,
+            f'{bravais_lattice}_4_01': abnn_group_params,
             }
         generator_info = [
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/6*0.05*n_candidates)},
@@ -635,12 +635,12 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/6*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_00', 'n_unit_cells': int(1/6*0.05*n_candidates)},
             {'generator': 'trees', 'split_group': f'{bravais_lattice}_4_01', 'n_unit_cells': int(1/6*0.05*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_4_00', 'n_unit_cells': int(1/6*0.55*n_candidates)},
-            {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_4_01', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_00', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_0_01', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_00', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_1_01', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_4_00', 'n_unit_cells': int(1/6*0.55*n_candidates)},
+            {'generator': 'abnn', 'split_group': f'{bravais_lattice}_4_01', 'n_unit_cells': int(1/6*0.55*n_candidates)},
             {'generator': 'templates', 'n_unit_cells': int(0.4*n_candidates)},
             #{'generator': 'random', 'n_unit_cells': n_candidates},
             #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01*n_candidates)},
@@ -678,7 +678,7 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         opt_params,
         rf_params,
         template_params,
-        integral_filter_params,
+        abnn_params,
         random_params,
         bravais_lattice,
         comm,
@@ -698,18 +698,18 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         }
     template_params = {bravais_lattice: {'tag': f'triclinic_{broadening_tag}'}}
     rf_group_params = {'tag': f'triclinic_{broadening_tag}'}
-    integral_filter_group_params = {'tag': f'triclinic_{broadening_tag}'}
+    abnn_group_params = {'tag': f'triclinic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'triclinic_{broadening_tag}'}}
     rf_params = {
         f'{bravais_lattice}_00': rf_group_params,
         }
-    integral_filter_params = {
-        f'{bravais_lattice}_00': integral_filter_group_params,
+    abnn_params = {
+        f'{bravais_lattice}_00': abnn_group_params,
         }
     n_candidates = int(n_candidates_scale * 6000)
     generator_info = [
         {'generator': 'trees', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.05 * n_candidates)},
-        {'generator': 'integral_filter', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.4 * n_candidates)},
+        {'generator': 'abnn', 'split_group': f'{bravais_lattice}_00', 'n_unit_cells': int(0.4 * n_candidates)},
         {'generator': 'templates', 'n_unit_cells': int(0.55 * n_candidates)},
         #{'generator': 'random', 'n_unit_cells': n_candidates},
         #{'generator': 'predicted_volume', 'n_unit_cells': int(0.01 * n_candidates)},
@@ -746,7 +746,7 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         opt_params,
         rf_params,
         template_params,
-        integral_filter_params,
+        abnn_params,
         random_params,
         bravais_lattice,
         comm,

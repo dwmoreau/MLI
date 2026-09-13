@@ -246,13 +246,13 @@ class OptimizerWorker(OptimizerBase):
 
 
 class OptimizerManager(OptimizerBase):
-    def __init__(self, data_params, opt_params, rf_params, template_params, integral_filter_params, random_params, bravais_lattice, comm, fom, seed=12345):
+    def __init__(self, data_params, opt_params, rf_params, template_params, abnn_params, random_params, bravais_lattice, comm, fom, seed=12345):
         self.root = comm.Get_rank()
         assert self.root == 0
         self.data_params = data_params
         self.opt_params = opt_params
         self.rf_params = rf_params
-        self.integral_filter_params = integral_filter_params
+        self.abnn_params = abnn_params
         self.random_params = random_params
         self.template_params = template_params
         self.bravais_lattice = bravais_lattice
@@ -267,8 +267,8 @@ class OptimizerManager(OptimizerBase):
                 self.opt_params[key] = opt_params_defaults[key]
         for key in self.rf_params:
             self.rf_params[key]['load_from_tag'] = True
-        for key in self.integral_filter_params:
-            self.integral_filter_params[key]['load_from_tag'] = True
+        for key in self.abnn_params:
+            self.abnn_params[key]['load_from_tag'] = True
         self.data_params['load_from_tag'] = True
         self.template_params[self.bravais_lattice]['load_from_tag'] = True
         self.random_params[self.bravais_lattice]['load_from_tag'] = True
@@ -277,29 +277,29 @@ class OptimizerManager(OptimizerBase):
             data_params=self.data_params,
             rf_params=self.rf_params,
             template_params=self.template_params,
-            integral_filter_params=self.integral_filter_params,
+            abnn_params=self.abnn_params,
             random_params=self.random_params,
             seed=seed,
             )
         self.wrapper.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
         if self.opt_params['convergence_testing'] == False:
             load_random_forest = False
-            load_integral_filter = False
+            load_abnn = False
             load_templates = False
             load_random = False
             for generator_info in self.opt_params['generator_info']:
                 if generator_info['generator'] == 'trees':
                     load_random_forest = True
-                elif generator_info['generator'] == 'integral_filter':
-                    load_integral_filter = True
+                elif generator_info['generator'] == 'abnn':
+                    load_abnn = True
                 elif generator_info['generator'] == 'templates':
                     load_templates = True
                 elif generator_info['generator'] in ['predicted_volume', 'random']:
                     load_random = True
             if load_random_forest:
                 self.wrapper.setup_random_forest()
-            if load_integral_filter:
-                self.wrapper.setup_integral_filter(mode='inference')
+            if load_abnn:
+                self.wrapper.setup_abnn(mode='inference')
             if load_templates:
                 self.wrapper.setup_miller_index_templates()
             if load_random:
@@ -333,9 +333,9 @@ class OptimizerManager(OptimizerBase):
         volume_pred = None
         xnn_pred = None
         for generator_info in self.opt_params['generator_info']:
-            if generator_info['generator'] == 'integral_filter':
+            if generator_info['generator'] == 'abnn':
                 if generator_info['split_group'] == split_group:
-                    xnn_pred, prob = self.wrapper.integral_filter_generator[split_group].predict_xnn(
+                    xnn_pred, prob = self.wrapper.abnn_generator[split_group].predict_xnn(
                         top_n, self.rng, q2_obs=q2[np.newaxis], batch_size=2
                         )
             elif generator_info['generator'] == 'templates':
@@ -377,10 +377,10 @@ class OptimizerManager(OptimizerBase):
                     generator_unit_cells = self.wrapper.miller_index_templator[self.bravais_lattice].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         )
-                elif generator_info['generator'] == 'integral_filter':
+                elif generator_info['generator'] == 'abnn':
                     # We only do one inference, so batch_size=total_size=1 makes sense
                     # but batch size of 2 is faster than one ....
-                    generator_unit_cells = self.wrapper.integral_filter_generator[generator_info['split_group']].generate(
+                    generator_unit_cells = self.wrapper.abnn_generator[generator_info['split_group']].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         batch_size=2,
                         )
@@ -388,6 +388,13 @@ class OptimizerManager(OptimizerBase):
                     generator_unit_cells = self.wrapper.random_unit_cell_generator[self.bravais_lattice].generate(
                         generator_info['n_unit_cells'], self.rng, self.q2_obs,
                         model=generator_info['generator'],
+                        )
+                else:
+                    # Without this the loop appends the previous generator's cells a second
+                    # time, so a mistyped or renamed generator duplicates candidates instead
+                    # of failing, and the pool is silently wrong rather than absent.
+                    raise ValueError(
+                        f"unknown generator {generator_info['generator']!r} in generator_info"
                         )
                 candidate_unit_cells_all.append(generator_unit_cells)
             candidate_unit_cells_all = np.concatenate(candidate_unit_cells_all, axis=0)

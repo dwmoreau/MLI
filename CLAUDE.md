@@ -40,7 +40,7 @@ itself when it drifts from the first.
 pip install .
 ```
 
-ML model files (~545 MB) are published on the Hugging Face Hub at
+ML model files (~465 MB) are published on the Hugging Face Hub at
 [`dwmoreau/mlindex-models`](https://huggingface.co/dwmoreau/mlindex-models), and `mlindex.download_models`
 fetches them from there with `huggingface_hub` (no git or git-lfs needed). Each release pins a model
 revision via `model_revision` in `mlindex/model_metadata.json`.
@@ -57,7 +57,7 @@ package's own `mlindex/models/`. A models directory is the one that *directly* c
 
 Note that the wheel always ships a *partial* `mlindex/models/` tree: the `models/*/data/hkl_ref_*.npy`
 package-data glob, which `AnalyticOptimizer` and `CreatePeakList` read via `importlib.resources`. That is
-why the "do we have models?" probe checks for `cubic_1/integral_filter/` rather than for `models/`.
+why the "do we have models?" probe checks for `cubic_1/abnn/` rather than for `models/`.
 
 ## Running the indexer
 
@@ -91,7 +91,7 @@ Covers high-symmetry lattices (cF, cI, cP, hP, hR, tI, tP, oC, oF, oI, oP) seria
 ### Internal representations
 - **q²**: The input unit. q² = (2 sin θ / λ)² = 1/d². Peak lists are always in q² (Å⁻²).
 - **xnn**: The primary internal metric tensor representation (6-component vector). All optimization happens in xnn space. Converted to/from conventional unit cell parameters by `mlindex/utilities/UnitCellTools.py`.
-- **Bravais lattice split groups**: Each Bravais lattice is subdivided into "split groups" (e.g., `cF_0`, `mP_0_01`) based on unit-cell axis ordering and extinction groups. These are the granularity at which random forest regressors and integral filters are trained.
+- **Bravais lattice split groups**: Each Bravais lattice is subdivided into "split groups" (e.g., `cF_0`, `mP_0_01`) based on unit-cell axis ordering and extinction groups. These are the granularity at which random forest regressors and ABNNs are trained.
 
 ### Execution flow (`mlindex/command_line/run.py`)
 1. Load peak list → `q2_obs` array (up to 20 peaks used)
@@ -109,7 +109,12 @@ Covers high-symmetry lattices (cF, cI, cP, hP, hR, tI, tP, oC, oF, oI, oP) seria
 
 1. **RandomGenerator** (`RandomGenerator.py`): Random forest that predicts unit cell volume from the observed peak list. Used to generate random candidate unit cells.
 2. **MITemplates** (`MITemplates.py`): Miller index template library + HistGradientBoosting calibrator. Templates are sets of hkl assignments sampled from training data; the calibrator scores how likely a template is to converge to the correct unit cell.
-3. **IntegralFilter** (`IntegralFilter.py`): Neural network (PyTorch/ONNX) that filters and ranks candidates. Quantized for inference and stored as `.onnx` files.
+3. **ABNN** (`ABNN.py`): Attention-Based Neural Network -- `IntraVolume_MultiHeadAttention` over
+   per-volume extraction branches. Predicts a unit cell from the peak list, then resamples
+   Miller-index labellings of that cell to make several candidates from each prediction. The
+   labellings come from `FigureOfMerits.get_assignment_distribution`, a closed-form posterior;
+   the second network that used to assign them was retired in favour of it. Quantized for
+   inference and stored as `.onnx` files.
 
 All trained models are saved under `mlindex/models/{tag}/` (e.g., `mlindex/models/cubic_1/`).
 

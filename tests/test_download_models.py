@@ -141,12 +141,12 @@ def test_snapshot_download_kwargs(recorder, tmp_path):
     # Removed in huggingface_hub 1.x -- passing any of these is a TypeError for users.
     assert "local_dir_use_symlinks" not in recorder.kwargs
     assert "resume_download" not in recorder.kwargs
-    # cache_dir is unused when local_dir is set; passing it implies a second 545 MB copy.
+    # cache_dir is unused when local_dir is set; passing it implies a second 465 MB copy.
     assert "cache_dir" not in recorder.kwargs
 
 
 def test_force_does_not_imply_redownload(recorder, tmp_path, monkeypatch):
-    """--force only bypasses the directory guard; it must not refetch 545 MB."""
+    """--force only bypasses the directory guard; it must not refetch 465 MB."""
     monkeypatch.setattr(
         "sys.argv",
         ["mlindex.download_models", "--models-dir", str(tmp_path / "models"), "--force"],

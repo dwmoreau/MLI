@@ -86,7 +86,7 @@ if __name__ == '__main__':
         'mP_4_01': rf_group_params,
         }
 
-    integral_filter_params_group = {
+    abnn_params_group = {
         'tag': f'monoclinic_{broadening_tag}',
         'load_from_tag': False,
         'peak_length': 20,
@@ -105,34 +105,26 @@ if __name__ == '__main__':
         'loss_type': 'log_cosh',
         'augment': True,
         'model_type': 'metric',
-        'calibration_params': {
-            'layers': 3,
-            'epsilon_pds': 0.1,
-            'epochs': 40,
-            'learning_rate': 0.0002,
-            'augment': True,
-            'batch_size': 64,
-            },
         }
 
-    integral_filter_params_group_load = {
+    abnn_params_group_load = {
         'tag': f'monoclinic_{broadening_tag}',
         'load_from_tag': True,
         }
 
-    integral_filter_params = {
-        'mC_0_02': integral_filter_params_group,
-        'mC_0_03': integral_filter_params_group,
-        'mC_1_02': integral_filter_params_group,
-        'mC_1_03': integral_filter_params_group,
-        'mC_4_02': integral_filter_params_group,
-        'mC_4_03': integral_filter_params_group,
-        'mP_0_00': integral_filter_params_group,
-        'mP_0_01': integral_filter_params_group,
-        'mP_1_00': integral_filter_params_group,
-        'mP_1_01': integral_filter_params_group,
-        'mP_4_00': integral_filter_params_group,
-        'mP_4_01': integral_filter_params_group,
+    abnn_params = {
+        'mC_0_02': abnn_params_group,
+        'mC_0_03': abnn_params_group,
+        'mC_1_02': abnn_params_group,
+        'mC_1_03': abnn_params_group,
+        'mC_4_02': abnn_params_group,
+        'mC_4_03': abnn_params_group,
+        'mP_0_00': abnn_params_group,
+        'mP_0_01': abnn_params_group,
+        'mP_1_00': abnn_params_group,
+        'mP_1_01': abnn_params_group,
+        'mP_4_00': abnn_params_group,
+        'mP_4_01': abnn_params_group,
         }
 
     random_params_bl = {
@@ -155,7 +147,7 @@ if __name__ == '__main__':
         data_params=data_params,
         rf_params=rf_params, 
         template_params=template_params,
-        integral_filter_params=integral_filter_params,
+        abnn_params=abnn_params,
         random_params=random_params,
         seed=12345, 
         )
@@ -168,4 +160,4 @@ if __name__ == '__main__':
     #wrapper.setup_random_forest()
     #wrapper.inferences_random_forest()
     #wrapper.evaluate_random_forest()
-    wrapper.setup_integral_filter('training')
+    wrapper.setup_abnn('training')

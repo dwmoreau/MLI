@@ -1,4 +1,11 @@
 !!! THIS IS MEANT TO BE RUN IN IPYTHON !!!
+!!! AND IT IS A TRANSCRIPT, NOT CODE: the %lprun output below quotes the optimizer as it
+!!! stood in April, including IntegralFilter, which is now ABNN, and the per-peak
+!!! assignment network, which no longer exists. The names are left as the profiler
+!!! recorded them, because renaming quoted output would make it claim source that never
+!!! existed. Nothing imports or runs this file. It also carries absolute NERSC paths,
+!!! which PROTOCOL rule 4 forbids in anything shipped -- it should be deleted rather
+!!! than maintained (P-F-061).
 
 import numpy as np
 import os
