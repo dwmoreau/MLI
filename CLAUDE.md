@@ -40,7 +40,7 @@ itself when it drifts from the first.
 pip install .
 ```
 
-ML model files (~545 MB) are published on the Hugging Face Hub at
+ML model files (~465 MB) are published on the Hugging Face Hub at
 [`dwmoreau/mlindex-models`](https://huggingface.co/dwmoreau/mlindex-models), and `mlindex.download_models`
 fetches them from there with `huggingface_hub` (no git or git-lfs needed). Each release pins a model
 revision via `model_revision` in `mlindex/model_metadata.json`.

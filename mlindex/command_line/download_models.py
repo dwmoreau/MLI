@@ -27,7 +27,7 @@ DEFAULT_GITHUB_REPO_URL = 'https://github.com/dwmoreau/MLI.git'
 DEFAULT_GITHUB_BRANCH = 'main'
 
 # Approximate download size, for the progress banner.
-DOWNLOAD_SIZE_HINT = '~545 MB, 784 files'
+DOWNLOAD_SIZE_HINT = '~465 MB, 739 files'
 
 
 def _hf_imports():
@@ -160,7 +160,7 @@ def _download_hf(repo_id, revision, models_dir, redownload=False):
         if _is_rate_limited(exc):
             print(
                 f"\nERROR: the Hugging Face Hub rate-limited this download ({exc}).\n"
-                "Anonymous downloads have a low rate limit and this repository has 780 files.\n"
+                "Anonymous downloads have a low rate limit and this repository has 739 files.\n"
                 "Re-run the same command to resume -- files already downloaded are kept and\n"
                 "will not be fetched again. To raise the limit, log in first ('hf auth login')\n"
                 "or set the HF_TOKEN environment variable.",
@@ -175,7 +175,7 @@ def _download_hf(repo_id, revision, models_dir, redownload=False):
         else:
             print(
                 f"\nERROR: could not write to {models_dir} ({exc}).\n"
-                "About 600 MB of free space is required.",
+                "About 500 MB of free space is required.",
                 file=sys.stderr,
             )
         sys.exit(1)
