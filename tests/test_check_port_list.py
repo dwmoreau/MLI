@@ -7,7 +7,16 @@ from mlindex.scripts import check_port_list
 
 def test_a_symbol_in_the_tree_is_found_and_an_impossible_one_is_not():
     assert check_port_list.is_present('mcnemar')
-    assert not check_port_list.is_present('zzz_this_symbol_cannot_exist_zzz')
+    assert not check_port_list.is_present(check_port_list.absent_sentinel())
+
+
+def test_the_absent_sentinel_is_generated_rather_than_written_down():
+    """The first sentinel was a literal in the checker's own source, so once that file was tracked
+    `git grep` found it there and the checker declared itself broken -- on main, after a merge, in
+    code whose whole purpose is to not give a confident wrong answer."""
+    first, second = check_port_list.absent_sentinel(), check_port_list.absent_sentinel()
+    assert first != second
+    assert not check_port_list.is_present(first)
 
 
 def test_whole_word_matching_so_a_prefix_is_not_a_false_positive():
@@ -38,7 +47,8 @@ def test_the_checker_verifies_itself_before_reporting():
 def test_it_reports_the_absences_rather_than_failing_on_them(capsys):
     """An absence is present, renamed, or dropped by decision -- a list to account for, not a
     failure. Exiting non-zero would make a session suppress it."""
-    assert check_port_list.main(['--symbols', 'mcnemar,zzz_this_symbol_cannot_exist_zzz']) == 0
+    sentinel = check_port_list.absent_sentinel()
+    assert check_port_list.main(['--symbols', f'mcnemar,{sentinel}']) == 0
     out = capsys.readouterr().out
     assert '1 of 2 present' in out
-    assert 'zzz_this_symbol_cannot_exist_zzz' in out
+    assert sentinel in out

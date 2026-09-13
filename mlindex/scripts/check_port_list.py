@@ -24,6 +24,7 @@ reasons and the session says which:
 import argparse
 import subprocess
 import sys
+import uuid
 
 
 def is_present(symbol, paths=('mlindex/',)):
@@ -31,6 +32,16 @@ def is_present(symbol, paths=('mlindex/',)):
     result = subprocess.run(['git', 'grep', '-lw', symbol, '--', *paths],
                             capture_output=True, text=True)
     return bool(result.stdout.strip())
+
+
+def absent_sentinel():
+    """A symbol that cannot be in the tree, generated rather than written down.
+
+    The first sentinel was a literal in this file, so once the file was tracked `git grep` found
+    it here and the checker declared itself broken. A random name cannot appear in any source,
+    including this one -- which is the only way to be sure the negative case is really negative.
+    """
+    return f'absent_{uuid.uuid4().hex}'
 
 
 def verify_the_checker():
@@ -43,7 +54,7 @@ def verify_the_checker():
     """
     if not is_present('mcnemar'):
         raise SystemExit('The checker is broken: a symbol known to be present reads as absent.')
-    if is_present('zzz_this_symbol_cannot_exist_zzz'):
+    if is_present(absent_sentinel()):
         raise SystemExit('The checker is broken: an impossible symbol reads as present.')
 
 
