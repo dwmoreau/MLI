@@ -96,6 +96,10 @@ HYPERPARAMETERS = {
     'q2_error_multiplier_high': float,
     'n_contaminants_max': int,
     }
+# The thread-count settings a spawned job inherits: OpenMP (scikit-learn's tree fitting), the BLAS
+# libraries numpy links against, and numba.
+SINGLE_THREAD_VARIABLES = ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                           'VECLIB_MAXIMUM_THREADS', 'NUMBA_NUM_THREADS')
 # Depths the unrefined yield is read at, beside each lattice's production depth.
 DEPTHS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
 # What the runs of one report must share. Their seeds may differ: varying them is how the run-to-run
@@ -306,9 +310,16 @@ def measure_lattice(arm, arm_dir, bravais_lattice, rows, second_phase_pool, bund
 
 
 def _run_jobs(function, jobs, processes):
-    """Run `function(*job)` for every job, in spawned processes when more than one is allowed."""
+    """Run `function(*job)` for every job, in spawned processes when more than one is allowed.
+
+    Spawned processes are held to one thread each in their numerical libraries, unless the caller
+    has set a count. Left at their defaults, the processes' thread pools compete for the same cores
+    and the same work takes about twice as long; the results are identical either way.
+    """
     if processes <= 1:
         return [function(*job) for job in jobs]
+    for variable in SINGLE_THREAD_VARIABLES:
+        os.environ.setdefault(variable, '1')
     context = multiprocessing.get_context('spawn')
     with ProcessPoolExecutor(max_workers=processes, mp_context=context) as executor:
         futures = [executor.submit(function, *job) for job in jobs]
