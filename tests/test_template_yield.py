@@ -87,3 +87,67 @@ def test_the_template_count_is_read_from_the_factory(models_dir):
 
 def test_help_is_ascii():
     tool.build_parser().format_help().encode("ascii")
+
+
+def _per_entry(arm, found, first_rank, n_templates=5, n_ranked=50, oracle=True):
+    """A yield run's rows for four tP patterns and one aP pattern."""
+    lattices = ["tP", "tP", "tP", "tP", "aP"]
+    return pd.DataFrame({
+        "run": "seed1",
+        "arm": arm,
+        "entry_id": [f"crystal{index}" for index in range(5)],
+        "condition_bundle": "b1_error1_cont0",
+        "bravais_lattice": lattices,
+        "n_templates": n_templates,
+        "n_ranked": n_ranked,
+        "first_rank_0.01": first_rank,
+        "oracle_0.01": oracle,
+        "refined_found": found,
+        "refined_in_top_n": found,
+    })
+
+
+def test_a_template_counts_as_kept_only_within_the_production_depth():
+    frame = _per_entry("rho", [True] * 5, [0, 4, 5, -1, 3])
+    kept = tool.pattern_outcomes(frame, [0.01])["kept_0.01"].tolist()
+    assert kept == [True, True, False, False, True]
+
+
+def test_when_every_template_is_kept_the_unrefined_yield_is_the_ceiling():
+    frame = _per_entry("rho", [True] * 5, [40, 40, 40, 40, 40], n_templates=60, n_ranked=50)
+    assert tool.pattern_outcomes(frame, [0.01])["kept_0.01"].all()
+
+
+def test_the_aggregate_is_an_unweighted_mean_over_lattices():
+    frame = _per_entry("rho", [True, True, True, True, False], [0] * 5)
+    _, aggregate = tool.summarise(tool.pattern_outcomes(frame, [0.01]))
+    # tP finds 4 of 4 and aP 0 of 1: the unweighted mean is 0.5, the pooled share 0.8.
+    assert aggregate["refined_found"].iloc[0] == pytest.approx(0.5)
+
+
+def test_arms_are_paired_pattern_by_pattern():
+    rho = _per_entry("rho", [True, False, False, True, False], [0] * 5)
+    posterior = _per_entry("posterior_sigma", [True, True, True, False, False], [0] * 5)
+    outcomes = tool.pattern_outcomes(pd.concat((rho, posterior)), [0.01])
+    table = tool.paired(outcomes, "rho").set_index("scope")
+    assert table.loc["tP", "b_only"] == 2 and table.loc["tP", "a_only"] == 1
+    assert table.loc["tP", "delta"] == pytest.approx(0.25)
+    assert table.loc["aggregate", "delta"] == pytest.approx((0.25 + 0.0) / 2)
+
+
+def test_arms_that_cover_different_patterns_are_refused():
+    rho = _per_entry("rho", [True] * 5, [0] * 5)
+    posterior = _per_entry("posterior_sigma", [True] * 5, [0] * 5).iloc[:4]
+    outcomes = tool.pattern_outcomes(pd.concat((rho, posterior)), [0.01])
+    with pytest.raises(ValueError, match="different patterns"):
+        tool.paired(outcomes, "rho")
+
+
+def test_the_floor_is_the_spread_of_the_paired_difference_between_runs():
+    table = pd.DataFrame({"arm": "posterior_sigma", "reference": "rho", "scope": "aggregate",
+                          "delta": [0.10, 0.20, 0.30]})
+    row = tool.floor(table).iloc[0]
+    assert row["delta_mean"] == pytest.approx(0.2)
+    assert row["delta_sd"] == pytest.approx(0.1)
+    assert row["delta_in_sds"] == pytest.approx(2.0)
+    assert row["n_runs"] == 3

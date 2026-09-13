@@ -21,6 +21,12 @@ Run the stages in order.
         --input-sets rho,posterior_sigma --bravais-lattices tP --per-lattice 50 \
         --group select --bundles b1_error1_cont0 --out-dir template_yield/select
 
+    # 3. Summarise one or more yield runs: shares per lattice and over lattices, each arm paired
+    #    against rho, the run-to-run floor when the runs differ only in --fit-seed and
+    #    --search-seed, and the yield at every depth.
+    python -m mlindex.scripts.run_template_yield --stage report \
+        --runs template_yield/select --out-dir template_yield/select_report
+
 Crystals come from the frozen split in three disjoint groups. `fit` and `select` divide the
 `fom-train` crystals drawn for a lattice four to one by a hash of each crystal's identifier, so a
 crystal's group does not depend on how many were drawn; `report` is `fom-dev`. Rankers are trained
@@ -56,6 +62,7 @@ import pandas as pd
 
 from mlindex.model_training import Benchmark
 from mlindex.model_training import BenchmarkConditions
+from mlindex.model_training import BenchmarkMetrics as metrics
 from mlindex.model_training import BenchmarkPatterns
 from mlindex.model_training import BenchmarkRuns as runs
 from mlindex.model_training.MITemplates import TEMPLATE_INPUT_SETS
@@ -89,6 +96,12 @@ HYPERPARAMETERS = {
     'q2_error_multiplier_high': float,
     'n_contaminants_max': int,
     }
+# Depths the unrefined yield is read at, beside each lattice's production depth.
+DEPTHS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
+# What the runs of one report must share. Their seeds may differ: varying them is how the run-to-run
+# floor is measured.
+SHARED_RUN_FIELDS = ('group', 'population', 'bundles', 'bravais_lattices', 'per_lattice', 'seed',
+                     'cut', 'rtols', 'condition_set_digest', 'split_manifest_sha256')
 
 
 def crystal_group(identifier, seed):
@@ -330,14 +343,14 @@ def run_train(args):
             jobs.append((input_set, lattice, args.models_dir, args.work_dir,
                          rows.loc[of_lattice & (groups == 'fit')].reset_index(drop=True),
                          rows.loc[of_lattice & (groups == 'select')].reset_index(drop=True),
-                         args.seed))
+                         args.fit_seed))
     summary = pd.DataFrame(_run_jobs(train_input_set, jobs, args.processes))
     print(summary.to_string(index=False))
     for input_set in args.input_sets:
         write_manifest(arm_models_dir(args.work_dir, input_set) / 'training_manifest.json',
                        input_set=input_set, families=TEMPLATE_INPUT_SETS[input_set],
                        bravais_lattices=lattices, per_lattice=args.per_lattice, seed=args.seed,
-                       select_every=SELECT_EVERY, target='-log10(distance to the true cell)',
+                       fit_seed=args.fit_seed, select_every=SELECT_EVERY, target='-log10(distance to the true cell)',
                        split_manifest=str(args.split_manifest),
                        split_manifest_sha256=runs.file_digest(args.split_manifest),
                        shipped_models_dir=str(args.models_dir),
@@ -384,6 +397,138 @@ def run_yield(args):
     print(f'wrote {out_dir / "per_entry.parquet"}: {per_entry.shape[0]} rows')
 
 
+def load_runs(run_dirs):
+    """The per-pattern tables of several yield runs, refused if they measured different things."""
+    frames, manifests = [], []
+    for run_dir in map(Path, run_dirs):
+        with open(run_dir / 'manifest.json', encoding='utf-8') as handle:
+            manifests.append(json.load(handle))
+        frame = pd.read_parquet(run_dir / 'per_entry.parquet')
+        frame['run'] = run_dir.name
+        frames.append(frame)
+    for run_dir, manifest in zip(run_dirs[1:], manifests[1:]):
+        for field in SHARED_RUN_FIELDS + ('arms',):
+            ours = manifest.get(field)
+            theirs = manifests[0].get(field)
+            if field == 'arms':
+                ours, theirs = sorted(ours or {}), sorted(theirs or {})
+            if ours != theirs:
+                raise ValueError(f'{run_dir} differs from {run_dirs[0]} in {field}: {ours!r} '
+                                 f'against {theirs!r}. Only the seeds may differ between runs.')
+    frame = pd.concat(frames, ignore_index=True)
+    measured = frame['refused'].fillna('') == ''
+    return frame.loc[measured].reset_index(drop=True), manifests[0]
+
+
+def pattern_outcomes(frame, rtols):
+    """Per pattern: the refined yield, the unrefined yield at the production depth, the ceiling.
+
+    Where production asks for at least as many templates as exist, the templater returns all of
+    them, so the unrefined yield there is the ceiling.
+    """
+    outcomes = frame[['run', 'arm', 'entry_id', 'condition_bundle', 'bravais_lattice']].copy()
+    outcomes['refined_found'] = frame['refined_found'].astype(bool)
+    outcomes['refined_in_top_n'] = frame['refined_in_top_n'].astype(bool)
+    keeps_every_template = frame['n_templates'] >= frame['n_ranked']
+    for rtol in rtols:
+        rank = frame[f'first_rank_{rtol:g}']
+        oracle = frame[f'oracle_{rtol:g}'].astype(bool)
+        outcomes[f'kept_{rtol:g}'] = (((rank >= 0) & (rank < frame['n_templates']))
+                                      | (keeps_every_template & oracle))
+        outcomes[f'oracle_{rtol:g}'] = oracle
+    return outcomes
+
+
+def summarise(outcomes):
+    """Shares per (run, arm, lattice), and their unweighted mean over lattices per (run, arm)."""
+    keys = ['run', 'arm', 'bravais_lattice']
+    values = [column for column in outcomes.columns
+              if column not in keys + ['entry_id', 'condition_bundle']]
+    grouped = outcomes.groupby(keys)
+    per_lattice = grouped[values].mean().reset_index()
+    per_lattice['n_patterns'] = grouped.size().to_numpy()
+    aggregate = per_lattice.groupby(['run', 'arm'])[values].mean().reset_index()
+    return per_lattice, aggregate
+
+
+def paired(outcomes, reference, column='refined_found'):
+    """Each arm against `reference` on the same patterns: per lattice, and over lattices.
+
+    The aggregate difference is the unweighted mean of the per-lattice differences, as every
+    reported share is; the McNemar test beside it pools the patterns.
+    """
+    keys = ['entry_id', 'condition_bundle', 'bravais_lattice']
+    rows = []
+    for run, of_run in outcomes.groupby('run'):
+        base = of_run.loc[of_run['arm'] == reference].set_index(keys)[column]
+        if base.empty:
+            raise ValueError(f'Run {run} has no {reference!r} arm to pair against.')
+        for arm, of_arm in of_run.groupby('arm'):
+            if arm == reference:
+                continue
+            other = of_arm.set_index(keys)[column]
+            joined = pd.concat({'a': base, 'b': other}, axis=1, join='inner')
+            if not (joined.shape[0] == base.shape[0] == other.shape[0]):
+                raise ValueError(f'In run {run}, {arm!r} and {reference!r} cover different '
+                                 'patterns, so they cannot be paired.')
+            lattice_deltas = []
+            for lattice, block in joined.groupby(level='bravais_lattice'):
+                test = metrics.mcnemar(block['a'], block['b'])
+                low, high = metrics.paired_delta_ci(
+                    block['a'], block['b'], block.index.get_level_values('entry_id'))
+                rows.append(dict(test, run=run, arm=arm, reference=reference, scope=lattice,
+                                 ci_low=low, ci_high=high))
+                lattice_deltas.append(test['delta'])
+            test = metrics.mcnemar(joined['a'], joined['b'])
+            rows.append(dict(test, run=run, arm=arm, reference=reference, scope='aggregate',
+                             delta=float(np.mean(lattice_deltas)), delta_pooled=test['delta']))
+    return pd.DataFrame(rows)
+
+
+def floor(paired_table):
+    """How far each paired difference moves between runs that differ only in their seeds."""
+    table = (paired_table.groupby(['arm', 'reference', 'scope'])['delta']
+             .agg(delta_mean='mean', delta_sd='std', n_runs='count').reset_index())
+    table['delta_in_sds'] = table['delta_mean'] / table['delta_sd']
+    return table
+
+
+def depth_curve(frame, rtols, depths=DEPTHS):
+    """The share of patterns whose first correct template is within the ranker's top `depth`."""
+    rows = []
+    for (run, arm, lattice), block in frame.groupby(['run', 'arm', 'bravais_lattice']):
+        production_depth = int(block['n_templates'].iloc[0])
+        for rtol in rtols:
+            rank = block[f'first_rank_{rtol:g}'].to_numpy()
+            for depth in sorted(set(depths) | {production_depth}):
+                rows.append({'run': run, 'arm': arm, 'bravais_lattice': lattice, 'rtol': rtol,
+                             'depth': depth, 'production_depth': production_depth,
+                             'share_found': float(np.mean((rank >= 0) & (rank < depth)))})
+    return pd.DataFrame(rows)
+
+
+def run_report(args):
+    frame, manifest = load_runs(args.runs)
+    rtols = manifest['rtols']
+    outcomes = pattern_outcomes(frame, rtols)
+    per_lattice, aggregate = summarise(outcomes)
+    paired_table = paired(outcomes, args.reference)
+    tables = {
+        'per_lattice.csv': per_lattice,
+        'aggregate.csv': aggregate,
+        'paired.csv': paired_table,
+        'floor.csv': floor(paired_table),
+        'depth_curve.csv': depth_curve(frame, rtols),
+        }
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, table in tables.items():
+        table.to_csv(out_dir / name, index=False, encoding='utf-8')
+        print(f'wrote {out_dir / name}')
+    print(aggregate.to_string(index=False))
+    print(paired_table.loc[paired_table['scope'] == 'aggregate'].to_string(index=False))
+
+
 def _split(value):
     return [item for item in (value or '').split(',') if item]
 
@@ -393,16 +538,17 @@ def build_parser():
         description='Train the Miller-index template ranker on different input sets and measure '
                     'how often the templates it keeps lead to the true cell.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--stage', required=True, choices=('train', 'yield'),
+    parser.add_argument('--stage', required=True, choices=('train', 'yield', 'report'),
                         help='train: fit one ranker per input set. yield: measure the shipped '
-                             'ranker and the trained ones.')
-    parser.add_argument('--split-manifest', required=True, metavar='PATH',
-                        help='The frozen train/dev/test split crystals are drawn from.')
-    parser.add_argument('--models-dir', required=True, metavar='PATH',
+                             'ranker and the trained ones. report: summarise yield runs.')
+    parser.add_argument('--split-manifest', default=None, metavar='PATH',
+                        help='The frozen train/dev/test split crystals are drawn from (train, '
+                             'yield).')
+    parser.add_argument('--models-dir', default=None, metavar='PATH',
                         help='The shipped model tree: the directory that directly contains '
                              'cubic_1/, hexagonal_1/, ... It supplies the template library, the '
-                             'hyperparameters and the shipped ranker.')
-    parser.add_argument('--work-dir', required=True, metavar='PATH',
+                             'hyperparameters and the shipped ranker (train, yield).')
+    parser.add_argument('--work-dir', default=None, metavar='PATH',
                         help='Where trained rankers are written, one models directory per input '
                              'set under WORK_DIR/models/.')
     parser.add_argument('--input-sets', default='', metavar='A,B',
@@ -413,8 +559,11 @@ def build_parser():
                         help='Crystals drawn per lattice before the fit/select division, or from '
                              'fom-dev for --group report (default: 50).')
     parser.add_argument('--seed', type=int, default=12345, metavar='N',
-                        help='Fixes the crystals drawn, their groups, their noise and the training '
-                             'draws (default: 12345).')
+                        help='Fixes the crystals drawn, their groups and their noise '
+                             '(default: 12345). Runs compared in one report share it.')
+    parser.add_argument('--fit-seed', type=int, default=12345, metavar='N',
+                        help='Reaches training alone: the noise put on training peak lists '
+                             '(default: 12345). Varied with --search-seed to measure the floor.')
     parser.add_argument('--processes', type=int, default=1, metavar='N',
                         help='Jobs run at once; one job is one input set on one lattice '
                              '(default: 1).')
@@ -438,8 +587,16 @@ def build_parser():
                          metavar='A,B',
                          help='Relative tolerances a template must match the true cell to '
                               '(default: 0.001,0.003,0.01,0.03).')
-    measure.add_argument('--out-dir', default=None, metavar='PATH',
-                         help='Where the per-pattern table and its manifest are written.')
+    parser.add_argument('--out-dir', default=None, metavar='PATH',
+                        help='yield: where the per-pattern table and its manifest are written. '
+                             'report: where the summary tables are written.')
+
+    report = parser.add_argument_group('reporting')
+    report.add_argument('--runs', default='', metavar='A,B',
+                        help='Comma-separated --out-dir directories of yield runs. More than one '
+                             'run, differing only in their seeds, gives the run-to-run floor.')
+    report.add_argument('--reference', default='rho', metavar='NAME',
+                        help='The arm every other arm is paired against (default: rho).')
     return parser
 
 
@@ -449,6 +606,7 @@ def main(argv=None):
     args.bravais_lattices = _split(args.bravais_lattices)
     args.bundles = _split(args.bundles)
     args.rtol = [float(value) for value in _split(args.rtol)]
+    args.runs = _split(args.runs)
     unknown = [name for name in args.input_sets if name not in TEMPLATE_INPUT_SETS]
     if unknown:
         raise SystemExit(f'Unknown input set(s) {unknown}. Known: {list(TEMPLATE_INPUT_SETS)}')
@@ -459,6 +617,12 @@ def main(argv=None):
     if unknown:
         raise SystemExit(f'Unknown condition bundle(s) {unknown}. '
                          f'Known: {list(BenchmarkConditions.tags())}')
+    if args.stage in ('train', 'yield'):
+        missing = [flag for flag, value in (('--split-manifest', args.split_manifest),
+                                            ('--models-dir', args.models_dir),
+                                            ('--work-dir', args.work_dir)) if value is None]
+        if missing:
+            raise SystemExit(f'--stage {args.stage} needs {", ".join(missing)}.')
     if args.stage == 'train':
         if not args.input_sets:
             raise SystemExit('--stage train needs --input-sets.')
@@ -467,6 +631,10 @@ def main(argv=None):
         if args.out_dir is None:
             raise SystemExit('--stage yield needs --out-dir.')
         run_yield(args)
+    elif args.stage == 'report':
+        if not args.runs or args.out_dir is None:
+            raise SystemExit('--stage report needs --runs and --out-dir.')
+        run_report(args)
 
 
 if __name__ == '__main__':
