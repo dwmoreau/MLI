@@ -170,6 +170,7 @@ class MITemplates:
             'n_peaks_calibration': min(20, data_params['n_peaks']),
             'max_distance': 0.05,
             'grid_search': None,
+            'load_templates': False,
             'load_training_data': False,
             'template_inputs': 'rho',
             }
@@ -533,7 +534,9 @@ class MITemplates:
             )
 
     def setup(self, data):
-        if self.template_params['load_training_data']:
+        # `load_templates` reuses a template library already saved under this tag, so a refit
+        # changes the regressor alone; `load_training_data` separately reuses its training cache.
+        if self.template_params['load_templates']:
             self.miller_index_templates = np.load(os.path.join(
                 f'{self.save_to}',
                 f'{self.bravais_lattice}_miller_index_templates_{self.template_params["tag"]}.npy'
@@ -542,6 +545,7 @@ class MITemplates:
                 f'{self.save_to}',
                 f'{self.bravais_lattice}_miller_index_templates_prob_{self.template_params["tag"]}.npy',
                 ))
+            self.template_params['n_templates'] = self.miller_index_templates.shape[0]
         else:
             self.setup_templates(data)
         train_inputs = self.calibrate_templates(data)
