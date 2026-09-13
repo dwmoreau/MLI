@@ -4,9 +4,7 @@ import numpy as np
 from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.utilities.FigureOfMerits import get_M20
 from mlindex.utilities.FigureOfMerits import get_assignment_posterior
-from mlindex.utilities.FigureOfMerits import get_M_rev_sym
-from mlindex.utilities.FigureOfMerits import get_n_over
-from mlindex.utilities.FigureOfMerits import get_X_N
+from mlindex.utilities.FigureOfMerits import merit_set
 from mlindex.utilities.MillerIndexAssignment import vectorized_subsampling
 from mlindex.utilities.numba_functions import fast_assign
 from mlindex.utilities.Q2Calculator import Q2Calculator
@@ -85,17 +83,49 @@ class Candidates:
         self.best_M20 = self.M20
 
     def fix_bad_conversions(self):
+        """Replace a candidate whose cell will not convert with a copy of one that does.
+
+        A conversion failure leaves NaN in the cell, and a NaN candidate is dead weight for the
+        rest of the search: it cannot be refined, scored or ranked. Rather than carry it, it is
+        overwritten by a donor drawn from the candidates that did convert.
+
+        Donors are drawn with a preference for high-scoring ones, by rank rather than by score.
+        Weighting by M20 directly does not work: it is heavy-tailed and reaches 1e12 on a
+        saturated fit, so a single blown-up candidate would take essentially all the probability
+        and every repair would return the same cell. Rank weights are scale-free and give a mild,
+        bounded preference -- the best donor is `n` times as likely as the worst.
+
+        Before the first assignment there is no score to rank by, and the draw is uniform.
+        """
         bad_conversions = np.sum(np.isnan(self.reciprocal_unit_cell), axis=1) > 0
-        good_indices = np.arange(self.reciprocal_unit_cell.shape[0])[~bad_conversions]
-        n_bad = np.sum(bad_conversions)
-        if n_bad > 0:
-            if n_bad > bad_conversions.size - n_bad:
-                good_indices = self.rng.choice(good_indices, replace=True, size=n_bad)
-            else:
-                good_indices = self.rng.choice(good_indices, replace=False, size=n_bad)
-            self.xnn[bad_conversions] = self.xnn[good_indices]
-            self.reciprocal_unit_cell[bad_conversions] = self.reciprocal_unit_cell[good_indices]
-            self.unit_cell[bad_conversions] = self.unit_cell[good_indices]
+        n_bad = int(np.sum(bad_conversions))
+        if n_bad == 0:
+            return
+        good_indices = np.flatnonzero(~bad_conversions)
+        if good_indices.size == 0:
+            raise ValueError(
+                'Every candidate cell failed to convert, so there is nothing to repair them '
+                'from. The generated cells are unusable for this pattern.')
+        donors = self.rng.choice(
+            good_indices, size=n_bad, replace=n_bad > good_indices.size,
+            p=self._donor_weights(good_indices))
+        self.xnn[bad_conversions] = self.xnn[donors]
+        self.reciprocal_unit_cell[bad_conversions] = self.reciprocal_unit_cell[donors]
+        self.unit_cell[bad_conversions] = self.unit_cell[donors]
+
+    def _donor_weights(self, good_indices):
+        """Rank-based sampling weights over the candidates that converted, or None for uniform."""
+        score = getattr(self, 'best_M20', None)
+        n_candidates = self.reciprocal_unit_cell.shape[0]
+        if score is None or np.size(score) != n_candidates or good_indices.size < 2:
+            return None
+        good_score = np.asarray(score, dtype=np.float64)[good_indices]
+        if not np.all(np.isfinite(good_score)):
+            return None
+        # Ranks, not scores: position among the donors, worst getting weight 1.
+        weights = np.empty(good_indices.size, dtype=np.float64)
+        weights[np.argsort(good_score, kind='stable')] = np.arange(1, good_indices.size + 1)
+        return weights/weights.sum()
 
     def update_xnn_from_unit_cell(self):
         self.reciprocal_unit_cell = reciprocal_uc_conversion(
@@ -342,10 +372,9 @@ class Candidates:
 
         Every candidate criterion, on the cells as they stand at the cut.
 
-        `q2_ref_calc` is rebuilt from `best_xnn` and the assignment redone with `fast_assign`, so
-        the recomputed M20 matches `best_M20` bit for bit. Rebuilding `q2_calc` from the stored
-        Miller indices instead differs by an ULP, which is enough to move a line across M20's own
-        cut-off.
+        `q2_ref_calc` is rebuilt from `best_xnn`, so the recomputed M20 matches `best_M20` bit
+        for bit. `merit_set` is shared with the benchmark's merit sidecar, which computes the
+        same eight on the refined cells.
         """
         if self.zero_error:
             raise NotImplementedError(
@@ -353,20 +382,7 @@ class Candidates:
                 'candidate zeropoint would have to be applied to q2_ref_calc here, and the '
                 'captured merits would not reproduce the pipeline value without it.'
                 )
-        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
-        hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
-        q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
-
-        M_tilde, M_rev, M_sym, n_cal = get_M_rev_sym(
-            self.q2_obs, q2_calc, q2_ref_calc, return_n_cal=True)
-        n_over, max_gap = get_n_over(self.q2_obs, q2_calc, q2_ref_calc)
-        X_N = get_X_N(self.q2_obs, q2_calc, q2_ref_calc)
-        M20 = get_M20(self.q2_obs, q2_calc, q2_ref_calc)
-
-        captured = {'M20': M20, 'M_tilde': M_tilde, 'M_rev': M_rev, 'M_sym': M_sym,
-                    'X_N': X_N.astype(np.float64), 'n_over': n_over.astype(np.float64),
-                    'max_gap': max_gap.astype(np.float64),
-                    'n_cal': n_cal.astype(np.float64)}
+        captured = merit_set(self.q2_obs, self.q2_calculator.get_q2(self.best_xnn))
         assert tuple(captured) == PRUNE_CAPTURE_MERITS, (
             f'capture order drifted from PRUNE_CAPTURE_MERITS: {tuple(captured)}')
         return captured

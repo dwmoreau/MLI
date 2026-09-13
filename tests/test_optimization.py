@@ -261,6 +261,94 @@ def test_standardize_cell_is_a_no_op_off_monoclinic_and_triclinic():
     assert np.array_equal(candidates.best_xnn, before)
 
 
+def _repairable(scores=None, bad=(2,), n=5):
+    """A Candidates carrying only what fix_bad_conversions touches."""
+    from mlindex.optimization.Candidates import Candidates
+
+    candidates = Candidates.__new__(Candidates)
+    candidates.rng = np.random.default_rng(0)
+    cells = np.arange(1.0, n + 1.0).reshape(n, 1)
+    candidates.reciprocal_unit_cell = cells.copy()
+    for row in bad:
+        candidates.reciprocal_unit_cell[row] = np.nan
+    candidates.xnn = (10.0*cells).copy()
+    candidates.unit_cell = candidates.xnn.copy()
+    if scores is not None:
+        candidates.best_M20 = np.asarray(scores, dtype=float)
+    return candidates
+
+
+def test_a_cell_that_will_not_convert_is_replaced_by_one_that_does():
+    """A NaN cell cannot be refined, scored or ranked, so carrying it costs a candidate slot for
+    the rest of the search."""
+    candidates = _repairable(scores=[1.0, 9.0, 0.0, 5.0, 3.0])
+
+    candidates.fix_bad_conversions()
+
+    assert not np.isnan(candidates.reciprocal_unit_cell).any()
+    assert candidates.xnn[2, 0] in {10.0, 20.0, 40.0, 50.0}
+    # The donor is copied consistently into all three representations.
+    donor = np.flatnonzero(candidates.xnn[:, 0] == candidates.xnn[2, 0])[0]
+    assert candidates.unit_cell[2, 0] == candidates.unit_cell[donor, 0]
+
+
+def test_donors_are_preferred_by_rank_and_not_by_the_size_of_the_score():
+    """M20 is heavy-tailed -- it reaches 1e12 on a saturated fit -- so weighting by the value
+    would put nearly all the probability on one blown-up candidate and every repair would return
+    the same cell. Ranks are scale-free: the best donor is n times as likely as the worst, whatever
+    the numbers are."""
+    from mlindex.optimization.Candidates import Candidates
+
+    counts = {}
+    for seed in range(2000):
+        candidates = _repairable(scores=[1.0, 9.0, 0.0, 5.0, 3.0])
+        candidates.rng = np.random.default_rng(seed)
+        candidates.fix_bad_conversions()
+        cell = float(candidates.xnn[2, 0])
+        counts[cell] = counts.get(cell, 0) + 1
+
+    # Donors ranked worst to best are 10, 50, 40, 20, so frequencies must be ordered likewise.
+    assert counts[20.0] > counts[40.0] > counts[50.0] > counts[10.0]
+    # A blown-up score must not swamp the draw the way a value-weighted rule would.
+    blown = {}
+    for seed in range(2000):
+        candidates = _repairable(scores=[1.0, 1e13, 0.0, 5.0, 3.0])
+        candidates.rng = np.random.default_rng(seed)
+        candidates.fix_bad_conversions()
+        cell = float(candidates.xnn[2, 0])
+        blown[cell] = blown.get(cell, 0) + 1
+    assert blown[20.0] < 0.5*sum(blown.values())
+
+
+def test_the_draw_is_uniform_before_any_score_exists():
+    """The repair runs from `update_unit_cell_from_xnn`, which is reached before `assign_hkls` has
+    produced an M20. There is nothing to rank by there, and that must not raise."""
+    candidates = _repairable(scores=None)
+
+    candidates.fix_bad_conversions()
+
+    assert not np.isnan(candidates.reciprocal_unit_cell).any()
+
+
+def test_more_bad_than_good_still_repairs_every_one():
+    """With too few donors to go round they are reused, rather than leaving NaN cells behind."""
+    candidates = _repairable(scores=[1.0, 2.0, 0.0, 0.0, 0.0], bad=(2, 3, 4))
+
+    candidates.fix_bad_conversions()
+
+    assert not np.isnan(candidates.reciprocal_unit_cell).any()
+    assert set(candidates.xnn[:, 0]) <= {10.0, 20.0}
+
+
+def test_every_cell_failing_to_convert_is_refused_rather_than_left_as_nan():
+    """There is nothing to repair from. Carrying on would hand NaN cells to the refinement, where
+    they are silently dropped much later by the deduplication's own filter."""
+    candidates = _repairable(scores=[0.0, 0.0], bad=(0, 1), n=2)
+
+    with pytest.raises(ValueError, match='failed to convert'):
+        candidates.fix_bad_conversions()
+
+
 def _downsample_manager():
     """An OptimizerManager stub carrying only what _downsample_computation touches."""
     from mlindex.optimization.MPIOptimizer import OptimizerManager
@@ -329,6 +417,61 @@ def test_a_matched_return_still_downsamples():
 
     assert manager.top_M20.tolist() == [30.0, 20.0, 10.0]
     assert manager.top_spacegroup == ['C', 'B', 'A']
+
+
+def test_a_collapsed_neighbourhood_keeps_each_survivor_s_spacegroup():
+    """The deduplication permutes rows and drops them, and the spacegroups are a list beside
+    the arrays rather than a column of them. Row identity is carried through the collapse so
+    the list is indexed once, at the end; this pins that a survivor keeps its own label."""
+    manager = _downsample_manager()
+    manager.opt_params['downsample_radius'] = 1e-3
+    # The first two cells are near-duplicates, so one of them is collapsed away.
+    xnn = [np.array([[1.0], [1.0000001], [5.0]])]
+    M20 = [np.array([10.0, 20.0, 30.0])]
+    n_indexed = [np.array([5, 6, 7])]
+    spacegroup = ['A', 'B', 'C']
+
+    manager._downsample_computation(M20, xnn, n_indexed, spacegroup,
+                                    n_top_candidates=10)
+
+    assert manager.top_M20.tolist() == [30.0, 20.0]
+    assert manager.top_spacegroup == ['C', 'B']
+    assert manager.top_n_indexed.tolist() == [7, 6]
+
+
+def test_the_downsample_hook_is_inert_and_sees_the_pool_before_truncation():
+    """The shipped indexer keeps twenty candidates a lattice; a benchmark needs every
+    survivor and the size of the pool they came from. The hook is where a research subclass
+    reads them, and it must do nothing at all unless something overrides it."""
+    from mlindex.optimization.MPIOptimizer import OptimizerManager
+
+    seen = {}
+
+    class Recording(OptimizerManager):
+        def _on_downsample(self, survivors, order, n_entering, n_top_candidates):
+            seen.update(survivors=survivors, order=order, n_entering=n_entering)
+
+    manager = Recording.__new__(Recording)
+    manager.lattice_system = 'cubic'
+    manager.n_ranks = 1
+    manager.zero_error = False
+    manager.opt_params = {'downsample_radius': 1e-9}
+    xnn = [np.array([[1.0], [2.0], [np.nan], [3.0]])]
+    M20 = [np.array([10.0, 20.0, 999.0, 30.0])]
+    n_indexed = [np.array([5, 6, 7, 8])]
+    spacegroup = ['A', 'B', 'BAD', 'D']
+
+    manager._downsample_computation(M20, xnn, n_indexed, spacegroup,
+                                    n_top_candidates=1)
+
+    # Truncation keeps one; the hook saw all three that reached deduplication.
+    assert manager.top_M20.tolist() == [30.0]
+    assert seen['n_entering'] == 3
+    assert seen['survivors']['spacegroup'] == ['A', 'B', 'D']
+    assert seen['survivors']['M20'].tolist() == [10.0, 20.0, 30.0]
+    assert seen['order'].tolist() == [2, 1, 0]
+    # The base class reads nothing and returns nothing.
+    assert OptimizerManager._on_downsample(manager, {}, None, 0, 0) is None
 
 
 def _triclinic_candidates(xnn_values, seed=7):

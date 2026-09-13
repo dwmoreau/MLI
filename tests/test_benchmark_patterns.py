@@ -208,3 +208,62 @@ def test_the_error_can_move_a_peak_across_the_edge_of_the_window(block):
         if pattern.q2_obs.size == patterns.N_PEAKS and len(nominal) == patterns.N_PEAKS:
             crossed = crossed or pattern.q2_obs[-1] > max(nominal)
     assert crossed, 'no peak crossed the window edge in any sampled crystal'
+
+
+# ---------------------------------------------------------------------------
+# Partner phases that cannot contaminate
+# ---------------------------------------------------------------------------
+
+
+def test_a_partner_with_no_lines_in_range_is_passed_over_for_one_that_works():
+    """Two of 128 pools died on the first cluster run because the partner was drawn blind: a very
+    large cell observes a range so low that most partners have no lines there, and the first draw
+    was one of them. The draw now tries successive partners and takes the first that works."""
+    from mlindex.model_training.BenchmarkPatterns import prepare_peak_list
+    from mlindex.model_training import BenchmarkConditions
+
+    condition = BenchmarkConditions.BY_KEY['second_phase']
+    entry = {'identifier': 'BIGCELL', 'q2_1': np.linspace(0.0013, 0.0175, 30)}
+    # Most partners sit far above this entry's range; one overlaps it.
+    useless = np.linspace(0.5, 0.9, 40)
+    usable = np.linspace(0.0014, 0.0174, 40)
+    pool = ([f'DUD{i:02d}' for i in range(20)] + ['GOOD'],
+            [useless]*20 + [usable])
+
+    pattern = prepare_peak_list(entry, condition, base_seed=12345, second_phase_pool=pool)
+
+    assert pattern.second_phase_partner == 'GOOD'
+    assert pattern.n_second_phase_achieved > 0
+
+
+def test_no_usable_partner_is_refused_with_the_reason_attached():
+    """When nothing in the pool can contaminate the pattern there is no pattern to make. The
+    driver catches this and records the crystal; it must not come back as a bare error with no
+    indication of which entry or why."""
+    from mlindex.model_training.BenchmarkPatterns import prepare_peak_list
+    from mlindex.model_training import BenchmarkConditions
+    from mlindex.utilities.ErrorAdder import ContaminantPlacementError
+
+    condition = BenchmarkConditions.BY_KEY['second_phase']
+    entry = {'identifier': 'BIGCELL', 'q2_1': np.linspace(0.0013, 0.0175, 30)}
+    pool = ([f'DUD{i:02d}' for i in range(20)], [np.linspace(0.5, 0.9, 40)]*20)
+
+    with pytest.raises(ContaminantPlacementError, match='BIGCELL'):
+        prepare_peak_list(entry, condition, base_seed=12345, second_phase_pool=pool)
+
+
+def test_the_partner_choice_is_the_same_in_every_arm():
+    """A skip or a partner choice that varied between arms would unpair the comparison."""
+    from mlindex.model_training.BenchmarkPatterns import prepare_peak_list
+    from mlindex.model_training import BenchmarkConditions
+
+    condition = BenchmarkConditions.BY_KEY['second_phase']
+    entry = {'identifier': 'BIGCELL', 'q2_1': np.linspace(0.0013, 0.0175, 30)}
+    pool = ([f'DUD{i:02d}' for i in range(20)] + ['GOOD'],
+            [np.linspace(0.5, 0.9, 40)]*20 + [np.linspace(0.0014, 0.0174, 40)])
+
+    first = prepare_peak_list(entry, condition, base_seed=12345, second_phase_pool=pool)
+    second = prepare_peak_list(entry, condition, base_seed=12345, second_phase_pool=pool)
+
+    assert first.second_phase_partner == second.second_phase_partner
+    np.testing.assert_array_equal(first.q2_obs, second.q2_obs)
