@@ -143,6 +143,35 @@ def test_arms_that_cover_different_patterns_are_refused():
         tool.paired(outcomes, "rho")
 
 
+def _write_run(directory, arms, search_seed):
+    import json
+
+    directory.mkdir(parents=True)
+    frames = [_per_entry(arm, [True] * 5, [0] * 5).drop(columns="run") for arm in arms]
+    table = pd.concat(frames, ignore_index=True)
+    table["refused"] = ""
+    table.to_parquet(directory / "per_entry.parquet", index=False)
+    manifest = {field: "shared" for field in tool.SHARED_RUN_FIELDS}
+    manifest.update(search_seed=search_seed, arms={arm: f"/models/{arm}" for arm in arms})
+    with open(directory / "manifest.json", "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+
+
+def test_a_floor_run_with_fewer_arms_is_read_through_the_arms_it_shares(tmp_path):
+    _write_run(tmp_path / "seed12345", ["shipped", "rho", "posterior_sigma", "merits"], 12345)
+    _write_run(tmp_path / "seed202", ["shipped", "rho", "posterior_sigma"], 202)
+    runs = [str(tmp_path / "seed12345"), str(tmp_path / "seed202")]
+
+    with pytest.raises(ValueError, match="arms"):
+        tool.load_runs(runs)
+    with pytest.raises(ValueError, match="merits"):
+        tool.load_runs(runs, ["rho", "merits"])
+
+    frame, _ = tool.load_runs(runs, ["rho", "posterior_sigma"])
+    assert sorted(frame["arm"].unique()) == ["posterior_sigma", "rho"]
+    assert sorted(frame["run"].unique()) == ["seed12345", "seed202"]
+
+
 def test_the_floor_is_the_spread_of_the_paired_difference_between_runs():
     table = pd.DataFrame({"arm": "posterior_sigma", "reference": "rho", "scope": "aggregate",
                           "delta": [0.10, 0.20, 0.30]})

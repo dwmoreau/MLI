@@ -408,13 +408,27 @@ def run_yield(args):
     print(f'wrote {out_dir / "per_entry.parquet"}: {per_entry.shape[0]} rows')
 
 
-def load_runs(run_dirs):
-    """The per-pattern tables of several yield runs, refused if they measured different things."""
+def load_runs(run_dirs, arms=None):
+    """The per-pattern tables of several yield runs, refused if they measured different things.
+
+    `arms` restricts every run to those arms, each of which every run must hold. A floor re-runs
+    only the reference and the shortlisted input sets, so without it the first run -- which
+    measured every set -- could not be read against the later ones.
+    """
     frames, manifests = [], []
     for run_dir in map(Path, run_dirs):
         with open(run_dir / 'manifest.json', encoding='utf-8') as handle:
-            manifests.append(json.load(handle))
+            manifest = json.load(handle)
+        if arms:
+            missing = sorted(set(arms) - set(manifest.get('arms') or {}))
+            if missing:
+                raise ValueError(f'{run_dir} did not measure arm(s) {missing}.')
+            manifest['arms'] = {name: path for name, path in manifest['arms'].items()
+                                if name in arms}
+        manifests.append(manifest)
         frame = pd.read_parquet(run_dir / 'per_entry.parquet')
+        if arms:
+            frame = frame.loc[frame['arm'].isin(arms)]
         frame['run'] = run_dir.name
         frames.append(frame)
     for run_dir, manifest in zip(run_dirs[1:], manifests[1:]):
@@ -519,7 +533,7 @@ def depth_curve(frame, rtols, depths=DEPTHS):
 
 
 def run_report(args):
-    frame, manifest = load_runs(args.runs)
+    frame, manifest = load_runs(args.runs, args.arms)
     rtols = manifest['rtols']
     outcomes = pattern_outcomes(frame, rtols)
     per_lattice, aggregate = summarise(outcomes)
@@ -608,6 +622,10 @@ def build_parser():
                              'run, differing only in their seeds, gives the run-to-run floor.')
     report.add_argument('--reference', default='rho', metavar='NAME',
                         help='The arm every other arm is paired against (default: rho).')
+    report.add_argument('--arms', default='', metavar='A,B',
+                        help='Report only these arms, which every run must hold (default: all). '
+                             'A floor names the reference and the shortlist here, so the first '
+                             'run, which measured every input set, can be read with the re-runs.')
     return parser
 
 
@@ -618,6 +636,7 @@ def main(argv=None):
     args.bundles = _split(args.bundles)
     args.rtol = [float(value) for value in _split(args.rtol)]
     args.runs = _split(args.runs)
+    args.arms = _split(args.arms)
     unknown = [name for name in args.input_sets if name not in TEMPLATE_INPUT_SETS]
     if unknown:
         raise SystemExit(f'Unknown input set(s) {unknown}. Known: {list(TEMPLATE_INPUT_SETS)}')
