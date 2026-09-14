@@ -1,6 +1,9 @@
 #!/bin/bash
 # Screen the Miller-index template ranker's input sets on NERSC: train, then measure yield.
 #
+# RESEARCH CODE THAT NEEDS TO BE DELETED at P07. It runs P06's one-off comparison of input sets and
+# is removed when P07 ships the retrained template models.
+#
 # One script, three uses, chosen with MLI_STAGE. Each array task is one (fit seed, search seed) pair
 # from MLI_SEEDS; task 0 is the first screen, tasks 1 and 2 are the floor re-runs.
 #

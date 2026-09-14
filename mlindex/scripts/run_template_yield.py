@@ -4,6 +4,12 @@ The templater turns a peak list into thousands of candidate cells, and a gradien
 keeps the few that go on to the search. This script trains that ranker on different input sets and
 measures, for each, how often the templates it keeps lead to the true cell.
 
+RESEARCH CODE THAT NEEDS TO BE DELETED at P07, in part. `--stage train` (`train_input_set`,
+`run_train`) exists only for P06's one-off comparison of input sets and duplicates the
+`run_training_*.py` -> `Wrapper` training path; it goes when P07 ships the retrained template
+models, together with `TEMPLATE_INPUT_SETS` in `MITemplates`. `--stage yield` and `--stage report`
+are the durable part: they are how a template ranker is shown to beat the one it replaces.
+
 Run the stages in order.
 
     # 1. Train one ranker per input set on the `fit` crystals. The real training target is a
