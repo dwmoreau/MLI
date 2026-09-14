@@ -148,21 +148,38 @@ class SKLearnManager:
     def _save_onnx(self, model, n_features):
         """Save model in ONNX format"""
         from skl2onnx import convert_sklearn
+        from skl2onnx.common import tree_ensemble
         from skl2onnx.common.data_types import FloatTensorType
-        
+
         # Define input type
         initial_types = [('float_input', FloatTensorType([None, n_features]))]
-        
+
+        # skl2onnx records each tree node's missing-value flag as it receives it -- an integer for
+        # a split, the boolean False for a leaf -- and protobuf 7 refuses a boolean in an integer
+        # list, so every gradient-boosted model fails to export. For the duration of the
+        # conversion the flag is passed as 0 or 1, the encoding the ONNX tree operators define.
+        # Remove this once skl2onnx writes integers itself.
+        add_node = tree_ensemble.add_node
+
+        def add_node_with_integer_flag(*args, nodes_missing_value_tracks_true=False, **kwargs):
+            return add_node(
+                *args, nodes_missing_value_tracks_true=int(nodes_missing_value_tracks_true),
+                **kwargs)
+
         # Convert to ONNX with appropriate options
         #is_classifier = hasattr(model, 'classes_')
         #options = {id(model): {'zipmap': False}} if is_classifier else None
         options = {type(model): {'output_type': 'tensor(float)'}}
-        onnx_model = convert_sklearn(
-            model, 
-            initial_types=initial_types,
-            target_opset=15,
-            #options=options
-        )
+        tree_ensemble.add_node = add_node_with_integer_flag
+        try:
+            onnx_model = convert_sklearn(
+                model,
+                initial_types=initial_types,
+                target_opset=15,
+                #options=options
+            )
+        finally:
+            tree_ensemble.add_node = add_node
         
         # Save ONNX model
         with open(f"{self.filename}.onnx", "wb") as f:
