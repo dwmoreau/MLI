@@ -70,9 +70,12 @@ def _write_pools(directory, n_crystals=12, depth=8):
     distance[:, :, 0] = rng.uniform(2e-4, 4e-4, (n_crystals, depth))    # trees: middling
     distance[:, :, 1] = rng.uniform(1e-4, 1.2e-4, (n_crystals, depth))  # abnn: close
     distance[:, :, 2] = rng.uniform(5e-3, 9e-3, (n_crystals, depth))    # templates: hopeless
+    # positions spread far enough apart that nothing clumps, so the fit's answer is decided by
+    # the distances alone and this test is about the selection, not the crowding
+    rng_pos = np.random.default_rng(1)
     np.savez_compressed(
         directory/'cP_pools.npz',
-        xnn=np.zeros((n_crystals, depth, 3, 1), dtype=np.float32),
+        xnn=rng_pos.uniform(0, 1, (n_crystals, depth, 3, 1)).astype(np.float32),
         xnn_true=np.zeros((n_crystals, 1)),
         distances=distance,
         identifiers=np.array([f'X{index:03d}' for index in range(n_crystals)], dtype=object),
@@ -85,6 +88,11 @@ def _write_pools(directory, n_crystals=12, depth=8):
             'shipped_mix': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10},
             'generator_names': ['trees', 'abnn', 'templates'], 'n_peaks': 10}},
         }), encoding='utf-8')
+
+
+def _write_discount(directory):
+    np.savez(directory/'cP_clump_discount.npz', delta=1e-6,
+             k=np.array([1.0, 2.0, 8.0]), alpha=np.array([1.0, 0.6, 0.2]))
 
 
 def _write_curve(directory):
@@ -101,18 +109,17 @@ def test_the_fit_stage_runs_without_mpi_and_picks_the_generator_that_is_closer(t
     out = tmp_path/'out'
     _write_pools(pools)
     _write_curve(roc)
+    _write_discount(roc)
 
     assert driver.main([
         '--stage', 'fit', '--bravais-lattices', 'cP', '--pools', str(pools),
-        '--roc-dir', str(roc), '--out-dir', str(out), '--step', '0.1',
-        '--variant', 'shipped', '--variant', 'capped',
+        '--roc-dir', str(roc), '--clump-discount', str(roc),
+        '--out-dir', str(out), '--step', '0.1',
         ]) == 0
 
     frame = pd.read_csv(out/'ensemble_mix.csv')
     whole = frame.loc[frame['split'] == 'all']
-    assert set(whole['variant']) == {'shipped', 'capped'}
-    # abnn's candidates are ten times closer than the others', so whatever else the two scores
-    # disagree about, both must give it the largest share.
+    # abnn's candidates are ten times closer than the others', so it must take the largest share.
     for _, row in whole.iterrows():
         assert row['best_abnn'] > row['best_trees'], row.to_dict()
         assert row['best_abnn'] > row['best_templates'], row.to_dict()
@@ -122,13 +129,23 @@ def test_the_fit_refuses_pools_it_was_never_given(tmp_path):
     out = tmp_path/'out'
     with pytest.raises(SystemExit, match='no pools manifest'):
         driver.main(['--stage', 'fit', '--pools', str(tmp_path/'nothing'),
-                     '--roc-dir', str(tmp_path), '--out-dir', str(out)])
+                     '--roc-dir', str(tmp_path), '--clump-discount', str(tmp_path),
+                     '--out-dir', str(out)])
 
 
 def test_a_lattice_the_package_does_not_know_is_refused(tmp_path):
     with pytest.raises(SystemExit, match='not Bravais lattices'):
         driver.main(['--stage', 'fit', '--bravais-lattices', 'xQ', '--pools', str(tmp_path),
-                     '--roc-dir', str(tmp_path), '--out-dir', str(tmp_path)])
+                     '--roc-dir', str(tmp_path), '--clump-discount', str(tmp_path),
+                     '--out-dir', str(tmp_path)])
+
+
+def test_the_fit_refuses_to_run_without_a_clump_discount(tmp_path):
+    """A score that assumes candidates are independent always names a corner, so this is not a
+    convenience default -- there is no sensible value to fall back to."""
+    with pytest.raises(SystemExit, match='not independent'):
+        driver.main(['--stage', 'fit', '--pools', str(tmp_path), '--roc-dir', str(tmp_path),
+                     '--out-dir', str(tmp_path)])
 
 
 def test_the_generate_stage_says_what_it_needs(tmp_path):

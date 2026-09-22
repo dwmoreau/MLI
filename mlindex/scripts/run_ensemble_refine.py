@@ -13,19 +13,9 @@ score, while scoring costs seconds and is the thing that gets changed:
   --stage fit        read those pools and score every mixture on a grid. No MPI, seconds.
                      One row per lattice, score, reduction and split, written to ensemble_mix.csv.
 
-Scores, selected with --variant, and more than one may be given in a single fit:
-
-  shipped   the score the current shares were originally chosen against. A pool is credited for
-            every candidate it has beyond the number the curve says is needed, integrated over
-            the curve, with a flat penalty if it never has enough. It rises without limit, so a
-            pattern already certain to be indexed keeps earning credit.
-  expected  the expected number of candidates that converge. The same shape as shipped, changing
-            one thing: a candidate is worth its own chance rather than the whole tail of the curve
-            beyond it.
-  capped    the log of one over the chance that every candidate fails, capped. It adds up over
-            candidates the same way, but stops crediting a pattern that is already safe.
-
-Both are reported so that the difference between them is attributable.
+The score is the expected number of candidates that converge. It does NOT account for candidates
+being correlated: a clump that starts close together succeeds or fails together, so it is worth
+fewer tries than the sum counts. The discount for that is measured but not yet wired in.
 
 Worked commands. One lattice end to end on a laptop, which takes a few minutes:
 
@@ -33,7 +23,7 @@ Worked commands. One lattice end to end on a laptop, which takes a few minutes:
         --stage all --bravais-lattices cP --n-entries 20 \\
         --dataset-directory mlindex/data/generated_datasets \\
         --roc-dir docs/fom_production/artifacts/P08_inputs/data \\
-        --pools /tmp/pools --out-dir /tmp/mix --variant shipped --variant capped
+        --pools /tmp/pools --out-dir /tmp/mix
 
 Generation for every lattice, on a node. Use mpiexec, not srun: a conda-built mpi4py does not
 read srun's process management, so every task comes up alone and runs the whole job. The stage
@@ -46,7 +36,7 @@ Then, refitting as often as the score changes, on a laptop, against those pools:
 
     python -m mlindex.scripts.run_ensemble_refine --stage fit --pools results/pools \\
         --roc-dir docs/fom_production/artifacts/P08_inputs/data --out-dir results/mix \\
-        --variant shipped --variant capped
+       
 """
 import argparse
 import json
@@ -63,9 +53,10 @@ import mlindex
 from mlindex.optimization import UtilitiesOptimizer
 from mlindex.optimization.GeneratorPools import generate_candidate_pools
 from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+from mlindex.utilities.ClumpDiscount import clump_weights, load_clump_discount
 from mlindex.utilities.ConvergenceCurve import load_curve
 from mlindex.utilities.Digests import derived_seed
-from mlindex.utilities.EnsembleObjective import VARIANTS, evaluate
+from mlindex.utilities.EnsembleObjective import expected_success_objective
 from mlindex.model_training import BenchmarkConditions
 from mlindex.model_training import BenchmarkPatterns
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
@@ -88,9 +79,6 @@ FACTORY_OF_SYSTEM = {
 N_PEAKS = {'cF': 10, 'cI': 10, 'cP': 10}
 DEFAULT_N_PEAKS = 20
 BROADENING_TAG = '1'
-# The shipped score is minimised and the capped one is maximised. Multiplying by this makes larger
-# mean better for both, so one grid search and one report serve either.
-SENSE = {'shipped': -1.0, 'expected': 1.0, 'capped': 1.0}
 
 
 # ---------------------------------------------------------------------------
@@ -320,13 +308,31 @@ def stack_pools(distance, counts):
         [distance[:, :count, index] for index, count in enumerate(counts) if count], axis=1)
 
 
-def score_every_mix(distance, grid, budget, curve, variant, cap):
-    """(n_mixes, n_crystals) scores, oriented so that larger is always better."""
+def stack_positions(xnn, counts):
+    """The same selection, on positions: (n_crystals, sum(counts), n_cell_parameters)."""
+    return np.concatenate(
+        [xnn[:, :count, index] for index, count in enumerate(counts) if count], axis=1)
+
+
+def score_every_mix(distance, xnn, grid, budget, curve, discount):
+    """(n_mixes, n_crystals): what each mix is worth to each crystal. Larger is better.
+
+    The clump weights are recomputed for the candidate subset each mix selects, not once over the
+    whole pool. Computed once they would not depend on the mix, the score would be linear in it,
+    and its optimum would always be a corner -- which is the answer a score blind to crowding
+    gives and the reason this term exists.
+
+    That is also what makes the fit slow: one neighbour search per mix per crystal. At a 0.02 grid
+    over hundreds of crystals it is hours, not seconds; --step buys the time back.
+    """
     scores = np.empty((grid.shape[0], distance.shape[0]))
-    extra = {'cap': cap} if variant == 'capped' else {}
     for index, mix in enumerate(grid):
-        pool = stack_pools(distance, counts_for_mix(mix, budget))
-        scores[index] = SENSE[variant]*evaluate(variant, pool, curve, **extra)
+        counts = counts_for_mix(mix, budget)
+        pool = stack_pools(distance, counts)
+        positions = stack_positions(xnn, counts)
+        weight = np.stack([clump_weights(positions[crystal], *discount)
+                           for crystal in range(positions.shape[0])])
+        scores[index] = expected_success_objective(pool, curve[0], curve[1], weight)
     return scores
 
 
@@ -378,7 +384,7 @@ def screen(pooled, grid, chosen):
 
 
 def fit(args):
-    """Score every mix on the grid, under every variant and reduction asked for."""
+    """Score every mix on the grid, under every reduction asked for."""
     pools = Path(args.pools)
     manifest_path = pools/'pools_manifest.json'
     if not manifest_path.is_file():
@@ -398,36 +404,44 @@ def fit(args):
         distance = np.asarray(data['distances'], dtype=float)
         if not np.all(np.isfinite(distance)):
             raise SystemExit(f'{path} holds non-finite distances; regenerate it')
+        if 'xnn' not in data:
+            raise SystemExit(
+                f'{path} has no candidate positions, so how crowded the pool is cannot be seen '
+                f'and the mix cannot be scored. Regenerate it with the current driver.')
+        xnn = np.asarray(data['xnn'], dtype=float)
+        discount = load_clump_discount(args.clump_discount, bravais_lattice)
         info = manifest['lattices'][bravais_lattice]
         shipped = np.array([info['shipped_mix'][name] for name in names])
         curve = np.vstack(load_curve(args.roc_dir, bravais_lattice))
         grid = mix_grid(args.step, len(names))
 
-        print(f'{bravais_lattice}: scoring {grid.shape[0]} mixes x {len(args.variants)} '
-              f'variants over {distance.shape[0]} crystals', flush=True)
+        print(f'{bravais_lattice}: scoring {grid.shape[0]} mixes over '
+              f'{distance.shape[0]} crystals', flush=True)
 
         budget = int(info['shipped_budget'])
         if budget <= distance.shape[1]:
-            for variant in args.variants:
-                scores = score_every_mix(distance, grid, budget, curve, variant, args.cap)
-                shipped_value = float(SENSE[variant]*np.mean(evaluate(
-                    variant, stack_pools(distance, counts_for_mix(shipped, budget)), curve,
-                    **({'cap': args.cap} if variant == 'capped' else {}))))
-                for reduction in args.reductions:
-                    for split, rows_of in _splits(distance.shape[0], args.split_seed):
-                        chosen, pooled, how = choose_mix(scores[:, rows_of], grid, reduction)
-                        measured = screen(pooled, grid, chosen)
-                        measured.update(how)
-                        rows.append(dict(
-                            bravais_lattice=bravais_lattice,
-                            bundle=manifest.get('bundle', 'unknown'), variant=variant,
-                            reduction=reduction, split=split, budget=budget,
-                            n_crystals=int(rows_of.size),
-                            **{f'best_{name}': float(value)
-                               for name, value in zip(names, chosen)},
-                            **{f'shipped_{name}': float(value)
-                               for name, value in zip(names, shipped)},
-                            value_shipped=shipped_value, **measured))
+            scores = score_every_mix(distance, xnn, grid, budget, curve, discount)
+            shipped_counts = counts_for_mix(shipped, budget)
+            shipped_positions = stack_positions(xnn, shipped_counts)
+            shipped_value = float(np.mean(expected_success_objective(
+                stack_pools(distance, shipped_counts), curve[0], curve[1],
+                np.stack([clump_weights(shipped_positions[c], *discount)
+                          for c in range(shipped_positions.shape[0])]))))
+            for reduction in args.reductions:
+                for split, rows_of in _splits(distance.shape[0], args.split_seed):
+                    chosen, pooled, how = choose_mix(scores[:, rows_of], grid, reduction)
+                    measured = screen(pooled, grid, chosen)
+                    measured.update(how)
+                    rows.append(dict(
+                        bravais_lattice=bravais_lattice,
+                        bundle=manifest.get('bundle', 'unknown'),
+                        reduction=reduction, split=split, budget=budget,
+                        n_crystals=int(rows_of.size),
+                        **{f'best_{name}': float(value)
+                           for name, value in zip(names, chosen)},
+                        **{f'shipped_{name}': float(value)
+                           for name, value in zip(names, shipped)},
+                        value_shipped=shipped_value, **measured))
         # Written after every lattice rather than once at the end: the low-symmetry lattices are
         # the slow ones and they come last, so a run that dies on aP would otherwise take the
         # thirteen finished lattices with it.
@@ -463,6 +477,11 @@ def build_parser():
                         help='Directory the candidate pools are written to and read from.')
     parser.add_argument('--out-dir', default=None, metavar='PATH',
                         help='Where the fit writes its table. Required for --stage fit and all.')
+    parser.add_argument('--clump-discount', default=None, metavar='PATH',
+                        help='Directory holding the measured clump discounts, one file a '
+                             'lattice. They say what a candidate is worth when it is not alone, '
+                             'and without them a mix cannot be scored. Run output, like the '
+                             'curves. Required to fit.')
     parser.add_argument('--roc-dir', default=None, metavar='PATH',
                         help='Directory holding the measured convergence curves. They are run '
                              'output and are not shipped with the package. Required to fit.')
@@ -484,17 +503,10 @@ def build_parser():
                                      'contaminants and dropout.')
     generate_group.add_argument('--seed', type=int, default=12345, metavar='N')
     fit_group = parser.add_argument_group('fit')
-    fit_group.add_argument('--variant', action='append', dest='variants', default=None,
-                           choices=VARIANTS,
-                           help='Which score to fit against. Repeat for several in one pass. '
-                                'Default: shipped.')
     fit_group.add_argument('--reduction', action='append', dest='reductions', default=None,
                            choices=('pooled', 'per-pattern'),
                            help='How per-crystal scores become one mix. Repeat for several. '
                                 'Default: pooled.')
-    fit_group.add_argument('--cap', type=float, default=5.0, metavar='X',
-                           help='Where the capped score stops crediting a pattern (default: 5.0, '
-                                'about a 0.7 percent chance that every candidate fails).')
     fit_group.add_argument('--step', type=float, default=0.02, metavar='X',
                            help='Grid spacing on the simplex (default: 0.02, so 1326 mixes).')
     fit_group.add_argument('--split-seed', type=int, default=12345, metavar='N',
@@ -508,7 +520,6 @@ def main(argv=None):
     unknown = [name for name in args.bravais_lattices if name not in BRAVAIS_LATTICES]
     if unknown:
         raise SystemExit(f'not Bravais lattices this package knows: {", ".join(unknown)}')
-    args.variants = args.variants or ['shipped']
     args.reductions = args.reductions or ['pooled']
 
     if args.stage in ('all', 'generate'):
@@ -520,6 +531,10 @@ def main(argv=None):
             raise SystemExit('--stage fit needs --roc-dir')
         if args.out_dir is None:
             raise SystemExit('--stage fit needs --out-dir')
+        if args.clump_discount is None:
+            raise SystemExit(
+                '--stage fit needs --clump-discount. Candidates in a real pool are not '
+                'independent, and a score that assumes they are always names a corner.')
         fit(args)
     return 0
 

@@ -6,8 +6,8 @@ import scipy.spatial
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
 from mlindex.utilities.Digests import peak_list_bytes
-from mlindex.utilities.EnsembleObjective import excess_count_objective
-from mlindex.utilities.EnsembleObjective import shell_targets
+from mlindex.utilities.ClumpDiscount import clump_weights
+from mlindex.utilities.EnsembleObjective import expected_success_objective
 from mlindex.utilities.ErrorAdder import perturb_xnn
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.UnitCellTools import fix_unphysical
@@ -438,11 +438,24 @@ class OptimizerManager(OptimizerBase):
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
         return self.generate_candidates_common(candidate_xnn_rank)
 
-    def _redistribution_testing_functional(self, neighbor_radius, xnn, radii, n_success):
+    def _redistribution_testing_functional(self, neighbor_radius, xnn, curve, discount):
+        """What a redistributed cloud is worth, NEGATED so that a minimiser can be used on it.
+
+        The expected number of INDEPENDENT candidates that converge, each weighted by its share of
+        its own clump.
+
+        The weight is not optional here, it is the whole measurement. Redistribution moves
+        candidates apart; it barely changes how far any of them is from the true cell, so a score
+        built only on distances cannot see it at all -- which is why the score this replaces read
+        the same value at every setting on six of seven lattices while a third of the pool was
+        being moved. What redistribution changes is how crowded the cloud is, and `clump_weights`
+        is the only term that reads that.
+        """
         self.opt_params['neighbor_radius'] = neighbor_radius
         redistributed_xnn = self.redistribute_xnn(xnn)
         distance = np.linalg.norm(redistributed_xnn - self.xnn_true[np.newaxis], axis=1)
-        return excess_count_objective(distance, radii, n_success)
+        weight = clump_weights(redistributed_xnn, *discount)
+        return -expected_success_objective(distance, curve[0], curve[1], weight)
 
     def redistrubution_testing(self, xnn):
         import scipy.optimize
@@ -451,14 +464,24 @@ class OptimizerManager(OptimizerBase):
         #   an optimization for the best neighbor_radius
         opt_neighbor_radius = np.zeros(len(self.opt_params['max_neighbors_grid']))
         objective_function = np.zeros(len(self.opt_params['max_neighbors_grid']))
-        radii, n_success = shell_targets(
-            self.opt_params['convergence_radius'][self.bravais_lattice])
+        curve = np.asarray(
+            self.opt_params['convergence_radius'][self.bravais_lattice], dtype=float)
+        # Without the clump discount this search is blind: redistribution changes how crowded the
+        # cloud is and almost nothing else, so refusing here is better than returning a flat
+        # objective and a constant chosen from noise.
+        if 'clump_discount' not in self.opt_params:
+            raise KeyError(
+                "redistribution testing needs opt_params['clump_discount'][bravais_lattice], the "
+                "measured (delta, k, alpha) for this lattice. Without it the objective cannot see "
+                "what redistribution does and the search returns whichever setting noise favours."
+                )
+        discount = self.opt_params['clump_discount'][self.bravais_lattice]
         for index, max_neighors in enumerate(self.opt_params['max_neighbors_grid']):
             self.opt_params['max_neighbors'] = max_neighors
             opt_results = scipy.optimize.minimize_scalar(
                 fun=self._redistribution_testing_functional,
                 bounds=[0, 0.001],
-                args=(xnn, radii, n_success)
+                args=(xnn, curve, discount)
                 )
             opt_neighbor_radius[index] = opt_results.x
             objective_function[index] = opt_results.fun
