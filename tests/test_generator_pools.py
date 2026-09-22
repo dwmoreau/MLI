@@ -7,8 +7,12 @@ permuting the values would -- otherwise a pool regenerated at the same seed stop
 on disk. This file pins that.
 """
 import numpy as np
+import pytest
 
-from mlindex.optimization.GeneratorPools import generate_candidate_pools  # noqa: F401
+from mlindex.optimization.GeneratorPools import (  # noqa: F401
+    generate_candidate_pools,
+    refuse_unfilled,
+    )
 
 
 def test_permuting_by_a_drawn_index_matches_permuting_the_values():
@@ -33,3 +37,16 @@ def test_permuting_a_gathered_block_matches_permuting_the_gather_index():
         rng_values.permutation(column[gather]),
         column[rng_index.permutation(gather)],
         )
+
+
+def test_an_unfilled_candidate_slot_is_refused_rather_than_returned():
+    """A share that does not divide among a generator's split groups leaves NaN behind, and a
+    NaN distance is silently read as "beyond the curve" by everything downstream."""
+    names = ['trees', 'abnn', 'templates']
+    full = np.zeros((4, 3, 2))
+    refuse_unfilled(full, names, 4)          # a full pool passes
+
+    holed = np.zeros((4, 3, 2))
+    holed[3, 1] = np.nan
+    with pytest.raises(ValueError, match="'abnn': 1"):
+        refuse_unfilled(holed, names, 4)

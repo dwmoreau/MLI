@@ -369,6 +369,8 @@ def fit(args):
         data = np.load(path, allow_pickle=True)
         names = [str(name) for name in data['generator_names']]
         distance = np.asarray(data['distances'], dtype=float)
+        if not np.all(np.isfinite(distance)):
+            raise SystemExit(f'{path} holds non-finite distances; regenerate it')
         info = manifest['lattices'][bravais_lattice]
         shipped = np.array([info['shipped_mix'][name] for name in names])
         curve = np.vstack(load_curve(args.roc_dir, bravais_lattice))

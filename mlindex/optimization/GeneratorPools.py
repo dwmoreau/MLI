@@ -15,6 +15,22 @@ from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 
 
+def refuse_unfilled(xnn, generator_names, candidates_per_model):
+    """Every slot starts as NaN and is filled by the generator that owns it.
+
+    A slot left over -- which happens when a generator's share does not divide evenly among its
+    split groups -- would otherwise reach the caller as a candidate at an undefined distance, and
+    a distance of NaN is silently treated as "beyond the curve" by everything downstream.
+    """
+    unfilled = np.isnan(xnn).any(axis=-1).sum(axis=0)
+    if unfilled.any():
+        raise ValueError(
+            f'candidate slots were never filled: '
+            f'{dict(zip(generator_names, unfilled.tolist()))}. {candidates_per_model} does not '
+            f'divide among the split groups of every generator'
+            )
+
+
 def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
     """Draw `candidates_per_model` candidates from each generator for one known-answer pattern.
 
@@ -134,4 +150,5 @@ def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
             ])
         xnn[:n_total_candidates, abnn_index] = xnn[order, abnn_index]
 
+    refuse_unfilled(xnn, generator_names, candidates_per_model)
     return xnn, xnn_true, generator_names
