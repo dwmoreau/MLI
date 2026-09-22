@@ -443,6 +443,14 @@ def _report_block(report, names, variant, reduction, budget_scale, rows):
         mix = '/'.join(f'{row[f"best_{name}"]:.2f}' for name in names)
         line += f'{row["split"]}: {mix}  '
     whole = block[0]
+    # The two halves are disjoint, so how far apart their answers are is the whole of the
+    # stability screen. Reported as a number rather than left for the reader to eyeball.
+    halves = [row for row in block if row['split'] != 'all']
+    if len(halves) == 2:
+        drift = max(abs(halves[0][f'best_{name}'] - halves[1][f'best_{name}']) for name in names)
+        for row in block:
+            row['half_to_half'] = drift
+        line += f' | halves differ by {drift:.2f}'
     report.append(line)
     report.append(f'        best {whole["value_best"]:+.5f}  shipped {whole["value_shipped"]:+.5f}'
                   f'  spread {whole["spread"]:.5f}  {whole["n_tied"]} of {whole["n_mixes"]} tied'
