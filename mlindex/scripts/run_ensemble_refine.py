@@ -18,6 +18,9 @@ Scores, selected with --variant, and more than one may be given in a single fit:
             every candidate it has beyond the number the curve says is needed, integrated over
             the curve, with a flat penalty if it never has enough. It rises without limit, so a
             pattern already certain to be indexed keeps earning credit.
+  expected  the expected number of candidates that converge. The same shape as shipped, changing
+            one thing: a candidate is worth its own chance rather than the whole tail of the curve
+            beyond it.
   capped    the log of one over the chance that every candidate fails, capped. It adds up over
             candidates the same way, but stops crediting a pattern that is already safe.
 
@@ -84,7 +87,7 @@ DEFAULT_N_PEAKS = 20
 BROADENING_TAG = '1'
 # The shipped score is minimised and the capped one is maximised. Multiplying by this makes larger
 # mean better for both, so one grid search and one report serve either.
-SENSE = {'shipped': -1.0, 'capped': 1.0}
+SENSE = {'shipped': -1.0, 'expected': 1.0, 'capped': 1.0}
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +250,11 @@ def generate(args):
                 'generator_names': generated_names,
                 'n_peaks': N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS),
                 }
+            # Rewritten after every lattice, not once at the end, so that a run which dies
+            # partway leaves the lattices it finished in a state the fit stage can read.
+            (out/'pools_manifest.json').write_text(
+                json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8')
             print(f'{bravais_lattice}: wrote {xnn.shape[0]} crystals', flush=True)
-
-    if rank == 0:
-        (out/'pools_manifest.json').write_text(
-            json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8')
     return 0
 
 
@@ -292,7 +295,7 @@ def stack_pools(distance, counts):
 def score_every_mix(distance, grid, budget, curve, variant, cap):
     """(n_mixes, n_crystals) scores, oriented so that larger is always better."""
     scores = np.empty((grid.shape[0], distance.shape[0]))
-    extra = {} if variant == 'shipped' else {'cap': cap}
+    extra = {'cap': cap} if variant == 'capped' else {}
     for index, mix in enumerate(grid):
         pool = stack_pools(distance, counts_for_mix(mix, budget))
         scores[index] = SENSE[variant]*evaluate(variant, pool, curve, **extra)
@@ -378,7 +381,7 @@ def fit(args):
                 scores = score_every_mix(distance, grid, budget, curve, variant, args.cap)
                 shipped_value = float(SENSE[variant]*np.mean(evaluate(
                     variant, stack_pools(distance, counts_for_mix(shipped, budget)), curve,
-                    **({} if variant == 'shipped' else {'cap': args.cap}))))
+                    **({'cap': args.cap} if variant == 'capped' else {}))))
                 for reduction in args.reductions:
                     for split, rows_of in _splits(distance.shape[0], args.split_seed):
                         chosen, pooled = choose_mix(scores[:, rows_of], grid, reduction)
