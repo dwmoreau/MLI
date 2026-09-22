@@ -109,7 +109,6 @@ def test_the_fit_stage_runs_without_mpi_and_picks_the_generator_that_is_closer(t
         ]) == 0
 
     frame = pd.read_csv(out/'ensemble_mix.csv')
-    assert (out/'ensemble_mix.txt').is_file()
     whole = frame.loc[frame['split'] == 'all']
     assert set(whole['variant']) == {'shipped', 'capped'}
     # abnn's candidates are ten times closer than the others', so whatever else the two scores

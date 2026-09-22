@@ -11,6 +11,7 @@ score, while scoring costs seconds and is the thing that gets changed:
 
   --stage generate   draw each generator's pool for many patterns and write it to disk. MPI.
   --stage fit        read those pools and score every mixture on a grid. No MPI, seconds.
+                     One row per lattice, score, reduction and split, written to ensemble_mix.csv.
 
 Scores, selected with --variant, and more than one may be given in a single fit:
 
@@ -387,9 +388,6 @@ def fit(args):
     out.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    report = ['# The generator mix, by lattice', '',
-              f'pools: {pools}   commit that generated them: {manifest.get("commit")}',
-              f'population: {manifest.get("population")}', '']
 
     for bravais_lattice in args.bravais_lattices:
         path = pools/f'{bravais_lattice}_pools.npz'
@@ -407,18 +405,9 @@ def fit(args):
 
         print(f'{bravais_lattice}: scoring {grid.shape[0]} mixes x {len(args.variants)} '
               f'variants over {distance.shape[0]} crystals', flush=True)
-        report.append(f'## {bravais_lattice}   {distance.shape[0]} crystals, '
-                      f'{distance.shape[1]} candidates a generator, '
-                      f'shipped budget {info["shipped_budget"]}')
-        report.append('   shipped mix  ' + '  '.join(
-            f'{name} {value:.2f}' for name, value in zip(names, shipped)))
 
-        for budget_scale in args.budget_scales:
-            budget = int(round(budget_scale*info['shipped_budget']))
-            if budget > distance.shape[1]:
-                report.append(f'   x{budget_scale:g}: skipped, the pools only go to '
-                              f'{distance.shape[1]} a generator')
-                continue
+        budget = int(info['shipped_budget'])
+        if budget <= distance.shape[1]:
             for variant in args.variants:
                 scores = score_every_mix(distance, grid, budget, curve, variant, args.cap)
                 shipped_value = float(SENSE[variant]*np.mean(evaluate(
@@ -433,23 +422,16 @@ def fit(args):
                             bravais_lattice=bravais_lattice,
                             bundle=manifest.get('bundle', 'unknown'), variant=variant,
                             reduction=reduction, split=split, budget=budget,
-                            budget_scale=budget_scale, n_crystals=int(rows_of.size),
+                            n_crystals=int(rows_of.size),
                             **{f'best_{name}': float(value)
                                for name, value in zip(names, chosen)},
                             **{f'shipped_{name}': float(value)
                                for name, value in zip(names, shipped)},
                             value_shipped=shipped_value, **measured))
-                    _report_block(report, names, variant, reduction, budget_scale, rows)
-        report.append('')
         # Written after every lattice rather than once at the end: the low-symmetry lattices are
         # the slow ones and they come last, so a run that dies on aP would otherwise take the
         # thirteen finished lattices with it.
         pd.DataFrame(rows).to_csv(out/'ensemble_mix.csv', index=False)
-
-    frame = pd.DataFrame(rows)
-    text = '\n'.join(report) + '\n'
-    (out/'ensemble_mix.txt').write_text(text, encoding='utf-8')
-    print(text)
     return 0
 
 
@@ -461,33 +443,6 @@ def _splits(n_crystals, seed):
     return [('all', everything),
             ('half-a', np.sort(shuffled[:half])),
             ('half-b', np.sort(shuffled[half:]))]
-
-
-def _report_block(report, names, variant, reduction, budget_scale, rows):
-    """The last three rows written are one setting's three splits."""
-    block = rows[-3:]
-    line = f'   x{budget_scale:g} {variant:>8s} {reduction:>12s}  '
-    for row in block:
-        mix = '/'.join(f'{row[f"best_{name}"]:.2f}' for name in names)
-        line += f'{row["split"]}: {mix}  '
-    whole = block[0]
-    # The two halves are disjoint, so how far apart their answers are is the whole of the
-    # stability screen. Reported as a number rather than left for the reader to eyeball.
-    halves = [row for row in block if row['split'] != 'all']
-    if len(halves) == 2:
-        drift = max(abs(halves[0][f'best_{name}'] - halves[1][f'best_{name}']) for name in names)
-        for row in block:
-            row['half_to_half'] = drift
-        line += f' | halves differ by {drift:.2f}'
-    report.append(line)
-    report.append(f'        best {whole["value_best"]:+.5f}  shipped {whole["value_shipped"]:+.5f}'
-                  f'  spread {whole["spread"]:.5f}  {whole["n_tied"]} of {whole["n_mixes"]} tied'
-                  f'  {"determined" if whole["determined"] else "NOT DETERMINED"}'
-                  f'{"  optimum on a boundary" if whole["on_boundary"] else ""}')
-    if 'share_all_or_nothing' in whole:
-        report.append(f'        per-pattern optima: '
-                      f'{100*whole["share_all_or_nothing"]:.0f}% give one generator over 95%, '
-                      f'{100*whole["share_on_a_corner"]:.0f}% give it everything')
 
 
 # ---------------------------------------------------------------------------
@@ -507,8 +462,7 @@ def build_parser():
     parser.add_argument('--pools', required=True, metavar='PATH',
                         help='Directory the candidate pools are written to and read from.')
     parser.add_argument('--out-dir', default=None, metavar='PATH',
-                        help='Where the fit writes its table and report. Required for --stage '
-                             'fit and all.')
+                        help='Where the fit writes its table. Required for --stage fit and all.')
     parser.add_argument('--roc-dir', default=None, metavar='PATH',
                         help='Directory holding the measured convergence curves. They are run '
                              'output and are not shipped with the package. Required to fit.')
@@ -543,8 +497,6 @@ def build_parser():
                                 'about a 0.7 percent chance that every candidate fails).')
     fit_group.add_argument('--step', type=float, default=0.02, metavar='X',
                            help='Grid spacing on the simplex (default: 0.02, so 1326 mixes).')
-    fit_group.add_argument('--budget-scales', default='1', metavar='A,B',
-                           help='Budgets to score, as multiples of the shipped one (default: 1).')
     fit_group.add_argument('--split-seed', type=int, default=12345, metavar='N',
                            help='Seed for the half-and-half stability check (default: 12345).')
     return parser
@@ -558,7 +510,6 @@ def main(argv=None):
         raise SystemExit(f'not Bravais lattices this package knows: {", ".join(unknown)}')
     args.variants = args.variants or ['shipped']
     args.reductions = args.reductions or ['pooled']
-    args.budget_scales = [float(value) for value in args.budget_scales.split(',')]
 
     if args.stage in ('all', 'generate'):
         if args.dataset_directory is None:
