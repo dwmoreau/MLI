@@ -376,6 +376,8 @@ def fit(args):
         curve = np.vstack(load_curve(args.roc_dir, bravais_lattice))
         grid = mix_grid(args.step, len(names))
 
+        print(f'{bravais_lattice}: scoring {grid.shape[0]} mixes x {len(args.variants)} '
+              f'variants over {distance.shape[0]} crystals', flush=True)
         report.append(f'## {bravais_lattice}   {distance.shape[0]} crystals, '
                       f'{distance.shape[1]} candidates a generator, '
                       f'shipped budget {info["shipped_budget"]}')
