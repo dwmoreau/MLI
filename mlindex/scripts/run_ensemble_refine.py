@@ -142,7 +142,9 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle):
     condition = BenchmarkConditions.BY_KEY[bundle]
     n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
     data = pd.read_parquet(path, columns=[
-        'identifier', 'train', f'q2_{BROADENING_TAG}', 'reindexed_xnn'])
+        'identifier', 'train', f'q2_{BROADENING_TAG}', 'reindexed_xnn',
+        # the labeller works from the conventional cell, so both forms of the truth come back
+        'reindexed_unit_cell'])
     data = data.loc[data['train']]
     peaks = data[f'q2_{BROADENING_TAG}']
     data = data.loc[peaks.apply(lambda q2: np.count_nonzero(q2) >= n_peaks)]
@@ -169,6 +171,7 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle):
             continue
         rows.append({'identifier': entry['identifier'],
                      'reindexed_xnn': entry['reindexed_xnn'],
+                     'reindexed_unit_cell': entry['reindexed_unit_cell'],
                      'q2': q2[:n_peaks]})
         if len(rows) == n_entries:
             break
