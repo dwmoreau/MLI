@@ -71,19 +71,6 @@ def _script_copy(distance, x, N_success):
     return term_0 + term_1
 
 
-def _templater_copy(distance_convergence, success_rate, distance_train):
-    """From MITemplates.fit, where the calibrator's regression targets are built."""
-    indices_train = np.searchsorted(distance_convergence, distance_train)
-    indices_train[indices_train < 0] = 0
-    indices_train[indices_train >= success_rate.size] = success_rate.size - 1
-    return success_rate[indices_train].ravel()
-
-
-# ---------------------------------------------------------------------------
-# Curves and pools to run them on
-# ---------------------------------------------------------------------------
-
-
 def _curve(n_shells=40, floor=0.0):
     """A curve shaped like the real ones: log-spaced shells, a rate falling past the cut."""
     radii = np.logspace(-4, -2, n_shells)
@@ -147,36 +134,13 @@ def test_candidates_beyond_the_last_shell_are_counted_nowhere():
     np.testing.assert_array_equal(shell_counts(inside, radii), shell_counts(outside, radii))
 
 
-def test_the_lookup_zeroes_beyond_the_curve_and_clamps_for_the_templater():
+def test_the_lookup_is_worth_nothing_beyond_the_curve():
     radii, success = _curve()
     distance = np.array([radii[0]/2, radii[3], radii[-1], radii[-1]*1.5])
-    zeroed = success_of_distance(radii, success, distance, beyond='zero')
-    clamped = success_of_distance(radii, success, distance, beyond='clamp')
-    np.testing.assert_array_equal(zeroed[:3], clamped[:3])
-    assert zeroed[-1] == 0.0
-    assert clamped[-1] == success[-1]
-
-
-def test_the_templater_targets_are_unchanged_by_the_shared_lookup():
-    """What stops this collapse from silently moving the targets 14 calibrators were fitted on."""
-    rng = np.random.default_rng(7)
-    radii, success = _curve()
-    distance = np.exp(rng.uniform(np.log(radii[0]/3), np.log(radii[-1]*3), 500))
-    np.testing.assert_array_equal(
-        success_of_distance(radii, success, distance, beyond='clamp'),
-        _templater_copy(radii, success, distance),
-        )
-
-
-def test_an_unknown_out_of_range_rule_is_refused():
-    radii, success = _curve()
-    with pytest.raises(ValueError, match='out-of-range rule'):
-        success_of_distance(radii, success, np.array([1e-4]), beyond='last')
-
-
-# ---------------------------------------------------------------------------
-# The capped log score
-# ---------------------------------------------------------------------------
+    rate = success_of_distance(radii, success, distance)
+    assert rate[0] == success[0]      # closer than the first shell takes the first rate
+    assert rate[2] == success[-1]     # exactly on the last shell still counts
+    assert rate[3] == 0.0             # past it is worth nothing
 
 
 def test_the_capped_score_never_exceeds_its_cap():

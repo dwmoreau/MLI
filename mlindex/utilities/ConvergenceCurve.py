@@ -63,31 +63,22 @@ def load_curve(roc_directory, bravais_lattice):
     return curve[0], curve[1]
 
 
-def success_of_distance(radii, success_rate, distance, beyond):
+def success_of_distance(radii, success_rate, distance):
     """s(d) for every distance, by lookup on the curve's own shells.
 
-    A candidate closer than the first shell takes the first shell's rate, which is the highest
-    that was measured. `beyond` decides what a candidate further out than the LAST shell is
-    worth, and the two callers need different answers:
+    A candidate closer than the first shell takes the first shell's rate, which is the highest that
+    was measured. A candidate further out than the LAST shell is worth nothing -- anything else
+    extrapolates past where the curve was measured, and it matters: the last shell's rate is small
+    but not zero, so crediting a few thousand hopeless candidates with it drives a combined
+    probability to exactly 1 for every generator mix and the score stops separating them.
 
-      'zero'   it is worth nothing. This is what the measurement supports -- anything else
-               extrapolates past where the curve was measured -- and it is what the ensemble
-               objective has always done, because the `np.histogram` it counts candidates with
-               drops anything past the last bin edge. Combining thousands of candidates needs it:
-               the last shell's rate is small but not zero, so crediting a few thousand hopeless
-               candidates with it drives a combined probability to exactly 1 for every generator
-               mix, and the objective stops separating them.
-      'clamp'  it keeps the last shell's rate. `MITemplates` fits its template calibrator against
-               these values as regression targets, so every shipped template model was trained on
-               the clamped ones. Zeroing them here would move those targets without retraining.
-
-    `beyond` is required. There is no sensible default: each caller's value is wrong for the other.
+    `MITemplates` does the same lookup but clamps to the last shell instead of zeroing, for the
+    regression targets its calibrator is fitted on. That difference is deliberate and is not
+    reproduced here: every shipped template model was fitted against the clamped values, so
+    changing them is a retrain, not a refactor. It is recorded in `STATUS.md` rather than carried
+    as an argument nothing in this package sets.
     """
-    if beyond not in ('zero', 'clamp'):
-        raise ValueError(f"unknown out-of-range rule {beyond!r}; use 'zero' or 'clamp'")
     index = np.searchsorted(radii, distance)
     past_last = index >= radii.size
     rate = success_rate[np.clip(index, 0, radii.size - 1)]
-    if beyond == 'zero':
-        rate = np.where(past_last, 0.0, rate)
-    return rate
+    return np.where(past_last, 0.0, rate)

@@ -108,7 +108,7 @@ def expected_success_objective(distance, radii, success_rate):
 
     `distance` is (..., n_candidates); the result is (...).
     """
-    rate = success_of_distance(radii, success_rate, distance, beyond='zero')
+    rate = success_of_distance(radii, success_rate, distance)
     return np.sum(np.where(rate > CONVERGENCE_CUT, rate, 0.0), axis=-1)
 
 
@@ -125,7 +125,7 @@ def capped_log_objective(distance, radii, success_rate, cap, weight):
 
     `distance` and `weight` are (..., n_candidates); the result is (...).
     """
-    rate = success_of_distance(radii, success_rate, distance, beyond='zero')
+    rate = success_of_distance(radii, success_rate, distance)
     # A shell measured at a rate of exactly 1 would make one candidate worth infinite credit. The
     # cap would absorb it, but the intermediate overflows, so hold the rate just below certainty.
     rate = np.clip(rate, 0.0, 1.0 - 1e-12)
