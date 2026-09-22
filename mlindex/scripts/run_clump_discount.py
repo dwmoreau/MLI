@@ -100,91 +100,116 @@ def measure(args):
     package_root = Path(UtilitiesOptimizer.__file__).parent.parent.parent
 
     for bravais_lattice in args.bravais_lattices:
-        tag = ROC_TAG[bravais_lattice]
-        n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
-        n_drop = int(re.search(r'drop(\d+)', tag).group(1))
-        radii, success = pick_radii(*load_curve(args.roc_dir, bravais_lattice),
-                                    TARGET_SUCCESS_RATES)
-        lattice_system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
-        options = {
-            'convergence_testing': True, 'convergence_candidates': total,
-            'convergence_distances': radii,
-            'iteration_info': [{'worker': 'random_subsampling', 'n_iterations': N_ITERATIONS,
-                                'n_peaks': n_peaks, 'n_drop': n_drop, 'uniform_sampling': False}],
-            }
-        factory = getattr(UtilitiesOptimizer, FACTORY_OF_SYSTEM[lattice_system])
-        optimizer = factory(bravais_lattice, BROADENING_TAG, 1, split_comm,
-                            project_path=package_root, options=options,
-                            optimizer_class=SeparatedStartManager, seed=args.seed,
-                            models_directory=models_dir)
-        optimizer.group_size = args.group_size
-
-        if rank == 0:
-            entries, refused = load_entries(bravais_lattice, args.n_entries,
-                                            args.dataset_directory, args.seed, args.bundle)
-            print(f'{bravais_lattice}: {len(entries)} crystals ({refused} refused), '
-                  f'{args.n_groups} groups of {args.group_size}, {len(ratios)} separations',
-                  flush=True)
-            for other in range(1, n_ranks):
-                comm.send(entries.iloc[other::n_ranks], dest=other)
-            mine = entries.iloc[0::n_ranks]
-        else:
-            mine = comm.recv(source=0)
-
-        shape = (len(ratios), len(mine), radii.size, args.n_groups, args.group_size)
-        correct = np.zeros(shape, dtype=bool)
-        distance = np.zeros(shape, dtype=np.float32)
-        separation = np.zeros(shape, dtype=np.float32)
-        for ratio_index, ratio in enumerate(ratios):
-            optimizer.separation_ratio = ratio
-            for entry_index in range(len(mine)):
-                entry = mine.iloc[entry_index]
-                truth = get_partial_unit_cell(np.array(entry['reindexed_unit_cell']),
-                                              lattice_system=lattice_system)
-                for shell in range(radii.size):
-                    optimizer.chunk_tag = (shell + 1)*1000 + ratio_index
-                    optimizer.opt_params['convergence_distances'] = radii[shell:shell + 1]
-                    optimizer.run(entry=entry, n_top_candidates=20)
-                    if optimizer.top_unit_cell.shape[0] != total:
-                        raise RuntimeError(
-                            f'{bravais_lattice} {entry["identifier"]}: '
-                            f'{optimizer.top_unit_cell.shape[0]} candidates back against {total} '
-                            f'generated; the row order is the measurement')
-                    is_correct, _ = label_known_bl_batch(
-                        truth, optimizer.top_unit_cell, lattice_system)
-                    block = (args.n_groups, args.group_size)
-                    correct[ratio_index, entry_index, shell] = is_correct.reshape(block)
-                    distance[ratio_index, entry_index, shell] = \
-                        optimizer.last_distance.reshape(block)
-                    separation[ratio_index, entry_index, shell] = \
-                        optimizer.last_separation.reshape(block)
-                if rank == 0:
-                    print(f'  {bravais_lattice} delta/r={ratio}: {entry_index + 1}/{len(mine)}',
-                          flush=True)
-
-        gathered = comm.gather({'correct': correct, 'distance': distance,
-                                'separation': separation,
-                                'identifiers': list(mine['identifier'])}, root=0)
-        if rank == 0:
-            np.savez_compressed(
-                out/f'{bravais_lattice}_separation.npz',
-                radii=radii, curve_success=success, separation_ratios=np.array(ratios),
-                correct=np.concatenate([g['correct'] for g in gathered], axis=1),
-                distance=np.concatenate([g['distance'] for g in gathered], axis=1),
-                separation=np.concatenate([g['separation'] for g in gathered], axis=1),
-                identifiers=np.array([n for g in gathered for n in g['identifiers']],
-                                     dtype=object),
-                )
-            (out/f'{bravais_lattice}_manifest.json').write_text(json.dumps({
-                'group_size': args.group_size, 'n_groups': args.n_groups,
-                'separation_ratios': ratios, 'n_entries': args.n_entries, 'seed': args.seed,
-                'bundle': args.bundle, 'commit': commit(), 'n_ranks': n_ranks,
-                'platform': platform.platform(), 'machine': platform.machine(),
-                'numpy': np.__version__, 'roc_file': f'{bravais_lattice}_roc_{tag}',
-                }, indent=2, sort_keys=True), encoding='utf-8')
-            print(f'{bravais_lattice}: written', flush=True)
+        # Every rank runs the same lattices and the work between them is blocking: send,
+        # recv and gather. A rank that raises leaves the others waiting for a message that
+        # never comes, and the job sits there until the allocation ends with nothing
+        # written. Abort takes the whole job down with the traceback instead.
+        try:
+            _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice,
+                             ratios, total, models_dir, package_root)
+        except Exception:
+            import traceback
+            print(f'RANK {rank} FAILED on {bravais_lattice}:', flush=True)
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            comm.Abort(1)
     # The reduction reads what rank 0 has just written, so it must not start anywhere else.
     return rank
+
+
+def _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice,
+                     ratios, total, models_dir, package_root):
+    """One lattice: refine its grouped clouds at every separation, and write the raw run."""
+    tag = ROC_TAG[bravais_lattice]
+    n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
+    n_drop = int(re.search(r'drop(\d+)', tag).group(1))
+    radii, success = pick_radii(*load_curve(args.roc_dir, bravais_lattice),
+                                TARGET_SUCCESS_RATES)
+    lattice_system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
+    options = {
+        'convergence_testing': True, 'convergence_candidates': total,
+        'convergence_distances': radii,
+        'iteration_info': [{'worker': 'random_subsampling', 'n_iterations': N_ITERATIONS,
+                            'n_peaks': n_peaks, 'n_drop': n_drop, 'uniform_sampling': False}],
+        }
+    if rank == 0:
+        print(f'{bravais_lattice}: loading models', flush=True)
+    factory = getattr(UtilitiesOptimizer, FACTORY_OF_SYSTEM[lattice_system])
+    optimizer = factory(bravais_lattice, BROADENING_TAG, 1, split_comm,
+                        project_path=package_root, options=options,
+                        optimizer_class=SeparatedStartManager, seed=args.seed,
+                        models_directory=models_dir)
+    optimizer.group_size = args.group_size
+
+    if rank == 0:
+        entries, refused = load_entries(bravais_lattice, args.n_entries,
+                                        args.dataset_directory, args.seed, args.bundle)
+        print(f'{bravais_lattice}: {len(entries)} crystals ({refused} refused), '
+              f'{args.n_groups} groups of {args.group_size}, {len(ratios)} separations',
+              flush=True)
+        for other in range(1, n_ranks):
+            comm.send(entries.iloc[other::n_ranks], dest=other)
+        mine = entries.iloc[0::n_ranks]
+    else:
+        mine = comm.recv(source=0)
+
+    shape = (len(ratios), len(mine), radii.size, args.n_groups, args.group_size)
+    correct = np.zeros(shape, dtype=bool)
+    distance = np.zeros(shape, dtype=np.float32)
+    separation = np.zeros(shape, dtype=np.float32)
+    for ratio_index, ratio in enumerate(ratios):
+        optimizer.separation_ratio = ratio
+        for entry_index in range(len(mine)):
+            entry = mine.iloc[entry_index]
+            truth = get_partial_unit_cell(np.array(entry['reindexed_unit_cell']),
+                                          lattice_system=lattice_system)
+            for shell in range(radii.size):
+                if rank == 0:
+                    print(f'    {bravais_lattice} d/r={ratio} entry '
+                          f'{entry_index + 1}/{len(mine)} shell '
+                          f'{shell + 1}/{radii.size}', flush=True)
+                optimizer.chunk_tag = (shell + 1)*1000 + ratio_index
+                optimizer.opt_params['convergence_distances'] = radii[shell:shell + 1]
+                optimizer.run(entry=entry, n_top_candidates=20)
+                if optimizer.top_unit_cell.shape[0] != total:
+                    raise RuntimeError(
+                        f'{bravais_lattice} {entry["identifier"]}: '
+                        f'{optimizer.top_unit_cell.shape[0]} candidates back against {total} '
+                        f'generated; the row order is the measurement')
+                is_correct, _ = label_known_bl_batch(
+                    truth, optimizer.top_unit_cell, lattice_system)
+                block = (args.n_groups, args.group_size)
+                correct[ratio_index, entry_index, shell] = is_correct.reshape(block)
+                distance[ratio_index, entry_index, shell] = \
+                    optimizer.last_distance.reshape(block)
+                separation[ratio_index, entry_index, shell] = \
+                    optimizer.last_separation.reshape(block)
+            if rank == 0:
+                print(f'  {bravais_lattice} delta/r={ratio}: {entry_index + 1}/{len(mine)}',
+                      flush=True)
+
+    gathered = comm.gather({'correct': correct, 'distance': distance,
+                            'separation': separation,
+                            'identifiers': list(mine['identifier'])}, root=0)
+    if rank == 0:
+        np.savez_compressed(
+            out/f'{bravais_lattice}_separation.npz',
+            radii=radii, curve_success=success, separation_ratios=np.array(ratios),
+            correct=np.concatenate([g['correct'] for g in gathered], axis=1),
+            distance=np.concatenate([g['distance'] for g in gathered], axis=1),
+            separation=np.concatenate([g['separation'] for g in gathered], axis=1),
+            identifiers=np.array([n for g in gathered for n in g['identifiers']],
+                                 dtype=object),
+            )
+        (out/f'{bravais_lattice}_manifest.json').write_text(json.dumps({
+            'group_size': args.group_size, 'n_groups': args.n_groups,
+            'separation_ratios': ratios, 'n_entries': args.n_entries, 'seed': args.seed,
+            'bundle': args.bundle, 'commit': commit(), 'n_ranks': n_ranks,
+            'platform': platform.platform(), 'machine': platform.machine(),
+            'numpy': np.__version__, 'roc_file': f'{bravais_lattice}_roc_{tag}',
+            }, indent=2, sort_keys=True), encoding='utf-8')
+        print(f'{bravais_lattice}: written', flush=True)
 
 
 def solve_alpha(correct, distance, radii_curve, success_curve, k):
