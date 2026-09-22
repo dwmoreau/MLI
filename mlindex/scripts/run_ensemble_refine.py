@@ -430,7 +430,8 @@ def fit(args):
                         measured = screen(pooled, grid, chosen)
                         measured.update(how)
                         rows.append(dict(
-                            bravais_lattice=bravais_lattice, variant=variant,
+                            bravais_lattice=bravais_lattice,
+                            bundle=manifest.get('bundle', 'unknown'), variant=variant,
                             reduction=reduction, split=split, budget=budget,
                             budget_scale=budget_scale, n_crystals=int(rows_of.size),
                             **{f'best_{name}': float(value)
