@@ -381,7 +381,7 @@ def fit(args):
         report.append(f'## {bravais_lattice}   {distance.shape[0]} crystals, '
                       f'{distance.shape[1]} candidates a generator, '
                       f'shipped budget {info["shipped_budget"]}')
-        report.append(f'   shipped mix  ' + '  '.join(
+        report.append('   shipped mix  ' + '  '.join(
             f'{name} {value:.2f}' for name, value in zip(names, shipped)))
 
         for budget_scale in args.budget_scales:
@@ -435,7 +435,7 @@ def _splits(n_crystals, seed):
 def _report_block(report, names, variant, reduction, budget_scale, rows):
     """The last three rows written are one setting's three splits."""
     block = rows[-3:]
-    line = (f'   x{budget_scale:g} {variant:>8s} {reduction:>12s}  ')
+    line = f'   x{budget_scale:g} {variant:>8s} {reduction:>12s}  '
     for row in block:
         mix = '/'.join(f'{row[f"best_{name}"]:.2f}' for name in names)
         line += f'{row["split"]}: {mix}  '
