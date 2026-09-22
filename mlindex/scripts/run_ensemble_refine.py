@@ -21,6 +21,7 @@ from tqdm import tqdm
 import sys
 
 import mlindex
+from mlindex.optimization.GeneratorPools import generate_candidate_pools
 from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_hexagonal_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_monoclinic_optimizer
@@ -28,126 +29,7 @@ from mlindex.optimization.UtilitiesOptimizer import get_orthorhombic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_rhombohedral_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_tetragonal_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_triclinic_optimizer
-from mlindex.optimization.CandidateValidation import validate_candidate
-from mlindex.utilities.UnitCellTools import fix_unphysical
-from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
-from mlindex.utilities.Reindexing import reindex_entry_triclinic
 from mlindex.utilities.ErrorAdder import add_q2_error
-
-
-def evaluate_regression(optimizer, entry, candidates_per_model, rng):
-    abnn_top_n = None
-    n_sub_generators = dict()
-    candidates_per_sub_model = dict()
-    generator_names = []
-    for generator_info in optimizer.opt_params['generator_info']:
-        if generator_info['generator'] in n_sub_generators.keys():
-            n_sub_generators[generator_info['generator']] += 1
-        else:
-            n_sub_generators[generator_info['generator']] = 1
-            generator_names.append(generator_info['generator'])
-    for key in n_sub_generators.keys():
-        if n_sub_generators[key] == 1:
-            candidates_per_sub_model[key] = candidates_per_model
-        else:
-            candidates_per_sub_model[key] = candidates_per_model // n_sub_generators[key]
-    distance = np.full(
-        (candidates_per_model, len(n_sub_generators.keys())),
-        np.nan
-        )
-
-    xnn_true = np.array(entry['reindexed_xnn'])[optimizer.wrapper.data_params['unit_cell_indices']]
-    q2 = np.array(entry['q2'])[:optimizer.n_peaks]
-
-    for generator_info in optimizer.opt_params['generator_info']:
-        if generator_info['generator'] == 'trees':
-            generator_unit_cells = optimizer.wrapper.random_forest_generator[generator_info['split_group']].generate(
-                candidates_per_sub_model[generator_info['generator']], rng,  q2,
-                )
-        elif generator_info['generator'] == 'abnn':
-            if abnn_top_n is None:
-                abnn_top_n = optimizer.wrapper.abnn_generator[generator_info['split_group']].model_params['n_volumes']
-            generator_unit_cells = optimizer.wrapper.abnn_generator[generator_info['split_group']].generate(
-                candidates_per_sub_model[generator_info['generator']], rng, q2,
-                top_n=abnn_top_n,
-                batch_size=2,
-                )
-        elif generator_info['generator'] == 'templates':
-            generator_unit_cells = optimizer.wrapper.miller_index_templator[optimizer.bravais_lattice].generate(
-                candidates_per_sub_model[generator_info['generator']], rng, q2, 
-                )
-        else:
-            # As in MPIOptimizer: without this the previous generator's cells are reused.
-            raise ValueError(
-                f"unknown generator {generator_info['generator']!r} in generator_info"
-                )
-
-        generator_unit_cells = fix_unphysical(
-            unit_cell=generator_unit_cells,
-            rng=rng,
-            minimum_unit_cell=optimizer.opt_params['minimum_uc'],
-            maximum_unit_cell=optimizer.opt_params['maximum_uc'],
-            lattice_system=optimizer.wrapper.data_params['lattice_system']
-            )
-        if optimizer.wrapper.data_params['lattice_system'] == 'triclinic':
-            generator_unit_cells, _ = reindex_entry_triclinic(generator_unit_cells)
-        generator_xnn = get_xnn_from_unit_cell(
-            generator_unit_cells,
-            partial_unit_cell=True,
-            lattice_system=optimizer.wrapper.data_params['lattice_system']
-            )
-        generator_distance = np.linalg.norm(generator_xnn - xnn_true[np.newaxis], axis=1)
-        generator_index = list(n_sub_generators.keys()).index(generator_info['generator'])
-        if n_sub_generators[generator_info['generator']] == 1:
-            distance[:, generator_index] = generator_distance
-        else:
-            start = np.argwhere(np.isnan(distance[:, generator_index]))[0][0]
-            stop = start + candidates_per_sub_model[generator_info['generator']]
-            distance[start: stop, generator_index] = generator_distance
-
-    # Randomly permute the Tree distances because they are ordered based on the
-    # split group or dominant zone bin in the case of the RF model.
-    tree_index = list(n_sub_generators.keys()).index('trees')
-    distance[:, tree_index] = rng.permutation(distance[:, tree_index])
-
-    # The ABNN model distances are also ordered based on the split group.
-    # There is also an ordering based on the "top_n" predictions. The first top_n predictions
-    # are the top_n most probable unit cells. The rest of the predictions are based on
-    # randomly sampling their Miller Indices.
-    # Create groupings of the top_n and rest of the predictions. Permute separately. Then
-    # combine with the top_n first.
-    abnn_index = list(n_sub_generators.keys()).index('abnn')
-
-    if abnn_top_n < candidates_per_sub_model['abnn']:
-        n_lower = (candidates_per_sub_model['abnn'] - abnn_top_n)
-        distance_top_n = np.zeros(abnn_top_n * n_sub_generators['abnn'])
-        distance_lower = np.zeros(n_lower * n_sub_generators['abnn'])
-    
-        start = 0
-        for sub_index in range(n_sub_generators['abnn']):
-            distance_top_n[sub_index*abnn_top_n: (sub_index+1)*abnn_top_n] = distance[
-                start: start + abnn_top_n,
-                abnn_index
-                ]
-            distance_lower[sub_index*n_lower: (sub_index+1)*n_lower] = distance[
-                start + abnn_top_n: start + candidates_per_sub_model['abnn'],
-                abnn_index
-                ]
-            start += candidates_per_sub_model['abnn']
-        n_total_candidates = n_sub_generators['abnn']*candidates_per_sub_model['abnn']
-        distance[:n_total_candidates, abnn_index] = np.concatenate([
-            rng.permutation(distance_top_n),
-            rng.permutation(distance_lower)
-            ])
-
-    #print('Distance Evaluation')
-    #print('Tree', 'abnn', 'Template')
-    #print(
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('trees')]), decimals=3),
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('abnn')]), decimals=3),
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('templates')]), decimals=3),
-    #    )
-    return distance, generator_names
 
 
 def ensemble_refine(distance, generator_names, convergence_radius, rng):
@@ -363,12 +245,13 @@ if __name__ == '__main__':
             
         output = []
         for trial_index in range(len(bravais_lattice_data)):
-            distance, generator_names = evaluate_regression(
+            xnn, xnn_true, generator_names = generate_candidate_pools(
                 optimizer,
                 bravais_lattice_data.iloc[trial_index],
                 candidates_per_model=candidates_per_model[bravais_lattice],
                 rng=rng,
                 )
+            distance = np.linalg.norm(xnn - xnn_true, axis=-1)
             output.append(ensemble_refine(
                 distance,
                 generator_names,
