@@ -65,7 +65,9 @@ from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 from mlindex.utilities.ConvergenceCurve import load_curve
 from mlindex.utilities.Digests import derived_seed
 from mlindex.utilities.EnsembleObjective import VARIANTS, evaluate
-from mlindex.utilities.ErrorAdder import add_q2_error
+from mlindex.model_training import BenchmarkConditions
+from mlindex.model_training import BenchmarkPatterns
+from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
 
@@ -131,11 +133,16 @@ def shipped_mix_and_budget(optimizer):
     return order, [counts[name]/budget for name in order], budget
 
 
-def load_entries(bravais_lattice, n_entries, dataset_directory, seed):
-    """Training crystals with enough peaks, chosen reproducibly.
+def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle):
+    """Training crystals with enough peaks, synthesised under one condition bundle.
 
     Training crystals, not benchmark ones: the mix is a setting being selected, and selecting it
-    on the population it is later reported against would be reading the answer first.
+    on the population it is later reported against would be reading the answer first. That is why
+    this does not call `BenchmarkPatterns.sample_entries`, which selects the benchmark half.
+
+    The synthesis itself IS the harness's, so a pattern here is the same object a benchmark arm
+    would index -- same dropout rule, same error model, same contaminant placement. A crystal the
+    condition cannot be applied to is skipped, as the harness skips it, rather than failing the run.
     """
     path = Path(dataset_directory)/f'dataset_{bravais_lattice}.parquet'
     if not path.is_file():
@@ -143,6 +150,7 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed):
             f'no source dataset for {bravais_lattice} at {path}. Point --dataset-directory at a '
             f'tree that has it.'
             )
+    condition = BenchmarkConditions.BY_KEY[bundle]
     n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
     data = pd.read_parquet(path, columns=[
         'identifier', 'train', f'q2_{BROADENING_TAG}', 'reindexed_xnn'])
@@ -150,16 +158,32 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed):
     peaks = data[f'q2_{BROADENING_TAG}']
     data = data.loc[peaks.apply(lambda q2: np.count_nonzero(q2) >= n_peaks)]
     data = data.sort_values('identifier', kind='stable', ignore_index=True)
-    if data.shape[0] > n_entries:
+    # Drawn wider than asked, because a condition loses a few crystals it cannot be applied to.
+    draw = min(data.shape[0], int(1.3*n_entries) + 8)
+    if data.shape[0] > draw:
         rng = np.random.default_rng(derived_seed(f'sample:{bravais_lattice}', seed))
-        data = data.iloc[np.sort(rng.choice(data.shape[0], size=n_entries, replace=False))]
-        data = data.reset_index(drop=True)
-    q2 = np.zeros((data.shape[0], n_peaks))
-    for index in range(data.shape[0]):
-        q2[index] = np.array(data[f'q2_{BROADENING_TAG}'].iloc[index])[:n_peaks]
-    data = data.copy()
-    data['q2'] = list(add_q2_error(q2, None, 1, np.random.default_rng(seed)))
-    return data
+        data = data.iloc[np.sort(rng.choice(data.shape[0], size=draw, replace=False))]
+    data = data.reset_index(drop=True)
+
+    rows = []
+    refused = 0
+    for _, entry in data.iterrows():
+        try:
+            pattern = BenchmarkPatterns.prepare_peak_list(
+                entry, condition, seed, n_peaks=n_peaks)
+        except ContaminantPlacementError:
+            refused += 1
+            continue
+        q2 = np.asarray(pattern.q2_obs, dtype=float)
+        if np.count_nonzero(q2) < n_peaks:
+            refused += 1
+            continue
+        rows.append({'identifier': entry['identifier'],
+                     'reindexed_xnn': entry['reindexed_xnn'],
+                     'q2': q2[:n_peaks]})
+        if len(rows) == n_entries:
+            break
+    return pd.DataFrame(rows), refused
 
 
 def commit():
@@ -190,7 +214,9 @@ def generate(args):
         'broadening_tag': BROADENING_TAG, 'commit': commit(), 'n_ranks': n_ranks,
         'platform': platform.platform(), 'machine': platform.machine(),
         'numpy': np.__version__, 'models_directory': str(models_directory),
-        'population': 'training crystals, nominal error severity 1, no contaminants, no dropout',
+        'bundle': args.bundle,
+        'population': f'training crystals, condition bundle {args.bundle!r} '
+                      f'({BenchmarkConditions.BY_KEY[args.bundle].description})',
         'lattices': {},
         }
 
@@ -204,10 +230,11 @@ def generate(args):
         per_generator = int(round(args.budget_scale*budget))
 
         if rank == 0:
-            entries = load_entries(bravais_lattice, args.n_entries, args.dataset_directory,
-                                   args.seed)
-            print(f'{bravais_lattice}: {len(entries)} crystals, {per_generator} candidates a '
-                  f'generator, shipped budget {budget}', flush=True)
+            entries, refused = load_entries(bravais_lattice, args.n_entries,
+                                            args.dataset_directory, args.seed, args.bundle)
+            print(f'{bravais_lattice}: {len(entries)} crystals under {args.bundle!r} '
+                  f'({refused} refused), {per_generator} candidates a generator, '
+                  f'shipped budget {budget}', flush=True)
             for other in range(1, n_ranks):
                 comm.send(entries.iloc[other::n_ranks], dest=other)
             mine = entries.iloc[0::n_ranks]
@@ -494,6 +521,12 @@ def build_parser():
                                      'budget (default: 2.0, so any mix can be scored at twice it).')
     generate_group.add_argument('--models-directory', default=None, metavar='PATH',
                                 help='Model tree. Default: the usual resolution order.')
+    generate_group.add_argument('--bundle', default='nominal',
+                                choices=tuple(BenchmarkConditions.BY_KEY),
+                                help='Condition bundle the patterns are synthesised under, from '
+                                     'the benchmark\'s own set (default: nominal). This is how '
+                                     'the mix is tested for dependence on peak error, '
+                                     'contaminants and dropout.')
     generate_group.add_argument('--seed', type=int, default=12345, metavar='N')
     fit_group = parser.add_argument_group('fit')
     fit_group.add_argument('--variant', action='append', dest='variants', default=None,

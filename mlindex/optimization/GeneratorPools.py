@@ -59,11 +59,15 @@ def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
         else:
             n_sub_generators[generator_info['generator']] = 1
             generator_names.append(generator_info['generator'])
-    for key in n_sub_generators.keys():
-        if n_sub_generators[key] == 1:
-            candidates_per_sub_model[key] = candidates_per_model
-        else:
-            candidates_per_sub_model[key] = candidates_per_model // n_sub_generators[key]
+    # A generator's share is divided among its split groups, and the division rarely comes out
+    # even -- hexagonal has eight groups and a budget of 1996. Floor-dividing leaves the remainder
+    # ungenerated, so the leftovers go one each to the earliest groups and the counts sum exactly.
+    for key, n_sub in n_sub_generators.items():
+        base, remainder = divmod(candidates_per_model, n_sub)
+        candidates_per_sub_model[key] = [
+            base + (1 if index < remainder else 0) for index in range(n_sub)
+            ]
+    taken = {key: 0 for key in n_sub_generators}
 
     xnn_true = np.array(entry['reindexed_xnn'])[optimizer.wrapper.data_params['unit_cell_indices']]
     q2 = np.array(entry['q2'])[:optimizer.n_peaks]
@@ -74,21 +78,24 @@ def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
     filled = np.zeros(len(n_sub_generators.keys()), dtype=int)
 
     for generator_info in optimizer.opt_params['generator_info']:
+        name = generator_info['generator']
+        wanted = candidates_per_sub_model[name][taken.get(name, 0)] if name in taken else None
+        taken[name] = taken.get(name, 0) + 1
         if generator_info['generator'] == 'trees':
             generator_unit_cells = optimizer.wrapper.random_forest_generator[generator_info['split_group']].generate(
-                candidates_per_sub_model[generator_info['generator']], rng,  q2,
+                wanted, rng,  q2,
                 )
         elif generator_info['generator'] == 'abnn':
             if abnn_top_n is None:
                 abnn_top_n = optimizer.wrapper.abnn_generator[generator_info['split_group']].model_params['n_volumes']
             generator_unit_cells = optimizer.wrapper.abnn_generator[generator_info['split_group']].generate(
-                candidates_per_sub_model[generator_info['generator']], rng, q2,
+                wanted, rng, q2,
                 top_n=abnn_top_n,
                 batch_size=2,
                 )
         elif generator_info['generator'] == 'templates':
             generator_unit_cells = optimizer.wrapper.miller_index_templator[optimizer.bravais_lattice].generate(
-                candidates_per_sub_model[generator_info['generator']], rng, q2, 
+                wanted, rng, q2, 
                 )
         else:
             # As in MPIOptimizer: without this the previous generator's cells are reused.
@@ -129,26 +136,19 @@ def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
     # labellings of them. The tiers are permuted separately and the probable ones kept in front,
     # so that a prefix of the column is the best of each tier rather than the best of one group.
     abnn_index = list(n_sub_generators.keys()).index('abnn')
-    if abnn_top_n < candidates_per_sub_model['abnn']:
-        n_lower = (candidates_per_sub_model['abnn'] - abnn_top_n)
-        index_top_n = np.zeros(abnn_top_n * n_sub_generators['abnn'], dtype=int)
-        index_lower = np.zeros(n_lower * n_sub_generators['abnn'], dtype=int)
-
+    if abnn_top_n < min(candidates_per_sub_model['abnn']):
+        index_top_n = []
+        index_lower = []
         start = 0
-        for sub_index in range(n_sub_generators['abnn']):
-            index_top_n[sub_index*abnn_top_n: (sub_index+1)*abnn_top_n] = np.arange(
-                start, start + abnn_top_n
-                )
-            index_lower[sub_index*n_lower: (sub_index+1)*n_lower] = np.arange(
-                start + abnn_top_n, start + candidates_per_sub_model['abnn']
-                )
-            start += candidates_per_sub_model['abnn']
-        n_total_candidates = n_sub_generators['abnn']*candidates_per_sub_model['abnn']
+        for count in candidates_per_sub_model['abnn']:
+            index_top_n.extend(range(start, start + abnn_top_n))
+            index_lower.extend(range(start + abnn_top_n, start + count))
+            start += count
         order = np.concatenate([
-            rng.permutation(index_top_n),
-            rng.permutation(index_lower)
+            rng.permutation(np.array(index_top_n, dtype=int)),
+            rng.permutation(np.array(index_lower, dtype=int))
             ])
-        xnn[:n_total_candidates, abnn_index] = xnn[order, abnn_index]
+        xnn[:start, abnn_index] = xnn[order, abnn_index]
 
     refuse_unfilled(xnn, generator_names, candidates_per_model)
     return xnn, xnn_true, generator_names
