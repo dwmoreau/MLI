@@ -303,18 +303,27 @@ def score_every_mix(distance, grid, budget, curve, variant, cap):
 
 
 def choose_mix(scores, grid, reduction):
-    """The mix a reduction picks, and the value the pooled score gives it.
+    """The mix a reduction picks, the pooled score over the grid, and how it got there.
 
     'pooled'       one mix for the lattice, against the mean over crystals.
     'per-pattern'  the best mix for each crystal, averaged. This is what the original fit did, by
                    averaging the logits it optimised; averaging the winning shares is the same
                    idea on a grid. Kept so that what it costs can be measured rather than assumed.
+
+    For 'per-pattern' the third return says whether the average describes any pattern at all. A
+    per-pattern optimum that hands almost the whole budget to one generator is not evidence for a
+    blend, and an average of such optima is a mix no pattern asked for.
     """
     pooled = scores.mean(axis=1)
     if reduction == 'pooled':
-        return grid[int(np.argmax(pooled))], pooled
+        return grid[int(np.argmax(pooled))], pooled, {}
     if reduction == 'per-pattern':
-        return grid[np.argmax(scores, axis=0)].mean(axis=0), pooled
+        winners = grid[np.argmax(scores, axis=0)]
+        return winners.mean(axis=0), pooled, {
+            'share_all_or_nothing': float(np.mean(winners.max(axis=1) > 0.95)),
+            'share_on_a_corner': float(np.mean(np.isclose(winners.max(axis=1), 1.0))),
+            'winner_spread': float(np.mean(winners.std(axis=0))),
+            }
     raise ValueError(f'unknown reduction {reduction!r}')
 
 
@@ -384,8 +393,9 @@ def fit(args):
                     **({'cap': args.cap} if variant == 'capped' else {}))))
                 for reduction in args.reductions:
                     for split, rows_of in _splits(distance.shape[0], args.split_seed):
-                        chosen, pooled = choose_mix(scores[:, rows_of], grid, reduction)
+                        chosen, pooled, how = choose_mix(scores[:, rows_of], grid, reduction)
                         measured = screen(pooled, grid, chosen)
+                        measured.update(how)
                         rows.append(dict(
                             bravais_lattice=bravais_lattice, variant=variant,
                             reduction=reduction, split=split, budget=budget,
@@ -431,6 +441,10 @@ def _report_block(report, names, variant, reduction, budget_scale, rows):
                   f'  spread {whole["spread"]:.5f}  {whole["n_tied"]} of {whole["n_mixes"]} tied'
                   f'  {"determined" if whole["determined"] else "NOT DETERMINED"}'
                   f'{"  optimum on a boundary" if whole["on_boundary"] else ""}')
+    if 'share_all_or_nothing' in whole:
+        report.append(f'        per-pattern optima: '
+                      f'{100*whole["share_all_or_nothing"]:.0f}% give one generator over 95%, '
+                      f'{100*whole["share_on_a_corner"]:.0f}% give it everything')
 
 
 # ---------------------------------------------------------------------------
