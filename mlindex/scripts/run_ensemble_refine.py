@@ -356,6 +356,8 @@ def fit(args):
     if not manifest_path.is_file():
         raise SystemExit(f'no pools manifest at {manifest_path}; run --stage generate first')
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
     rows = []
     report = ['# The generator mix, by lattice', '',
@@ -411,11 +413,12 @@ def fit(args):
                             value_shipped=shipped_value, **measured))
                     _report_block(report, names, variant, reduction, budget_scale, rows)
         report.append('')
+        # Written after every lattice rather than once at the end: the low-symmetry lattices are
+        # the slow ones and they come last, so a run that dies on aP would otherwise take the
+        # thirteen finished lattices with it.
+        pd.DataFrame(rows).to_csv(out/'ensemble_mix.csv', index=False)
 
     frame = pd.DataFrame(rows)
-    out = Path(args.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(out/'ensemble_mix.csv', index=False)
     text = '\n'.join(report) + '\n'
     (out/'ensemble_mix.txt').write_text(text, encoding='utf-8')
     print(text)
