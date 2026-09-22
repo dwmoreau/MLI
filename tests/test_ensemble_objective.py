@@ -301,3 +301,18 @@ def test_shell_counts_match_np_histogram_on_random_pools():
             shell_counts(distance, radii),
             np.cumsum(np.histogram(distance, bins=bins)[0]),
             )
+
+
+def test_the_expected_score_counts_each_candidate_at_its_own_rate():
+    radii = np.array([1e-4, 2e-4, 3e-4])
+    success = np.array([0.5, 0.3, 0.005])
+    from mlindex.utilities.EnsembleObjective import expected_success_objective
+    # two candidates in the first shell, one in the second, one past the cut and so worth nothing
+    distance = np.array([1e-4, 1e-4, 2e-4, 3e-4])
+    assert expected_success_objective(distance, radii, success) == pytest.approx(0.5 + 0.5 + 0.3)
+
+
+def test_the_expected_score_refuses_a_cap_it_cannot_use():
+    radii, success = _curve()
+    with pytest.raises(ValueError, match='neither a cap nor a weight'):
+        evaluate('expected', np.full(5, radii[0]), np.vstack((radii, success)), cap=5.0)

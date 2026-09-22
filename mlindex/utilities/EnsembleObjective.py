@@ -18,7 +18,7 @@ from mlindex.utilities.ConvergenceCurve import success_of_distance
 # candidates needed for one success runs away, and the curve's own measurement is thinnest there.
 CONVERGENCE_CUT = 0.01
 
-VARIANTS = ('shipped', 'capped')
+VARIANTS = ('shipped', 'expected', 'capped')
 
 
 def shell_targets(curve):
@@ -98,6 +98,20 @@ def excess_count_objective(distance, radii, n_success):
     return term_0 + term_1
 
 
+def expected_success_objective(distance, radii, success_rate):
+    """The expected number of candidates that converge: the plain sum of s(d_i). Maximised.
+
+    It differs from the shipped score in one thing only -- what a candidate is worth. The shipped
+    score weights a candidate by the whole tail of the curve beyond where it sits; this weights it
+    by its own chance. Like the shipped score it is linear in the number of candidates and does
+    not saturate, so the two can be compared without saturation confusing the comparison.
+
+    `distance` is (..., n_candidates); the result is (...).
+    """
+    rate = success_of_distance(radii, success_rate, distance, beyond='zero')
+    return np.sum(np.where(rate > CONVERGENCE_CUT, rate, 0.0), axis=-1)
+
+
 def capped_log_objective(distance, radii, success_rate, cap, weight):
     """Lambda = sum of weight_i * -log(1 - s(d_i)) over the candidates worth counting, capped.
 
@@ -128,6 +142,8 @@ def evaluate(variant, distance, curve, cap=None, weight=None):
 
       'shipped'       the score the generator mix was originally chosen against. Minimised.
                       Takes neither a cap nor a weight.
+      'expected'      the expected number of candidates that converge. Maximised. Takes
+                      neither a cap nor a weight.
       'capped'        the capped log score, unweighted. Maximised. Needs a cap.
 
     `capped_log_objective` takes a per-candidate weight, so a clump-discounted variant is one more
@@ -142,6 +158,10 @@ def evaluate(variant, distance, curve, cap=None, weight=None):
             raise ValueError("variant='shipped' takes neither a cap nor a weight")
         radii, n_success = shell_targets(curve)
         return excess_count_objective(distance, radii, n_success)
+    if variant == 'expected':
+        if cap is not None or weight is not None:
+            raise ValueError("variant='expected' takes neither a cap nor a weight")
+        return expected_success_objective(distance, curve[0], curve[1])
     if variant == 'capped':
         if cap is None:
             raise ValueError("variant='capped' needs a cap")
