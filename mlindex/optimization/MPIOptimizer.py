@@ -6,6 +6,8 @@ import scipy.spatial
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
 from mlindex.utilities.Digests import peak_list_bytes
+from mlindex.utilities.EnsembleObjective import excess_count_objective
+from mlindex.utilities.EnsembleObjective import shell_targets
 from mlindex.utilities.ErrorAdder import perturb_xnn
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.UnitCellTools import fix_unphysical
@@ -436,22 +438,11 @@ class OptimizerManager(OptimizerBase):
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
         return self.generate_candidates_common(candidate_xnn_rank)
 
-    def _redistribution_testing_functional(self, neighbor_radius, xnn, x, N_success):
+    def _redistribution_testing_functional(self, neighbor_radius, xnn, radii, n_success):
         self.opt_params['neighbor_radius'] = neighbor_radius
         redistributed_xnn = self.redistribute_xnn(xnn)
         distance = np.linalg.norm(redistributed_xnn - self.xnn_true[np.newaxis], axis=1)
-        bins = np.concatenate([[0], x])
-        distance_hist, _ = np.histogram(distance, bins=bins)
-        N = np.cumsum(distance_hist)
-        in_range = N_success != np.inf
-        F = (N[in_range] - N_success[in_range]) / N_success[in_range]
-        term_0 = 0
-        if np.max(F) < 0:
-            term_0 += 100
-        term_1 = -np.mean(
-            np.trapezoid(F, x[in_range]) / np.trapezoid(x[in_range])
-            )
-        return term_0 + term_1
+        return excess_count_objective(distance, radii, n_success)
 
     def redistrubution_testing(self, xnn):
         import scipy.optimize
@@ -460,18 +451,14 @@ class OptimizerManager(OptimizerBase):
         #   an optimization for the best neighbor_radius
         opt_neighbor_radius = np.zeros(len(self.opt_params['max_neighbors_grid']))
         objective_function = np.zeros(len(self.opt_params['max_neighbors_grid']))
-        convergence_radius = self.opt_params['convergence_radius'][self.bravais_lattice]
-        x = convergence_radius[0]
-        success_rate = convergence_radius[1]
-        N_success = 1/success_rate
-        in_range = success_rate > 0.01
-        N_success[~in_range] = np.inf
+        radii, n_success = shell_targets(
+            self.opt_params['convergence_radius'][self.bravais_lattice])
         for index, max_neighors in enumerate(self.opt_params['max_neighbors_grid']):
             self.opt_params['max_neighbors'] = max_neighors
             opt_results = scipy.optimize.minimize_scalar(
                 fun=self._redistribution_testing_functional,
                 bounds=[0, 0.001],
-                args=(xnn, x, N_success)
+                args=(xnn, radii, n_success)
                 )
             opt_neighbor_radius[index] = opt_results.x
             objective_function[index] = opt_results.fun
