@@ -12,7 +12,6 @@ in every bundle and any subset of the benchmark regenerates identically -- which
 run be split across processes, resumed, or re-run over a handful of crystals.
 """
 
-import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +19,7 @@ import pandas as pd
 
 import mlindex
 from mlindex.model_training import BenchmarkConditions
+from mlindex.utilities.Digests import derived_seed
 from mlindex.utilities.ErrorAdder import add_contaminants
 from mlindex.utilities.ErrorAdder import add_q2_error
 from mlindex.utilities.ErrorAdder import add_second_phase
@@ -60,12 +60,6 @@ TRUTH_COLUMNS = READ_COLUMNS + [
     f'reindexed_k_{BROADENING_TAG}',
     f'reindexed_l_{BROADENING_TAG}',
     ]
-
-
-def derived_seed(key, base_seed):
-    """A stable seed for `key`. `hash()` will not do: it is salted per process."""
-    digest = hashlib.sha256(f'{base_seed}:{key}'.encode('utf-8')).digest()
-    return int.from_bytes(digest[:8], 'big')
 
 
 def mechanism_rng(mechanism, entry_id, base_seed):

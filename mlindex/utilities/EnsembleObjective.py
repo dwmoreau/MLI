@@ -18,7 +18,7 @@ from mlindex.utilities.ConvergenceCurve import success_of_distance
 # candidates needed for one success runs away, and the curve's own measurement is thinnest there.
 CONVERGENCE_CUT = 0.01
 
-VARIANTS = ('shipped', 'capped', 'capped_alpha')
+VARIANTS = ('shipped', 'capped')
 
 
 def shell_targets(curve):
@@ -44,20 +44,37 @@ def shell_targets(curve):
 def shell_counts(distance, radii):
     """N(r): how many candidates lie within each shell, cumulatively.
 
+    `distance` is (..., n_candidates) and the result is (..., n_shells), so a whole stack of pools
+    is counted in one pass -- which is what makes a grid search over generator mixes affordable.
+
     A candidate further out than the last shell is counted in no bin at all. That is not an
     oversight to be repaired -- it is how this score has always excluded candidates beyond the
     measured curve, and on the low-symmetry lattices it is three quarters of them.
     """
+    distance = np.atleast_1d(distance)
     bins = np.concatenate([[0], radii])
-    distance_hist, _ = np.histogram(distance, bins=bins)
-    return np.cumsum(distance_hist)
+    # The bins are half-open, [lo, hi), except the last one, which is closed at both ends. That is
+    # np.histogram's rule, and this counts the same way so that a distance landing exactly on the
+    # outermost shell keeps being counted.
+    shell = np.searchsorted(bins, distance, side='right') - 1
+    shell = np.where(distance == bins[-1], bins.size - 2, shell)
+    inside = (shell >= 0) & (shell < radii.size)
+
+    flat = shell.reshape(-1, distance.shape[-1])
+    keep = inside.reshape(flat.shape)
+    pool = np.repeat(np.arange(flat.shape[0]), flat.shape[1]).reshape(flat.shape)
+    counted = np.bincount(
+        (pool[keep]*radii.size + flat[keep]).ravel(),
+        minlength=flat.shape[0]*radii.size,
+        ).reshape(flat.shape[0], radii.size)
+    return np.cumsum(counted, axis=-1).reshape(distance.shape[:-1] + (radii.size,))
 
 
 def shell_excess(distance, radii, n_success):
-    """(F, in_range). F is the pool's surplus over the count needed, per in-range shell."""
+    """(F, in_range). F is each pool's surplus over the count needed, per in-range shell."""
     N = shell_counts(distance, radii)
     in_range = n_success != np.inf
-    F = (N[in_range] - n_success[in_range]) / n_success[in_range]
+    F = (N[..., in_range] - n_success[in_range]) / n_success[in_range]
     return F, in_range
 
 
@@ -65,20 +82,18 @@ def excess_count_objective(distance, radii, n_success):
     """The shipped score, minimised: a flat penalty if the pool never reaches the count it needs,
     minus the normalised integral of its surplus where it does.
 
-    One pattern, one pool: `distance` is (n_candidates,) and the result is a scalar. Combining
-    patterns is the caller's business, because fitting each pattern separately and averaging the
-    answers describes no pattern.
+    `distance` is (..., n_candidates) and the result is (...), so one pool gives a scalar and a
+    stack of them gives one score each. Combining patterns is the caller's business, because
+    fitting each pattern separately and averaging the answers describes no pattern.
 
     The arithmetic below is written in the order the two originals wrote it and is not to be
     simplified into an algebraically equal form, because the test that pins this to them compares
     with `==`.
     """
     F, in_range = shell_excess(distance, radii, n_success)
-    term_0 = 0
-    if np.max(F) < 0:
-        term_0 += 100
-    term_1 = -np.mean(
-        np.trapezoid(F, radii[in_range]) / np.trapezoid(radii[in_range])
+    term_0 = np.where(np.max(F, axis=-1) < 0, 100, 0)
+    term_1 = -(
+        np.trapezoid(F, radii[in_range], axis=-1) / np.trapezoid(radii[in_range])
         )
     return term_0 + term_1
 
@@ -114,7 +129,9 @@ def evaluate(variant, distance, curve, cap=None, weight=None):
       'shipped'       the score the generator mix was originally chosen against. Minimised.
                       Takes neither a cap nor a weight.
       'capped'        the capped log score, unweighted. Maximised. Needs a cap.
-      'capped_alpha'  the same, with a per-candidate weight for clumping. Needs both.
+
+    `capped_log_objective` takes a per-candidate weight, so a clump-discounted variant is one more
+    branch here; it is not written until something sets it.
 
     Production does not come through here: `_redistribution_testing_functional` calls
     `excess_count_objective` directly, so a variant added for a measurement has no route into the
@@ -129,11 +146,7 @@ def evaluate(variant, distance, curve, cap=None, weight=None):
         if cap is None:
             raise ValueError("variant='capped' needs a cap")
         if weight is not None:
-            raise ValueError("variant='capped' is the unweighted one; use 'capped_alpha'")
+            raise ValueError("variant='capped' is the unweighted one; call the kernel directly")
         return capped_log_objective(
             distance, curve[0], curve[1], cap, np.ones(np.shape(distance)))
-    if variant == 'capped_alpha':
-        if cap is None or weight is None:
-            raise ValueError("variant='capped_alpha' needs both a cap and a weight")
-        return capped_log_objective(distance, curve[0], curve[1], cap, weight)
     raise ValueError(f'unknown ensemble objective variant {variant!r}')

@@ -225,10 +225,8 @@ def test_a_variant_refuses_a_constant_it_cannot_use():
         evaluate('shipped', distance, curve, cap=5.0)
     with pytest.raises(ValueError, match='needs a cap'):
         evaluate('capped', distance, curve)
-    with pytest.raises(ValueError, match='use'):
+    with pytest.raises(ValueError, match='unweighted one'):
         evaluate('capped', distance, curve, cap=5.0, weight=np.ones(20))
-    with pytest.raises(ValueError, match='both a cap and a weight'):
-        evaluate('capped_alpha', distance, curve, cap=5.0)
 
 
 def test_an_unknown_variant_is_refused_rather_than_ignored():
@@ -248,3 +246,58 @@ def test_the_dispatcher_agrees_with_the_kernels_it_dispatches_to():
     weight = np.ones(300)
     assert evaluate('capped', distance, curve, cap=5.0) == capped_log_objective(
         distance, radii, success, 5.0, weight)
+
+
+# ---------------------------------------------------------------------------
+# Scoring a stack of pools must equal scoring them one at a time
+# ---------------------------------------------------------------------------
+
+
+def test_a_stack_of_pools_counts_exactly_as_the_pools_one_at_a_time():
+    """The grid search scores every mix at once; it must not become a second implementation.
+
+    The counting is exact. The score is not bit-identical between the two shapes, and the reason
+    is outside this module: np.trapezoid sums a 2-D array in a different order from a 1-D one, for
+    about 2e-16 of relative difference. The shipped one-pool path, which is the one a production
+    number comes from, IS bit-identical to the originals -- that is the test above.
+    """
+    rng = np.random.default_rng(31)
+    radii, success = _curve()
+    shared_radii, targets = shell_targets(np.vstack((radii, success)))
+    stack = np.exp(rng.uniform(np.log(radii[0]/3), np.log(radii[-1]*3), (25, 600)))
+
+    for index in range(stack.shape[0]):
+        np.testing.assert_array_equal(
+            shell_counts(stack, shared_radii)[index],
+            shell_counts(stack[index], shared_radii),
+            )
+
+    together = excess_count_objective(stack, shared_radii, targets)
+    assert together.shape == (25,)
+    one_at_a_time = np.array([
+        excess_count_objective(stack[index], shared_radii, targets)
+        for index in range(stack.shape[0])
+        ])
+    np.testing.assert_allclose(together, one_at_a_time, rtol=1e-14, atol=0.0)
+
+
+def test_the_outermost_shell_is_closed_the_way_np_histogram_closes_it():
+    """A distance landing exactly on the last radius is counted, not dropped."""
+    radii, _ = _curve()
+    on_the_edge = np.array([radii[0], radii[-1]])
+    bins = np.concatenate([[0], radii])
+    reference = np.cumsum(np.histogram(on_the_edge, bins=bins)[0])
+    np.testing.assert_array_equal(shell_counts(on_the_edge, radii), reference)
+    assert shell_counts(on_the_edge, radii)[-1] == 2
+
+
+def test_shell_counts_match_np_histogram_on_random_pools():
+    rng = np.random.default_rng(4)
+    radii, _ = _curve()
+    bins = np.concatenate([[0], radii])
+    for _ in range(25):
+        distance = np.exp(rng.uniform(np.log(radii[0]/3), np.log(radii[-1]*3), 500))
+        np.testing.assert_array_equal(
+            shell_counts(distance, radii),
+            np.cumsum(np.histogram(distance, bins=bins)[0]),
+            )

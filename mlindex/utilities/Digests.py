@@ -1,4 +1,4 @@
-"""Stable digests of a peak list.
+"""Stable digests, and stable seeds, for things that must not change between processes.
 
 Two callers need the same peak list reduced to bytes the same way: the search re-keys its random
 generator on the pattern it is about to index, and a benchmark carries a short digest in both the
@@ -14,6 +14,12 @@ generated on one and analysed on another.
 import hashlib
 
 import numpy as np
+
+
+def derived_seed(key, base_seed):
+    """A stable seed for `key`. `hash()` will not do: it is salted per process."""
+    digest = hashlib.sha256(f'{base_seed}:{key}'.encode('utf-8')).digest()
+    return int.from_bytes(digest[:8], 'big')
 
 
 def peak_list_bytes(q2):
