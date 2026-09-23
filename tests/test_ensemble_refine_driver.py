@@ -151,3 +151,40 @@ def test_the_fit_refuses_to_run_without_a_clump_discount(tmp_path):
 def test_the_generate_stage_says_what_it_needs(tmp_path):
     with pytest.raises(SystemExit, match='needs --dataset-directory'):
         driver.main(['--stage', 'generate', '--pools', str(tmp_path)])
+
+
+def test_spreading_the_score_over_processes_does_not_change_it():
+    """The parallel path is a partition of crystals, so it must agree to the last bit.
+
+    It is the only thing standing between a 67-hour fit and a half-hour one, and a subtle
+    disagreement would not look like a failure -- it would look like a different answer.
+    """
+    rng = np.random.default_rng(7)
+    n_crystals, depth = 9, 12
+    distance = rng.uniform(1e-4, 5e-3, (n_crystals, depth, 3))
+    xnn = rng.uniform(0, 1e-3, (n_crystals, depth, 3, 4)).astype(np.float32)
+    grid = driver.mix_grid(0.25, 3)
+    curve = np.vstack((np.logspace(-4, -2, 20), np.linspace(0.9, 0.0, 20)))
+    discount = (2e-4, np.array([1.0, 2.0, 8.0]), np.array([1.0, 0.6, 0.2]))
+
+    serial = driver.score_every_mix(distance, xnn, grid, 8, curve, discount, 1)
+    parallel = driver.score_every_mix(distance, xnn, grid, 8, curve, discount, 4)
+    assert parallel.shape == (grid.shape[0], n_crystals)
+    np.testing.assert_array_equal(serial, parallel)
+
+
+def test_a_lattice_short_of_crystals_says_so(tmp_path, capsys):
+    """Ten of the fourteen lattices cannot supply 10 000, and a quiet shortfall is a wrong run."""
+    rng = np.random.default_rng(3)
+    n_rows = 5
+    pd.DataFrame({
+        'identifier': [f'X{i}' for i in range(n_rows)],
+        'train': [True]*n_rows,
+        f'q2_{driver.BROADENING_TAG}': [rng.uniform(0.01, 1.0, 30) for _ in range(n_rows)],
+        'reindexed_xnn': [rng.uniform(0, 1, 6) for _ in range(n_rows)],
+        'reindexed_unit_cell': [np.array([5.0, 5.0, 5.0, 90.0, 90.0, 90.0])]*n_rows,
+        }).to_parquet(tmp_path/'dataset_cP.parquet')
+
+    entries, _ = driver.load_entries('cP', 1000, str(tmp_path), 1, 'nominal')
+    assert len(entries) == n_rows
+    assert 'WARNING' in capsys.readouterr().out

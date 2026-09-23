@@ -10,12 +10,14 @@ It runs in two stages, because generating candidates costs node-hours and does n
 score, while scoring costs seconds and is the thing that gets changed:
 
   --stage generate   draw each generator's pool for many patterns and write it to disk. MPI.
-  --stage fit        read those pools and score every mixture on a grid. No MPI, seconds.
-                     One row per lattice, score, reduction and split, written to ensemble_mix.csv.
+  --stage fit        read those pools and score every mixture on a grid. Multiprocessing, not
+                     MPI, over crystals; --nproc. One row per lattice, score, reduction and
+                     split, written to ensemble_mix.csv.
 
-The score is the expected number of candidates that converge. It does NOT account for candidates
-being correlated: a clump that starts close together succeeds or fails together, so it is worth
-fewer tries than the sum counts. The discount for that is measured but not yet wired in.
+The score is the expected number of INDEPENDENT candidates that converge. Candidates in a real
+pool are not independent -- a clump that starts close together succeeds or fails together, and is
+worth fewer tries than counting it would say -- so every candidate carries the measured clump
+discount, which --clump-discount supplies and without which the fit refuses to run.
 
 Worked commands. One lattice end to end on a laptop, which takes a few minutes:
 
@@ -32,14 +34,17 @@ refuses to start in that state.
     mpiexec -n 32 python -m mlindex.scripts.run_ensemble_refine --stage generate \\
         --dataset-directory mlindex/data/generated_datasets --pools results/pools
 
-Then, refitting as often as the score changes, on a laptop, against those pools:
+Then, refitting as often as the score changes, against those pools. Give --nproc the cores of
+whatever it is running on: the work is one neighbour search per crystal per mix, so at production
+scale a single core is days and a node is under an hour.
 
     python -m mlindex.scripts.run_ensemble_refine --stage fit --pools results/pools \\
         --roc-dir docs/fom_production/artifacts/P08_inputs/data --out-dir results/mix \\
-       
+        --clump-discount mlindex/characterization/clump_discount --nproc 128
 """
 import argparse
 import json
+import multiprocessing
 import os
 import platform
 import subprocess
@@ -120,6 +125,11 @@ def shipped_mix_and_budget(optimizer):
         counts[name] += generator_info['n_unit_cells']
     budget = sum(counts.values())
     return order, [counts[name]/budget for name in order], budget
+
+
+# Crystals per chunk when distances are computed. Sized so the float64 temporary stays around a
+# hundred megabytes at the deepest pool this driver generates.
+DISTANCE_CHUNK = 64
 
 
 def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle):
@@ -257,14 +267,31 @@ def generate(args):
                    'identifiers': list(mine['identifier']), 'generator_names': generated_names}
 
         gathered = comm.gather(payload, root=0)
+        del payload, positions, truths
         if rank == 0:
-            xnn = np.stack([block for part in gathered for block in part['xnn']])
+            blocks = [block for part in gathered for block in part['xnn']]
             xnn_true = np.stack([block for part in gathered for block in part['xnn_true']])
             identifiers = [name for part in gathered for name in part['identifiers']]
+            del gathered
+            # Filled a crystal at a time and each block dropped as it is copied, so the gathered
+            # copy and the stacked one are never both whole. At 10 000 crystals one aP pool is
+            # 8.6 GB, and np.stack over the list would need both at once.
+            xnn = np.empty((len(blocks),) + blocks[0].shape, dtype=np.float32)
+            for index in range(len(blocks)):
+                xnn[index] = blocks[index]
+                blocks[index] = None
+            del blocks
             # Distances at full precision because the score is computed from them; positions at
             # single precision because they are only ever used to count near neighbours, where the
             # radii are thousands of times coarser than float32's resolution here.
-            distance = np.linalg.norm(xnn - xnn_true[:, np.newaxis, np.newaxis, :], axis=-1)
+            #
+            # In crystal-sized chunks: the whole-array form promotes the float32 positions against
+            # the float64 truth, and that one temporary is 17 GB for aP at 10 000 crystals.
+            distance = np.empty(xnn.shape[:-1], dtype=float)
+            for start in range(0, xnn.shape[0], DISTANCE_CHUNK):
+                stop = start + DISTANCE_CHUNK
+                distance[start:stop] = np.linalg.norm(
+                    xnn[start:stop] - xnn_true[start:stop, np.newaxis, np.newaxis, :], axis=-1)
             np.savez_compressed(
                 out/f'{bravais_lattice}_pools.npz',
                 xnn=xnn, xnn_true=xnn_true, distances=distance,
@@ -325,7 +352,7 @@ def stack_positions(xnn, counts):
         [xnn[:, :count, index] for index, count in enumerate(counts) if count], axis=1)
 
 
-def score_every_mix(distance, xnn, grid, budget, curve, discount):
+def score_crystals(distance, xnn, grid, budget, curve, discount):
     """(n_mixes, n_crystals): what each mix is worth to each crystal. Larger is better.
 
     The clump weights are recomputed for the candidate subset each mix selects, not once over the
@@ -333,8 +360,10 @@ def score_every_mix(distance, xnn, grid, budget, curve, discount):
     and its optimum would always be a corner -- which is the answer a score blind to crowding
     gives and the reason this term exists.
 
-    That is also what makes the fit slow: one neighbour search per mix per crystal. At a 0.02 grid
-    over hundreds of crystals it is hours, not seconds; --step buys the time back.
+    That is also what makes the fit slow: one neighbour search per mix per crystal. Measured on
+    this laptop, a 12 000-candidate pool costs 18 ms a crystal a mix, so a 0.02 grid over 10 000
+    crystals is 67 hours on one core. This function is the serial unit; `score_every_mix` spreads
+    it over crystals, which is the axis the work is independent along.
     """
     scores = np.empty((grid.shape[0], distance.shape[0]))
     for index, mix in enumerate(grid):
@@ -345,6 +374,32 @@ def score_every_mix(distance, xnn, grid, budget, curve, discount):
                            for crystal in range(positions.shape[0])])
         scores[index] = expected_success_objective(pool, curve[0], curve[1], weight)
     return scores
+
+
+def _score_chunk(payload):
+    """Module-level and taking one picklable argument, because workers are spawned, not forked."""
+    return score_crystals(*payload)
+
+
+def score_every_mix(distance, xnn, grid, budget, curve, discount, nproc):
+    """`score_crystals` over every crystal, spread across `nproc` processes.
+
+    `nproc` has no default. A fit that quietly ran on one core would take days at production
+    scale and look like a hang, so the caller says how many cores it is giving this.
+    """
+    n_crystals = distance.shape[0]
+    if nproc <= 1 or n_crystals < 2*nproc:
+        return score_crystals(distance, xnn, grid, budget, curve, discount)
+
+    def chunks():
+        # Built lazily: materialising every chunk first would hold a second copy of the pool,
+        # which is gigabytes at production scale.
+        for rows in np.array_split(np.arange(n_crystals), nproc):
+            yield (distance[rows], xnn[rows], grid, budget, curve, discount)
+
+    with multiprocessing.get_context('spawn').Pool(nproc) as pool:
+        parts = list(pool.imap(_score_chunk, chunks()))
+    return np.concatenate(parts, axis=1)
 
 
 def choose_mix(scores, grid, reduction):
@@ -419,7 +474,10 @@ def fit(args):
             raise SystemExit(
                 f'{path} has no candidate positions, so how crowded the pool is cannot be seen '
                 f'and the mix cannot be scored. Regenerate it with the current driver.')
-        xnn = np.asarray(data['xnn'], dtype=float)
+        # Left at the single precision they were written in. The generate stage stores them that
+        # way on purpose -- they are only ever used to count near neighbours, where the radii are
+        # thousands of times coarser -- and widening them here would double a 9 GB array.
+        xnn = np.asarray(data['xnn'], dtype=np.float32)
         discount = load_clump_discount(args.clump_discount, bravais_lattice)
         info = manifest['lattices'][bravais_lattice]
         shipped = np.array([info['shipped_mix'][name] for name in names])
@@ -427,17 +485,15 @@ def fit(args):
         grid = mix_grid(args.step, len(names))
 
         print(f'{bravais_lattice}: scoring {grid.shape[0]} mixes over '
-              f'{distance.shape[0]} crystals', flush=True)
+              f'{distance.shape[0]} crystals on {args.nproc} processes', flush=True)
 
         budget = int(info['shipped_budget'])
         if budget <= distance.shape[1]:
-            scores = score_every_mix(distance, xnn, grid, budget, curve, discount)
-            shipped_counts = counts_for_mix(shipped, budget)
-            shipped_positions = stack_positions(xnn, shipped_counts)
-            shipped_value = float(np.mean(expected_success_objective(
-                stack_pools(distance, shipped_counts), curve[0], curve[1],
-                np.stack([clump_weights(shipped_positions[c], *discount)
-                          for c in range(shipped_positions.shape[0])]))))
+            scores = score_every_mix(distance, xnn, grid, budget, curve, discount, args.nproc)
+            # The shipped mix need not sit on the grid, so it is scored as a grid of one rather
+            # than by a second copy of the same arithmetic.
+            shipped_value = float(np.mean(score_every_mix(
+                distance, xnn, shipped[np.newaxis], budget, curve, discount, args.nproc)))
             for reduction in args.reductions:
                 for split, rows_of in _splits(distance.shape[0], args.split_seed):
                     chosen, pooled, how = choose_mix(scores[:, rows_of], grid, reduction)
@@ -522,6 +578,11 @@ def build_parser():
                            help='Grid spacing on the simplex (default: 0.02, so 1326 mixes).')
     fit_group.add_argument('--split-seed', type=int, default=12345, metavar='N',
                            help='Seed for the half-and-half stability check (default: 12345).')
+    fit_group.add_argument('--nproc', type=int, default=1, metavar='N',
+                           help='Processes the scoring is spread over, across crystals '
+                                '(default: 1). The cost is one neighbour search per crystal per '
+                                'mix; at 10000 crystals and the default grid that is tens of '
+                                'hours on one core, so give this the cores of the node.')
     return parser
 
 
