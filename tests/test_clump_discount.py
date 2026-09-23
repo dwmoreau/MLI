@@ -73,3 +73,41 @@ def test_a_written_discount_round_trips(tmp_path):
     assert delta == pytest.approx(3.4e-4)
     np.testing.assert_array_equal(k, K)
     np.testing.assert_array_equal(alpha, ALPHA)
+
+
+def test_cubic_falls_back_to_no_discount_because_it_cannot_be_measured(tmp_path):
+    """A cubic cell has one free parameter, so the separation job cannot build a clump in it.
+
+    SeparatedStartManager puts group members on a sphere of radius delta/2 about the centre, and
+    in one dimension that sphere is two points -- half of every group coincident at any
+    separation. So there is no cubic file to load and the fit would otherwise refuse the three
+    lattices outright.
+    """
+    from mlindex.utilities.ClumpDiscount import CUBIC
+
+    for bravais_lattice in CUBIC:
+        delta, k, alpha = load_clump_discount(str(tmp_path), bravais_lattice)
+        assert delta == 0.0
+        assert np.all(alpha == 1.0)
+        # and it really does switch the term off, even on a maximally clumped pool
+        coincident = np.zeros((64, 1))
+        assert np.all(clump_weights(coincident, delta, k, alpha) == 1.0)
+
+
+def test_a_measured_cubic_discount_takes_precedence_over_the_fallback(tmp_path):
+    """The fallback must never shadow a real measurement, or fixing the group construction
+    later would silently have no effect."""
+    np.savez(discount_path(str(tmp_path), 'cP'), delta=1e-3,
+             k=np.array([1.0, 8.0]), alpha=np.array([1.0, 0.25]))
+    delta, k, alpha = load_clump_discount(str(tmp_path), 'cP')
+    assert delta == 1e-3
+    assert alpha.tolist() == [1.0, 0.25]
+    coincident = np.zeros((8, 1))
+    assert clump_weights(coincident, delta, k, alpha)[0] < 1.0, 'the measured table must bite'
+
+
+def test_a_non_cubic_lattice_still_refuses_a_missing_discount(tmp_path):
+    """The fallback is for the three lattices that cannot be measured, not a general default."""
+    for bravais_lattice in ('oP', 'mP', 'aP', 'hP'):
+        with pytest.raises(FileNotFoundError, match='no clump discount'):
+            load_clump_discount(str(tmp_path), bravais_lattice)
