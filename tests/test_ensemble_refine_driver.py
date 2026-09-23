@@ -226,3 +226,62 @@ def test_the_second_phase_bundle_gets_the_partner_pool_it_needs(tmp_path):
     entries, _ = driver.load_entries('cP', 2, str(tmp_path), 1, 'second_phase',
                                      second_phase_pool=pool)
     assert 'q2' in entries.columns
+
+
+def test_the_difficulty_grid_puts_the_second_phase_at_three_contaminants():
+    """DWMM's convention: three contaminants IS the second phase.
+
+    Three independently placed lines and three from one real partner cell are not the same
+    object -- the partner's lines are mutually consistent with some other lattice, which is what
+    makes them hard to reject -- so the top of the axis uses the correlated mechanism.
+    """
+    for level in (0, 1, 2):
+        condition = driver.grid_condition(level, 4)
+        assert condition.n_contaminants == level
+        assert condition.second_phase_lines == 0
+    top = driver.grid_condition(3, 4)
+    assert top.n_contaminants == 0, 'three contaminants is not three independent lines'
+    assert top.second_phase_lines == 3
+    # every cell keeps the nominal peak error and a distinct tag
+    tags = {driver.grid_condition(c, d).tag
+            for c in driver.CONTAMINANT_LEVELS for d in driver.DROPOUT_LEVELS}
+    assert len(tags) == len(driver.CONTAMINANT_LEVELS)*len(driver.DROPOUT_LEVELS)
+    assert all(driver.grid_condition(c, d).error_multiplier == 1.0
+               for c in driver.CONTAMINANT_LEVELS for d in driver.DROPOUT_LEVELS)
+    with pytest.raises(ValueError):
+        driver.grid_condition(5, 4)
+    with pytest.raises(ValueError):
+        driver.grid_condition(1, 3)
+
+
+def test_the_grid_draws_a_difficulty_per_crystal_and_keeps_every_one(tmp_path):
+    """--n-entries X must still deliver X crystals, and the draw must not depend on X.
+
+    A crystal whose observed range is narrow cannot take every contaminant asked for. Dropping
+    it would bias the sample toward crystals that can, so the draw steps down instead and the
+    delivered difficulty is recorded on the row.
+    """
+    for bravais_lattice in ('cP', 'oP', 'tP'):
+        _write_dataset(tmp_path/f'dataset_{bravais_lattice}.parquet', 40,
+                       seed=abs(hash(bravais_lattice)) % 1000)
+    pool = driver.load_second_phase_pool(str(tmp_path), 1)
+    assert driver.needs_second_phase_pool('grid'), 'the grid reaches the second phase'
+    assert not driver.needs_second_phase_pool('nominal')
+
+    entries, _ = driver.load_entries('cP', 24, str(tmp_path), 1, 'grid',
+                                     second_phase_pool=pool)
+    assert len(entries) == 24, 'every crystal asked for must come back'
+    # what is recorded is what was DELIVERED, which can fall short of the level drawn: a crystal
+    # with few spare interior peaks yields 3 where 4 was asked. So the bound is the range, not
+    # the set -- on real data the delivered dropout does take values outside DROPOUT_LEVELS.
+    assert entries['n_contaminants'].between(0, max(driver.CONTAMINANT_LEVELS)).all()
+    assert entries['n_dropout'].between(0, max(driver.DROPOUT_LEVELS)).all()
+    assert entries['n_dropout'].nunique() > 1, 'the difficulty must actually vary'
+    assert entries['n_contaminants'].nunique() > 1
+
+    # the draw is keyed on the crystal, so asking for fewer gives the same crystals the same cell
+    fewer, _ = driver.load_entries('cP', 12, str(tmp_path), 1, 'grid', second_phase_pool=pool)
+    merged = fewer.merge(entries, on='identifier', suffixes=('_few', '_many'))
+    assert len(merged) == 12
+    assert (merged['n_dropout_few'] == merged['n_dropout_many']).all()
+    assert (merged['n_contaminants_few'] == merged['n_contaminants_many']).all()

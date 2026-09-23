@@ -133,10 +133,57 @@ def shipped_mix_and_budget(optimizer):
 DISTANCE_CHUNK = 64
 
 
+# The difficulty grid. DWMM: the mix must be fitted against patterns the indexer will actually
+# meet, not against one condition, so a run draws a cell per crystal rather than applying one
+# bundle to all of them.
+#
+# Three contaminants IS the second phase, on DWMM's instruction: three lines from ONE real partner
+# cell, mutually consistent with some other lattice. Independently placed lines are easier to
+# reject than real ones (`ErrorAdder.add_second_phase`), so taking the top of the axis as the
+# correlated mechanism keeps the hardest case honest rather than optimistic.
+#
+# Peak positional error stays at the nominal 1x across every cell. It is not a third axis here
+# because it was measured not to matter -- 5-7 % on the fitted mix, nil on tP, and structurally
+# invisible to the score (P-F-119) -- and varying it would dilute the two that do.
+GRID_BUNDLE = 'grid'
+CONTAMINANT_LEVELS = (0, 1, 2, 3)
+DROPOUT_LEVELS = (0, 2, 4, 6)
+
+
+def grid_condition(n_contaminants, n_dropout):
+    """One cell of the difficulty grid, as a Condition the harness can synthesise."""
+    if n_contaminants not in CONTAMINANT_LEVELS or n_dropout not in DROPOUT_LEVELS:
+        raise ValueError(f'({n_contaminants}, {n_dropout}) is not a cell of the grid')
+    correlated = 3 if n_contaminants == 3 else 0
+    placed = 0 if n_contaminants == 3 else n_contaminants
+    return BenchmarkConditions.Condition(
+        key=f'grid_cont{n_contaminants}_drop{n_dropout}',
+        label=f'G{n_contaminants}{n_dropout}',
+        axis='difficulty_grid',
+        description=(f'{n_contaminants} contaminant lines '
+                     f'({"one real partner phase" if correlated else "independently placed"}) '
+                     f'and {n_dropout} dropped peaks, at nominal peak error'),
+        error_multiplier=1.0,
+        n_contaminants=placed,
+        n_dropout=n_dropout,
+        second_phase_lines=correlated,
+        is_hard=bool(n_contaminants or n_dropout),
+        )
+
+
 # Partner phases sampled per lattice for the second-phase bundle. The harness builds its pool
 # from the crystals an arm drew, a few hundred a lattice; this matches that scale rather than
 # pooling every training crystal, which would be half a million arrays held for the whole run.
 SECOND_PHASE_POOL_PER_LATTICE = 300
+
+
+def needs_second_phase_pool(bundle):
+    """Whether this bundle will ever ask for a partner phase, so one place decides it."""
+    if bundle == GRID_BUNDLE:
+        # the top of the contaminant axis is the second phase, so the grid always needs one
+        return any(grid_condition(level, 0).second_phase_lines > 0
+                   for level in CONTAMINANT_LEVELS)
+    return BenchmarkConditions.BY_KEY[bundle].second_phase_lines > 0
 
 
 def load_second_phase_pool(dataset_directory, seed):
@@ -180,8 +227,16 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle,
     this does not call `BenchmarkPatterns.sample_entries`, which selects the benchmark half.
 
     The synthesis itself IS the harness's, so a pattern here is the same object a benchmark arm
-    would index -- same dropout rule, same error model, same contaminant placement. A crystal the
-    condition cannot be applied to is skipped, as the harness skips it, rather than failing the run.
+    would index -- same dropout rule, same error model, same contaminant placement.
+
+    `bundle` is one of the harness's named bundles, or GRID_BUNDLE, which draws a difficulty per
+    crystal instead: contaminants from CONTAMINANT_LEVELS and dropped peaks from DROPOUT_LEVELS,
+    independently and uniformly, so all sixteen cells appear in one run. The draw is keyed on the
+    crystal's identifier, so which difficulty a crystal gets does not depend on how many crystals
+    were asked for or on what order they came in.
+
+    Every row carries the difficulty that was DELIVERED, which is not always the one drawn -- see
+    the degradation below -- so the fit can be re-cut by difficulty without regenerating.
     """
     path = Path(dataset_directory)/f'dataset_{bravais_lattice}.parquet'
     if not path.is_file():
@@ -189,7 +244,7 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle,
             f'no source dataset for {bravais_lattice} at {path}. Point --dataset-directory at a '
             f'tree that has it.'
             )
-    condition = BenchmarkConditions.BY_KEY[bundle]
+    fixed = None if bundle == GRID_BUNDLE else BenchmarkConditions.BY_KEY[bundle]
     n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
     data = pd.read_parquet(path, columns=[
         'identifier', 'train', f'q2_{BROADENING_TAG}', 'reindexed_xnn',
@@ -208,12 +263,35 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle,
 
     rows = []
     refused = 0
+    degraded = 0
     for _, entry in data.iterrows():
-        try:
-            pattern = BenchmarkPatterns.prepare_peak_list(
-                entry, condition, seed, n_peaks=n_peaks,
-                second_phase_pool=second_phase_pool)
-        except ContaminantPlacementError:
+        if fixed is not None:
+            attempts = [fixed]
+        else:
+            draw_rng = np.random.default_rng(derived_seed(
+                f'difficulty:{bravais_lattice}:{entry["identifier"]}', seed))
+            n_contaminants = int(draw_rng.choice(CONTAMINANT_LEVELS))
+            n_dropout = int(draw_rng.choice(DROPOUT_LEVELS))
+            # A pattern whose observed range is narrow cannot take every contaminant asked for,
+            # and add_contaminants raises rather than placing one on top of a peak. Dropping the
+            # crystal would bias the sample: the ones that refuse are systematically the ones
+            # with a narrow range, so they would be under-represented at high contamination and
+            # over-represented at low. The draw steps down instead, and what was delivered is
+            # recorded on the row.
+            attempts = [grid_condition(level, n_dropout)
+                        for level in range(n_contaminants, -1, -1)]
+        pattern = None
+        for index, condition in enumerate(attempts):
+            try:
+                pattern = BenchmarkPatterns.prepare_peak_list(
+                    entry, condition, seed, n_peaks=n_peaks,
+                    second_phase_pool=second_phase_pool)
+            except ContaminantPlacementError:
+                continue
+            if index:
+                degraded += 1
+            break
+        if pattern is None:
             refused += 1
             continue
         q2 = np.asarray(pattern.q2_obs, dtype=float)
@@ -223,9 +301,17 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle,
         rows.append({'identifier': entry['identifier'],
                      'reindexed_xnn': entry['reindexed_xnn'],
                      'reindexed_unit_cell': entry['reindexed_unit_cell'],
-                     'q2': q2[:n_peaks]})
+                     'q2': q2[:n_peaks],
+                     # the second phase counts as contamination: DWMM's convention, and the two
+                     # mechanisms deliver extra lines that the pattern cannot tell apart
+                     'n_contaminants': int(pattern.n_contaminants_achieved
+                                           + pattern.n_second_phase_achieved),
+                     'n_dropout': int(pattern.n_dropout_achieved)})
         if len(rows) == n_entries:
             break
+    if degraded:
+        print(f'{bravais_lattice}: {degraded} of {len(rows)} crystals took fewer contaminants '
+              f'than drawn; the delivered count is on the row', flush=True)
     if len(rows) < n_entries:
         # Ten of the fourteen lattices hold fewer than 10 000 usable training crystals -- cF has
         # 554 -- so a large --n-entries silently becomes 'all of them' on most of the run. Said
@@ -266,8 +352,13 @@ def generate(args):
         'platform': platform.platform(), 'machine': platform.machine(),
         'numpy': np.__version__, 'models_directory': str(models_directory),
         'bundle': args.bundle,
-        'population': f'training crystals, condition bundle {args.bundle!r} '
-                      f'({BenchmarkConditions.BY_KEY[args.bundle].description})',
+        'population': (
+            f'training crystals, a difficulty drawn per crystal from '
+            f'{CONTAMINANT_LEVELS} contaminants x {DROPOUT_LEVELS} dropped peaks at nominal '
+            f'peak error; three contaminants is the second phase'
+            if args.bundle == GRID_BUNDLE else
+            f'training crystals, condition bundle {args.bundle!r} '
+            f'({BenchmarkConditions.BY_KEY[args.bundle].description})'),
         'lattices': {},
         }
 
@@ -275,7 +366,7 @@ def generate(args):
     # lattice-matched and rebuilding it per lattice would make the partner depend on which
     # lattices a run happened to ask for.
     second_phase_pool = None
-    if rank == 0 and BenchmarkConditions.BY_KEY[args.bundle].second_phase_lines > 0:
+    if rank == 0 and needs_second_phase_pool(args.bundle):
         second_phase_pool = load_second_phase_pool(args.dataset_directory, args.seed)
 
     for bravais_lattice in args.bravais_lattices:
@@ -313,7 +404,10 @@ def generate(args):
             positions.append(xnn.astype(np.float32))
             truths.append(xnn_true)
         payload = {'xnn': positions, 'xnn_true': truths,
-                   'identifiers': list(mine['identifier']), 'generator_names': generated_names}
+                   'identifiers': list(mine['identifier']),
+                   'n_contaminants': list(mine['n_contaminants']),
+                   'n_dropout': list(mine['n_dropout']),
+                   'generator_names': generated_names}
 
         gathered = comm.gather(payload, root=0)
         del payload, positions, truths
@@ -321,6 +415,10 @@ def generate(args):
             blocks = [block for part in gathered for block in part['xnn']]
             xnn_true = np.stack([block for part in gathered for block in part['xnn_true']])
             identifiers = [name for part in gathered for name in part['identifiers']]
+            # Carried into the pool so the fit can be cut by difficulty without regenerating:
+            # what was DELIVERED, which is not always what was drawn.
+            n_contaminants = [v for part in gathered for v in part['n_contaminants']]
+            n_dropout = [v for part in gathered for v in part['n_dropout']]
             del gathered
             # Filled a crystal at a time and each block dropped as it is copied, so the gathered
             # copy and the stacked one are never both whole. At 10 000 crystals one aP pool is
@@ -345,6 +443,8 @@ def generate(args):
                 out/f'{bravais_lattice}_pools.npz',
                 xnn=xnn, xnn_true=xnn_true, distances=distance,
                 identifiers=np.array(identifiers, dtype=object),
+                n_contaminants=np.array(n_contaminants, dtype=int),
+                n_dropout=np.array(n_dropout, dtype=int),
                 generator_names=np.array(generated_names, dtype=object),
                 )
             manifest['lattices'][bravais_lattice] = {
@@ -607,11 +707,14 @@ def build_parser():
     generate_group.add_argument('--models-directory', default=None, metavar='PATH',
                                 help='Model tree. Default: the usual resolution order.')
     generate_group.add_argument('--bundle', default='nominal',
-                                choices=tuple(BenchmarkConditions.BY_KEY),
-                                help='Condition bundle the patterns are synthesised under, from '
-                                     'the benchmark\'s own set (default: nominal). This is how '
-                                     'the mix is tested for dependence on peak error, '
-                                     'contaminants and dropout.')
+                                choices=tuple(BenchmarkConditions.BY_KEY) + (GRID_BUNDLE,),
+                                help='Conditions the patterns are synthesised under: one of '
+                                     'the benchmark\'s named bundles (default: nominal), or '
+                                     '\'grid\', which draws a difficulty per crystal -- 0, 1, 2 '
+                                     'or 3 contaminants against 0, 2, 4 or 6 dropped peaks, all '
+                                     'sixteen cells in one run, at nominal peak error. Three '
+                                     'contaminants is the second phase. The delivered difficulty '
+                                     'is stored per crystal so the fit can be cut by it.')
     generate_group.add_argument('--seed', type=int, default=12345, metavar='N')
     fit_group = parser.add_argument_group('fit')
     fit_group.add_argument('--reduction', action='append', dest='reductions', default=None,

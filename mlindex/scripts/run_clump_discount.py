@@ -52,6 +52,7 @@ from mlindex.scripts.run_ensemble_refine import (
     BROADENING_TAG, FACTORY_OF_SYSTEM, N_PEAKS, DEFAULT_N_PEAKS, check_mpi_world, commit,
     load_entries,
     load_second_phase_pool,
+    needs_second_phase_pool,
     )
 from mlindex.model_training import BenchmarkConditions
 from mlindex.utilities.ClumpDiscount import discount_path
@@ -104,7 +105,7 @@ def measure(args):
     # Built once and across every lattice: a partner phase is not lattice-matched, so which
     # lattices this run was asked for must not change which partners exist.
     second_phase_pool = None
-    if rank == 0 and BenchmarkConditions.BY_KEY[args.bundle].second_phase_lines > 0:
+    if rank == 0 and needs_second_phase_pool(args.bundle):
         second_phase_pool = load_second_phase_pool(args.dataset_directory, args.seed)
 
     for bravais_lattice in args.bravais_lattices:
