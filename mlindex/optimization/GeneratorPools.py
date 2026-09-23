@@ -10,6 +10,7 @@ scored many times, because the scoring is what gets changed and the generation i
 """
 import numpy as np
 
+from mlindex.utilities.Allocation import largest_remainder
 from mlindex.utilities.Reindexing import reindex_entry_triclinic
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
@@ -61,12 +62,12 @@ def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
             generator_names.append(generator_info['generator'])
     # A generator's share is divided among its split groups, and the division rarely comes out
     # even -- hexagonal has eight groups and a budget of 1996. Floor-dividing leaves the remainder
-    # ungenerated, so the leftovers go one each to the earliest groups and the counts sum exactly.
+    # ungenerated, so the shared allocator is used: equal weights, leftovers to the earliest
+    # groups by its tie rule, counts summing to the budget exactly. Identical to the even split
+    # this replaces, which `test_ties_go_to_the_earliest_claimant` pins.
     for key, n_sub in n_sub_generators.items():
-        base, remainder = divmod(candidates_per_model, n_sub)
-        candidates_per_sub_model[key] = [
-            base + (1 if index < remainder else 0) for index in range(n_sub)
-            ]
+        candidates_per_sub_model[key] = largest_remainder(
+            np.ones(n_sub), candidates_per_model).tolist()
     taken = {key: 0 for key in n_sub_generators}
 
     xnn_true = np.array(entry['reindexed_xnn'])[optimizer.wrapper.data_params['unit_cell_indices']]

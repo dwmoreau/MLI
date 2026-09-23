@@ -58,6 +58,7 @@ import mlindex
 from mlindex.optimization import UtilitiesOptimizer
 from mlindex.optimization.GeneratorPools import generate_candidate_pools
 from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+from mlindex.utilities.Allocation import largest_remainder
 from mlindex.utilities.ClumpDiscount import clump_weights, load_clump_discount
 from mlindex.utilities.ConvergenceCurve import load_curve
 from mlindex.utilities.Digests import derived_seed
@@ -375,17 +376,12 @@ def mix_grid(step, n_generators):
 
 
 def counts_for_mix(mix, budget):
-    """Candidate counts that sum to the budget exactly, by largest remainder.
+    """Candidate counts that sum to the budget exactly.
 
     Rounding each share independently makes the total drift with the mix, and the score rises with
     the number of candidates, so a mix that happened to round up would win on that alone.
     """
-    exact = np.asarray(mix, dtype=float)*budget
-    counts = np.floor(exact).astype(int)
-    short = budget - int(counts.sum())
-    if short:
-        counts[np.argsort(-(exact - counts))[:short]] += 1
-    return counts
+    return largest_remainder(mix, budget)
 
 
 def stack_pools(distance, counts):
