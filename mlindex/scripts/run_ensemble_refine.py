@@ -175,6 +175,14 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle):
                      'q2': q2[:n_peaks]})
         if len(rows) == n_entries:
             break
+    if len(rows) < n_entries:
+        # Ten of the fourteen lattices hold fewer than 10 000 usable training crystals -- cF has
+        # 554 -- so a large --n-entries silently becomes 'all of them' on most of the run. Said
+        # loudly here because the count otherwise appears as one line among thousands, and a
+        # number of crystals is the number every later error bar is read against.
+        print(f'WARNING: {bravais_lattice}: asked for {n_entries} crystals, only {len(rows)} '
+              f'are available ({data.shape[0]} drawn, {refused} refused by the condition). '
+              f'Every result for this lattice rests on {len(rows)}.', flush=True)
     return pd.DataFrame(rows), refused
 
 
