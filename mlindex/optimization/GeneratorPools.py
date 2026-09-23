@@ -32,6 +32,29 @@ def refuse_unfilled(xnn, generator_names, candidates_per_model):
             )
 
 
+def abnn_order(counts, top_n, rng):
+    """The order to read the network's column in, so a prefix is its best predictions.
+
+    `counts` is how many candidates each split group produced, `top_n` how many of those are
+    predicted cells rather than resampled labellings of them.
+
+    Returns an index over the whole column: first the predicted cells, interleaved by rank
+    across the split groups, then the resampled ones, permuted.
+    """
+    group_starts = []
+    index_lower = []
+    start = 0
+    for count in counts:
+        group_starts.append(start)
+        index_lower.extend(range(start + top_n, start + count))
+        start += count
+    index_top_n = [group + rank for rank in range(top_n) for group in group_starts]
+    return np.concatenate([
+        np.array(index_top_n, dtype=int),
+        rng.permutation(np.array(index_lower, dtype=int)),
+        ])
+
+
 def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
     """Draw `candidates_per_model` candidates from each generator for one known-answer pattern.
 
@@ -132,24 +155,34 @@ def generate_candidate_pools(optimizer, entry, candidates_per_model, rng):
     order = rng.permutation(candidates_per_model)
     xnn[:, tree_index] = xnn[order, tree_index]
 
-    # The network's candidates are ordered too, and in two tiers: within each split group the
-    # first abnn_top_n are its most probable cells and the rest are resampled Miller-index
-    # labellings of them. The tiers are permuted separately and the probable ones kept in front,
-    # so that a prefix of the column is the best of each tier rather than the best of one group.
+    # The network's candidates come in two tiers: within each split group the first abnn_top_n
+    # are its predicted cells, ALREADY SORTED by the network's own confidence because
+    # predict_xnn sorts them and generate writes them in that order; the rest are resampled
+    # Miller-index labellings of those cells.
+    #
+    # The top tier is interleaved by rank across the split groups -- every group's rank 1, then
+    # every group's rank 2 -- rather than permuted. Two reasons, and the second is the one that
+    # matters:
+    #
+    #   * a prefix still draws on every split group rather than exhausting one, which is what
+    #     the permutation was for;
+    #   * and it keeps the ranking. Taking a prefix of a permuted tier samples the predictions
+    #     at random, but production does not: when a generator's share is smaller than the
+    #     model's prediction count, ABNN.generate calls predict_xnn(n_unit_cells), which
+    #     returns the MOST PROBABLE n. Scoring a random sample understates what production
+    #     would actually deliver at that share, and the rank carries real information --
+    #     measured over three lattices, a rank-1 prediction lands inside the convergence radius
+    #     7x to 100x more often than one from the bottom half.
+    #
+    # Ranks are not compared ACROSS split groups: each model's softmax is normalised within
+    # itself, so rank 1 of one group is not commensurable with rank 1 of another. Round-robin
+    # only ever compares a group with itself.
+    #
+    # The lower tier stays permuted: siblings of one prediction are interchangeable.
     abnn_index = list(n_sub_generators.keys()).index('abnn')
     if abnn_top_n < min(candidates_per_sub_model['abnn']):
-        index_top_n = []
-        index_lower = []
-        start = 0
-        for count in candidates_per_sub_model['abnn']:
-            index_top_n.extend(range(start, start + abnn_top_n))
-            index_lower.extend(range(start + abnn_top_n, start + count))
-            start += count
-        order = np.concatenate([
-            rng.permutation(np.array(index_top_n, dtype=int)),
-            rng.permutation(np.array(index_lower, dtype=int))
-            ])
-        xnn[:start, abnn_index] = xnn[order, abnn_index]
+        order = abnn_order(candidates_per_sub_model['abnn'], abnn_top_n, rng)
+        xnn[:order.size, abnn_index] = xnn[order, abnn_index]
 
     refuse_unfilled(xnn, generator_names, candidates_per_model)
     return xnn, xnn_true, generator_names
