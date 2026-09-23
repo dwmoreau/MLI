@@ -188,3 +188,41 @@ def test_a_lattice_short_of_crystals_says_so(tmp_path, capsys):
     entries, _ = driver.load_entries('cP', 1000, str(tmp_path), 1, 'nominal')
     assert len(entries) == n_rows
     assert 'WARNING' in capsys.readouterr().out
+
+
+def _write_dataset(path, n_rows, seed):
+    rng = np.random.default_rng(seed)
+    pd.DataFrame({
+        'identifier': [f'{path.stem}_{i}' for i in range(n_rows)],
+        'train': [True]*n_rows,
+        f'q2_{driver.BROADENING_TAG}': [np.sort(rng.uniform(0.01, 1.0, 30))
+                                        for _ in range(n_rows)],
+        'reindexed_xnn': [rng.uniform(0.01, 1, 6) for _ in range(n_rows)],
+        'reindexed_unit_cell': [np.array([5.0, 6.0, 7.0, 90.0, 90.0, 90.0])]*n_rows,
+        }).to_parquet(path)
+
+
+def test_the_second_phase_bundle_gets_the_partner_pool_it_needs(tmp_path):
+    """`--bundle second_phase` was offered and could not run.
+
+    The bundle adds lines from a real partner cell, so prepare_peak_list needs a pool of them
+    and raises without one. load_entries never passed it, so the bundle failed on the first
+    crystal every time -- and it is the hardest contaminant, which is the case the mix most
+    needs to be tested against.
+    """
+    for bravais_lattice in ('cP', 'oP', 'tP'):
+        _write_dataset(tmp_path/f'dataset_{bravais_lattice}.parquet', 6, seed=hash(bravais_lattice) % 1000)
+
+    pool = driver.load_second_phase_pool(str(tmp_path), 1)
+    identifiers, lines = pool
+    assert len(identifiers) == len(lines) == 18, 'every lattice should contribute its crystals'
+    # the partner comes from the whole set, not from the lattice being fitted
+    assert any(name.startswith('dataset_oP') for name in identifiers)
+    assert any(name.startswith('dataset_cP') for name in identifiers)
+
+    with pytest.raises(ValueError, match='partner pool'):
+        driver.load_entries('cP', 2, str(tmp_path), 1, 'second_phase')
+
+    entries, _ = driver.load_entries('cP', 2, str(tmp_path), 1, 'second_phase',
+                                     second_phase_pool=pool)
+    assert 'q2' in entries.columns

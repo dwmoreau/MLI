@@ -51,7 +51,9 @@ from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 from mlindex.scripts.run_ensemble_refine import (
     BROADENING_TAG, FACTORY_OF_SYSTEM, N_PEAKS, DEFAULT_N_PEAKS, check_mpi_world, commit,
     load_entries,
+    load_second_phase_pool,
     )
+from mlindex.model_training import BenchmarkConditions
 from mlindex.utilities.ClumpDiscount import discount_path
 from mlindex.utilities.ConvergenceCurve import ROC_TAG, load_curve, success_of_distance
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM, get_partial_unit_cell
@@ -99,6 +101,12 @@ def measure(args):
     models_dir = Path(args.models_directory) if args.models_directory else _resolve_models_dir()
     package_root = Path(UtilitiesOptimizer.__file__).parent.parent.parent
 
+    # Built once and across every lattice: a partner phase is not lattice-matched, so which
+    # lattices this run was asked for must not change which partners exist.
+    second_phase_pool = None
+    if rank == 0 and BenchmarkConditions.BY_KEY[args.bundle].second_phase_lines > 0:
+        second_phase_pool = load_second_phase_pool(args.dataset_directory, args.seed)
+
     for bravais_lattice in args.bravais_lattices:
         # Every rank runs the same lattices and the work between them is blocking: send,
         # recv and gather. A rank that raises leaves the others waiting for a message that
@@ -106,7 +114,7 @@ def measure(args):
         # written. Abort takes the whole job down with the traceback instead.
         try:
             _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice,
-                             ratios, total, models_dir, package_root)
+                             ratios, total, models_dir, package_root, second_phase_pool)
         except Exception:
             import traceback
             print(f'RANK {rank} FAILED on {bravais_lattice}:', flush=True)
@@ -119,7 +127,7 @@ def measure(args):
 
 
 def _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice,
-                     ratios, total, models_dir, package_root):
+                     ratios, total, models_dir, package_root, second_phase_pool):
     """One lattice: refine its grouped clouds at every separation, and write the raw run."""
     tag = ROC_TAG[bravais_lattice]
     n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
@@ -144,7 +152,8 @@ def _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice
 
     if rank == 0:
         entries, refused = load_entries(bravais_lattice, args.n_entries,
-                                        args.dataset_directory, args.seed, args.bundle)
+                                        args.dataset_directory, args.seed, args.bundle,
+                                        second_phase_pool=second_phase_pool)
         print(f'{bravais_lattice}: {len(entries)} crystals ({refused} refused), '
               f'{args.n_groups} groups of {args.group_size}, {len(ratios)} separations',
               flush=True)

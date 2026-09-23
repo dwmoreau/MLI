@@ -132,7 +132,46 @@ def shipped_mix_and_budget(optimizer):
 DISTANCE_CHUNK = 64
 
 
-def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle):
+# Partner phases sampled per lattice for the second-phase bundle. The harness builds its pool
+# from the crystals an arm drew, a few hundred a lattice; this matches that scale rather than
+# pooling every training crystal, which would be half a million arrays held for the whole run.
+SECOND_PHASE_POOL_PER_LATTICE = 300
+
+
+def load_second_phase_pool(dataset_directory, seed):
+    """Candidate contaminating phases, drawn from every lattice.
+
+    The `second_phase` bundle adds lines from a real partner cell, and real contamination is not
+    lattice-matched -- so the partner comes from the whole set, exactly as `BenchmarkRuns` builds
+    it, not from the lattice being fitted. Training crystals only, for the same reason
+    `load_entries` uses them: a partner taken from the benchmark half would put benchmark data
+    into a setting that is later reported against the benchmark.
+    """
+    frames = []
+    for bravais_lattice in BRAVAIS_LATTICES:
+        path = Path(dataset_directory)/f'dataset_{bravais_lattice}.parquet'
+        if not path.is_file():
+            continue
+        data = pd.read_parquet(path, columns=['identifier', 'train', f'q2_{BROADENING_TAG}'])
+        data = data.loc[data['train']].sort_values('identifier', kind='stable',
+                                                   ignore_index=True)
+        if data.shape[0] > SECOND_PHASE_POOL_PER_LATTICE:
+            rng = np.random.default_rng(derived_seed(f'phase2:{bravais_lattice}', seed))
+            data = data.iloc[np.sort(rng.choice(data.shape[0],
+                                                size=SECOND_PHASE_POOL_PER_LATTICE,
+                                                replace=False))]
+        frames.append(data)
+    if not frames:
+        raise SystemExit(
+            f'no source datasets under {dataset_directory}, so no partner phases can be drawn '
+            f'for the second-phase bundle.'
+            )
+    return BenchmarkPatterns.build_second_phase_pool(
+        pd.concat(frames, ignore_index=True))
+
+
+def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle,
+                 second_phase_pool=None):
     """Training crystals with enough peaks, synthesised under one condition bundle.
 
     Training crystals, not benchmark ones: the mix is a setting being selected, and selecting it
@@ -171,7 +210,8 @@ def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle):
     for _, entry in data.iterrows():
         try:
             pattern = BenchmarkPatterns.prepare_peak_list(
-                entry, condition, seed, n_peaks=n_peaks)
+                entry, condition, seed, n_peaks=n_peaks,
+                second_phase_pool=second_phase_pool)
         except ContaminantPlacementError:
             refused += 1
             continue
@@ -230,6 +270,13 @@ def generate(args):
         'lattices': {},
         }
 
+    # Built once and across every lattice, not per lattice, because a partner phase is not
+    # lattice-matched and rebuilding it per lattice would make the partner depend on which
+    # lattices a run happened to ask for.
+    second_phase_pool = None
+    if rank == 0 and BenchmarkConditions.BY_KEY[args.bundle].second_phase_lines > 0:
+        second_phase_pool = load_second_phase_pool(args.dataset_directory, args.seed)
+
     for bravais_lattice in args.bravais_lattices:
         factory = getattr(
             UtilitiesOptimizer, FACTORY_OF_SYSTEM[BL_TO_LATTICE_SYSTEM[bravais_lattice]])
@@ -241,7 +288,8 @@ def generate(args):
 
         if rank == 0:
             entries, refused = load_entries(bravais_lattice, args.n_entries,
-                                            args.dataset_directory, args.seed, args.bundle)
+                                            args.dataset_directory, args.seed, args.bundle,
+                                            second_phase_pool=second_phase_pool)
             print(f'{bravais_lattice}: {len(entries)} crystals under {args.bundle!r} '
                   f'({refused} refused), {per_generator} candidates a generator, '
                   f'shipped budget {budget}', flush=True)
