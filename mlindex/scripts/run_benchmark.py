@@ -51,6 +51,7 @@ import pandas as pd
 from mlindex.model_training import Benchmark
 from mlindex.model_training import BenchmarkMetrics as metrics
 from mlindex.model_training import BenchmarkRuns as runs
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
 DEFAULT_SCORES = ('M20', 'M_sym')
@@ -162,11 +163,36 @@ def build_parser():
     generate.add_argument('--dataset-directory', default=None, metavar='PATH',
                           help='Where the per-lattice source datasets live (default: the '
                                'packaged mlindex/data/generated_datasets).')
+    generate.add_argument('--budget-scale', action='append', default=None, metavar='NAME=F',
+                          help='Multiply the candidate budget of one Bravais lattice (cP) or of '
+                               'every lattice in a lattice system (cubic) by F. Repeat for '
+                               'several. Recorded in the manifest, so arms that differ in it pair '
+                               'only with --vary ensemble.')
+    generate.add_argument('--no-redistribution', action='store_true',
+                          help='Skip the step that moves candidates out of crowded '
+                               'neighbourhoods before refinement. Recorded like --budget-scale.')
     return parser
 
 
 def _split(value):
     return [item for item in (value or '').split(',') if item]
+
+
+def _parse_budget_scale(values):
+    """`NAME=F` values as {Bravais lattice: F}, a lattice system expanding to its lattices."""
+    scale = {}
+    for item in values or []:
+        if '=' not in item:
+            raise ValueError(f'--budget-scale wants NAME=F, got {item!r}')
+        name, factor = item.split('=', 1)
+        lattices = [lattice for lattice, system in BL_TO_LATTICE_SYSTEM.items()
+                    if name in (lattice, system)]
+        if not lattices:
+            raise ValueError(f'--budget-scale: {name!r} is neither a Bravais lattice nor a '
+                             f'lattice system; known: {sorted(set(BL_TO_LATTICE_SYSTEM.values()))}')
+        for lattice in lattices:
+            scale[lattice] = float(factor)
+    return scale
 
 
 def _parse_arms(values):
@@ -280,7 +306,9 @@ def main(argv=None):
             args.out_pool, args.split_manifest, population=args.population,
             per_lattice=args.per_lattice, seed=args.seed, search_seed=args.search_seed,
             cut=args.cut, pool_size=args.pool_size, n_pools=args.n_pools, bundles=bundles,
-            dataset_directory=args.dataset_directory)
+            dataset_directory=args.dataset_directory,
+            budget_scale=_parse_budget_scale(args.budget_scale),
+            redistribute=not args.no_redistribution)
         print(f"generated {metadata['n_source_entries']} crystals x "
               f"{len(metadata['bundles'])} bundles into {args.out_pool}")
         pools = [args.out_pool]

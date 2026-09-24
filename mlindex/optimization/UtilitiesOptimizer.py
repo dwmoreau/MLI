@@ -49,6 +49,19 @@ ENSEMBLE = {
     }
 
 
+def lattice_budget(bravais_lattice, n_candidates_scale, budget_scale):
+    """How many candidates a lattice generates: its ENSEMBLE budget times both scales.
+
+    `n_candidates_scale` applies to every lattice; `budget_scale` maps a Bravais lattice to a
+    further factor for that lattice alone, and a lattice it does not name keeps a factor of one.
+    """
+    unknown = sorted(set(budget_scale) - set(ENSEMBLE))
+    if unknown:
+        raise ValueError(f'budget_scale names unknown Bravais lattices {unknown}')
+    return int(
+        n_candidates_scale * budget_scale.get(bravais_lattice, 1) * ENSEMBLE[bravais_lattice]['n_candidates'])
+
+
 def _env_models_dir_error(env_dir):
     """Build the error message for an MLINDEX_MODELS_DIR that isn't a models directory.
 

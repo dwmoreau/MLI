@@ -6,6 +6,7 @@ import scipy.spatial
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
 from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
+from mlindex.optimization.UtilitiesOptimizer import lattice_budget
 from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
 from mlindex.utilities.ClumpDiscount import clump_weights
@@ -265,6 +266,11 @@ class OptimizerManager(OptimizerBase):
         opt_params_defaults = {
             'minimum_uc': 2,
             'maximum_uc': 500,
+            'budget_scale': {},
+            # RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c's redistribution-off benchmark run.
+            # Removed when P09c records its verdict: either the step stays and this is dead, or
+            # the step goes with it.
+            'redistribute': True,
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
@@ -273,10 +279,13 @@ class OptimizerManager(OptimizerBase):
             raise ValueError(
                 'generator_info is derived from UtilitiesOptimizer.ENSEMBLE and cannot be passed in; '
                 'edit the lattice\'s row there instead')
-        ensemble = ENSEMBLE[self.bravais_lattice]
         self.opt_params['generator_info'] = generator_info_from_fractions(
-            ensemble['fractions'],
-            int(self.opt_params['n_candidates_scale'] * ensemble['n_candidates']),
+            ENSEMBLE[self.bravais_lattice]['fractions'],
+            lattice_budget(
+                self.bravais_lattice,
+                self.opt_params['n_candidates_scale'],
+                self.opt_params['budget_scale'],
+                ),
             list(self.rf_params),
             list(self.abnn_params),
             )
@@ -435,7 +444,7 @@ class OptimizerManager(OptimizerBase):
 
         if self.opt_params['redistribution_testing']:
             self.redistrubution_testing(candidate_xnn_all)
-        elif self.opt_params['convergence_testing'] == False:
+        elif self.opt_params['convergence_testing'] == False and self.opt_params['redistribute']:
             candidate_xnn_all = self.redistribute_xnn(candidate_xnn_all)
 
         return candidate_xnn_all

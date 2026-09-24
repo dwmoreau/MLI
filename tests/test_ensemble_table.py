@@ -7,6 +7,7 @@ than against a second call of the new function -- is what makes the test able to
 import pytest
 
 from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
+from mlindex.optimization.UtilitiesOptimizer import lattice_budget
 from mlindex.utilities.Allocation import check_generator_fractions
 from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
@@ -158,7 +159,7 @@ def _derived(bravais_lattice, scale):
     ensemble = ENSEMBLE[bravais_lattice]
     return generator_info_from_fractions(
         ensemble['fractions'],
-        int(built.opt_params['n_candidates_scale']*ensemble['n_candidates']),
+        lattice_budget(bravais_lattice, built.opt_params['n_candidates_scale'], {}),
         list(built.rf_params), list(built.abnn_params))
 
 
@@ -196,3 +197,16 @@ def test_a_zero_share_generator_is_left_out():
     info = generator_info_from_fractions(
         {'trees': 1.0, 'abnn': 0.0, 'templates': 0.0}, 100, ['cP_0'], ['cP_0'])
     assert info == [{'generator': 'trees', 'split_group': 'cP_0', 'n_unit_cells': 100}]
+
+
+def test_a_budget_scale_reaches_only_the_lattices_it_names():
+    scale = {'cF': 0.5, 'cI': 0.5, 'cP': 0.5}
+    assert lattice_budget('cP', 1, scale) == 50
+    assert lattice_budget('aP', 1, scale) == 6000
+    # the same number the global scale gives, so a per-family run and a global one agree
+    assert lattice_budget('oP', 1, {'oP': 2}) == lattice_budget('oP', 2, {}) == 8000
+
+
+def test_a_budget_scale_naming_an_unknown_lattice_is_refused():
+    with pytest.raises(ValueError, match='unknown Bravais lattices'):
+        lattice_budget('cP', 1, {'cubic': 0.5})

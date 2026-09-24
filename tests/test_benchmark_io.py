@@ -470,6 +470,24 @@ def test_a_contrast_is_reported_in_multiples_of_the_measured_floor():
     assert np.isnan(without[without.metric == 'top1'].iloc[0]['standard_errors'])
 
 
+def test_arms_that_ran_different_candidate_settings_pair_only_when_that_is_the_point():
+    shipped = {'redistribute': True, 'lattices': {'cP': {'n_candidates': 100}}}
+    halved = {'redistribute': True, 'lattices': {'cP': {'n_candidates': 50}}}
+    arms = {'control': _manifest(ensemble=shipped), 'budget_half': _manifest(ensemble=halved)}
+    with pytest.raises(ValueError, match='ensemble'):
+        Benchmark.manifest_identity(arms)
+    assert Benchmark.manifest_identity(arms, allow=('ensemble',))
+
+
+def test_a_budget_scale_names_a_lattice_or_a_whole_lattice_system():
+    from mlindex.scripts.run_benchmark import _parse_budget_scale
+
+    assert _parse_budget_scale(['cubic=0.5']) == {'cF': 0.5, 'cI': 0.5, 'cP': 0.5}
+    assert _parse_budget_scale(['oP=2', 'triclinic=0.5']) == {'oP': 2.0, 'aP': 0.5}
+    with pytest.raises(ValueError, match='neither a Bravais lattice'):
+        _parse_budget_scale(['orthorhombc=2'])
+
+
 def test_an_arm_contrast_needs_a_reference_that_exists_and_something_to_compare():
     from mlindex.model_training.BenchmarkRuns import arm_contrast
 
