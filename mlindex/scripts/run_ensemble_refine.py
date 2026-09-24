@@ -1,389 +1,762 @@
-import os
-os.environ["KERAS_BACKEND"] = "torch"
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
-os.environ['BLIS_NUM_THREADS'] = '1'
-os.environ['GOTO_NUM_THREADS'] = '1'
-os.environ['ATLAS_NUM_THREADS'] = '1'
-os.environ['SKLEARN_N_JOBS'] = '1'
+"""Choose how much of the candidate budget each generator should get.
 
-import scipy.optimize
-import scipy.special
-import matplotlib.pyplot as plt
-from mpi4py import MPI
+The indexer draws candidate unit cells from three generators -- a random forest (`trees`), a
+neural network (`abnn`) and a Miller-index template library (`templates`) -- and refines the
+mixture. The shares are fixed numbers in `UtilitiesOptimizer.py`. This driver measures what those
+shares should be, by generating each generator's candidates separately for patterns whose answer
+is known and scoring every mixture of them against the measured convergence curve.
+
+It runs in two stages, because generating candidates costs node-hours and does not depend on the
+score, while scoring costs seconds and is the thing that gets changed:
+
+  --stage generate   draw each generator's pool for many patterns and write it to disk. MPI.
+  --stage fit        read those pools and score every mixture on a grid. Multiprocessing, not
+                     MPI, over crystals; --nproc. One row per lattice, score, reduction and
+                     split, written to ensemble_mix.csv.
+
+The score is the expected number of INDEPENDENT candidates that converge. Candidates in a real
+pool are not independent -- a clump that starts close together succeeds or fails together, and is
+worth fewer tries than counting it would say -- so every candidate carries the measured clump
+discount, which --clump-discount supplies and without which the fit refuses to run.
+
+Worked commands. One lattice end to end on a laptop, which takes a few minutes:
+
+    MLINDEX_MODELS_DIR=$PWD/mlindex/models python -m mlindex.scripts.run_ensemble_refine \\
+        --stage all --bravais-lattices cP --n-entries 20 \\
+        --dataset-directory mlindex/data/generated_datasets \\
+        --roc-dir docs/fom_production/artifacts/P08_inputs/data \\
+        --pools /tmp/pools --out-dir /tmp/mix
+
+Generation for every lattice, on a node. Use mpiexec, not srun: a conda-built mpi4py does not
+read srun's process management, so every task comes up alone and runs the whole job. The stage
+refuses to start in that state.
+
+    mpiexec -n 32 python -m mlindex.scripts.run_ensemble_refine --stage generate \\
+        --dataset-directory mlindex/data/generated_datasets --pools results/pools
+
+Then, refitting as often as the score changes, against those pools. Give --nproc the cores of
+whatever it is running on: the work is one neighbour search per crystal per mix, so at production
+scale a single core is days and a node is under an hour.
+
+    python -m mlindex.scripts.run_ensemble_refine --stage fit --pools results/pools \\
+        --roc-dir docs/fom_production/artifacts/P08_inputs/data --out-dir results/mix \\
+        --clump-discount mlindex/characterization/clump_discount --nproc 128
+"""
+import argparse
+import json
+import multiprocessing
+import os
+import platform
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from tqdm import tqdm
-import sys
 
 import mlindex
-from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
-from mlindex.optimization.UtilitiesOptimizer import get_hexagonal_optimizer
-from mlindex.optimization.UtilitiesOptimizer import get_monoclinic_optimizer
-from mlindex.optimization.UtilitiesOptimizer import get_orthorhombic_optimizer
-from mlindex.optimization.UtilitiesOptimizer import get_rhombohedral_optimizer
-from mlindex.optimization.UtilitiesOptimizer import get_tetragonal_optimizer
-from mlindex.optimization.UtilitiesOptimizer import get_triclinic_optimizer
-from mlindex.optimization.CandidateValidation import validate_candidate
-from mlindex.utilities.UnitCellTools import fix_unphysical
-from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
-from mlindex.utilities.Reindexing import reindex_entry_triclinic
-from mlindex.utilities.ErrorAdder import add_q2_error
+from mlindex.optimization import UtilitiesOptimizer
+from mlindex.optimization.GeneratorPools import generate_candidate_pools
+from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+from mlindex.utilities.Allocation import largest_remainder
+from mlindex.utilities.ClumpDiscount import clump_weights, load_clump_discount
+from mlindex.utilities.ConvergenceCurve import load_curve
+from mlindex.utilities.Digests import derived_seed
+from mlindex.utilities.EnsembleObjective import expected_success_objective
+from mlindex.model_training import BenchmarkConditions
+from mlindex.model_training import BenchmarkPatterns
+from mlindex.utilities.ErrorAdder import ContaminantPlacementError
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
 
-def evaluate_regression(optimizer, entry, candidates_per_model, rng):
-    abnn_top_n = None
-    n_sub_generators = dict()
-    candidates_per_sub_model = dict()
-    generator_names = []
+BRAVAIS_LATTICES = ('cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',
+                    'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP')
+FACTORY_OF_SYSTEM = {
+    'cubic': 'get_cubic_optimizer',
+    'hexagonal': 'get_hexagonal_optimizer',
+    'rhombohedral': 'get_rhombohedral_optimizer',
+    'tetragonal': 'get_tetragonal_optimizer',
+    'orthorhombic': 'get_orthorhombic_optimizer',
+    'monoclinic': 'get_monoclinic_optimizer',
+    'triclinic': 'get_triclinic_optimizer',
+    }
+# The cubic curves were measured on ten peaks and the rest on twenty, so a pattern is cut to the
+# same count the curve for its lattice was measured at.
+N_PEAKS = {'cF': 10, 'cI': 10, 'cP': 10}
+DEFAULT_N_PEAKS = 20
+BROADENING_TAG = '1'
+
+
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
+
+
+def check_mpi_world(comm, n_ranks):
+    """Refuse to run one copy of the whole job per task because the launcher never reached MPI.
+
+    A conda-built mpi4py does not read the process-management information srun hands out, so every
+    task comes up in a world of size one, believes it is the only rank, takes the whole crystal
+    list and does the entire job. Nothing about that shows up in the results: it is N times the
+    cost for one job's work, and N processes writing one file.
+    """
+    launched = int(os.environ.get('SLURM_NTASKS') or 0)
+    if n_ranks == 1 and launched > 1:
+        raise SystemExit(
+            f'the launcher started {launched} tasks but MPI reports a world of 1, so every task '
+            f'would run the whole job. Launch with mpiexec rather than srun.'
+            )
+    return comm
+
+
+def shipped_mix_and_budget(optimizer):
+    """The shares and the budget this lattice ships with, read off the optimizer.
+
+    Taken from `generator_info` rather than transcribed, so the comparison is always against what
+    the package actually does. A generator split across several split groups contributes each of
+    its entries, which is why the counts are summed per name rather than read off one row.
+    """
+    counts = {}
+    order = []
     for generator_info in optimizer.opt_params['generator_info']:
-        if generator_info['generator'] in n_sub_generators.keys():
-            n_sub_generators[generator_info['generator']] += 1
-        else:
-            n_sub_generators[generator_info['generator']] = 1
-            generator_names.append(generator_info['generator'])
-    for key in n_sub_generators.keys():
-        if n_sub_generators[key] == 1:
-            candidates_per_sub_model[key] = candidates_per_model
-        else:
-            candidates_per_sub_model[key] = candidates_per_model // n_sub_generators[key]
-    distance = np.full(
-        (candidates_per_model, len(n_sub_generators.keys())),
-        np.nan
+        name = generator_info['generator']
+        if name not in counts:
+            counts[name] = 0
+            order.append(name)
+        counts[name] += generator_info['n_unit_cells']
+    budget = sum(counts.values())
+    return order, [counts[name]/budget for name in order], budget
+
+
+# Crystals per chunk when distances are computed. Sized so the float64 temporary stays around a
+# hundred megabytes at the deepest pool this driver generates.
+DISTANCE_CHUNK = 64
+
+
+# The difficulty grid. DWMM: the mix must be fitted against patterns the indexer will actually
+# meet, not against one condition, so a run draws a cell per crystal rather than applying one
+# bundle to all of them.
+#
+# Three contaminants IS the second phase, on DWMM's instruction: three lines from ONE real partner
+# cell, mutually consistent with some other lattice. Independently placed lines are easier to
+# reject than real ones (`ErrorAdder.add_second_phase`), so taking the top of the axis as the
+# correlated mechanism keeps the hardest case honest rather than optimistic.
+#
+# Peak positional error stays at the nominal 1x across every cell. It is not a third axis here
+# because it was measured not to matter -- 5-7 % on the fitted mix, nil on tP, and structurally
+# invisible to the score (P-F-119) -- and varying it would dilute the two that do.
+GRID_BUNDLE = 'grid'
+CONTAMINANT_LEVELS = (0, 1, 2, 3)
+DROPOUT_LEVELS = (0, 2, 4, 6)
+
+
+def grid_condition(n_contaminants, n_dropout):
+    """One cell of the difficulty grid, as a Condition the harness can synthesise."""
+    if n_contaminants not in CONTAMINANT_LEVELS or n_dropout not in DROPOUT_LEVELS:
+        raise ValueError(f'({n_contaminants}, {n_dropout}) is not a cell of the grid')
+    correlated = 3 if n_contaminants == 3 else 0
+    placed = 0 if n_contaminants == 3 else n_contaminants
+    return BenchmarkConditions.Condition(
+        key=f'grid_cont{n_contaminants}_drop{n_dropout}',
+        label=f'G{n_contaminants}{n_dropout}',
+        axis='difficulty_grid',
+        description=(f'{n_contaminants} contaminant lines '
+                     f'({"one real partner phase" if correlated else "independently placed"}) '
+                     f'and {n_dropout} dropped peaks, at nominal peak error'),
+        error_multiplier=1.0,
+        n_contaminants=placed,
+        n_dropout=n_dropout,
+        second_phase_lines=correlated,
+        is_hard=bool(n_contaminants or n_dropout),
         )
 
-    xnn_true = np.array(entry['reindexed_xnn'])[optimizer.wrapper.data_params['unit_cell_indices']]
-    q2 = np.array(entry['q2'])[:optimizer.n_peaks]
 
-    for generator_info in optimizer.opt_params['generator_info']:
-        if generator_info['generator'] == 'trees':
-            generator_unit_cells = optimizer.wrapper.random_forest_generator[generator_info['split_group']].generate(
-                candidates_per_sub_model[generator_info['generator']], rng,  q2,
-                )
-        elif generator_info['generator'] == 'abnn':
-            if abnn_top_n is None:
-                abnn_top_n = optimizer.wrapper.abnn_generator[generator_info['split_group']].model_params['n_volumes']
-            generator_unit_cells = optimizer.wrapper.abnn_generator[generator_info['split_group']].generate(
-                candidates_per_sub_model[generator_info['generator']], rng, q2,
-                top_n=abnn_top_n,
-                batch_size=2,
-                )
-        elif generator_info['generator'] == 'templates':
-            generator_unit_cells = optimizer.wrapper.miller_index_templator[optimizer.bravais_lattice].generate(
-                candidates_per_sub_model[generator_info['generator']], rng, q2, 
-                )
+# Partner phases sampled per lattice for the second-phase bundle. The harness builds its pool
+# from the crystals an arm drew, a few hundred a lattice; this matches that scale rather than
+# pooling every training crystal, which would be half a million arrays held for the whole run.
+SECOND_PHASE_POOL_PER_LATTICE = 300
+
+
+def needs_second_phase_pool(bundle):
+    """Whether this bundle will ever ask for a partner phase, so one place decides it."""
+    if bundle == GRID_BUNDLE:
+        # the top of the contaminant axis is the second phase, so the grid always needs one
+        return any(grid_condition(level, 0).second_phase_lines > 0
+                   for level in CONTAMINANT_LEVELS)
+    return BenchmarkConditions.BY_KEY[bundle].second_phase_lines > 0
+
+
+def load_second_phase_pool(dataset_directory, seed):
+    """Candidate contaminating phases, drawn from every lattice.
+
+    The `second_phase` bundle adds lines from a real partner cell, and real contamination is not
+    lattice-matched -- so the partner comes from the whole set, exactly as `BenchmarkRuns` builds
+    it, not from the lattice being fitted. Training crystals only, for the same reason
+    `load_entries` uses them: a partner taken from the benchmark half would put benchmark data
+    into a setting that is later reported against the benchmark.
+    """
+    frames = []
+    for bravais_lattice in BRAVAIS_LATTICES:
+        path = Path(dataset_directory)/f'dataset_{bravais_lattice}.parquet'
+        if not path.is_file():
+            continue
+        data = pd.read_parquet(path, columns=['identifier', 'train', f'q2_{BROADENING_TAG}'])
+        data = data.loc[data['train']].sort_values('identifier', kind='stable',
+                                                   ignore_index=True)
+        if data.shape[0] > SECOND_PHASE_POOL_PER_LATTICE:
+            rng = np.random.default_rng(derived_seed(f'phase2:{bravais_lattice}', seed))
+            data = data.iloc[np.sort(rng.choice(data.shape[0],
+                                                size=SECOND_PHASE_POOL_PER_LATTICE,
+                                                replace=False))]
+        frames.append(data)
+    if not frames:
+        raise SystemExit(
+            f'no source datasets under {dataset_directory}, so no partner phases can be drawn '
+            f'for the second-phase bundle.'
+            )
+    return BenchmarkPatterns.build_second_phase_pool(
+        pd.concat(frames, ignore_index=True))
+
+
+def load_entries(bravais_lattice, n_entries, dataset_directory, seed, bundle,
+                 second_phase_pool=None):
+    """Training crystals with enough peaks, synthesised under one condition bundle.
+
+    Training crystals, not benchmark ones: the mix is a setting being selected, and selecting it
+    on the population it is later reported against would be reading the answer first. That is why
+    this does not call `BenchmarkPatterns.sample_entries`, which selects the benchmark half.
+
+    The synthesis itself IS the harness's, so a pattern here is the same object a benchmark arm
+    would index -- same dropout rule, same error model, same contaminant placement.
+
+    `bundle` is one of the harness's named bundles, or GRID_BUNDLE, which draws a difficulty per
+    crystal instead: contaminants from CONTAMINANT_LEVELS and dropped peaks from DROPOUT_LEVELS,
+    independently and uniformly, so all sixteen cells appear in one run. The draw is keyed on the
+    crystal's identifier, so which difficulty a crystal gets does not depend on how many crystals
+    were asked for or on what order they came in.
+
+    Every row carries the difficulty that was DELIVERED, which is not always the one drawn -- see
+    the degradation below -- so the fit can be re-cut by difficulty without regenerating.
+    """
+    path = Path(dataset_directory)/f'dataset_{bravais_lattice}.parquet'
+    if not path.is_file():
+        raise SystemExit(
+            f'no source dataset for {bravais_lattice} at {path}. Point --dataset-directory at a '
+            f'tree that has it.'
+            )
+    fixed = None if bundle == GRID_BUNDLE else BenchmarkConditions.BY_KEY[bundle]
+    n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
+    data = pd.read_parquet(path, columns=[
+        'identifier', 'train', f'q2_{BROADENING_TAG}', 'reindexed_xnn',
+        # the labeller works from the conventional cell, so both forms of the truth come back
+        'reindexed_unit_cell'])
+    data = data.loc[data['train']]
+    peaks = data[f'q2_{BROADENING_TAG}']
+    data = data.loc[peaks.apply(lambda q2: np.count_nonzero(q2) >= n_peaks)]
+    data = data.sort_values('identifier', kind='stable', ignore_index=True)
+    # Drawn wider than asked, because a condition loses a few crystals it cannot be applied to.
+    draw = min(data.shape[0], int(1.3*n_entries) + 8)
+    if data.shape[0] > draw:
+        rng = np.random.default_rng(derived_seed(f'sample:{bravais_lattice}', seed))
+        data = data.iloc[np.sort(rng.choice(data.shape[0], size=draw, replace=False))]
+    data = data.reset_index(drop=True)
+
+    rows = []
+    refused = 0
+    degraded = 0
+    for _, entry in data.iterrows():
+        if fixed is not None:
+            attempts = [fixed]
         else:
-            # As in MPIOptimizer: without this the previous generator's cells are reused.
-            raise ValueError(
-                f"unknown generator {generator_info['generator']!r} in generator_info"
-                )
-
-        generator_unit_cells = fix_unphysical(
-            unit_cell=generator_unit_cells,
-            rng=rng,
-            minimum_unit_cell=optimizer.opt_params['minimum_uc'],
-            maximum_unit_cell=optimizer.opt_params['maximum_uc'],
-            lattice_system=optimizer.wrapper.data_params['lattice_system']
-            )
-        if optimizer.wrapper.data_params['lattice_system'] == 'triclinic':
-            generator_unit_cells, _ = reindex_entry_triclinic(generator_unit_cells)
-        generator_xnn = get_xnn_from_unit_cell(
-            generator_unit_cells,
-            partial_unit_cell=True,
-            lattice_system=optimizer.wrapper.data_params['lattice_system']
-            )
-        generator_distance = np.linalg.norm(generator_xnn - xnn_true[np.newaxis], axis=1)
-        generator_index = list(n_sub_generators.keys()).index(generator_info['generator'])
-        if n_sub_generators[generator_info['generator']] == 1:
-            distance[:, generator_index] = generator_distance
-        else:
-            start = np.argwhere(np.isnan(distance[:, generator_index]))[0][0]
-            stop = start + candidates_per_sub_model[generator_info['generator']]
-            distance[start: stop, generator_index] = generator_distance
-
-    # Randomly permute the Tree distances because they are ordered based on the
-    # split group or dominant zone bin in the case of the RF model.
-    tree_index = list(n_sub_generators.keys()).index('trees')
-    distance[:, tree_index] = rng.permutation(distance[:, tree_index])
-
-    # The ABNN model distances are also ordered based on the split group.
-    # There is also an ordering based on the "top_n" predictions. The first top_n predictions
-    # are the top_n most probable unit cells. The rest of the predictions are based on
-    # randomly sampling their Miller Indices.
-    # Create groupings of the top_n and rest of the predictions. Permute separately. Then
-    # combine with the top_n first.
-    abnn_index = list(n_sub_generators.keys()).index('abnn')
-
-    if abnn_top_n < candidates_per_sub_model['abnn']:
-        n_lower = (candidates_per_sub_model['abnn'] - abnn_top_n)
-        distance_top_n = np.zeros(abnn_top_n * n_sub_generators['abnn'])
-        distance_lower = np.zeros(n_lower * n_sub_generators['abnn'])
-    
-        start = 0
-        for sub_index in range(n_sub_generators['abnn']):
-            distance_top_n[sub_index*abnn_top_n: (sub_index+1)*abnn_top_n] = distance[
-                start: start + abnn_top_n,
-                abnn_index
-                ]
-            distance_lower[sub_index*n_lower: (sub_index+1)*n_lower] = distance[
-                start + abnn_top_n: start + candidates_per_sub_model['abnn'],
-                abnn_index
-                ]
-            start += candidates_per_sub_model['abnn']
-        n_total_candidates = n_sub_generators['abnn']*candidates_per_sub_model['abnn']
-        distance[:n_total_candidates, abnn_index] = np.concatenate([
-            rng.permutation(distance_top_n),
-            rng.permutation(distance_lower)
-            ])
-
-    #print('Distance Evaluation')
-    #print('Tree', 'abnn', 'Template')
-    #print(
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('trees')]), decimals=3),
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('abnn')]), decimals=3),
-    #    np.round(np.mean(1000*distance[:, :, list(n_sub_generators.keys()).index('templates')]), decimals=3),
-    #    )
-    return distance, generator_names
+            draw_rng = np.random.default_rng(derived_seed(
+                f'difficulty:{bravais_lattice}:{entry["identifier"]}', seed))
+            n_contaminants = int(draw_rng.choice(CONTAMINANT_LEVELS))
+            n_dropout = int(draw_rng.choice(DROPOUT_LEVELS))
+            # A pattern whose observed range is narrow cannot take every contaminant asked for,
+            # and add_contaminants raises rather than placing one on top of a peak. Dropping the
+            # crystal would bias the sample: the ones that refuse are systematically the ones
+            # with a narrow range, so they would be under-represented at high contamination and
+            # over-represented at low. The draw steps down instead, and what was delivered is
+            # recorded on the row.
+            attempts = [grid_condition(level, n_dropout)
+                        for level in range(n_contaminants, -1, -1)]
+        pattern = None
+        for index, condition in enumerate(attempts):
+            try:
+                pattern = BenchmarkPatterns.prepare_peak_list(
+                    entry, condition, seed, n_peaks=n_peaks,
+                    second_phase_pool=second_phase_pool)
+            except ContaminantPlacementError:
+                continue
+            if index:
+                degraded += 1
+            break
+        if pattern is None:
+            refused += 1
+            continue
+        q2 = np.asarray(pattern.q2_obs, dtype=float)
+        if np.count_nonzero(q2) < n_peaks:
+            refused += 1
+            continue
+        rows.append({'identifier': entry['identifier'],
+                     'reindexed_xnn': entry['reindexed_xnn'],
+                     'reindexed_unit_cell': entry['reindexed_unit_cell'],
+                     'q2': q2[:n_peaks],
+                     # the second phase counts as contamination: DWMM's convention, and the two
+                     # mechanisms deliver extra lines that the pattern cannot tell apart
+                     'n_contaminants': int(pattern.n_contaminants_achieved
+                                           + pattern.n_second_phase_achieved),
+                     'n_dropout': int(pattern.n_dropout_achieved)})
+        if len(rows) == n_entries:
+            break
+    if degraded:
+        print(f'{bravais_lattice}: {degraded} of {len(rows)} crystals took fewer contaminants '
+              f'than drawn; the delivered count is on the row', flush=True)
+    if len(rows) < n_entries:
+        # Ten of the fourteen lattices hold fewer than 10 000 usable training crystals -- cF has
+        # 554 -- so a large --n-entries silently becomes 'all of them' on most of the run. Said
+        # loudly here because the count otherwise appears as one line among thousands, and a
+        # number of crystals is the number every later error bar is read against.
+        print(f'WARNING: {bravais_lattice}: asked for {n_entries} crystals, only {len(rows)} '
+              f'are available ({data.shape[0]} drawn, {refused} refused by the condition). '
+              f'Every result for this lattice rests on {len(rows)}.', flush=True)
+    return pd.DataFrame(rows), refused
 
 
-def ensemble_refine(distance, generator_names, convergence_radius, rng):
-    def target_function(params, distance_all, x, N_success, rng, n_total, return_F=False):
-        # convergence radius has rows:
-        # 0: distance
-        # 1: success rate
-        n_generators = distance_all.shape[1]
-        n_gen = np.round(
-            n_total * scipy.special.softmax(params[:n_generators]), decimals=0
-            ).astype(int)
-        n_total = n_gen.sum()
-        distance = np.zeros(n_total)
-        start = 0
-        for generator_index in range(n_generators):
-            distance[start: start + n_gen[generator_index]] = distance_all[:n_gen[generator_index], generator_index]
-            start += n_gen[generator_index]
-
-        # Calculate N_success(delta xnn) from the convergence radius
-        # Calcuate N_gen(delta xnn)
-        bins = np.concatenate([[0], x])
-        distance_hist, _ = np.histogram(distance, bins=bins)
-        N = np.cumsum(distance_hist)
-
-        in_range = N_success != np.inf
-        # Calculate target function
-        F = (N[in_range] - N_success[in_range]) / N_success[in_range]
-        term_0 = 0
-        if np.max(F) < 0:
-            term_0 += 100
-        # term_1 represents efficiency. Integrate F. This gives a total number of excess entries.
-        term_1 = -np.mean(
-            np.trapezoid(F, x[in_range]) / np.trapezoid(x[in_range])
-            )
-        #if term_0 > 0:
-        #    print(term_0, term_1)
-        if return_F:
-            return F, N
-        else:
-            return term_0 + term_1
-
-    n_optimizations = 10
-    n_generators = distance.shape[1]
-    # Parameterization:
-    # 0 -> n_generators-1: Logit for generator sampling fraction
-    bounds = [[-np.inf, np.inf] for _ in range(n_generators)]
-    n_total = distance.shape[0]
-
-    x_opt = np.zeros((n_optimizations, n_generators))
-    x = convergence_radius[0]
-    success_rate = convergence_radius[1]
-    N_success = 1/success_rate
-    in_range = success_rate > 0.01
-    N_success[~in_range] = np.inf
-    for opt_index in range(n_optimizations):
-        x0 = rng.normal(size=n_generators)
-        initial_simplex = rng.normal(size=(n_generators+1, n_generators))    
-        opt_results = scipy.optimize.minimize(
-            target_function,
-            x0=x0,
-            method='Nelder-Mead',
-            args=(distance, x, N_success, rng, n_total),
-            options={'initial_simplex': initial_simplex},
-            bounds=bounds,
-            )
-        x_opt[opt_index] = opt_results.x
-    print(generator_names)
-    print(np.round(scipy.special.softmax(x_opt.mean(axis=0)) * n_total))
-    #print(scipy.special.softmax(opt_results.x[:-1]))
-    #print(opt_results)
-    output = {}
-    F, N = target_function(
-        x_opt.mean(axis=0), distance, x, N_success, rng, n_total, return_F=True
-        )
-    #fig, axes = plt.subplots(2, 1 ,figsize=(6, 4), sharex=True)
-    #axes[0].plot(x[in_range], F[0])
-    #axes[1].plot(x, N[0])
-    #axes[1].plot(x, N_success)
-    #plt.show()
-    #print('Mean distance of the top 10 entries:')
-    mean_distance = np.zeros(len(generator_names))
-    for index, name in enumerate(generator_names):
-        output[name] = x_opt.mean(axis=0)[index]
-        output[f'{name}_mean_dist'] = np.sort(distance[:, index])[:10].mean()
-        mean_distance[index] = np.sort(distance[:, index])[:10].mean()
-        #print(name, output[f'{name}_mean_dist'])
-    print(np.round(mean_distance / mean_distance.min(), decimals=1))
-    print()
-    return output
+def commit():
+    try:
+        return subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return 'unknown'
 
 
-if __name__ == '__main__':
-    comm = MPI.COMM_WORLD
+def generate(args):
+    """Draw every generator's pool for every chosen lattice and write them to disk."""
+    from mpi4py import MPI
+
+    comm = check_mpi_world(MPI.COMM_WORLD, MPI.COMM_WORLD.Get_size())
     rank = comm.Get_rank()
     n_ranks = comm.Get_size()
     split_comm = comm.Split(color=rank, key=rank)
-    project_path = Path(mlindex.__path__[0]).parent
+    out = Path(args.pools)
+    if rank == 0:
+        out.mkdir(parents=True, exist_ok=True)
+    comm.Barrier()
 
-    load_data = True
-    broadening_tag = '1'
-    n_trials = 10000
-    rng = np.random.default_rng(0)
-    #rng = np.random.default_rng()
-
-    #bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    #bravais_lattices = ['hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP']
-    #bravais_lattices = ['cF', 'cI', 'cP']
-    #bravais_lattices = ['cP']
-    #bravais_lattices = ['hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    #bravais_lattices = ['hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    #bravais_lattices = ['cF', 'cI', 'cP']
-    #bravais_lattices = ['oC', 'oF', 'oI', 'oP', 'mC', 'mP', 'aP']
-    #bravais_lattices = ['tI', 'tP','oP', 'mC', 'mP', 'aP']
-    #bravais_lattices = ['mC', 'mP', 'aP']
-
-    bravais_lattices = [sys.argv[1]]
-
-    cr_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/roc/data'
-    convergence_radius = {
-        'cF': np.load(os.path.join(cr_dir, 'cF_roc_peaks10_drop8_iter100_sampQ2.npy')),
-        'cI': np.load(os.path.join(cr_dir, 'cI_roc_peaks10_drop8_iter100_sampQ2.npy')),
-        'cP': np.load(os.path.join(cr_dir, 'cP_roc_peaks10_drop8_iter100_sampQ2.npy')),
-        'hP': np.load(os.path.join(cr_dir, 'hP_roc_peaks20_drop17_iter100_sampQ2.npy')),
-        'hR': np.load(os.path.join(cr_dir, 'hR_roc_peaks20_drop17_iter100_sampQ2.npy')),
-        'tI': np.load(os.path.join(cr_dir, 'tI_roc_peaks20_drop17_iter100_sampQ2.npy')),
-        'tP': np.load(os.path.join(cr_dir, 'tP_roc_peaks20_drop17_iter100_sampQ2.npy')),
-        'oC': np.load(os.path.join(cr_dir, 'oC_roc_peaks20_drop16_iter100_sampQ2.npy')),
-        'oF': np.load(os.path.join(cr_dir, 'oF_roc_peaks20_drop16_iter100_sampQ2.npy')),
-        'oI': np.load(os.path.join(cr_dir, 'oI_roc_peaks20_drop16_iter100_sampQ2.npy')),
-        'oP': np.load(os.path.join(cr_dir, 'oP_roc_peaks20_drop16_iter100_sampQ2.npy')),
-        'mC': np.load(os.path.join(cr_dir, 'mC_roc_peaks20_drop14_iter100_sampQ2.npy')),
-        'mP': np.load(os.path.join(cr_dir, 'mP_roc_peaks20_drop14_iter100_sampQ2.npy')),
-        'aP': np.load(os.path.join(cr_dir, 'aP_roc_peaks20_drop11_iter100_sampQ2.npy'))
+    models_directory = Path(args.models_directory) if args.models_directory else _resolve_models_dir()
+    package_root = Path(mlindex.__path__[0]).parent
+    manifest = {
+        'n_entries': args.n_entries, 'budget_scale': args.budget_scale, 'seed': args.seed,
+        'broadening_tag': BROADENING_TAG, 'commit': commit(), 'n_ranks': n_ranks,
+        'platform': platform.platform(), 'machine': platform.machine(),
+        'numpy': np.__version__, 'models_directory': str(models_directory),
+        'bundle': args.bundle,
+        'population': (
+            f'training crystals, a difficulty drawn per crystal from '
+            f'{CONTAMINANT_LEVELS} contaminants x {DROPOUT_LEVELS} dropped peaks at nominal '
+            f'peak error; three contaminants is the second phase'
+            if args.bundle == GRID_BUNDLE else
+            f'training crystals, condition bundle {args.bundle!r} '
+            f'({BenchmarkConditions.BY_KEY[args.bundle].description})'),
+        'lattices': {},
         }
 
-    candidates_per_model = {
-        'cF': 100,
-        'cI': 100,
-        'cP': 100,
-        'hP': 1500,
-        'hR': 1500,
-        'tI': 1500,
-        'tP': 1500,
-        'oC': 2500,
-        'oF': 2500,
-        'oI': 2500,
-        'oP': 2500,
-        'mC': 4000,
-        'mP': 4000,
-        'aP': 4000,
+    # Built once and across every lattice, not per lattice, because a partner phase is not
+    # lattice-matched and rebuilding it per lattice would make the partner depend on which
+    # lattices a run happened to ask for.
+    second_phase_pool = None
+    if rank == 0 and needs_second_phase_pool(args.bundle):
+        second_phase_pool = load_second_phase_pool(args.dataset_directory, args.seed)
+
+    for bravais_lattice in args.bravais_lattices:
+        factory = getattr(
+            UtilitiesOptimizer, FACTORY_OF_SYSTEM[BL_TO_LATTICE_SYSTEM[bravais_lattice]])
+        optimizer = factory(bravais_lattice, BROADENING_TAG, 1, split_comm,
+                            project_path=package_root, seed=args.seed,
+                            models_directory=models_directory)
+        names, fractions, budget = shipped_mix_and_budget(optimizer)
+        per_generator = int(round(args.budget_scale*budget))
+
+        if rank == 0:
+            entries, refused = load_entries(bravais_lattice, args.n_entries,
+                                            args.dataset_directory, args.seed, args.bundle,
+                                            second_phase_pool=second_phase_pool)
+            print(f'{bravais_lattice}: {len(entries)} crystals under {args.bundle!r} '
+                  f'({refused} refused), {per_generator} candidates a generator, '
+                  f'shipped budget {budget}', flush=True)
+            for other in range(1, n_ranks):
+                comm.send(entries.iloc[other::n_ranks], dest=other)
+            mine = entries.iloc[0::n_ranks]
+        else:
+            mine = comm.recv(source=0)
+
+        # The generators are seeded per crystal so that a subset of a run regenerates identically
+        # and the rank count cannot change an answer.
+        positions = []
+        truths = []
+        for index in range(len(mine)):
+            entry = mine.iloc[index]
+            rng = np.random.default_rng(derived_seed(
+                f'pool:{bravais_lattice}:{entry["identifier"]}', args.seed))
+            xnn, xnn_true, generated_names = generate_candidate_pools(
+                optimizer, entry, candidates_per_model=per_generator, rng=rng)
+            positions.append(xnn.astype(np.float32))
+            truths.append(xnn_true)
+        payload = {'xnn': positions, 'xnn_true': truths,
+                   'identifiers': list(mine['identifier']),
+                   'n_contaminants': list(mine['n_contaminants']),
+                   'n_dropout': list(mine['n_dropout']),
+                   'generator_names': generated_names}
+
+        gathered = comm.gather(payload, root=0)
+        del payload, positions, truths
+        if rank == 0:
+            blocks = [block for part in gathered for block in part['xnn']]
+            xnn_true = np.stack([block for part in gathered for block in part['xnn_true']])
+            identifiers = [name for part in gathered for name in part['identifiers']]
+            # Carried into the pool so the fit can be cut by difficulty without regenerating:
+            # what was DELIVERED, which is not always what was drawn.
+            n_contaminants = [v for part in gathered for v in part['n_contaminants']]
+            n_dropout = [v for part in gathered for v in part['n_dropout']]
+            del gathered
+            # Filled a crystal at a time and each block dropped as it is copied, so the gathered
+            # copy and the stacked one are never both whole. At 10 000 crystals one aP pool is
+            # 8.6 GB, and np.stack over the list would need both at once.
+            xnn = np.empty((len(blocks),) + blocks[0].shape, dtype=np.float32)
+            for index in range(len(blocks)):
+                xnn[index] = blocks[index]
+                blocks[index] = None
+            del blocks
+            # Distances at full precision because the score is computed from them; positions at
+            # single precision because they are only ever used to count near neighbours, where the
+            # radii are thousands of times coarser than float32's resolution here.
+            #
+            # In crystal-sized chunks: the whole-array form promotes the float32 positions against
+            # the float64 truth, and that one temporary is 17 GB for aP at 10 000 crystals.
+            distance = np.empty(xnn.shape[:-1], dtype=float)
+            for start in range(0, xnn.shape[0], DISTANCE_CHUNK):
+                stop = start + DISTANCE_CHUNK
+                distance[start:stop] = np.linalg.norm(
+                    xnn[start:stop] - xnn_true[start:stop, np.newaxis, np.newaxis, :], axis=-1)
+            np.savez_compressed(
+                out/f'{bravais_lattice}_pools.npz',
+                xnn=xnn, xnn_true=xnn_true, distances=distance,
+                identifiers=np.array(identifiers, dtype=object),
+                n_contaminants=np.array(n_contaminants, dtype=int),
+                n_dropout=np.array(n_dropout, dtype=int),
+                generator_names=np.array(generated_names, dtype=object),
+                )
+            manifest['lattices'][bravais_lattice] = {
+                'n_crystals': int(xnn.shape[0]), 'per_generator': per_generator,
+                'shipped_budget': budget, 'shipped_mix': dict(zip(names, fractions)),
+                'generator_names': generated_names,
+                'n_peaks': N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS),
+                }
+            # Rewritten after every lattice, not once at the end, so that a run which dies
+            # partway leaves the lattices it finished in a state the fit stage can read.
+            (out/'pools_manifest.json').write_text(
+                json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8')
+            print(f'{bravais_lattice}: wrote {xnn.shape[0]} crystals', flush=True)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Fitting
+# ---------------------------------------------------------------------------
+
+
+def mix_grid(step, n_generators):
+    """Every mix on a regular grid over the simplex, as fractions summing to one."""
+    n = int(round(1.0/step))
+    if n_generators != 3:
+        raise ValueError(f'the grid is written for three generators, not {n_generators}')
+    return np.array([(a/n, b/n, (n - a - b)/n)
+                     for a in range(n + 1) for b in range(n + 1 - a)])
+
+
+def counts_for_mix(mix, budget):
+    """Candidate counts that sum to the budget exactly.
+
+    Rounding each share independently makes the total drift with the mix, and the score rises with
+    the number of candidates, so a mix that happened to round up would win on that alone.
+    """
+    return largest_remainder(mix, budget)
+
+
+def stack_pools(distance, counts):
+    """(n_crystals, sum(counts)): the first counts[g] candidates of each generator, side by side."""
+    return np.concatenate(
+        [distance[:, :count, index] for index, count in enumerate(counts) if count], axis=1)
+
+
+def stack_positions(xnn, counts):
+    """The same selection, on positions: (n_crystals, sum(counts), n_cell_parameters)."""
+    return np.concatenate(
+        [xnn[:, :count, index] for index, count in enumerate(counts) if count], axis=1)
+
+
+def score_crystals(distance, xnn, grid, budget, curve, discount):
+    """(n_mixes, n_crystals): what each mix is worth to each crystal. Larger is better.
+
+    The clump weights are recomputed for the candidate subset each mix selects, not once over the
+    whole pool. Computed once they would not depend on the mix, the score would be linear in it,
+    and its optimum would always be a corner -- which is the answer a score blind to crowding
+    gives and the reason this term exists.
+
+    That is also what makes the fit slow: one neighbour search per mix per crystal. Measured on
+    this laptop, a 12 000-candidate pool costs 18 ms a crystal a mix, so a 0.02 grid over 10 000
+    crystals is 67 hours on one core. This function is the serial unit; `score_every_mix` spreads
+    it over crystals, which is the axis the work is independent along.
+    """
+    scores = np.empty((grid.shape[0], distance.shape[0]))
+    for index, mix in enumerate(grid):
+        counts = counts_for_mix(mix, budget)
+        pool = stack_pools(distance, counts)
+        positions = stack_positions(xnn, counts)
+        weight = np.stack([clump_weights(positions[crystal], *discount)
+                           for crystal in range(positions.shape[0])])
+        scores[index] = expected_success_objective(pool, curve[0], curve[1], weight)
+    return scores
+
+
+def _score_chunk(payload):
+    """Module-level and taking one picklable argument, because workers are spawned, not forked."""
+    return score_crystals(*payload)
+
+
+def score_every_mix(distance, xnn, grid, budget, curve, discount, nproc):
+    """`score_crystals` over every crystal, spread across `nproc` processes.
+
+    `nproc` has no default. A fit that quietly ran on one core would take days at production
+    scale and look like a hang, so the caller says how many cores it is giving this.
+    """
+    n_crystals = distance.shape[0]
+    if nproc <= 1 or n_crystals < 2*nproc:
+        return score_crystals(distance, xnn, grid, budget, curve, discount)
+
+    def chunks():
+        # Built lazily: materialising every chunk first would hold a second copy of the pool,
+        # which is gigabytes at production scale.
+        for rows in np.array_split(np.arange(n_crystals), nproc):
+            yield (distance[rows], xnn[rows], grid, budget, curve, discount)
+
+    with multiprocessing.get_context('spawn').Pool(nproc) as pool:
+        parts = list(pool.imap(_score_chunk, chunks()))
+    return np.concatenate(parts, axis=1)
+
+
+def choose_mix(scores, grid, reduction):
+    """The mix a reduction picks, the pooled score over the grid, and how it got there.
+
+    'pooled'       one mix for the lattice, against the mean over crystals.
+    'per-pattern'  the best mix for each crystal, averaged. This is what the original fit did, by
+                   averaging the logits it optimised; averaging the winning shares is the same
+                   idea on a grid. Kept so that what it costs can be measured rather than assumed.
+
+    For 'per-pattern' the third return says whether the average describes any pattern at all. A
+    per-pattern optimum that hands almost the whole budget to one generator is not evidence for a
+    blend, and an average of such optima is a mix no pattern asked for.
+    """
+    pooled = scores.mean(axis=1)
+    if reduction == 'pooled':
+        return grid[int(np.argmax(pooled))], pooled, {}
+    if reduction == 'per-pattern':
+        winners = grid[np.argmax(scores, axis=0)]
+        return winners.mean(axis=0), pooled, {
+            'share_all_or_nothing': float(np.mean(winners.max(axis=1) > 0.95)),
+            'share_on_a_corner': float(np.mean(np.isclose(winners.max(axis=1), 1.0))),
+            'winner_spread': float(np.mean(winners.std(axis=0))),
+            }
+    raise ValueError(f'unknown reduction {reduction!r}')
+
+
+def screen(pooled, grid, chosen):
+    """How decided the answer is, and whether it sits in a corner.
+
+    A score that is flat gives every mix the same value, and `argmax` then returns whichever the
+    grid happens to enumerate first. Counting how many mixes come within a hundredth of the whole
+    range of the best one says whether there was anything to choose.
+    """
+    best = float(pooled.max())
+    worst = float(pooled.min())
+    spread = best - worst
+    tied = int(np.count_nonzero(pooled >= best - 0.01*spread)) if spread > 0 else pooled.size
+    return {
+        'value_best': best,
+        'value_worst': worst,
+        'spread': spread,
+        'n_tied': tied,
+        'n_mixes': int(pooled.size),
+        'determined': bool(tied < 0.02*pooled.size),
+        'on_boundary': bool(np.any(np.isclose(chosen, 0.0)) or np.any(np.isclose(chosen, 1.0))),
         }
 
-    read_columns = [
-        'lattice_system',
-        'bravais_lattice',
-        'train',
-        f'q2_{broadening_tag}',
-        'reindexed_spacegroup_symbol_hm',
-        'reindexed_unit_cell',
-        'reindexed_xnn',
-        ]
-    drop_columns = [
-        f'q2_{broadening_tag}',
-        ]
 
-    for bravais_lattice in bravais_lattices:
-        print(f'Loading optimizer for {bravais_lattice}')
-        if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
-        elif bravais_lattice in ['hP']:
-            optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
-        elif bravais_lattice in ['hR']:
-            optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
-        elif bravais_lattice in ['tI', 'tP']:
-            optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
-        elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
-        elif bravais_lattice in ['mC', 'mP']:
-            optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
-        elif bravais_lattice in ['aP']:
-            optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, project_path)
-        
-        if rank == 0:
-            if bravais_lattice in ['cF', 'cI', 'cP']:
-                n_peaks = 10
-            else:
-                n_peaks = 20
-            bravais_lattice_data = pd.read_parquet(
-                f'/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/generated_datasets/dataset_{bravais_lattice}.parquet',
-                columns=read_columns
-                )
-            bravais_lattice_data = bravais_lattice_data.loc[bravais_lattice_data['train']]
-            peaks = bravais_lattice_data[f'q2_{broadening_tag}']
-            bravais_lattice_data = bravais_lattice_data.loc[peaks.apply(len) >= n_peaks]
-            peaks = bravais_lattice_data[f'q2_{broadening_tag}']
-            bravais_lattice_data = bravais_lattice_data.loc[peaks.apply(np.count_nonzero) >= n_peaks]
-            q2 = np.zeros((bravais_lattice_data.shape[0], n_peaks))
-            for entry_index in range(bravais_lattice_data.shape[0]):
-                q2[entry_index] = np.array(bravais_lattice_data[f'q2_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-            bravais_lattice_data['q2'] = list(add_q2_error(q2, None, 1, rng))
-            bravais_lattice_data.drop(columns=drop_columns, inplace=True)
-            if n_trials < len(bravais_lattice_data):
-                bravais_lattice_data = bravais_lattice_data.sample(
-                    n=n_trials,
-                    replace=False,
-                    random_state=rng
-                    )
-            for rank_index in range(1, n_ranks):
-                comm.send(bravais_lattice_data.iloc[rank_index::n_ranks], dest=rank_index)
-            bravais_lattice_data = bravais_lattice_data.iloc[0::n_ranks]
-        else:
-            bravais_lattice_data = comm.recv(source=0)
-            
-        output = []
-        for trial_index in range(len(bravais_lattice_data)):
-            distance, generator_names = evaluate_regression(
-                optimizer,
-                bravais_lattice_data.iloc[trial_index],
-                candidates_per_model=candidates_per_model[bravais_lattice],
-                rng=rng,
-                )
-            output.append(ensemble_refine(
-                distance,
-                generator_names,
-                convergence_radius[bravais_lattice],
-                rng=rng,
-                ))
-        
-        if rank == 0:
-            for rank_index in range(1, n_ranks):
-                output += comm.recv(source=rank_index)
-            df = pd.DataFrame(output)
-            df.to_csv(os.path.join(
-                '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/ensemble',
-                f'ensemble_{bravais_lattice}.csv'
-            ))
-        else:
-            comm.send(output, dest=0)
-        
+def fit(args):
+    """Score every mix on the grid, under every reduction asked for."""
+    pools = Path(args.pools)
+    manifest_path = pools/'pools_manifest.json'
+    if not manifest_path.is_file():
+        raise SystemExit(f'no pools manifest at {manifest_path}; run --stage generate first')
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+
+    for bravais_lattice in args.bravais_lattices:
+        path = pools/f'{bravais_lattice}_pools.npz'
+        if not path.is_file():
+            continue
+        data = np.load(path, allow_pickle=True)
+        names = [str(name) for name in data['generator_names']]
+        distance = np.asarray(data['distances'], dtype=float)
+        if not np.all(np.isfinite(distance)):
+            raise SystemExit(f'{path} holds non-finite distances; regenerate it')
+        if 'xnn' not in data:
+            raise SystemExit(
+                f'{path} has no candidate positions, so how crowded the pool is cannot be seen '
+                f'and the mix cannot be scored. Regenerate it with the current driver.')
+        # Left at the single precision they were written in. The generate stage stores them that
+        # way on purpose -- they are only ever used to count near neighbours, where the radii are
+        # thousands of times coarser -- and widening them here would double a 9 GB array.
+        xnn = np.asarray(data['xnn'], dtype=np.float32)
+        discount = load_clump_discount(args.clump_discount, bravais_lattice)
+        info = manifest['lattices'][bravais_lattice]
+        shipped = np.array([info['shipped_mix'][name] for name in names])
+        curve = np.vstack(load_curve(args.roc_dir, bravais_lattice))
+        grid = mix_grid(args.step, len(names))
+
+        print(f'{bravais_lattice}: scoring {grid.shape[0]} mixes over '
+              f'{distance.shape[0]} crystals on {args.nproc} processes', flush=True)
+
+        budget = int(info['shipped_budget'])
+        if budget <= distance.shape[1]:
+            scores = score_every_mix(distance, xnn, grid, budget, curve, discount, args.nproc)
+            # The shipped mix need not sit on the grid, so it is scored as a grid of one rather
+            # than by a second copy of the same arithmetic.
+            shipped_value = float(np.mean(score_every_mix(
+                distance, xnn, shipped[np.newaxis], budget, curve, discount, args.nproc)))
+            for reduction in args.reductions:
+                for split, rows_of in _splits(distance.shape[0], args.split_seed):
+                    chosen, pooled, how = choose_mix(scores[:, rows_of], grid, reduction)
+                    measured = screen(pooled, grid, chosen)
+                    measured.update(how)
+                    rows.append(dict(
+                        bravais_lattice=bravais_lattice,
+                        bundle=manifest.get('bundle', 'unknown'),
+                        reduction=reduction, split=split, budget=budget,
+                        n_crystals=int(rows_of.size),
+                        **{f'best_{name}': float(value)
+                           for name, value in zip(names, chosen)},
+                        **{f'shipped_{name}': float(value)
+                           for name, value in zip(names, shipped)},
+                        value_shipped=shipped_value, **measured))
+        # Written after every lattice rather than once at the end: the low-symmetry lattices are
+        # the slow ones and they come last, so a run that dies on aP would otherwise take the
+        # thirteen finished lattices with it.
+        pd.DataFrame(rows).to_csv(out/'ensemble_mix.csv', index=False)
+    return 0
+
+
+def _splits(n_crystals, seed):
+    """The whole set, then two disjoint halves, so a mix that does not reproduce is visible."""
+    everything = np.arange(n_crystals)
+    shuffled = np.random.default_rng(seed).permutation(everything)
+    half = n_crystals//2
+    return [('all', everything),
+            ('half-a', np.sort(shuffled[:half])),
+            ('half-b', np.sort(shuffled[half:]))]
+
+
+# ---------------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------------
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog='python -m mlindex.scripts.run_ensemble_refine',
+        description='Measure how much of the candidate budget each generator should get.')
+    parser.add_argument('--stage', default='all', choices=('all', 'generate', 'fit'),
+                        help='generate writes candidate pools (MPI, slow); fit scores mixes '
+                             'against them (no MPI, seconds). Default: all.')
+    parser.add_argument('--bravais-lattices', default=','.join(BRAVAIS_LATTICES), metavar='A,B',
+                        help='Comma-separated. Default: all fourteen.')
+    parser.add_argument('--pools', required=True, metavar='PATH',
+                        help='Directory the candidate pools are written to and read from.')
+    parser.add_argument('--out-dir', default=None, metavar='PATH',
+                        help='Where the fit writes its table. Required for --stage fit and all.')
+    parser.add_argument('--clump-discount', default=None, metavar='PATH',
+                        help='Directory holding the measured clump discounts, one file a '
+                             'lattice. They say what a candidate is worth when it is not alone, '
+                             'and without them a mix cannot be scored. Run output, like the '
+                             'curves. Required to fit.')
+    parser.add_argument('--roc-dir', default=None, metavar='PATH',
+                        help='Directory holding the measured convergence curves. They are run '
+                             'output and are not shipped with the package. Required to fit.')
+    generate_group = parser.add_argument_group('generate')
+    generate_group.add_argument('--dataset-directory', default=None, metavar='PATH',
+                                help='Directory holding dataset_{lattice}.parquet.')
+    generate_group.add_argument('--n-entries', type=int, default=300, metavar='N',
+                                help='Source crystals per lattice (default: 300).')
+    generate_group.add_argument('--budget-scale', type=float, default=2.0, metavar='X',
+                                help='Candidates per generator, as a multiple of the shipped '
+                                     'budget (default: 2.0, so any mix can be scored at twice it).')
+    generate_group.add_argument('--models-directory', default=None, metavar='PATH',
+                                help='Model tree. Default: the usual resolution order.')
+    generate_group.add_argument('--bundle', default='nominal',
+                                choices=tuple(BenchmarkConditions.BY_KEY) + (GRID_BUNDLE,),
+                                help='Conditions the patterns are synthesised under: one of '
+                                     'the benchmark\'s named bundles (default: nominal), or '
+                                     '\'grid\', which draws a difficulty per crystal -- 0, 1, 2 '
+                                     'or 3 contaminants against 0, 2, 4 or 6 dropped peaks, all '
+                                     'sixteen cells in one run, at nominal peak error. Three '
+                                     'contaminants is the second phase. The delivered difficulty '
+                                     'is stored per crystal so the fit can be cut by it.')
+    generate_group.add_argument('--seed', type=int, default=12345, metavar='N')
+    fit_group = parser.add_argument_group('fit')
+    fit_group.add_argument('--reduction', action='append', dest='reductions', default=None,
+                           choices=('pooled', 'per-pattern'),
+                           help='How per-crystal scores become one mix. Repeat for several. '
+                                'Default: pooled.')
+    fit_group.add_argument('--step', type=float, default=0.02, metavar='X',
+                           help='Grid spacing on the simplex (default: 0.02, so 1326 mixes).')
+    fit_group.add_argument('--split-seed', type=int, default=12345, metavar='N',
+                           help='Seed for the half-and-half stability check (default: 12345).')
+    fit_group.add_argument('--nproc', type=int, default=1, metavar='N',
+                           help='Processes the scoring is spread over, across crystals '
+                                '(default: 1). The cost is one neighbour search per crystal per '
+                                'mix; at 10000 crystals and the default grid that is tens of '
+                                'hours on one core, so give this the cores of the node.')
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    args.bravais_lattices = [name for name in args.bravais_lattices.split(',') if name]
+    unknown = [name for name in args.bravais_lattices if name not in BRAVAIS_LATTICES]
+    if unknown:
+        raise SystemExit(f'not Bravais lattices this package knows: {", ".join(unknown)}')
+    args.reductions = args.reductions or ['pooled']
+
+    if args.stage in ('all', 'generate'):
+        if args.dataset_directory is None:
+            raise SystemExit('--stage generate needs --dataset-directory')
+        generate(args)
+    if args.stage in ('all', 'fit'):
+        if args.roc_dir is None:
+            raise SystemExit('--stage fit needs --roc-dir')
+        if args.out_dir is None:
+            raise SystemExit('--stage fit needs --out-dir')
+        if args.clump_discount is None:
+            raise SystemExit(
+                '--stage fit needs --clump-discount. Candidates in a real pool are not '
+                'independent, and a score that assumes they are always names a corner.')
+        fit(args)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

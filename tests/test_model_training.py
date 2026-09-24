@@ -402,3 +402,49 @@ def test_search_does_not_carry_state_between_patterns_in_worker_processes(
         f"at pool size 2, {differing} of {max(after.size, alone.size)} aP candidate "
         f"rows depend on what the workers indexed first"
     )
+
+
+def test_abnn_never_starts_a_candidate_from_a_degenerate_cell(
+    unique_test_metadata, all_optimizers
+):
+    """Every generated candidate must be refined from a real predicted cell.
+
+    `generate` allocates xnn_gen with np.zeros and fills it in whole passes of top_n. The
+    n_unit_cells % top_n leftovers were never filled, so they reached the Gauss-Newton step as
+    an all-zero metric tensor -- a cell with no volume. That is 75 of hP's 175 candidates a
+    split group. Asserted on the cells entering the refinement rather than on the output,
+    because fix_unphysical turns the degenerate ones into plausible-looking garbage.
+    """
+    from mlindex.model_training import ABNN as abnn_module
+
+    seen = []
+    real_step = abnn_module.CandidateOptLoss.gauss_newton_step
+
+    def spy(self, xnn):
+        seen.append(np.array(xnn))
+        return real_step(self, xnn)
+
+    abnn_module.CandidateOptLoss.gauss_newton_step = spy
+    try:
+        for q2_obs, unit_cell, wavelength, bl, lattice_system in _cases(
+            unique_test_metadata
+        ):
+            opt = all_optimizers[bl]
+            sg = opt.wrapper.data_params["split_groups"][0]
+            seen.clear()
+            opt.wrapper.abnn_generator[sg].generate(
+                N_GENERATE,
+                np.random.default_rng(12345),
+                q2_obs[: opt.n_peaks],
+                top_n=N_RESAMPLE_TOP_N,
+                batch_size=2,
+            )
+            assert seen, f"abnn {bl}: the refinement step was never reached"
+            starting = seen[-1]
+            degenerate = np.count_nonzero(np.all(starting == 0.0, axis=1))
+            assert degenerate == 0, (
+                f"abnn {bl}: {degenerate} of {starting.shape[0]} candidates enter "
+                f"Gauss-Newton as an all-zero cell"
+            )
+    finally:
+        abnn_module.CandidateOptLoss.gauss_newton_step = real_step

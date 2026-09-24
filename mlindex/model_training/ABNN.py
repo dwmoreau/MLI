@@ -656,6 +656,12 @@ class ABNN:
                 xnn_gen[start: start + top_n] = xnn_pred
                 start += top_n
             hkl_assign[start: start + n_extra], _ = vectorized_resampling(hkl_softmax[:n_extra], rng)
+            # The leftover candidates get a predicted cell too. Without this they keep the zeros
+            # xnn_gen was allocated with, so a degenerate metric tensor enters the Gauss-Newton
+            # step below and what comes out is noise, not a candidate. It is not a rare edge:
+            # n_extra is n_unit_cells % top_n, which is 75 of hP's 175 candidates a split group,
+            # 100 of mC's and mP's 550, and 50 of tI's and tP's 350.
+            xnn_gen[start: start + n_extra] = xnn_pred[:n_extra]
             hkl = np.take_along_axis(self.hkl_ref[:, np.newaxis, :], hkl_assign[:, :, np.newaxis], axis=0)
 
         # hkl: n_unit_cells, n_peaks, 3
