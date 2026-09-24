@@ -7,6 +7,7 @@ from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
 from mlindex.optimization.UtilitiesOptimizer import lattice_budget
 from mlindex.optimization.UtilitiesOptimizer import lattice_fractions
+from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
 from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
 from mlindex.utilities.Redistribution import redistribute_xnn
@@ -267,11 +268,12 @@ class OptimizerManager(OptimizerBase):
             'minimum_uc': 2,
             'maximum_uc': 500,
             'budget_scale': {},
-            # RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c's benchmark runs. `fractions`
-            # overrides ENSEMBLE per lattice and goes when P09c closes; `redistribute` goes when
-            # P09c records its verdict, since either the step stays and this is dead, or the step
-            # goes with it.
+            # RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c's benchmark runs. `fractions` and
+            # `redistribution` override ENSEMBLE per lattice and go when P09c closes; `redistribute`
+            # goes when P09c records its verdict, since either the step stays and this is dead, or
+            # the step goes with it.
             'fractions': {},
+            'redistribution': {},
             'redistribute': True,
             }
         for key in opt_params_defaults.keys():
@@ -441,8 +443,7 @@ class OptimizerManager(OptimizerBase):
             candidate_xnn_all = redistribute_xnn(
                 candidate_xnn_all,
                 self.bravais_lattice,
-                self.opt_params['max_neighbors'],
-                self.opt_params['neighbor_radius'],
+                *lattice_redistribution(self.bravais_lattice, self.opt_params['redistribution']),
                 self.rng,
                 minimum_unit_cell=self.opt_params['minimum_uc'],
                 maximum_unit_cell=self.opt_params['maximum_uc'],

@@ -8,25 +8,42 @@ import warnings
 from mlindex import paths
 
 
-# Each Bravais lattice's candidate budget at n_candidates_scale = 1, and the fraction of it each
-# generator makes. This is the only place either is set: OptimizerManager divides each fraction
-# among the split groups with Allocation.generator_info_from_fractions, and a row whose fractions
-# do not sum to one is refused there.
+# Each Bravais lattice's candidate settings, and the only place they are set:
+#   n_candidates     the budget at n_candidates_scale = 1
+#   fractions        the share of it each generator makes; OptimizerManager divides each share
+#                    among the split groups with Allocation.generator_info_from_fractions, and a row
+#                    whose fractions do not sum to one is refused there
+#   max_neighbors,   Redistribution.redistribute_xnn caps every candidate's neighbourhood within
+#   neighbor_radius  neighbor_radius at max_neighbors
 ENSEMBLE = {
-    'cF': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10}},
-    'cI': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10}},
-    'cP': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10}},
-    'hP': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'hR': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'tI': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'tP': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'oC': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'oF': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'oI': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'oP': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25}},
-    'mC': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.55, 'templates': 0.40}},
-    'mP': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.55, 'templates': 0.40}},
-    'aP': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.40, 'templates': 0.55}},
+    'cF': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10},
+           'max_neighbors': 64, 'neighbor_radius': 0.000026},
+    'cI': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10},
+           'max_neighbors': 64, 'neighbor_radius': 0.000026},
+    'cP': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10},
+           'max_neighbors': 64, 'neighbor_radius': 0.000026},
+    'hP': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 52, 'neighbor_radius': 0.000213},
+    'hR': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 52, 'neighbor_radius': 0.000213},
+    'tI': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 52, 'neighbor_radius': 0.000213},
+    'tP': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 52, 'neighbor_radius': 0.000213},
+    'oC': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 46, 'neighbor_radius': 0.000338},
+    'oF': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 46, 'neighbor_radius': 0.000338},
+    'oI': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 46, 'neighbor_radius': 0.000338},
+    'oP': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+           'max_neighbors': 46, 'neighbor_radius': 0.000338},
+    'mC': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.55, 'templates': 0.40},
+           'max_neighbors': 42, 'neighbor_radius': 0.000547},
+    'mP': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.55, 'templates': 0.40},
+           'max_neighbors': 42, 'neighbor_radius': 0.000547},
+    'aP': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.40, 'templates': 0.55},
+           'max_neighbors': 23, 'neighbor_radius': 0.000679},
     }
 
 
@@ -41,6 +58,27 @@ def lattice_fractions(bravais_lattice, fractions):
     if unknown:
         raise ValueError(f'fractions names unknown Bravais lattices {unknown}')
     return dict(fractions.get(bravais_lattice, ENSEMBLE[bravais_lattice]['fractions']))
+
+def lattice_redistribution(bravais_lattice, redistribution):
+    """A lattice's (max_neighbors, neighbor_radius): its ENSEMBLE row, unless `redistribution`
+    names the lattice.
+
+    RESEARCH CODE THAT NEEDS TO BE DELETED -- `redistribution` exists so P09c's benchmark runs can
+    put the old and the re-derived constants side by side from one commit. It goes when P09c
+    closes.
+    """
+    unknown = sorted(set(redistribution) - set(ENSEMBLE))
+    if unknown:
+        raise ValueError(f'redistribution names unknown Bravais lattices {unknown}')
+    if bravais_lattice in redistribution:
+        max_neighbors, neighbor_radius = redistribution[bravais_lattice]
+    else:
+        max_neighbors = ENSEMBLE[bravais_lattice]['max_neighbors']
+        neighbor_radius = ENSEMBLE[bravais_lattice]['neighbor_radius']
+    if not (int(max_neighbors) == max_neighbors and max_neighbors >= 1 and neighbor_radius >= 0):
+        raise ValueError(f'{bravais_lattice}: max_neighbors must be a whole number >= 1 and '
+                         f'neighbor_radius >= 0, got {max_neighbors}, {neighbor_radius}')
+    return int(max_neighbors), float(neighbor_radius)
 
 def lattice_budget(bravais_lattice, n_candidates_scale, budget_scale):
     """How many candidates a lattice generates: its ENSEMBLE budget times both scales.
@@ -202,8 +240,6 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
     opt_params = {
         'n_candidates_scale': n_candidates_scale,
         'iteration_info': iteration_info,
-        'max_neighbors': 64,
-        'neighbor_radius': 0.000026,
         'convergence_testing': False,
         'downsample_radius': 0.002,
         'assignment_threshold': 0.95,
@@ -255,8 +291,6 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     opt_params = {
         'n_candidates_scale': n_candidates_scale,
         'iteration_info': iteration_info,
-        'max_neighbors': 52,
-        'neighbor_radius': 0.000213,
         'convergence_testing': False,
         'downsample_radius': 0.0001,
         'assignment_threshold': 0.95,
@@ -308,8 +342,6 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     opt_params = {
         'n_candidates_scale': n_candidates_scale,
         'iteration_info': iteration_info,
-        'max_neighbors': 52,
-        'neighbor_radius': 0.000213,
         'convergence_testing': False,
         'downsample_radius': 0.0001,
         'assignment_threshold': 0.95,
@@ -361,8 +393,6 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     opt_params = {
         'n_candidates_scale': n_candidates_scale,
         'iteration_info': iteration_info,
-        'max_neighbors': 52,
-        'neighbor_radius': 0.000213,
         'convergence_testing': False,
         'downsample_radius': 0.0001,
         'assignment_threshold': 0.95,
@@ -414,8 +444,6 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     opt_params = {
         'n_candidates_scale': n_candidates_scale,
         'iteration_info': iteration_info,
-        'max_neighbors': 46,
-        'neighbor_radius': 0.000338,
         'convergence_testing': False,
         'downsample_radius': 0.0001,
         'assignment_threshold': 0.95,
@@ -468,8 +496,6 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     opt_params = {
         'n_candidates_scale': n_candidates_scale,
         'iteration_info': iteration_info,
-        'max_neighbors': 42,
-        'neighbor_radius': 0.000547,
         'convergence_testing': False,
         'downsample_radius': 0.0001,
         'assignment_threshold': 0.95,
@@ -521,8 +547,6 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     opt_params = {
         'n_candidates_scale': n_candidates_scale,
         'iteration_info': iteration_info,
-        'max_neighbors': 23,
-        'neighbor_radius': 0.000679,
         'convergence_testing': False,
         'downsample_radius': 0.0001,
         'assignment_threshold': 0.95,

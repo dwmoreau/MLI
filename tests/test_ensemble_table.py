@@ -256,3 +256,28 @@ def test_fractions_on_the_command_line():
     for bad in (['cP=0.5,0.5'], ['cubic=1,0,0'], ['cP']):
         with pytest.raises(ValueError):
             _parse_fractions(bad)
+
+
+# The (max_neighbors, neighbor_radius) each factory set before the constants moved into ENSEMBLE.
+FACTORY_REDISTRIBUTION = {
+    'cubic': (64, 0.000026), 'tetragonal': (52, 0.000213), 'hexagonal': (52, 0.000213),
+    'rhombohedral': (52, 0.000213), 'orthorhombic': (46, 0.000338),
+    'monoclinic': (42, 0.000547), 'triclinic': (23, 0.000679),
+    }
+
+
+@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
+def test_redistribution_constants_match_the_factories_they_replaced(bravais_lattice):
+    from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
+    expected = FACTORY_REDISTRIBUTION[BL_TO_LATTICE_SYSTEM[bravais_lattice]]
+    assert lattice_redistribution(bravais_lattice, {}) == expected
+
+
+def test_a_run_can_name_redistribution_constants_for_one_lattice():
+    from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
+    assert lattice_redistribution('oP', {'oP': (10, 1e-4)}) == (10, 1e-4)
+    assert lattice_redistribution('aP', {'oP': (10, 1e-4)}) == (23, 0.000679)
+    for bad in ({'orthorhombic': (10, 1e-4)}, {'oP': (0, 1e-4)}, {'oP': (2.5, 1e-4)},
+                {'oP': (10, -1.0)}):
+        with pytest.raises(ValueError):
+            lattice_redistribution('oP', bad)
