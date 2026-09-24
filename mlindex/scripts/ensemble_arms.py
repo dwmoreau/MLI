@@ -22,9 +22,10 @@ one by hand. `list` prints each command in full, and any of them can be run on i
         --floor-dir docs/fom_production/artifacts/P04b_arms \
         --out-dir docs/fom_production/artifacts/P09c_arms/compare
 
-Two comparisons are made. The P09b generator fractions, now in ENSEMBLE, against the old ones,
-and then every other run against the P09b fractions, since that is the setting each of them
-changes one thing from.
+`control` is the code as it stands: P09b's generator fractions and the redistribution constants
+re-derived with the same score (run_ensemble_refine --stage redistribution), both in ENSEMBLE.
+Each is compared with the old setting it replaces, the two together with everything shipped
+before P09c, and the redistribution-off and budget runs with `control`.
 Both are read per Bravais lattice against the measured run-to-run floor, and a lattice is called
 helps, hurts or does not matter much by the rule fixed before any of them ran.
 
@@ -41,20 +42,34 @@ import pandas as pd
 from mlindex.scripts import run_benchmark
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
-# The generator fractions shipped before P09c, which the `baseline` run names so that the P09b
-# fractions now in ENSEMBLE can be measured against them from one commit. Trees, abnn, templates.
+# The generator fractions and redistribution constants shipped before P09c. ENSEMBLE now holds
+# P09b's fractions and the re-derived constants; a run that tests an old setting names it with
+# these, so every run comes from one commit. Fractions are trees, abnn, templates.
 OLD_FRACTIONS = {lattice: (0.45, 0.45, 0.10) for lattice in ('cF', 'cI', 'cP')}
 OLD_FRACTIONS.update({lattice: (0.05, 0.70, 0.25)
                       for lattice in ('hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP')})
 OLD_FRACTIONS.update({'mC': (0.05, 0.55, 0.40), 'mP': (0.05, 0.55, 0.40),
                       'aP': (0.05, 0.40, 0.55)})
-_OLD = [f'--fractions={lattice}={t},{a},{p}' for lattice, (t, a, p) in OLD_FRACTIONS.items()]
+OLD_REDISTRIBUTION = {lattice: (64, 0.000026) for lattice in ('cF', 'cI', 'cP')}
+OLD_REDISTRIBUTION.update({lattice: (52, 0.000213) for lattice in ('hP', 'hR', 'tI', 'tP')})
+OLD_REDISTRIBUTION.update({lattice: (46, 0.000338) for lattice in ('oC', 'oF', 'oI', 'oP')})
+OLD_REDISTRIBUTION.update({'mC': (42, 0.000547), 'mP': (42, 0.000547), 'aP': (23, 0.000679)})
+_OLD_FRACTIONS = [f'--fractions={lattice}={t},{a},{p}'
+                  for lattice, (t, a, p) in OLD_FRACTIONS.items()]
+_OLD_REDISTRIBUTION = [f'--redistribution={lattice}={n},{r}'
+                       for lattice, (n, r) in OLD_REDISTRIBUTION.items()]
 
 FAMILIES = ('cubic', 'hexagonal', 'rhombohedral', 'tetragonal', 'orthorhombic', 'monoclinic',
             'triclinic')
 
-# Each run's run_benchmark flags beyond the common ones.
-RUNS = {'baseline': _OLD, 'p09b_fractions': [], 'redistribution_off': ['--no-redistribution']}
+# Each run's run_benchmark flags beyond the common ones. `control` is ENSEMBLE as it stands.
+RUNS = {
+    'control': [],
+    'old_fractions': _OLD_FRACTIONS,
+    'old_redistribution': _OLD_REDISTRIBUTION,
+    'redistribution_off': ['--no-redistribution'],
+    'shipped_before_p09c': _OLD_FRACTIONS + _OLD_REDISTRIBUTION,
+    }
 for _family in FAMILIES:
     RUNS[f'budget_half_{_family}'] = [f'--budget-scale={_family}=0.5']
     RUNS[f'budget_double_{_family}'] = [f'--budget-scale={_family}=2']
@@ -70,13 +85,16 @@ SCORES = 'M_sym,M20'   # M_sym first: the contrast reads its floor from the firs
 SEED = 12345
 CUT = 1.5
 
-# The comparisons `compare` makes: (name, reference run, the runs read against it).
+# The comparisons `compare` makes: (name, reference run, the runs read against it). The reference
+# is the setting being replaced, so a verdict of helps means the new setting is better -- except
+# in `against_control`, where it means that change would improve on what ENSEMBLE ships.
 QUESTIONS = (
-    ('fractions', 'baseline', ('p09b_fractions',)),
-    ('settings', 'p09b_fractions',
-     tuple(name for name in RUNS if name not in ('baseline', 'p09b_fractions'))),
+    ('fractions', 'old_fractions', ('control',)),
+    ('redistribution_constants', 'old_redistribution', ('control',)),
+    ('all_of_p09c', 'shipped_before_p09c', ('control',)),
+    ('against_control', 'control',
+     ('redistribution_off',) + tuple(name for name in RUNS if name.startswith('budget_'))),
     )
-
 
 def _touches(run, lattices):
     """Whether a run changes anything on these lattices, so is worth running on them."""
@@ -84,6 +102,22 @@ def _touches(run, lattices):
         return True
     family = run.split('_', 2)[2]
     return any(BL_TO_LATTICE_SYSTEM[lattice] == family for lattice in lattices)
+
+
+def _refuse_before_the_constants_land():
+    """Stop before any run is made if ENSEMBLE still holds the old redistribution constants.
+
+    Until the re-derived constants are in ENSEMBLE, `old_redistribution` is the same run as
+    `control` and the comparison between them measures nothing.
+    """
+    from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
+    current = {lattice: (row['max_neighbors'], row['neighbor_radius'])
+               for lattice, row in ENSEMBLE.items()}
+    if current == OLD_REDISTRIBUTION:
+        raise SystemExit(
+            'ENSEMBLE still holds the old redistribution constants. Put the ones '
+            'run_ensemble_refine --stage redistribution chose into it first; until then '
+            'old_redistribution and control are the same run.')
 
 
 def jobs():
@@ -216,6 +250,7 @@ def main(argv=None):
             population, _, run = args.run.partition('/')
             if (population, run) not in listed:
                 raise SystemExit(f'No run {args.run!r}; see `list`.')
+        _refuse_before_the_constants_land()
         argv = generate_argv(population, run, args.pools_dir, args.tables_dir,
                              args.split_manifest, args.n_pools, args.dataset_directory)
         if args.limit is not None:

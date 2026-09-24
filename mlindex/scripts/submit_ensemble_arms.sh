@@ -21,9 +21,11 @@
 # that failed, `sbatch --array=<index> mlindex/scripts/submit_ensemble_arms.sh`. A run refuses to
 # write into a directory that already holds something, so remove a failed run's pool first.
 #
-# ALL RUNS COME FROM ONE COMMIT. The old and the new generator fractions are both named on the
-# command line, so nothing needs checking out between tasks and every pair of runs differs only
-# in the settings the manifest records under `ensemble`.
+# ALL RUNS COME FROM ONE COMMIT. The code holds the new generator fractions and redistribution
+# constants; a run testing an old setting names it on the command line, so nothing needs checking
+# out between tasks and every pair of runs differs only in the settings the manifest records
+# under `ensemble`. The runs refuse to start until the re-derived redistribution constants are in
+# the code -- run submit_redistribution_fit.sh and land its answer first.
 #
 # WHERE THE OUTPUT GOES. Pools, tens of GB a run, go to $MLI_POOLS_DIR and stay on scratch. The
 # reduced per-entry tables, a few MB, go to $MLI_TABLES_DIR, under the artifacts directory that
@@ -46,7 +48,7 @@
 #SBATCH -J p09c_ensemble_arms
 #SBATCH -A lcls
 #SBATCH -t 2:00:00
-#SBATCH --array=0-23
+#SBATCH --array=0-27
 #SBATCH -o p09c_ensemble_arms_%A_%a.out
 
 set -euo pipefail
