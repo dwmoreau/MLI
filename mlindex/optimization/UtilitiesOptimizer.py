@@ -10,39 +10,41 @@ from mlindex import paths
 
 # Each Bravais lattice's candidate settings, and the only place they are set:
 #   n_candidates     the budget at n_candidates_scale = 1
-#   fractions        the share of it each generator makes; OptimizerManager divides each share
+#   fractions        the share of it each generator makes: P09b's fit on a grid of contaminants
+#                    and dropped peaks (per-pattern reduction, rounded to 0.01). OptimizerManager
+#                    divides each share
 #                    among the split groups with Allocation.generator_info_from_fractions, and a row
 #                    whose fractions do not sum to one is refused there
 #   max_neighbors,   Redistribution.redistribute_xnn caps every candidate's neighbourhood within
 #   neighbor_radius  neighbor_radius at max_neighbors
 ENSEMBLE = {
-    'cF': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10},
+    'cF': {'n_candidates': 100, 'fractions': {'trees': 0.80, 'abnn': 0.09, 'templates': 0.11},
            'max_neighbors': 64, 'neighbor_radius': 0.000026},
-    'cI': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10},
+    'cI': {'n_candidates': 100, 'fractions': {'trees': 0.75, 'abnn': 0.09, 'templates': 0.16},
            'max_neighbors': 64, 'neighbor_radius': 0.000026},
-    'cP': {'n_candidates': 100, 'fractions': {'trees': 0.45, 'abnn': 0.45, 'templates': 0.10},
+    'cP': {'n_candidates': 100, 'fractions': {'trees': 0.67, 'abnn': 0.10, 'templates': 0.23},
            'max_neighbors': 64, 'neighbor_radius': 0.000026},
-    'hP': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'hP': {'n_candidates': 2000, 'fractions': {'trees': 0.44, 'abnn': 0.51, 'templates': 0.05},
            'max_neighbors': 52, 'neighbor_radius': 0.000213},
-    'hR': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'hR': {'n_candidates': 2000, 'fractions': {'trees': 0.57, 'abnn': 0.17, 'templates': 0.26},
            'max_neighbors': 52, 'neighbor_radius': 0.000213},
-    'tI': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'tI': {'n_candidates': 2000, 'fractions': {'trees': 0.66, 'abnn': 0.29, 'templates': 0.05},
            'max_neighbors': 52, 'neighbor_radius': 0.000213},
-    'tP': {'n_candidates': 2000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'tP': {'n_candidates': 2000, 'fractions': {'trees': 0.56, 'abnn': 0.10, 'templates': 0.34},
            'max_neighbors': 52, 'neighbor_radius': 0.000213},
-    'oC': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'oC': {'n_candidates': 4000, 'fractions': {'trees': 0.52, 'abnn': 0.03, 'templates': 0.45},
            'max_neighbors': 46, 'neighbor_radius': 0.000338},
-    'oF': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'oF': {'n_candidates': 4000, 'fractions': {'trees': 0.34, 'abnn': 0.03, 'templates': 0.63},
            'max_neighbors': 46, 'neighbor_radius': 0.000338},
-    'oI': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'oI': {'n_candidates': 4000, 'fractions': {'trees': 0.46, 'abnn': 0.04, 'templates': 0.50},
            'max_neighbors': 46, 'neighbor_radius': 0.000338},
-    'oP': {'n_candidates': 4000, 'fractions': {'trees': 0.05, 'abnn': 0.70, 'templates': 0.25},
+    'oP': {'n_candidates': 4000, 'fractions': {'trees': 0.71, 'abnn': 0.08, 'templates': 0.21},
            'max_neighbors': 46, 'neighbor_radius': 0.000338},
-    'mC': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.55, 'templates': 0.40},
+    'mC': {'n_candidates': 6000, 'fractions': {'trees': 0.29, 'abnn': 0.08, 'templates': 0.63},
            'max_neighbors': 42, 'neighbor_radius': 0.000547},
-    'mP': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.55, 'templates': 0.40},
+    'mP': {'n_candidates': 6000, 'fractions': {'trees': 0.45, 'abnn': 0.06, 'templates': 0.49},
            'max_neighbors': 42, 'neighbor_radius': 0.000547},
-    'aP': {'n_candidates': 6000, 'fractions': {'trees': 0.05, 'abnn': 0.40, 'templates': 0.55},
+    'aP': {'n_candidates': 6000, 'fractions': {'trees': 0.20, 'abnn': 0.21, 'templates': 0.59},
            'max_neighbors': 23, 'neighbor_radius': 0.000679},
     }
 

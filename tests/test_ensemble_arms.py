@@ -7,9 +7,9 @@ from mlindex.utilities.Allocation import check_generator_fractions
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
 
-def test_the_p09b_fractions_cover_every_lattice_and_each_row_sums_to_one():
-    assert set(ensemble_arms.P09B_FRACTIONS) == set(BRAVAIS_LATTICES)
-    for trees, abnn, templates in ensemble_arms.P09B_FRACTIONS.values():
+def test_the_old_fractions_cover_every_lattice_and_each_row_sums_to_one():
+    assert set(ensemble_arms.OLD_FRACTIONS) == set(BRAVAIS_LATTICES)
+    for trees, abnn, templates in ensemble_arms.OLD_FRACTIONS.values():
         check_generator_fractions({'trees': trees, 'abnn': abnn, 'templates': templates})
 
 
@@ -22,9 +22,10 @@ def test_every_run_is_a_command_run_benchmark_accepts(index):
     assert args.out_pool.endswith(f'{population}_{run}')
     fractions = run_benchmark._parse_fractions(args.fractions)
     if run == 'baseline':
-        assert fractions == {}
+        assert fractions['aP'] == {'trees': 0.05, 'abnn': 0.40, 'templates': 0.55}
+        assert set(fractions) == set(BRAVAIS_LATTICES)
     else:
-        assert fractions['aP'] == {'trees': 0.20, 'abnn': 0.21, 'templates': 0.59}
+        assert fractions == {}
     assert args.no_redistribution == (run == 'redistribution_off')
     scale = run_benchmark._parse_budget_scale(args.budget_scale)
     if run.startswith('budget_half_cubic'):

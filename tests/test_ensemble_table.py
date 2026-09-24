@@ -155,10 +155,17 @@ def _model_split_groups(bravais_lattice):
     return wrapper.data_params['split_groups']
 
 
+# The fractions the literals above encode -- the ones shipped before P09c moved ENSEMBLE to P09b's.
+FACTORY_FRACTIONS = {system: dict(zip(('trees', 'abnn', 'templates'), shares)) for system, shares in {
+    'cubic': (0.45, 0.45, 0.10), 'tetragonal': (0.05, 0.70, 0.25), 'hexagonal': (0.05, 0.70, 0.25),
+    'rhombohedral': (0.05, 0.70, 0.25), 'orthorhombic': (0.05, 0.70, 0.25),
+    'monoclinic': (0.05, 0.55, 0.40), 'triclinic': (0.05, 0.40, 0.55)}.items()}
+
+
 def _derived(bravais_lattice, scale):
-    """What OptimizerManager builds at this scale."""
+    """What OptimizerManager builds at this scale, at the fractions the literals were written for."""
     return generator_info_from_fractions(
-        ENSEMBLE[bravais_lattice]['fractions'],
+        FACTORY_FRACTIONS[BL_TO_LATTICE_SYSTEM[bravais_lattice]],
         lattice_budget(bravais_lattice, scale, {}),
         _model_split_groups(bravais_lattice))
 

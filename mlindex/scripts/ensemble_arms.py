@@ -22,8 +22,9 @@ one by hand. `list` prints each command in full, and any of them can be run on i
         --floor-dir docs/fom_production/artifacts/P04b_arms \
         --out-dir docs/fom_production/artifacts/P09c_arms/compare
 
-Two comparisons are made. The P09b generator fractions against the old ones, and then every other
-run against the P09b fractions, since that is the setting each of them changes one thing from.
+Two comparisons are made. The P09b generator fractions, now in ENSEMBLE, against the old ones,
+and then every other run against the P09b fractions, since that is the setting each of them
+changes one thing from.
 Both are read per Bravais lattice against the measured run-to-run floor, and a lattice is called
 helps, hurts or does not matter much by the rule fixed before any of them ran.
 
@@ -40,35 +41,23 @@ import pandas as pd
 from mlindex.scripts import run_benchmark
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
-# The per-pattern fit on the grid of contaminants and dropped peaks in
-# docs/fom_production/artifacts/P09b_fit/<lattice>/ensemble_mix.csv, rounded to 0.01 with the
-# largest share taking the rounding so each row sums to one. Trees, abnn, templates.
-P09B_FRACTIONS = {
-    'cF': (0.80, 0.09, 0.11),
-    'cI': (0.75, 0.09, 0.16),
-    'cP': (0.67, 0.10, 0.23),
-    'hP': (0.44, 0.51, 0.05),
-    'hR': (0.57, 0.17, 0.26),
-    'tI': (0.66, 0.29, 0.05),
-    'tP': (0.56, 0.10, 0.34),
-    'oC': (0.52, 0.03, 0.45),
-    'oF': (0.34, 0.03, 0.63),
-    'oI': (0.46, 0.04, 0.50),
-    'oP': (0.71, 0.08, 0.21),
-    'mC': (0.29, 0.08, 0.63),
-    'mP': (0.45, 0.06, 0.49),
-    'aP': (0.20, 0.21, 0.59),
-    }
-_P09B = [f'--fractions={lattice}={t},{a},{p}' for lattice, (t, a, p) in P09B_FRACTIONS.items()]
+# The generator fractions shipped before P09c, which the `baseline` run names so that the P09b
+# fractions now in ENSEMBLE can be measured against them from one commit. Trees, abnn, templates.
+OLD_FRACTIONS = {lattice: (0.45, 0.45, 0.10) for lattice in ('cF', 'cI', 'cP')}
+OLD_FRACTIONS.update({lattice: (0.05, 0.70, 0.25)
+                      for lattice in ('hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP')})
+OLD_FRACTIONS.update({'mC': (0.05, 0.55, 0.40), 'mP': (0.05, 0.55, 0.40),
+                      'aP': (0.05, 0.40, 0.55)})
+_OLD = [f'--fractions={lattice}={t},{a},{p}' for lattice, (t, a, p) in OLD_FRACTIONS.items()]
 
 FAMILIES = ('cubic', 'hexagonal', 'rhombohedral', 'tetragonal', 'orthorhombic', 'monoclinic',
             'triclinic')
 
 # Each run's run_benchmark flags beyond the common ones.
-RUNS = {'baseline': [], 'p09b_fractions': _P09B, 'redistribution_off': _P09B + ['--no-redistribution']}
+RUNS = {'baseline': _OLD, 'p09b_fractions': [], 'redistribution_off': ['--no-redistribution']}
 for _family in FAMILIES:
-    RUNS[f'budget_half_{_family}'] = _P09B + [f'--budget-scale={_family}=0.5']
-    RUNS[f'budget_double_{_family}'] = _P09B + [f'--budget-scale={_family}=2']
+    RUNS[f'budget_half_{_family}'] = [f'--budget-scale={_family}=0.5']
+    RUNS[f'budget_double_{_family}'] = [f'--budget-scale={_family}=2']
 
 # What the floor was measured on (submit_benchmark_arms.sh). The hard population takes the
 # driver's default bundles, every severe one, and covers aP, mP and mC only.
