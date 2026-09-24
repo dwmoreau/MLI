@@ -505,6 +505,25 @@ def contrast_table(reductions, baseline, top_n=10, depth='all'):
     return pd.DataFrame(rows)
 
 
+# The rule P09b fixed before any arm ran: a change is read in multiples of the measured
+# run-to-run floor, and only a move of more than this many either way is a result.
+VERDICT_STANDARD_ERRORS = 2.0
+
+
+def verdict(standard_errors):
+    """'helps', 'hurts' or 'does not matter much' for a difference in floor multiples.
+
+    Empty when no floor was given, because a difference in percentage points alone cannot be read.
+    """
+    if not np.isfinite(standard_errors):
+        return ''
+    if standard_errors > VERDICT_STANDARD_ERRORS:
+        return 'helps'
+    if standard_errors < -VERDICT_STANDARD_ERRORS:
+        return 'hurts'
+    return 'does not matter much'
+
+
 def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattices=None,
                  floors=None):
     """One arm's outcome against another's, under the same score, paired on the pattern.
@@ -554,15 +573,20 @@ def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattic
                     left.astype(float), right.astype(float),
                     block['entry_id'].to_numpy())
                 floor = (floors or {}).get(scope)
+                standard_errors = (100.0*test['delta']/floor) if floor else float('nan')
                 rows.append({
                     'arm': name, 'reference': reference, 'score': score, 'scope': scope,
                     'metric': metric, 'n_pairs': test['n_pairs'],
                     'reference_pct': 100.0*left.mean(), 'arm_pct': 100.0*right.mean(),
                     'delta_pp': 100.0*test['delta'],
                     'ci_low_pp': 100.0*low, 'ci_high_pp': 100.0*high,
-                    'n_discordant': test['n_discordant'], 'p_value': test['p_value'],
+                    'n_discordant': test['n_discordant'],
+                    'n_rescued': int(np.sum(~left.astype(bool) & right.astype(bool))),
+                    'n_broken': int(np.sum(left.astype(bool) & ~right.astype(bool))),
+                    'p_value': test['p_value'],
                     'floor_pp': floor,
-                    'standard_errors': (100.0*test['delta']/floor) if floor else float('nan'),
+                    'standard_errors': standard_errors,
+                    'verdict': verdict(standard_errors),
                     })
     return pd.DataFrame(rows)
 

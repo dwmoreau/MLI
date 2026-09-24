@@ -470,6 +470,27 @@ def test_a_contrast_is_reported_in_multiples_of_the_measured_floor():
     assert np.isnan(without[without.metric == 'top1'].iloc[0]['standard_errors'])
 
 
+def test_an_arm_contrast_counts_what_it_rescued_and_what_it_broke():
+    """The net change hides a trade: two crystals rescued and one broken reads as +1 either way."""
+    from mlindex.model_training.BenchmarkRuns import arm_contrast
+
+    arms = {'before': _floor_reduction([True, True, False, False]),
+            'after': _floor_reduction([True, False, True, True])}
+    row = arm_contrast(arms, 'M20', 'before').query("scope == 'aggregate' and metric == 'top1'")
+    assert row['n_rescued'].item() == 2
+    assert row['n_broken'].item() == 1
+    assert row['n_discordant'].item() == 3
+
+
+@pytest.mark.parametrize('standard_errors, expected', [
+    (15.0, 'helps'), (2.01, 'helps'), (2.0, 'does not matter much'), (0.0, 'does not matter much'),
+    (-2.0, 'does not matter much'), (-2.01, 'hurts'), (float('nan'), ''),
+    ])
+def test_the_verdict_follows_the_rule_fixed_before_any_arm_ran(standard_errors, expected):
+    from mlindex.model_training.BenchmarkRuns import verdict
+    assert verdict(standard_errors) == expected
+
+
 def test_arms_that_ran_different_candidate_settings_pair_only_when_that_is_the_point():
     shipped = {'redistribute': True, 'lattices': {'cP': {'n_candidates': 100}}}
     halved = {'redistribute': True, 'lattices': {'cP': {'n_candidates': 50}}}
