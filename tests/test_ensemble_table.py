@@ -240,12 +240,15 @@ def test_an_arm_refuses_half_edited_fractions_before_it_indexes_anything():
     from mlindex.model_training.BenchmarkRuns import ensemble_record
 
     with pytest.raises(ValueError, match='sum to 1'):
-        ensemble_record({}, True, {'cP': {'trees': 0.50, 'abnn': 0.45, 'templates': 0.10}})
-    record = ensemble_record({'cP': 0.5}, False, {})
+        ensemble_record({}, True, {'cP': {'trees': 0.50, 'abnn': 0.45, 'templates': 0.10}}, {})
+    record = ensemble_record({'cP': 0.5}, False, {}, {'oP': (10, 1e-4)})
     assert record['redistribute'] is False
     assert record['lattices']['cP']['n_candidates'] == 50
     assert record['lattices']['aP'] == {'n_candidates': 6000,
-                                        'fractions': ENSEMBLE['aP']['fractions']}
+                                        'fractions': ENSEMBLE['aP']['fractions'],
+                                        'max_neighbors': 23, 'neighbor_radius': 0.000679}
+    assert (record['lattices']['oP']['max_neighbors'],
+            record['lattices']['oP']['neighbor_radius']) == (10, 1e-4)
 
 
 def test_fractions_on_the_command_line():
@@ -281,3 +284,12 @@ def test_a_run_can_name_redistribution_constants_for_one_lattice():
                 {'oP': (10, -1.0)}):
         with pytest.raises(ValueError):
             lattice_redistribution('oP', bad)
+
+
+def test_redistribution_constants_on_the_command_line():
+    from mlindex.scripts.run_benchmark import _parse_redistribution
+
+    assert _parse_redistribution(['oP=10,0.0001']) == {'oP': (10, 1e-4)}
+    for bad in (['oP=10'], ['orthorhombic=10,0.0001'], ['oP']):
+        with pytest.raises(ValueError):
+            _parse_redistribution(bad)
