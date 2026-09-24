@@ -5,6 +5,8 @@ import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
+from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL
+from mlindex.optimization.UtilitiesOptimizer import MINIMUM_UNIT_CELL
 from mlindex.optimization.UtilitiesOptimizer import lattice_budget
 from mlindex.optimization.UtilitiesOptimizer import lattice_fractions
 from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
@@ -265,8 +267,8 @@ class OptimizerManager(OptimizerBase):
         self.set_seed(seed)
 
         opt_params_defaults = {
-            'minimum_uc': 2,
-            'maximum_uc': 500,
+            'minimum_uc': MINIMUM_UNIT_CELL,
+            'maximum_uc': MAXIMUM_UNIT_CELL,
             'budget_scale': {},
             # RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c's benchmark runs. `fractions` and
             # `redistribution` override ENSEMBLE per lattice and go when P09c closes; `redistribute`

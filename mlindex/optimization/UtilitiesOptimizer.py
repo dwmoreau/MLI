@@ -8,6 +8,11 @@ import warnings
 from mlindex import paths
 
 
+# The smallest and largest cell edge, in Angstrom, a candidate may have; fix_unphysical enforces
+# them wherever a cell is generated or moved.
+MINIMUM_UNIT_CELL = 2
+MAXIMUM_UNIT_CELL = 500
+
 # Each Bravais lattice's candidate settings, and the only place they are set:
 #   n_candidates     the budget at n_candidates_scale = 1
 #   fractions        the share of it each generator makes: P09b's fit on a grid of contaminants
