@@ -31,7 +31,7 @@ def test_every_run_is_a_command_run_benchmark_accepts(index):
         assert set(fractions) == set(BRAVAIS_LATTICES)
     else:
         assert fractions == {}
-    if run in ('old_redistribution', 'shipped_before_p09c'):
+    if run == 'shipped_before_p09c':
         assert redistribution == ensemble_arms.OLD_REDISTRIBUTION
     else:
         assert redistribution == {}
@@ -45,7 +45,7 @@ def test_every_run_is_a_command_run_benchmark_accepts(index):
 
 def test_the_hard_population_gets_only_the_runs_that_touch_its_lattices():
     hard = [run for population, run in ensemble_arms.jobs() if population == 'hard']
-    assert hard == ['control', 'old_fractions', 'old_redistribution', 'redistribution_off',
+    assert hard == ['control', 'old_fractions', 'redistribution_off',
                     'shipped_before_p09c',
                     'budget_half_monoclinic', 'budget_double_monoclinic',
                     'budget_half_triclinic', 'budget_double_triclinic']

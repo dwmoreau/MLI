@@ -253,7 +253,8 @@ def test_an_arm_refuses_half_edited_fractions_before_it_indexes_anything():
     assert record['lattices']['cP']['n_candidates'] == 50
     assert record['lattices']['aP'] == {'n_candidates': 6000,
                                         'fractions': ENSEMBLE['aP']['fractions'],
-                                        'max_neighbors': 23, 'neighbor_radius': 0.000679}
+                                        'max_neighbors': ENSEMBLE['aP']['max_neighbors'],
+                                        'neighbor_radius': ENSEMBLE['aP']['neighbor_radius']}
     assert (record['lattices']['oP']['max_neighbors'],
             record['lattices']['oP']['neighbor_radius']) == (10, 1e-4)
 
@@ -276,17 +277,18 @@ FACTORY_REDISTRIBUTION = {
     }
 
 
-@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
-def test_redistribution_constants_match_the_factories_they_replaced(bravais_lattice):
+@pytest.mark.parametrize('bravais_lattice', ['cF', 'cI', 'cP'])
+def test_cubic_keeps_the_redistribution_constants_its_factory_had(bravais_lattice):
+    """The other eleven were re-derived in P09c; the score cannot see redistribution on cubic."""
     from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
-    expected = FACTORY_REDISTRIBUTION[BL_TO_LATTICE_SYSTEM[bravais_lattice]]
-    assert lattice_redistribution(bravais_lattice, {}) == expected
+    assert lattice_redistribution(bravais_lattice, {}) == FACTORY_REDISTRIBUTION['cubic']
 
 
 def test_a_run_can_name_redistribution_constants_for_one_lattice():
     from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
     assert lattice_redistribution('oP', {'oP': (10, 1e-4)}) == (10, 1e-4)
-    assert lattice_redistribution('aP', {'oP': (10, 1e-4)}) == (23, 0.000679)
+    assert lattice_redistribution('aP', {'oP': (10, 1e-4)}) == (
+        ENSEMBLE['aP']['max_neighbors'], ENSEMBLE['aP']['neighbor_radius'])
     for bad in ({'orthorhombic': (10, 1e-4)}, {'oP': (0, 1e-4)}, {'oP': (2.5, 1e-4)},
                 {'oP': (10, -1.0)}):
         with pytest.raises(ValueError):

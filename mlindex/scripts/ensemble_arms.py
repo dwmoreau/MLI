@@ -24,8 +24,9 @@ one by hand. `list` prints each command in full, and any of them can be run on i
 
 `control` is the code as it stands: P09b's generator fractions and the redistribution constants
 re-derived with the same score (run_ensemble_refine --stage redistribution), both in ENSEMBLE.
-Each is compared with the old setting it replaces, the two together with everything shipped
-before P09c, and the redistribution-off and budget runs with `control`.
+The fractions are compared with the old ones, the two together with everything shipped before
+P09c, and the redistribution-off and budget runs with `control`. The re-derived constants are
+judged against switching redistribution off, not against the old constants (DWMM).
 Both are read per Bravais lattice against the measured run-to-run floor, and a lattice is called
 helps, hurts or does not matter much by the rule fixed before any of them ran.
 
@@ -66,7 +67,6 @@ FAMILIES = ('cubic', 'hexagonal', 'rhombohedral', 'tetragonal', 'orthorhombic', 
 RUNS = {
     'control': [],
     'old_fractions': _OLD_FRACTIONS,
-    'old_redistribution': _OLD_REDISTRIBUTION,
     'redistribution_off': ['--no-redistribution'],
     'shipped_before_p09c': _OLD_FRACTIONS + _OLD_REDISTRIBUTION,
     }
@@ -90,7 +90,6 @@ CUT = 1.5
 # in `against_control`, where it means that change would improve on what ENSEMBLE ships.
 QUESTIONS = (
     ('fractions', 'old_fractions', ('control',)),
-    ('redistribution_constants', 'old_redistribution', ('control',)),
     ('all_of_p09c', 'shipped_before_p09c', ('control',)),
     ('against_control', 'control',
      ('redistribution_off',) + tuple(name for name in RUNS if name.startswith('budget_'))),
@@ -107,8 +106,8 @@ def _touches(run, lattices):
 def _refuse_before_the_constants_land():
     """Stop before any run is made if ENSEMBLE still holds the old redistribution constants.
 
-    Until the re-derived constants are in ENSEMBLE, `old_redistribution` is the same run as
-    `control` and the comparison between them measures nothing.
+    Until the re-derived constants are in ENSEMBLE, `control` would test the old ones and the
+    redistribution-off run would answer a question nobody is asking.
     """
     from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
     current = {lattice: (row['max_neighbors'], row['neighbor_radius'])
@@ -116,8 +115,7 @@ def _refuse_before_the_constants_land():
     if current == OLD_REDISTRIBUTION:
         raise SystemExit(
             'ENSEMBLE still holds the old redistribution constants. Put the ones '
-            'run_ensemble_refine --stage redistribution chose into it first; until then '
-            'old_redistribution and control are the same run.')
+            'run_ensemble_refine --stage redistribution chose into it first.')
 
 
 def jobs():

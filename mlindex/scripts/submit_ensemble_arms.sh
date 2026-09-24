@@ -48,7 +48,7 @@
 #SBATCH -J p09c_ensemble_arms
 #SBATCH -A lcls
 #SBATCH -t 2:00:00
-#SBATCH --array=0-27
+#SBATCH --array=0-25
 #SBATCH -o p09c_ensemble_arms_%A_%a.out
 
 set -euo pipefail
