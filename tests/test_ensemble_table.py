@@ -1,7 +1,7 @@
 """The generator fractions are set in one table, and the counts derived from it are today's.
 
-`LITERAL_GENERATOR_INFO` holds, verbatim, the per-split-group count lines the seven optimizer
-factories carried before the fractions moved into `ENSEMBLE`. Comparing against them -- rather
+`_literal` holds, verbatim, the per-split-group count lines the seven optimizer factories carried
+before the fractions moved into `ENSEMBLE`. Comparing against them -- rather
 than against a second call of the new function -- is what makes the test able to fail.
 """
 import pytest
@@ -141,33 +141,47 @@ def _literal(bravais_lattice, n_candidates):
 BASE_BUDGET = {'cF': 100, 'cI': 100, 'cP': 100, 'tI': 2000, 'tP': 2000, 'hP': 2000, 'hR': 2000, 'oF': 4000, 'oI': 4000, 'oC': 4000, 'oP': 4000, 'mC': 6000, 'mP': 6000, 'aP': 6000}
 
 
-class _Captured:
-    """Stands in for an optimizer class, so a factory can be called without loading models."""
-    def __init__(self, data_params, opt_params, rf_params, template_params, abnn_params,
-                 random_params, bravais_lattice, comm, fom, seed=12345):
-        self.opt_params = opt_params
-        self.rf_params = rf_params
-        self.abnn_params = abnn_params
+def _model_split_groups(bravais_lattice):
+    """The split groups the saved models have, read the way OptimizerManager reads them."""
+    from mlindex.model_training.Wrapper import Wrapper
+    from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+    tag = f'{BL_TO_LATTICE_SYSTEM[bravais_lattice]}_1'
+    wrapper = Wrapper(
+        data_params={'tag': tag, 'base_directory': None,
+                     'models_directory': _resolve_models_dir(), 'load_from_tag': True},
+        rf_params={}, template_params={bravais_lattice: {'tag': tag, 'load_from_tag': True}},
+        abnn_params={}, random_params={bravais_lattice: {'tag': tag, 'load_from_tag': True}})
+    wrapper.setup_from_tag(load_bravais_lattice=bravais_lattice)
+    return wrapper.data_params['split_groups']
 
 
 def _derived(bravais_lattice, scale):
-    """What OptimizerManager builds, from the factory's own split groups and scale."""
-    from mlindex.optimization import UtilitiesOptimizer
-    family = BL_TO_LATTICE_SYSTEM[bravais_lattice]
-    factory = getattr(UtilitiesOptimizer, f'get_{family}_optimizer')
-    built = factory(bravais_lattice, '1', scale, None, optimizer_class=_Captured)
-    ensemble = ENSEMBLE[bravais_lattice]
+    """What OptimizerManager builds at this scale."""
     return generator_info_from_fractions(
-        ensemble['fractions'],
-        lattice_budget(bravais_lattice, built.opt_params['n_candidates_scale'], {}),
-        list(built.rf_params), list(built.abnn_params))
+        ENSEMBLE[bravais_lattice]['fractions'],
+        lattice_budget(bravais_lattice, scale, {}),
+        _model_split_groups(bravais_lattice))
+
+
+def _key(row):
+    return (row['generator'], row.get('split_group', ''))
 
 
 @pytest.mark.parametrize('scale', [0.5, 1, 2])
 @pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
 def test_counts_match_the_literals_they_replaced(bravais_lattice, scale):
+    """Same count for every (generator, split group). The order can differ: it now follows the
+    model files, which list hP's groups in a different order from the old factory."""
     expected = _literal(bravais_lattice, int(scale*BASE_BUDGET[bravais_lattice]))
-    assert _derived(bravais_lattice, scale) == expected
+    assert sorted(_derived(bravais_lattice, scale), key=_key) == sorted(expected, key=_key)
+
+
+@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
+def test_candidates_are_generated_in_the_model_files_split_group_order(bravais_lattice):
+    groups = _model_split_groups(bravais_lattice)
+    info = _derived(bravais_lattice, 1)
+    assert [row['split_group'] for row in info if row['generator'] == 'trees'] == groups
+    assert [row['split_group'] for row in info if row['generator'] == 'abnn'] == groups
 
 
 def test_every_lattice_has_a_row():
@@ -195,7 +209,7 @@ def test_a_malformed_row_is_refused(fractions):
 
 def test_a_zero_share_generator_is_left_out():
     info = generator_info_from_fractions(
-        {'trees': 1.0, 'abnn': 0.0, 'templates': 0.0}, 100, ['cP_0'], ['cP_0'])
+        {'trees': 1.0, 'abnn': 0.0, 'templates': 0.0}, 100, ['cP_0'])
     assert info == [{'generator': 'trees', 'split_group': 'cP_0', 'n_unit_cells': 100}]
 
 

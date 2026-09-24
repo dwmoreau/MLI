@@ -55,11 +55,11 @@ def check_generator_fractions(fractions):
         raise ValueError(f'generator fractions must sum to 1, got {fractions} (sum {total})')
 
 
-def generator_info_from_fractions(fractions, n_candidates, rf_split_groups, abnn_split_groups):
+def generator_info_from_fractions(fractions, n_candidates, split_groups):
     """The per-generator, per-split-group candidate counts for one lattice.
 
     The forest and the network are trained per split group, so each one's share is divided evenly
-    among its groups; the templates are not split. Each count is `int(1/k*share*n_candidates)`
+    among `split_groups`; the templates are not split. Each count is `int(1/k*share*n_candidates)`
     for a generator with `k` groups, which floors every group separately -- a lattice can receive
     a few candidates fewer than its budget. A generator whose share is zero is left out.
 
@@ -68,7 +68,7 @@ def generator_info_from_fractions(fractions, n_candidates, rf_split_groups, abnn
     """
     check_generator_fractions(fractions)
     generator_info = []
-    for name, split_groups in (('trees', rf_split_groups), ('abnn', abnn_split_groups)):
+    for name in ('trees', 'abnn'):
         if fractions[name] == 0:
             continue
         k = len(split_groups)

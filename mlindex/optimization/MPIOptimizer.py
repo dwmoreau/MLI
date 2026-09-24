@@ -251,13 +251,17 @@ class OptimizerWorker(OptimizerBase):
 
 
 class OptimizerManager(OptimizerBase):
-    def __init__(self, data_params, opt_params, rf_params, template_params, abnn_params, random_params, bravais_lattice, comm, fom, seed=12345):
+    def __init__(self, data_params, opt_params, rf_group_params, template_params, abnn_group_params, random_params, bravais_lattice, comm, fom, seed=12345):
+        """`rf_group_params` and `abnn_group_params` are the settings every split group's forest
+        and network share. The split groups themselves are read from the saved models by
+        `Wrapper.setup_from_tag`, and each gets its own copy of these."""
         self.root = comm.Get_rank()
         assert self.root == 0
         self.data_params = data_params
         self.opt_params = opt_params
-        self.rf_params = rf_params
-        self.abnn_params = abnn_params
+        # Filled per split group once the Wrapper has read which split groups the models have.
+        self.rf_params = {}
+        self.abnn_params = {}
         self.random_params = random_params
         self.template_params = template_params
         self.bravais_lattice = bravais_lattice
@@ -277,24 +281,6 @@ class OptimizerManager(OptimizerBase):
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
                 self.opt_params[key] = opt_params_defaults[key]
-        if 'generator_info' in self.opt_params:
-            raise ValueError(
-                'generator_info is derived from UtilitiesOptimizer.ENSEMBLE and cannot be passed in; '
-                'edit the lattice\'s row there instead')
-        self.opt_params['generator_info'] = generator_info_from_fractions(
-            lattice_fractions(self.bravais_lattice, self.opt_params['fractions']),
-            lattice_budget(
-                self.bravais_lattice,
-                self.opt_params['n_candidates_scale'],
-                self.opt_params['budget_scale'],
-                ),
-            list(self.rf_params),
-            list(self.abnn_params),
-            )
-        for key in self.rf_params:
-            self.rf_params[key]['load_from_tag'] = True
-        for key in self.abnn_params:
-            self.abnn_params[key]['load_from_tag'] = True
         self.data_params['load_from_tag'] = True
         self.template_params[self.bravais_lattice]['load_from_tag'] = True
         self.random_params[self.bravais_lattice]['load_from_tag'] = True
@@ -308,6 +294,19 @@ class OptimizerManager(OptimizerBase):
             seed=seed,
             )
         self.wrapper.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
+        split_groups = self.wrapper.data_params['split_groups']
+        for split_group in split_groups:
+            self.rf_params[split_group] = dict(rf_group_params, load_from_tag=True)
+            self.abnn_params[split_group] = dict(abnn_group_params, load_from_tag=True)
+        self.opt_params['generator_info'] = generator_info_from_fractions(
+            lattice_fractions(self.bravais_lattice, self.opt_params['fractions']),
+            lattice_budget(
+                self.bravais_lattice,
+                self.opt_params['n_candidates_scale'],
+                self.opt_params['budget_scale'],
+                ),
+            split_groups,
+            )
         if self.opt_params['convergence_testing'] == False:
             load_random_forest = False
             load_abnn = False

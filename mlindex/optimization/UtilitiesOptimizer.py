@@ -8,25 +8,6 @@ import warnings
 from mlindex import paths
 
 
-# Each Bravais lattice's split groups, in the order its candidates are generated. The forest and the
-# network are both trained per split group, so both read this list.
-SPLIT_GROUPS = {
-    'cF': ['cF_0'],
-    'cI': ['cI_0'],
-    'cP': ['cP_0'],
-    'hP': ['hP_0_00', 'hP_0_01', 'hP_0_02', 'hP_0_03', 'hP_1_00', 'hP_1_01', 'hP_1_02', 'hP_1_03'],
-    'hR': ['hR_00', 'hR_01'],
-    'tI': ['tI_0_00', 'tI_1_00', 'tI_0_01', 'tI_1_01'],
-    'tP': ['tP_0_00', 'tP_1_00', 'tP_0_01', 'tP_1_01'],
-    'oC': ['oC_0_00', 'oC_2_00'],
-    'oF': ['oF_0_00', 'oF_0_01'],
-    'oI': ['oI_0_00'],
-    'oP': ['oP_0_00', 'oP_0_01', 'oP_0_02', 'oP_0_03'],
-    'mC': ['mC_0_02', 'mC_0_03', 'mC_1_02', 'mC_1_03', 'mC_4_02', 'mC_4_03'],
-    'mP': ['mP_0_00', 'mP_0_01', 'mP_1_00', 'mP_1_01', 'mP_4_00', 'mP_4_01'],
-    'aP': ['aP_00'],
-    }
-
 # Each Bravais lattice's candidate budget at n_candidates_scale = 1, and the fraction of it each
 # generator makes. This is the only place either is set: OptimizerManager divides each fraction
 # among the split groups with Allocation.generator_info_from_fractions, and a row whose fractions
@@ -202,8 +183,8 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'cubic_{broadening_tag}'}}
-    rf_params = {group: {'tag': f'cubic_{broadening_tag}'} for group in SPLIT_GROUPS[bravais_lattice]}
-    abnn_params = {group: {'tag': f'cubic_{broadening_tag}'} for group in SPLIT_GROUPS[bravais_lattice]}
+    rf_group_params = {'tag': f'cubic_{broadening_tag}'}
+    abnn_group_params = {'tag': f'cubic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'cubic_{broadening_tag}'}}
     iteration_info = [
         {
@@ -235,9 +216,9 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
     optimizer = _cls(
         data_params,
         opt_params,
-        rf_params,
+        rf_group_params,
         template_params,
-        abnn_params,
+        abnn_group_params,
         random_params,
         bravais_lattice,
         comm,
@@ -257,9 +238,7 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
         }
     template_params = {bravais_lattice: {'tag': f'tetragonal_{broadening_tag}'}}
     rf_group_params = {'tag': f'tetragonal_{broadening_tag}'}
-    rf_params = {group: rf_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     abnn_group_params = {'tag': f'tetragonal_{broadening_tag}'}
-    abnn_params = {group: abnn_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     random_params = {bravais_lattice: {'tag': f'tetragonal_{broadening_tag}'}}
     iteration_info = [
         {
@@ -291,9 +270,9 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     optimizer = _cls(
         data_params,
         opt_params,
-        rf_params,
+        rf_group_params,
         template_params,
-        abnn_params,
+        abnn_group_params,
         random_params,
         bravais_lattice,
         comm,
@@ -313,9 +292,7 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
         }
     template_params = {bravais_lattice: {'tag': f'hexagonal_{broadening_tag}'}}
     rf_group_params = {'tag': f'hexagonal_{broadening_tag}'}
-    rf_params = {group: rf_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     abnn_group_params = {'tag': f'hexagonal_{broadening_tag}'}
-    abnn_params = {group: abnn_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     random_params = {bravais_lattice: {'tag': f'hexagonal_{broadening_tag}'}}
     iteration_info = [
         {
@@ -347,9 +324,9 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     optimizer = _cls(
         data_params,
         opt_params,
-        rf_params,
+        rf_group_params,
         template_params,
-        abnn_params,
+        abnn_group_params,
         random_params,
         bravais_lattice,
         comm,
@@ -369,9 +346,7 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
         }
     template_params = {bravais_lattice: {'tag': f'rhombohedral_{broadening_tag}'}}
     rf_group_params = {'tag': f'rhombohedral_{broadening_tag}'}
-    rf_params = {group: rf_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     abnn_group_params = {'tag': f'rhombohedral_{broadening_tag}', 'quantitized_model': True}
-    abnn_params = {group: abnn_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     random_params = {bravais_lattice: {'tag': f'rhombohedral_{broadening_tag}'}}
     iteration_info = [
         {
@@ -403,9 +378,9 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     optimizer = _cls(
         data_params,
         opt_params,
-        rf_params,
+        rf_group_params,
         template_params,
-        abnn_params,
+        abnn_group_params,
         random_params,
         bravais_lattice,
         comm,
@@ -427,8 +402,6 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     rf_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
     abnn_group_params = {'tag': f'orthorhombic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'orthorhombic_{broadening_tag}'}}
-    rf_params = {group: rf_group_params for group in SPLIT_GROUPS[bravais_lattice]}
-    abnn_params = {group: abnn_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     iteration_info = [
         {
         'worker': 'deterministic',
@@ -459,9 +432,9 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     optimizer = _cls(
         data_params,
         opt_params,
-        rf_params,
+        rf_group_params,
         template_params,
-        abnn_params,
+        abnn_group_params,
         random_params,
         bravais_lattice,
         comm,
@@ -483,8 +456,6 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     rf_group_params = {'tag': f'monoclinic_{broadening_tag}'}
     abnn_group_params = {'tag': f'monoclinic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'monoclinic_{broadening_tag}'}}
-    rf_params = {group: rf_group_params for group in SPLIT_GROUPS[bravais_lattice]}
-    abnn_params = {group: abnn_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     iteration_info = [
         {
         'worker': 'deterministic',
@@ -516,9 +487,9 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     optimizer = _cls(
         data_params,
         opt_params,
-        rf_params,
+        rf_group_params,
         template_params,
-        abnn_params,
+        abnn_group_params,
         random_params,
         bravais_lattice,
         comm,
@@ -540,8 +511,6 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     rf_group_params = {'tag': f'triclinic_{broadening_tag}'}
     abnn_group_params = {'tag': f'triclinic_{broadening_tag}'}
     random_params = {bravais_lattice: {'tag': f'triclinic_{broadening_tag}'}}
-    rf_params = {group: rf_group_params for group in SPLIT_GROUPS[bravais_lattice]}
-    abnn_params = {group: abnn_group_params for group in SPLIT_GROUPS[bravais_lattice]}
     iteration_info = [
         {
         'worker': 'deterministic',
@@ -572,9 +541,9 @@ def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     optimizer = _cls(
         data_params,
         opt_params,
-        rf_params,
+        rf_group_params,
         template_params,
-        abnn_params,
+        abnn_group_params,
         random_params,
         bravais_lattice,
         comm,
