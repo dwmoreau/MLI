@@ -5,8 +5,8 @@ import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
-from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
 from mlindex.optimization.UtilitiesOptimizer import lattice_budget
+from mlindex.optimization.UtilitiesOptimizer import lattice_fractions
 from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
 from mlindex.utilities.ClumpDiscount import clump_weights
@@ -267,9 +267,11 @@ class OptimizerManager(OptimizerBase):
             'minimum_uc': 2,
             'maximum_uc': 500,
             'budget_scale': {},
-            # RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c's redistribution-off benchmark run.
-            # Removed when P09c records its verdict: either the step stays and this is dead, or
-            # the step goes with it.
+            # RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c's benchmark runs. `fractions`
+            # overrides ENSEMBLE per lattice and goes when P09c closes; `redistribute` goes when
+            # P09c records its verdict, since either the step stays and this is dead, or the step
+            # goes with it.
+            'fractions': {},
             'redistribute': True,
             }
         for key in opt_params_defaults.keys():
@@ -280,7 +282,7 @@ class OptimizerManager(OptimizerBase):
                 'generator_info is derived from UtilitiesOptimizer.ENSEMBLE and cannot be passed in; '
                 'edit the lattice\'s row there instead')
         self.opt_params['generator_info'] = generator_info_from_fractions(
-            ENSEMBLE[self.bravais_lattice]['fractions'],
+            lattice_fractions(self.bravais_lattice, self.opt_params['fractions']),
             lattice_budget(
                 self.bravais_lattice,
                 self.opt_params['n_candidates_scale'],

@@ -170,7 +170,7 @@ def entry_record(entry, condition, pattern, digest, pool_size_full=-1):
 
 
 def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_lattices,
-              seed, search_seed, cut, pool_size, budget_scale, redistribute):
+              seed, search_seed, cut, pool_size, budget_scale, redistribute, fractions):
     """Index one stripe of an arm's crystals and write it under `parts/NNN/`.
 
     Module level and taking only picklable arguments, because Windows and macOS spawn rather
@@ -187,7 +187,7 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
     optimizers, processes, task_queues = setup_mp_optimizers(
         pool_size, BenchmarkPatterns.BROADENING_TAG, 1, seed=search_seed,
         options={'prune_m20_threshold': float(cut), 'budget_scale': dict(budget_scale),
-                 'redistribute': bool(redistribute)},
+                 'redistribute': bool(redistribute), 'fractions': dict(fractions)},
         optimizer_class=BenchmarkOptimizer)
 
     entry_rows = []
@@ -272,31 +272,34 @@ def _write_bundle(directory, bundle, records, entry_rows):
         Benchmark.write_candidate_shard(block.reset_index(drop=True), directory, bundle, lattice)
 
 
-def ensemble_record(budget_scale, redistribute):
+def ensemble_record(budget_scale, redistribute, fractions):
     """The candidate settings an arm ran with, as its manifest records them.
 
     Every lattice's budget and generator fractions are written out rather than only the scales
     that were asked for, so two arms can be compared on what they did without reading the commit.
     """
-    from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE, lattice_budget
-    return {
-        'redistribute': bool(redistribute),
-        'lattices': {
-            lattice: {'n_candidates': lattice_budget(lattice, 1, budget_scale),
-                      'fractions': dict(ENSEMBLE[lattice]['fractions'])}
-            for lattice in BRAVAIS_LATTICES},
-        }
+    from mlindex.optimization.UtilitiesOptimizer import lattice_budget, lattice_fractions
+    from mlindex.utilities.Allocation import check_generator_fractions
+    lattices = {}
+    for lattice in BRAVAIS_LATTICES:
+        lattice_mix = lattice_fractions(lattice, fractions)
+        check_generator_fractions(lattice_mix)
+        lattices[lattice] = {'n_candidates': lattice_budget(lattice, 1, budget_scale),
+                             'fractions': lattice_mix}
+    return {'redistribute': bool(redistribute), 'lattices': lattices}
 
 
 def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed=12345,
             search_seed=12345, cut=1.5, pool_size=1, n_pools=1, bundles=None,
             dataset_directory=None, degeneracy_rule='not_evaluated', budget_scale=None,
-            redistribute=True):
+            redistribute=True, fractions=None):
     """Generate one arm into `pool_dir`, and stamp it complete when every stripe has landed.
 
-    `budget_scale` maps a Bravais lattice to a factor on its candidate budget, and `redistribute`
-    turns the crowding redistribution off; both are recorded in the manifest's `ensemble` field,
-    with every lattice's resulting budget and generator fractions, so an arm says what it ran.
+    `budget_scale` maps a Bravais lattice to a factor on its candidate budget, `fractions` maps one
+    to generator fractions replacing its ENSEMBLE row, and `redistribute` turns the crowding
+    redistribution off. All three are resolved and checked before any pattern is indexed, and
+    recorded in the manifest's `ensemble` field as every lattice's resulting budget and fractions,
+    so an arm says what it ran.
 
     Returns the manifest's metadata. The completion stamp is written last and only here: a killed
     run leaves valid shards behind, so an unstamped arm is refused by every reader.
@@ -313,6 +316,10 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     # produced it -- which is both wrong and invisible, since the manifest still parses and the
     # identity check still compares it against other arms.
     commit = _commit()
+    # Checked before a single crystal is loaded, so a malformed setting costs nothing.
+    budget_scale = dict(budget_scale or {})
+    fractions = {lattice: dict(value) for lattice, value in (fractions or {}).items()}
+    ensemble = ensemble_record(budget_scale, redistribute, fractions)
     design = POPULATIONS[population]
     bundles = list(bundles or design['bundles'])
     unknown = [bundle for bundle in bundles if bundle not in BenchmarkConditions.BY_TAG]
@@ -329,10 +336,8 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     second_phase_pool = BenchmarkPatterns.build_second_phase_pool(source_rows)
 
     stripes = [source_rows.iloc[part::n_pools].reset_index(drop=True) for part in range(n_pools)]
-    budget_scale = dict(budget_scale or {})
-    ensemble = ensemble_record(budget_scale, redistribute)
     arguments = [(part, pool_dir, stripe, second_phase_pool, bundles, list(BRAVAIS_LATTICES),
-                  seed, search_seed, cut, pool_size, budget_scale, redistribute)
+                  seed, search_seed, cut, pool_size, budget_scale, redistribute, fractions)
                  for part, stripe in enumerate(stripes) if stripe.shape[0]]
     if len(arguments) == 1:
         _run_pool(*arguments[0])

@@ -168,6 +168,11 @@ def build_parser():
                                'every lattice in a lattice system (cubic) by F. Repeat for '
                                'several. Recorded in the manifest, so arms that differ in it pair '
                                'only with --vary ensemble.')
+    generate.add_argument('--fractions', action='append', default=None, metavar='BL=T,A,P',
+                          help='Generator fractions for one Bravais lattice, replacing its row in '
+                               'UtilitiesOptimizer.ENSEMBLE: trees, abnn, templates, summing to '
+                               '1. Repeat for several. For P09c, which compares the old and new '
+                               'fractions from one commit. Recorded like --budget-scale.')
     generate.add_argument('--no-redistribution', action='store_true',
                           help='Skip the step that moves candidates out of crowded '
                                'neighbourhoods before refinement. Recorded like --budget-scale.')
@@ -193,6 +198,21 @@ def _parse_budget_scale(values):
         for lattice in lattices:
             scale[lattice] = float(factor)
     return scale
+
+
+def _parse_fractions(values):
+    """`BL=T,A,P` values as {Bravais lattice: {'trees': T, 'abnn': A, 'templates': P}}."""
+    fractions = {}
+    for item in values or []:
+        if '=' not in item:
+            raise ValueError(f'--fractions wants BL=T,A,P, got {item!r}')
+        lattice, shares = item.split('=', 1)
+        shares = shares.split(',')
+        if lattice not in BRAVAIS_LATTICES or len(shares) != 3:
+            raise ValueError(f'--fractions wants a Bravais lattice and three shares, got {item!r}')
+        fractions[lattice] = {'trees': float(shares[0]), 'abnn': float(shares[1]),
+                              'templates': float(shares[2])}
+    return fractions
 
 
 def _parse_arms(values):
@@ -308,6 +328,7 @@ def main(argv=None):
             cut=args.cut, pool_size=args.pool_size, n_pools=args.n_pools, bundles=bundles,
             dataset_directory=args.dataset_directory,
             budget_scale=_parse_budget_scale(args.budget_scale),
+            fractions=_parse_fractions(args.fractions),
             redistribute=not args.no_redistribution)
         print(f"generated {metadata['n_source_entries']} crystals x "
               f"{len(metadata['bundles'])} bundles into {args.out_pool}")

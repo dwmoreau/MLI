@@ -210,3 +210,35 @@ def test_a_budget_scale_reaches_only_the_lattices_it_names():
 def test_a_budget_scale_naming_an_unknown_lattice_is_refused():
     with pytest.raises(ValueError, match='unknown Bravais lattices'):
         lattice_budget('cP', 1, {'cubic': 0.5})
+
+
+def test_a_run_can_name_fractions_for_one_lattice_and_the_rest_keep_their_row():
+    from mlindex.optimization.UtilitiesOptimizer import lattice_fractions
+
+    corner = {'trees': 1.0, 'abnn': 0.0, 'templates': 0.0}
+    assert lattice_fractions('cP', {'cP': corner}) == corner
+    assert lattice_fractions('aP', {'cP': corner}) == ENSEMBLE['aP']['fractions']
+    with pytest.raises(ValueError, match='unknown Bravais lattices'):
+        lattice_fractions('cP', {'cubic': corner})
+
+
+def test_an_arm_refuses_half_edited_fractions_before_it_indexes_anything():
+    from mlindex.model_training.BenchmarkRuns import ensemble_record
+
+    with pytest.raises(ValueError, match='sum to 1'):
+        ensemble_record({}, True, {'cP': {'trees': 0.50, 'abnn': 0.45, 'templates': 0.10}})
+    record = ensemble_record({'cP': 0.5}, False, {})
+    assert record['redistribute'] is False
+    assert record['lattices']['cP']['n_candidates'] == 50
+    assert record['lattices']['aP'] == {'n_candidates': 6000,
+                                        'fractions': ENSEMBLE['aP']['fractions']}
+
+
+def test_fractions_on_the_command_line():
+    from mlindex.scripts.run_benchmark import _parse_fractions
+
+    assert _parse_fractions(['cP=0.67,0.10,0.23']) == {
+        'cP': {'trees': 0.67, 'abnn': 0.10, 'templates': 0.23}}
+    for bad in (['cP=0.5,0.5'], ['cubic=1,0,0'], ['cP']):
+        with pytest.raises(ValueError):
+            _parse_fractions(bad)
