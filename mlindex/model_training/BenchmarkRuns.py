@@ -533,8 +533,9 @@ def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattic
     often. `contrast_table` answers a different one -- two scores inside one arm -- and
     `floor_from_arms` a third, the spread of a score-contrast across arms that differ only by seed.
 
-    `floors` maps a scope to that scope's measured run-to-run floor, and turns the difference into
-    the multiple of it that a gate is actually read in. Without it the size is reported in
+    `floors` maps (metric, scope) to that metric's measured run-to-run floor in that scope, and
+    turns the difference into the multiple of it that a gate is actually read in; a metric with no
+    measured floor is left unread. Without it the size is reported in
     percentage points and the caller is told, rather than left to assume the points mean something.
 
     Returns one row per metric per scope, aggregate first.
@@ -572,7 +573,7 @@ def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattic
                 low, high = metrics.paired_delta_ci(
                     left.astype(float), right.astype(float),
                     block['entry_id'].to_numpy())
-                floor = (floors or {}).get(scope)
+                floor = (floors or {}).get((metric, scope))
                 standard_errors = (100.0*test['delta']/floor) if floor else float('nan')
                 rows.append({
                     'arm': name, 'reference': reference, 'score': score, 'scope': scope,
@@ -592,10 +593,15 @@ def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattic
 
 
 def floors_from_table(table, score=None):
-    """{scope: floor_pp} from a `floor.csv` this harness wrote, for reading a contrast against."""
+    """{(metric, scope): floor_pp} from a `floor.csv` this harness wrote, to read a contrast against.
+
+    Keyed by metric as well as scope because a floor is measured for one metric -- top-10, as the
+    floor stage writes it -- and nothing says another metric's run-to-run spread is the same, so a
+    top-1 difference read against a top-10 floor would be read against the wrong noise.
+    """
     if score is not None:
         table = table.loc[table['score'] == score]
-    return {row.scope: float(row.floor_pp) for row in table.itertuples()
+    return {(row.metric, row.scope): float(row.floor_pp) for row in table.itertuples()
             if np.isfinite(row.floor_pp)}
 
 

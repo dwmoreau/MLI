@@ -459,12 +459,17 @@ def test_a_contrast_is_reported_in_multiples_of_the_measured_floor():
 
     arms = {'before': _floor_reduction([True]*4 + [False]*4),
             'after': _floor_reduction([True]*7 + [False])}
-    floor_table = pd.DataFrame([{'score': 'M20', 'scope': 'aggregate', 'floor_pp': 2.5}])
+    floor_table = pd.DataFrame([{'score': 'M20', 'metric': 'top1', 'scope': 'aggregate',
+                                 'floor_pp': 2.5}])
 
     with_floor = arm_contrast(arms, 'M20', 'before',
                               floors=floors_from_table(floor_table, score='M20'))
     row = with_floor[(with_floor.scope == 'aggregate') & (with_floor.metric == 'top1')].iloc[0]
     assert row['standard_errors'] == pytest.approx(37.5/2.5)
+    # A floor is measured for one metric; another metric is not read against it.
+    other = with_floor[(with_floor.scope == 'aggregate') & (with_floor.metric == 'top10')].iloc[0]
+    assert np.isnan(other['standard_errors'])
+    assert other['verdict'] == ''
 
     without = arm_contrast(arms, 'M20', 'before')
     assert np.isnan(without[without.metric == 'top1'].iloc[0]['standard_errors'])
