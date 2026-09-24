@@ -5,6 +5,8 @@ import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
+from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
+from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
 from mlindex.utilities.ClumpDiscount import clump_weights
 from mlindex.utilities.EnsembleObjective import expected_success_objective
@@ -267,6 +269,17 @@ class OptimizerManager(OptimizerBase):
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
                 self.opt_params[key] = opt_params_defaults[key]
+        if 'generator_info' in self.opt_params:
+            raise ValueError(
+                'generator_info is derived from UtilitiesOptimizer.ENSEMBLE and cannot be passed in; '
+                'edit the lattice\'s row there instead')
+        ensemble = ENSEMBLE[self.bravais_lattice]
+        self.opt_params['generator_info'] = generator_info_from_fractions(
+            ensemble['fractions'],
+            int(self.opt_params['n_candidates_scale'] * ensemble['n_candidates']),
+            list(self.rf_params),
+            list(self.abnn_params),
+            )
         for key in self.rf_params:
             self.rf_params[key]['load_from_tag'] = True
         for key in self.abnn_params:
