@@ -379,5 +379,21 @@ def test_the_redistribution_stage_runs_and_says_what_produced_it(tmp_path, monke
     assert set(zip(table['reduction'], table['split'])) == {
         (reduction, split) for reduction in ('per-pattern', 'pooled')
         for split in ('all', 'half-a', 'half-b')}
-    manifest = json.loads((out/'redistribution_manifest.json').read_text(encoding='utf-8'))
-    assert manifest['pools_commit'] == 'pools-commit' and manifest['n_crystals'] == 4
+    provenance = json.loads(str(np.load(out/'oP_redistribution_scores.npz',
+                                        allow_pickle=True)['provenance']))
+    assert provenance['pools_commit'] == 'pools-commit' and provenance['n_crystals'] == 4
+
+    # A later run over other lattices -- as after a job that ran out of time -- adds to the table
+    # instead of replacing it. Here the "other lattice" is the same scores under another name.
+    (out/'mP_redistribution_scores.npz').write_bytes(
+        (out/'oP_redistribution_scores.npz').read_bytes())
+    assert driver.main([
+        '--stage', 'redistribution', '--bravais-lattices', 'oP', '--pools', str(pools),
+        '--roc-dir', str(roc), '--clump-discount', str(roc), '--out-dir', str(out),
+        '--n-crystals', '4', '--repeats', '1']) == 0
+    assert set(pd.read_csv(out/'redistribution.csv')['bravais_lattice']) == {'oP', 'mP'}
+
+    # and the table can be rebuilt from the scores files alone
+    (out/'redistribution.csv').unlink()
+    assert driver.main(['--stage', 'redistribution-table', '--out-dir', str(out)]) == 0
+    assert set(pd.read_csv(out/'redistribution.csv')['bravais_lattice']) == {'oP', 'mP'}

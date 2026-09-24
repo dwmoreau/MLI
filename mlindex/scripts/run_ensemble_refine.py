@@ -782,24 +782,19 @@ def choose_redistribution(scores, grid, reduction):
 
 
 def fit_redistribution(args):
-    """Re-derive every lattice's redistribution constants against the ensemble score."""
+    """Re-derive every lattice's redistribution constants against the ensemble score.
+
+    Each lattice's per-crystal scores are written to their own file, carrying what produced them,
+    and the table is rebuilt from every such file after each lattice. So a second run over some
+    lattices -- after a first one ran out of time -- adds to the table rather than replacing it.
+    """
     pools = Path(args.pools)
     manifest_path = pools/'pools_manifest.json'
     if not manifest_path.is_file():
         raise SystemExit(f'no pools manifest at {manifest_path}; run --stage generate first')
+    pools_commit = json.loads(manifest_path.read_text(encoding='utf-8')).get('commit')
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    # Which code, which pools and which settings produced the table, so a number in it can be
-    # traced back without this conversation.
-    (out/'redistribution_manifest.json').write_text(json.dumps({
-        'commit': commit(), 'pools': str(pools),
-        'pools_commit': json.loads(manifest_path.read_text(encoding='utf-8')).get('commit'),
-        'n_crystals': args.n_crystals, 'repeats': args.repeats, 'seed': args.seed,
-        'split_seed': args.split_seed, 'neighbor_values': list(NEIGHBOR_VALUES),
-        'radius_factors': list(RADIUS_FACTORS), 'platform': platform.platform(),
-        'machine': platform.machine(), 'numpy': np.__version__,
-        }, indent=2, sort_keys=True), encoding='utf-8')
-    rows = []
     for bravais_lattice in args.bravais_lattices:
         if bravais_lattice in CUBIC:
             # No clump discount can be measured on cubic, so every weight is one and the score
@@ -835,26 +830,52 @@ def fit_redistribution(args):
         scores = score_redistribution_parallel(
             xnn, xnn_true, identifiers, bravais_lattice, counts, grid, curve, discount,
             args.repeats, args.seed, args.nproc)
+        # What produced these scores, kept with them so that it survives any later run.
+        provenance = {
+            'commit': commit(), 'pools': str(pools), 'pools_commit': pools_commit,
+            'n_crystals': int(xnn.shape[0]), 'repeats': args.repeats, 'seed': args.seed,
+            'split_seed': args.split_seed, 'budget': budget, 'fractions': fractions,
+            'shipped_max_neighbors': shipped[0], 'shipped_neighbor_radius': shipped[1],
+            'platform': platform.platform(), 'machine': platform.machine(),
+            'numpy': np.__version__,
+            }
         np.savez_compressed(out/f'{bravais_lattice}_redistribution_scores.npz', scores=scores,
-                            grid=grid, identifiers=np.array(identifiers, dtype=object))
+                            grid=grid, identifiers=np.array(identifiers, dtype=object),
+                            provenance=json.dumps(provenance, sort_keys=True))
+        write_redistribution_table(out, args.reductions, args.split_seed)
+        print(f'{bravais_lattice}: done', flush=True)
+    return 0
+
+
+def write_redistribution_table(out, reductions, split_seed):
+    """Rebuild redistribution.csv from every lattice's scores file in `out`."""
+    out = Path(out)
+    rows = []
+    for path in sorted(out.glob('*_redistribution_scores.npz')):
+        data = np.load(path, allow_pickle=True)
+        if 'provenance' not in data:
+            raise SystemExit(f'{path} does not say what produced it; regenerate it')
+        provenance = json.loads(str(data['provenance']))
+        bravais_lattice = path.name.split('_')[0]
+        scores, grid = data['scores'], data['grid']
+        shipped = (provenance['shipped_max_neighbors'], provenance['shipped_neighbor_radius'])
         shipped_index = 1 + int(np.flatnonzero(
             (grid[:, 0] == shipped[0]) & np.isclose(grid[:, 1], shipped[1]))[0])
-        for reduction in args.reductions:
-            for split, rows_of in _splits(xnn.shape[0], args.split_seed):
+        for reduction in reductions:
+            for split, rows_of in _splits(scores.shape[1], split_seed):
                 constants, report = choose_redistribution(scores[:, rows_of], grid, reduction)
                 rows.append(dict(
                     bravais_lattice=bravais_lattice, reduction=reduction, split=split,
-                    n_crystals=int(rows_of.size), budget=budget, repeats=args.repeats,
+                    n_crystals=int(rows_of.size), budget=provenance['budget'],
+                    repeats=provenance['repeats'], commit=provenance['commit'],
                     best_max_neighbors=None if constants is None else constants[0],
                     best_neighbor_radius=None if constants is None else constants[1],
                     shipped_max_neighbors=shipped[0], shipped_neighbor_radius=shipped[1],
                     value_off=float(scores[0, rows_of].mean()),
                     value_shipped=float(scores[shipped_index, rows_of].mean()),
                     **report))
-        pd.DataFrame(rows).to_csv(out/'redistribution.csv', index=False)
-        print(f'{bravais_lattice}: done', flush=True)
-    return 0
-
+    pd.DataFrame(rows).to_csv(out/'redistribution.csv', index=False)
+    return rows
 
 # ---------------------------------------------------------------------------
 # Command line
@@ -866,16 +887,20 @@ def build_parser():
         prog='python -m mlindex.scripts.run_ensemble_refine',
         description='Measure how much of the candidate budget each generator should get.')
     parser.add_argument('--stage', default='all',
-                        choices=('all', 'generate', 'fit', 'redistribution'),
+                        choices=('all', 'generate', 'fit', 'redistribution',
+                                 'redistribution-table'),
                         help='generate writes candidate pools (MPI, slow); fit scores mixes '
                              'against them (no MPI); redistribution re-derives each lattice\'s '
                              'redistribution constants against the same pools and score, at '
-                             'the generator fractions in ENSEMBLE. Default: all, which is '
-                             'generate then fit.')
+                             'the generator fractions in ENSEMBLE; redistribution-table '
+                             'rebuilds that stage\'s table from the scores files in --out-dir '
+                             'without scoring anything. Default: all, which is generate then '
+                             'fit.')
     parser.add_argument('--bravais-lattices', default=','.join(BRAVAIS_LATTICES), metavar='A,B',
                         help='Comma-separated. Default: all fourteen.')
-    parser.add_argument('--pools', required=True, metavar='PATH',
-                        help='Directory the candidate pools are written to and read from.')
+    parser.add_argument('--pools', default=None, metavar='PATH',
+                        help='Directory the candidate pools are written to and read from. '
+                             'Needed by every stage except redistribution-table.')
     parser.add_argument('--out-dir', default=None, metavar='PATH',
                         help='Where the fit writes its table. Required for --stage fit and all.')
     parser.add_argument('--clump-discount', default=None, metavar='PATH',
@@ -937,6 +962,8 @@ def main(argv=None):
     unknown = [name for name in args.bravais_lattices if name not in BRAVAIS_LATTICES]
     if unknown:
         raise SystemExit(f'not Bravais lattices this package knows: {", ".join(unknown)}')
+    if args.pools is None and args.stage != 'redistribution-table':
+        raise SystemExit(f'--stage {args.stage} needs --pools')
 
     if args.stage in ('all', 'generate'):
         if args.dataset_directory is None:
@@ -963,6 +990,11 @@ def main(argv=None):
                              f'clump discount redistribution is invisible to the score.')
         args.reductions = args.reductions or ['per-pattern', 'pooled']
         fit_redistribution(args)
+    if args.stage == 'redistribution-table':
+        if args.out_dir is None:
+            raise SystemExit('--stage redistribution-table needs --out-dir')
+        write_redistribution_table(args.out_dir, args.reductions or ['per-pattern', 'pooled'],
+                                   args.split_seed)
     return 0
 
 
