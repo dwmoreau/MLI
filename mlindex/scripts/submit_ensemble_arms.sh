@@ -76,10 +76,18 @@ fi
 
 MLI_CORES="${SLURM_CPUS_ON_NODE:-8}"
 MLI_POOLS="${MLI_POOLS:-$((MLI_CORES / 2))}"
+# MLI_POOLS is a process count here, as in submit_benchmark_arms.sh. Refuse anything else rather
+# than pass it on: a value left exported by another job reaches this line silently.
+case "$MLI_POOLS" in
+    ''|*[!0-9]*)
+        echo "FATAL: MLI_POOLS must be a number of processes, got '$MLI_POOLS'. Unset it or set a number." >&2
+        exit 1
+        ;;
+esac
 MLI_TASK="${SLURM_ARRAY_TASK_ID:-0}"
 
 cd "$MLI_REPO"
-echo "commit $(git rev-parse HEAD) | task $MLI_TASK | pools $MLI_POOLS | tables $MLI_TABLES_DIR"
+echo "commit $(git rev-parse HEAD) | task $MLI_TASK | processes $MLI_POOLS | pools $MLI_POOLS_DIR | tables $MLI_TABLES_DIR"
 "$MLI_PYTHON" -m mlindex.scripts.ensemble_arms generate \
     --index "$MLI_TASK" \
     --pools-dir "$MLI_POOLS_DIR" \

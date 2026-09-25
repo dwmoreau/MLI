@@ -16,7 +16,7 @@
 # answer reproduces, and at_grid_edge says whether the grid was wide enough. The chosen pair goes
 # into that lattice's ENSEMBLE row, and only then can submit_ensemble_arms.sh run.
 #
-# WHAT IT READS. The candidate pools P09b's generator fractions were fitted on ($MLI_POOLS, built
+# WHAT IT READS. The candidate pools P09b's generator fractions were fitted on ($MLI_REDIST_POOLS, built
 # at twice the shipped budget on the grid of contaminants and dropped peaks), the measured
 # convergence curves and the measured clump discounts. It uses the fractions and budget in
 # ENSEMBLE, so it must run from a checkout where those are P09b's.
@@ -36,7 +36,8 @@
 # to one core. Read SLURM_CPUS_ON_NODE, not nproc, and halve it -- it counts both hyperthreads.
 #
 # Variable names are MLI_-prefixed because bash silently discards an assignment to one of its own
-# built-ins.
+# built-ins, and this script's own settings are MLI_REDIST_-prefixed so that none of them, left
+# exported in a shell, changes another submit script's job.
 
 #SBATCH -N 1
 #SBATCH -C cpu
@@ -56,37 +57,37 @@ export NUMEXPR_NUM_THREADS=1
 
 : "${MLI_PYTHON:?set MLI_PYTHON to the interpreter that has mlindex installed}"
 : "${MLI_REPO:?set MLI_REPO to the checkout to run}"
-MLI_POOLS="${MLI_POOLS:-$SCRATCH/p09b_pools}"
-MLI_ROC="${MLI_ROC:-$MLI_REPO/docs/fom_production/artifacts/P08_inputs/data}"
-MLI_DISCOUNT="${MLI_DISCOUNT:-$MLI_REPO/mlindex/characterization/clump_discount}"
-MLI_OUT="${MLI_OUT:-$SCRATCH/fom_production/artifacts/P09c_redistribution}"
-MLI_N_CRYSTALS="${MLI_N_CRYSTALS:-1000}"
-MLI_REPEATS="${MLI_REPEATS:-3}"
-MLI_LATTICES="${MLI_LATTICES:-hP,hR,tI,tP,oC,oF,oI,oP,mC,mP,aP}"
+MLI_REDIST_POOLS="${MLI_REDIST_POOLS:-$SCRATCH/p09b_pools}"
+MLI_REDIST_ROC="${MLI_REDIST_ROC:-$MLI_REPO/docs/fom_production/artifacts/P08_inputs/data}"
+MLI_REDIST_DISCOUNT="${MLI_REDIST_DISCOUNT:-$MLI_REPO/mlindex/characterization/clump_discount}"
+MLI_REDIST_OUT="${MLI_REDIST_OUT:-$SCRATCH/fom_production/artifacts/P09c_redistribution}"
+MLI_REDIST_N_CRYSTALS="${MLI_REDIST_N_CRYSTALS:-1000}"
+MLI_REDIST_REPEATS="${MLI_REDIST_REPEATS:-3}"
+MLI_REDIST_LATTICES="${MLI_REDIST_LATTICES:-hP,hR,tI,tP,oC,oF,oI,oP,mC,mP,aP}"
 
-for MLI_PATH in "$MLI_POOLS" "$MLI_ROC" "$MLI_DISCOUNT"; do
+for MLI_PATH in "$MLI_REDIST_POOLS" "$MLI_REDIST_ROC" "$MLI_REDIST_DISCOUNT"; do
     if [ ! -d "$MLI_PATH" ]; then
         echo "FATAL: no directory at $MLI_PATH" >&2
         exit 1
     fi
 done
-if [ ! -f "$MLI_POOLS/pools_manifest.json" ]; then
-    echo "FATAL: $MLI_POOLS has no pools_manifest.json" >&2
+if [ ! -f "$MLI_REDIST_POOLS/pools_manifest.json" ]; then
+    echo "FATAL: $MLI_REDIST_POOLS has no pools_manifest.json" >&2
     exit 1
 fi
 
 MLI_CORES="${SLURM_CPUS_ON_NODE:-8}"
-MLI_NPROC="${MLI_NPROC:-$((MLI_CORES / 2))}"
+MLI_REDIST_NPROC="${MLI_REDIST_NPROC:-$((MLI_CORES / 2))}"
 
 cd "$MLI_REPO"
-echo "commit $(git rev-parse HEAD) | pools $MLI_POOLS | processes $MLI_NPROC | out $MLI_OUT"
+echo "commit $(git rev-parse HEAD) | pools $MLI_REDIST_POOLS | processes $MLI_REDIST_NPROC | out $MLI_REDIST_OUT"
 "$MLI_PYTHON" -m mlindex.scripts.run_ensemble_refine --stage redistribution \
-    --bravais-lattices "$MLI_LATTICES" \
-    --pools "$MLI_POOLS" \
-    --roc-dir "$MLI_ROC" \
-    --clump-discount "$MLI_DISCOUNT" \
-    --out-dir "$MLI_OUT" \
-    --n-crystals "$MLI_N_CRYSTALS" \
-    --repeats "$MLI_REPEATS" \
-    --nproc "$MLI_NPROC"
+    --bravais-lattices "$MLI_REDIST_LATTICES" \
+    --pools "$MLI_REDIST_POOLS" \
+    --roc-dir "$MLI_REDIST_ROC" \
+    --clump-discount "$MLI_REDIST_DISCOUNT" \
+    --out-dir "$MLI_REDIST_OUT" \
+    --n-crystals "$MLI_REDIST_N_CRYSTALS" \
+    --repeats "$MLI_REDIST_REPEATS" \
+    --nproc "$MLI_REDIST_NPROC"
 echo "done"
