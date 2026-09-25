@@ -247,16 +247,11 @@ def test_an_arm_refuses_half_edited_fractions_before_it_indexes_anything():
     from mlindex.model_training.BenchmarkRuns import ensemble_record
 
     with pytest.raises(ValueError, match='sum to 1'):
-        ensemble_record({}, True, {'cP': {'trees': 0.50, 'abnn': 0.45, 'templates': 0.10}}, {})
-    record = ensemble_record({'cP': 0.5}, False, {}, {'oP': (10, 1e-4)})
-    assert record['redistribute'] is False
+        ensemble_record({}, {'cP': {'trees': 0.50, 'abnn': 0.45, 'templates': 0.10}})
+    record = ensemble_record({'cP': 0.5}, {})
     assert record['lattices']['cP']['n_candidates'] == 50
     assert record['lattices']['aP'] == {'n_candidates': 6000,
-                                        'fractions': ENSEMBLE['aP']['fractions'],
-                                        'max_neighbors': ENSEMBLE['aP']['max_neighbors'],
-                                        'neighbor_radius': ENSEMBLE['aP']['neighbor_radius']}
-    assert (record['lattices']['oP']['max_neighbors'],
-            record['lattices']['oP']['neighbor_radius']) == (10, 1e-4)
+                                        'fractions': ENSEMBLE['aP']['fractions']}
 
 
 def test_fractions_on_the_command_line():
@@ -268,37 +263,3 @@ def test_fractions_on_the_command_line():
         with pytest.raises(ValueError):
             _parse_fractions(bad)
 
-
-# The (max_neighbors, neighbor_radius) each factory set before the constants moved into ENSEMBLE.
-FACTORY_REDISTRIBUTION = {
-    'cubic': (64, 0.000026), 'tetragonal': (52, 0.000213), 'hexagonal': (52, 0.000213),
-    'rhombohedral': (52, 0.000213), 'orthorhombic': (46, 0.000338),
-    'monoclinic': (42, 0.000547), 'triclinic': (23, 0.000679),
-    }
-
-
-@pytest.mark.parametrize('bravais_lattice', ['cF', 'cI', 'cP'])
-def test_cubic_keeps_the_redistribution_constants_its_factory_had(bravais_lattice):
-    """The other eleven were re-derived in P09c; the score cannot see redistribution on cubic."""
-    from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
-    assert lattice_redistribution(bravais_lattice, {}) == FACTORY_REDISTRIBUTION['cubic']
-
-
-def test_a_run_can_name_redistribution_constants_for_one_lattice():
-    from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
-    assert lattice_redistribution('oP', {'oP': (10, 1e-4)}) == (10, 1e-4)
-    assert lattice_redistribution('aP', {'oP': (10, 1e-4)}) == (
-        ENSEMBLE['aP']['max_neighbors'], ENSEMBLE['aP']['neighbor_radius'])
-    for bad in ({'orthorhombic': (10, 1e-4)}, {'oP': (0, 1e-4)}, {'oP': (2.5, 1e-4)},
-                {'oP': (10, -1.0)}):
-        with pytest.raises(ValueError):
-            lattice_redistribution('oP', bad)
-
-
-def test_redistribution_constants_on_the_command_line():
-    from mlindex.scripts.run_benchmark import _parse_redistribution
-
-    assert _parse_redistribution(['oP=10,0.0001']) == {'oP': (10, 1e-4)}
-    for bad in (['oP=10'], ['orthorhombic=10,0.0001'], ['oP']):
-        with pytest.raises(ValueError):
-            _parse_redistribution(bad)

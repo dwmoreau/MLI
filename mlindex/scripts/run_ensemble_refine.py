@@ -59,11 +59,10 @@ from mlindex.optimization import UtilitiesOptimizer
 from mlindex.optimization.GeneratorPools import generate_candidate_pools
 from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 from mlindex.utilities.Allocation import largest_remainder
-from mlindex.utilities.ClumpDiscount import CUBIC, clump_weights, load_clump_discount
+from mlindex.utilities.ClumpDiscount import clump_weights, load_clump_discount
 from mlindex.utilities.ConvergenceCurve import load_curve
 from mlindex.utilities.Digests import derived_seed
 from mlindex.utilities.EnsembleObjective import expected_success_objective
-from mlindex.utilities.Redistribution import redistribute_xnn
 from mlindex.model_training import BenchmarkConditions
 from mlindex.model_training import BenchmarkPatterns
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
@@ -672,212 +671,6 @@ def _splits(n_crystals, seed):
 
 
 # ---------------------------------------------------------------------------
-# Redistribution
-# ---------------------------------------------------------------------------
-
-# The settings searched, around each lattice's shipped pair: these max_neighbors values plus the
-# shipped one and two and four times it, against the shipped radius times each factor. Wide enough
-# that an answer on the edge of the grid says the grid was too small, which the table reports.
-NEIGHBOR_VALUES = (2, 5, 10, 20)
-RADIUS_FACTORS = (0.25, 0.5, 1, 2, 4, 8)
-
-
-def redistribution_grid(max_neighbors, neighbor_radius):
-    """(n_settings, 2) of (max_neighbors, neighbor_radius) around one lattice's shipped pair."""
-    neighbors = sorted({*NEIGHBOR_VALUES, max_neighbors, 2*max_neighbors, 4*max_neighbors})
-    return np.array([(n, factor*neighbor_radius) for n in neighbors for factor in RADIUS_FACTORS])
-
-
-def score_redistribution(xnn, xnn_true, identifiers, bravais_lattice, counts, grid, curve,
-                         discount, repeats, seed):
-    """(1 + n_settings, n_crystals): the pool as generated, then after each setting's redistribution.
-
-    Redistribution only moves candidates apart, so the clump weights are what can see it; they are
-    recomputed on every redistributed pool. It draws random numbers, so each setting is the mean
-    over `repeats` draws, and every setting uses the same `repeats` seeds for a crystal, so two
-    settings differ by what they do and not by which draws they got.
-    """
-    positions = stack_positions(xnn, counts).astype(float)
-    scores = np.empty((1 + grid.shape[0], positions.shape[0]))
-
-    def value(cloud, truth):
-        distance = np.linalg.norm(cloud - truth, axis=1)
-        return expected_success_objective(
-            distance, curve[0], curve[1], clump_weights(cloud, *discount))
-
-    for crystal in range(positions.shape[0]):
-        cloud, truth = positions[crystal], xnn_true[crystal]
-        scores[0, crystal] = value(cloud, truth)
-        for index, (max_neighbors, neighbor_radius) in enumerate(grid):
-            total = 0.0
-            for repeat in range(repeats):
-                rng = np.random.default_rng(derived_seed(
-                    f'redistribution:{bravais_lattice}:{identifiers[crystal]}:{repeat}', seed))
-                moved = redistribute_xnn(
-                    cloud, bravais_lattice, int(max_neighbors), float(neighbor_radius), rng,
-                    minimum_unit_cell=UtilitiesOptimizer.MINIMUM_UNIT_CELL,
-                    maximum_unit_cell=UtilitiesOptimizer.MAXIMUM_UNIT_CELL)
-                total += value(moved, truth)
-            scores[1 + index, crystal] = total/repeats
-    return scores
-
-
-def _score_redistribution_chunk(payload):
-    """Module-level and taking one picklable argument, because workers are spawned, not forked."""
-    return score_redistribution(*payload)
-
-
-def score_redistribution_parallel(xnn, xnn_true, identifiers, bravais_lattice, counts, grid,
-                                  curve, discount, repeats, seed, nproc):
-    """`score_redistribution` over every crystal, spread across `nproc` processes."""
-    n_crystals = xnn.shape[0]
-    if nproc <= 1 or n_crystals < 2*nproc:
-        return score_redistribution(xnn, xnn_true, identifiers, bravais_lattice, counts, grid,
-                                    curve, discount, repeats, seed)
-
-    def chunks():
-        for rows in np.array_split(np.arange(n_crystals), nproc):
-            yield (xnn[rows], xnn_true[rows], [identifiers[row] for row in rows],
-                   bravais_lattice, counts, grid, curve, discount, repeats, seed)
-
-    with multiprocessing.get_context('spawn').Pool(nproc) as pool:
-        parts = list(pool.imap(_score_redistribution_chunk, chunks()))
-    return np.concatenate(parts, axis=1)
-
-
-def choose_redistribution(scores, grid, reduction):
-    """The (max_neighbors, neighbor_radius) a reduction picks, and how decided it was.
-
-    `scores` is what `score_redistribution` returns; its first row, the pool left as generated, is
-    reported but never chosen, because switching the step off is a separate question.
-
-    'pooled'       the setting with the best mean over crystals.
-    'per-pattern'  each crystal's best setting, averaged, as the generator fractions were chosen.
-                   A crystal on which every setting scores the same -- nothing it holds is crowded
-                   enough to move -- has no best setting, and is left out of the average rather
-                   than voting for whichever setting the grid lists first. How many were left out
-                   is reported.
-    """
-    settings = scores[1:]
-    pooled = settings.mean(axis=1)
-    indifferent = np.ptp(settings, axis=0) == 0
-    report = {'n_indifferent': int(indifferent.sum()),
-              'value_pooled_best': float(pooled.max()),
-              'n_tied': int(np.count_nonzero(pooled >= pooled.max() - 0.01*np.ptp(pooled)))
-              if np.ptp(pooled) > 0 else int(pooled.size),
-              'n_settings': int(pooled.size)}
-    if reduction == 'pooled':
-        chosen = grid[int(np.argmax(pooled))]
-    elif reduction == 'per-pattern':
-        if indifferent.all():
-            return None, report
-        winners = grid[np.argmax(settings[:, ~indifferent], axis=0)]
-        chosen = winners.mean(axis=0)
-    else:
-        raise ValueError(f'unknown reduction {reduction!r}')
-    report['at_grid_edge'] = bool(
-        np.isclose(chosen[0], grid[:, 0].min()) or np.isclose(chosen[0], grid[:, 0].max())
-        or np.isclose(chosen[1], grid[:, 1].min()) or np.isclose(chosen[1], grid[:, 1].max()))
-    return (int(round(chosen[0])), float(chosen[1])), report
-
-
-def fit_redistribution(args):
-    """Re-derive every lattice's redistribution constants against the ensemble score.
-
-    Each lattice's per-crystal scores are written to their own file, carrying what produced them,
-    and the table is rebuilt from every such file after each lattice. So a second run over some
-    lattices -- after a first one ran out of time -- adds to the table rather than replacing it.
-    """
-    pools = Path(args.pools)
-    manifest_path = pools/'pools_manifest.json'
-    if not manifest_path.is_file():
-        raise SystemExit(f'no pools manifest at {manifest_path}; run --stage generate first')
-    pools_commit = json.loads(manifest_path.read_text(encoding='utf-8')).get('commit')
-    out = Path(args.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    for bravais_lattice in args.bravais_lattices:
-        if bravais_lattice in CUBIC:
-            # No clump discount can be measured on cubic, so every weight is one and the score
-            # cannot see what redistribution does; it moves nothing there at the shipped constants.
-            print(f'{bravais_lattice}: skipped, no measured clump discount to see redistribution '
-                  f'with', flush=True)
-            continue
-        path = pools/f'{bravais_lattice}_pools.npz'
-        if not path.is_file():
-            continue
-        data = np.load(path, allow_pickle=True)
-        names = [str(name) for name in data['generator_names']]
-        chosen_rows = np.sort(np.random.default_rng(args.split_seed).permutation(
-            data['xnn_true'].shape[0])[:args.n_crystals])
-        xnn = np.asarray(data['xnn'][chosen_rows], dtype=np.float32)
-        xnn_true = np.asarray(data['xnn_true'][chosen_rows], dtype=float)
-        identifiers = [str(name) for name in data['identifiers'][chosen_rows]]
-
-        ensemble = UtilitiesOptimizer.ENSEMBLE[bravais_lattice]
-        fractions = UtilitiesOptimizer.lattice_fractions(bravais_lattice, {})
-        budget = UtilitiesOptimizer.lattice_budget(bravais_lattice, 1, {})
-        counts = counts_for_mix([fractions[name] for name in names], budget)
-        if np.any(counts > xnn.shape[1]):
-            raise SystemExit(f'{path} holds {xnn.shape[1]} candidates a generator, fewer than '
-                             f'the {counts.max()} the shipped fractions ask of one')
-        shipped = (ensemble['max_neighbors'], ensemble['neighbor_radius'])
-        grid = redistribution_grid(*shipped)
-        curve = np.vstack(load_curve(args.roc_dir, bravais_lattice))
-        discount = load_clump_discount(args.clump_discount, bravais_lattice)
-        print(f'{bravais_lattice}: {grid.shape[0]} settings x {args.repeats} draws over '
-              f'{xnn.shape[0]} crystals on {args.nproc} processes', flush=True)
-
-        scores = score_redistribution_parallel(
-            xnn, xnn_true, identifiers, bravais_lattice, counts, grid, curve, discount,
-            args.repeats, args.seed, args.nproc)
-        # What produced these scores, kept with them so that it survives any later run.
-        provenance = {
-            'commit': commit(), 'pools': str(pools), 'pools_commit': pools_commit,
-            'n_crystals': int(xnn.shape[0]), 'repeats': args.repeats, 'seed': args.seed,
-            'split_seed': args.split_seed, 'budget': budget, 'fractions': fractions,
-            'shipped_max_neighbors': shipped[0], 'shipped_neighbor_radius': shipped[1],
-            'platform': platform.platform(), 'machine': platform.machine(),
-            'numpy': np.__version__,
-            }
-        np.savez_compressed(out/f'{bravais_lattice}_redistribution_scores.npz', scores=scores,
-                            grid=grid, identifiers=np.array(identifiers, dtype=object),
-                            provenance=json.dumps(provenance, sort_keys=True))
-        write_redistribution_table(out, args.reductions, args.split_seed)
-        print(f'{bravais_lattice}: done', flush=True)
-    return 0
-
-
-def write_redistribution_table(out, reductions, split_seed):
-    """Rebuild redistribution.csv from every lattice's scores file in `out`."""
-    out = Path(out)
-    rows = []
-    for path in sorted(out.glob('*_redistribution_scores.npz')):
-        data = np.load(path, allow_pickle=True)
-        if 'provenance' not in data:
-            raise SystemExit(f'{path} does not say what produced it; regenerate it')
-        provenance = json.loads(str(data['provenance']))
-        bravais_lattice = path.name.split('_')[0]
-        scores, grid = data['scores'], data['grid']
-        shipped = (provenance['shipped_max_neighbors'], provenance['shipped_neighbor_radius'])
-        shipped_index = 1 + int(np.flatnonzero(
-            (grid[:, 0] == shipped[0]) & np.isclose(grid[:, 1], shipped[1]))[0])
-        for reduction in reductions:
-            for split, rows_of in _splits(scores.shape[1], split_seed):
-                constants, report = choose_redistribution(scores[:, rows_of], grid, reduction)
-                rows.append(dict(
-                    bravais_lattice=bravais_lattice, reduction=reduction, split=split,
-                    n_crystals=int(rows_of.size), budget=provenance['budget'],
-                    repeats=provenance['repeats'], commit=provenance['commit'],
-                    best_max_neighbors=None if constants is None else constants[0],
-                    best_neighbor_radius=None if constants is None else constants[1],
-                    shipped_max_neighbors=shipped[0], shipped_neighbor_radius=shipped[1],
-                    value_off=float(scores[0, rows_of].mean()),
-                    value_shipped=float(scores[shipped_index, rows_of].mean()),
-                    **report))
-    pd.DataFrame(rows).to_csv(out/'redistribution.csv', index=False)
-    return rows
-
-# ---------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------
 
@@ -886,21 +679,13 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog='python -m mlindex.scripts.run_ensemble_refine',
         description='Measure how much of the candidate budget each generator should get.')
-    parser.add_argument('--stage', default='all',
-                        choices=('all', 'generate', 'fit', 'redistribution',
-                                 'redistribution-table'),
+    parser.add_argument('--stage', default='all', choices=('all', 'generate', 'fit'),
                         help='generate writes candidate pools (MPI, slow); fit scores mixes '
-                             'against them (no MPI); redistribution re-derives each lattice\'s '
-                             'redistribution constants against the same pools and score, at '
-                             'the generator fractions in ENSEMBLE; redistribution-table '
-                             'rebuilds that stage\'s table from the scores files in --out-dir '
-                             'without scoring anything. Default: all, which is generate then '
-                             'fit.')
+                             'against them (no MPI, seconds). Default: all.')
     parser.add_argument('--bravais-lattices', default=','.join(BRAVAIS_LATTICES), metavar='A,B',
                         help='Comma-separated. Default: all fourteen.')
-    parser.add_argument('--pools', default=None, metavar='PATH',
-                        help='Directory the candidate pools are written to and read from. '
-                             'Needed by every stage except redistribution-table.')
+    parser.add_argument('--pools', required=True, metavar='PATH',
+                        help='Directory the candidate pools are written to and read from.')
     parser.add_argument('--out-dir', default=None, metavar='PATH',
                         help='Where the fit writes its table. Required for --stage fit and all.')
     parser.add_argument('--clump-discount', default=None, metavar='PATH',
@@ -945,14 +730,6 @@ def build_parser():
                                 '(default: 1). The cost is one neighbour search per crystal per '
                                 'mix; at 10000 crystals and the default grid that is tens of '
                                 'hours on one core, so give this the cores of the node.')
-    redistribution_group = parser.add_argument_group('redistribution')
-    redistribution_group.add_argument('--n-crystals', type=int, default=1000, metavar='N',
-                                      help='Crystals a lattice, drawn with --split-seed from the '
-                                           'pool (default: 1000). The cost is about 130 '
-                                           'redistributions of one pool per crystal.')
-    redistribution_group.add_argument('--repeats', type=int, default=3, metavar='N',
-                                      help='Draws averaged per setting, since redistribution is '
-                                           'random (default: 3).')
     return parser
 
 
@@ -962,15 +739,13 @@ def main(argv=None):
     unknown = [name for name in args.bravais_lattices if name not in BRAVAIS_LATTICES]
     if unknown:
         raise SystemExit(f'not Bravais lattices this package knows: {", ".join(unknown)}')
-    if args.pools is None and args.stage != 'redistribution-table':
-        raise SystemExit(f'--stage {args.stage} needs --pools')
+    args.reductions = args.reductions or ['pooled']
 
     if args.stage in ('all', 'generate'):
         if args.dataset_directory is None:
             raise SystemExit('--stage generate needs --dataset-directory')
         generate(args)
     if args.stage in ('all', 'fit'):
-        args.reductions = args.reductions or ['pooled']
         if args.roc_dir is None:
             raise SystemExit('--stage fit needs --roc-dir')
         if args.out_dir is None:
@@ -980,21 +755,6 @@ def main(argv=None):
                 '--stage fit needs --clump-discount. Candidates in a real pool are not '
                 'independent, and a score that assumes they are always names a corner.')
         fit(args)
-    if args.stage == 'redistribution':
-        missing = [flag for flag, value in (('--roc-dir', args.roc_dir),
-                                            ('--out-dir', args.out_dir),
-                                            ('--clump-discount', args.clump_discount))
-                   if value is None]
-        if missing:
-            raise SystemExit(f'--stage redistribution needs {", ".join(missing)}. Without the '
-                             f'clump discount redistribution is invisible to the score.')
-        args.reductions = args.reductions or ['per-pattern', 'pooled']
-        fit_redistribution(args)
-    if args.stage == 'redistribution-table':
-        if args.out_dir is None:
-            raise SystemExit('--stage redistribution-table needs --out-dir')
-        write_redistribution_table(args.out_dir, args.reductions or ['per-pattern', 'pooled'],
-                                   args.split_seed)
     return 0
 
 

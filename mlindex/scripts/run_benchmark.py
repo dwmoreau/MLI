@@ -173,14 +173,6 @@ def build_parser():
                                'UtilitiesOptimizer.ENSEMBLE: trees, abnn, templates, summing to '
                                '1. Repeat for several. For P09c, which compares the old and new '
                                'fractions from one commit. Recorded like --budget-scale.')
-    generate.add_argument('--redistribution', action='append', default=None,
-                          metavar='BL=MAX,RADIUS',
-                          help='Redistribution constants for one Bravais lattice, replacing '
-                               'max_neighbors and neighbor_radius in its ENSEMBLE row. Repeat for '
-                               'several. For P09c. Recorded like --budget-scale.')
-    generate.add_argument('--no-redistribution', action='store_true',
-                          help='Skip the step that moves candidates out of crowded '
-                               'neighbourhoods before refinement. Recorded like --budget-scale.')
     return parser
 
 
@@ -218,18 +210,6 @@ def _parse_fractions(values):
         fractions[lattice] = {'trees': float(shares[0]), 'abnn': float(shares[1]),
                               'templates': float(shares[2])}
     return fractions
-
-
-def _parse_redistribution(values):
-    """`BL=MAX,RADIUS` values as {Bravais lattice: (max_neighbors, neighbor_radius)}."""
-    constants = {}
-    for item in values or []:
-        lattice, _, pair = item.partition('=')
-        pair = pair.split(',')
-        if lattice not in BRAVAIS_LATTICES or len(pair) != 2:
-            raise ValueError(f'--redistribution wants BL=MAX,RADIUS, got {item!r}')
-        constants[lattice] = (int(pair[0]), float(pair[1]))
-    return constants
 
 
 def _parse_arms(values):
@@ -345,9 +325,7 @@ def main(argv=None):
             cut=args.cut, pool_size=args.pool_size, n_pools=args.n_pools, bundles=bundles,
             dataset_directory=args.dataset_directory,
             budget_scale=_parse_budget_scale(args.budget_scale),
-            fractions=_parse_fractions(args.fractions),
-            redistribution=_parse_redistribution(args.redistribution),
-            redistribute=not args.no_redistribution)
+            fractions=_parse_fractions(args.fractions))
         print(f"generated {metadata['n_source_entries']} crystals x "
               f"{len(metadata['bundles'])} bundles into {args.out_pool}")
         pools = [args.out_pool]

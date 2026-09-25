@@ -17,43 +17,24 @@ MAXIMUM_UNIT_CELL = 500
 #   n_candidates     the budget at n_candidates_scale = 1
 #   fractions        the share of it each generator makes: P09b's fit on a grid of contaminants
 #                    and dropped peaks (per-pattern reduction, rounded to 0.01). OptimizerManager
-#                    divides each share
-#                    among the split groups with Allocation.generator_info_from_fractions, and a row
-#                    whose fractions do not sum to one is refused there
-#   max_neighbors,   Redistribution.redistribute_xnn caps every candidate's neighbourhood within
-#   neighbor_radius  neighbor_radius at max_neighbors. Re-derived in P09c with the same score as
-#                    the fractions (run_ensemble_refine --stage redistribution, per-pattern
-#                    reduction); cubic keeps its earlier pair, since no clump discount can be
-#                    measured there and the score cannot see redistribution
+#                    divides each share among the split groups with
+#                    Allocation.generator_info_from_fractions, and a row whose fractions do not sum
+#                    to one is refused there
 ENSEMBLE = {
-    'cF': {'n_candidates': 100, 'fractions': {'trees': 0.80, 'abnn': 0.09, 'templates': 0.11},
-           'max_neighbors': 64, 'neighbor_radius': 0.000026},
-    'cI': {'n_candidates': 100, 'fractions': {'trees': 0.75, 'abnn': 0.09, 'templates': 0.16},
-           'max_neighbors': 64, 'neighbor_radius': 0.000026},
-    'cP': {'n_candidates': 100, 'fractions': {'trees': 0.67, 'abnn': 0.10, 'templates': 0.23},
-           'max_neighbors': 64, 'neighbor_radius': 0.000026},
-    'hP': {'n_candidates': 2000, 'fractions': {'trees': 0.44, 'abnn': 0.51, 'templates': 0.05},
-           'max_neighbors': 64, 'neighbor_radius': 0.00122},
-    'hR': {'n_candidates': 2000, 'fractions': {'trees': 0.57, 'abnn': 0.17, 'templates': 0.26},
-           'max_neighbors': 46, 'neighbor_radius': 0.000609},
-    'tI': {'n_candidates': 2000, 'fractions': {'trees': 0.66, 'abnn': 0.29, 'templates': 0.05},
-           'max_neighbors': 66, 'neighbor_radius': 0.000753},
-    'tP': {'n_candidates': 2000, 'fractions': {'trees': 0.56, 'abnn': 0.10, 'templates': 0.34},
-           'max_neighbors': 45, 'neighbor_radius': 0.000421},
-    'oC': {'n_candidates': 4000, 'fractions': {'trees': 0.52, 'abnn': 0.03, 'templates': 0.45},
-           'max_neighbors': 50, 'neighbor_radius': 0.000689},
-    'oF': {'n_candidates': 4000, 'fractions': {'trees': 0.34, 'abnn': 0.03, 'templates': 0.63},
-           'max_neighbors': 68, 'neighbor_radius': 0.000547},
-    'oI': {'n_candidates': 4000, 'fractions': {'trees': 0.46, 'abnn': 0.04, 'templates': 0.50},
-           'max_neighbors': 65, 'neighbor_radius': 0.000582},
-    'oP': {'n_candidates': 4000, 'fractions': {'trees': 0.71, 'abnn': 0.08, 'templates': 0.21},
-           'max_neighbors': 58, 'neighbor_radius': 0.000766},
-    'mC': {'n_candidates': 6000, 'fractions': {'trees': 0.29, 'abnn': 0.08, 'templates': 0.63},
-           'max_neighbors': 44, 'neighbor_radius': 0.000892},
-    'mP': {'n_candidates': 6000, 'fractions': {'trees': 0.45, 'abnn': 0.06, 'templates': 0.49},
-           'max_neighbors': 46, 'neighbor_radius': 0.00126},
-    'aP': {'n_candidates': 6000, 'fractions': {'trees': 0.20, 'abnn': 0.21, 'templates': 0.59},
-           'max_neighbors': 22, 'neighbor_radius': 0.00132},
+    'cF': {'n_candidates': 100, 'fractions': {'trees': 0.80, 'abnn': 0.09, 'templates': 0.11}},
+    'cI': {'n_candidates': 100, 'fractions': {'trees': 0.75, 'abnn': 0.09, 'templates': 0.16}},
+    'cP': {'n_candidates': 100, 'fractions': {'trees': 0.67, 'abnn': 0.10, 'templates': 0.23}},
+    'hP': {'n_candidates': 2000, 'fractions': {'trees': 0.44, 'abnn': 0.51, 'templates': 0.05}},
+    'hR': {'n_candidates': 2000, 'fractions': {'trees': 0.57, 'abnn': 0.17, 'templates': 0.26}},
+    'tI': {'n_candidates': 2000, 'fractions': {'trees': 0.66, 'abnn': 0.29, 'templates': 0.05}},
+    'tP': {'n_candidates': 2000, 'fractions': {'trees': 0.56, 'abnn': 0.10, 'templates': 0.34}},
+    'oC': {'n_candidates': 4000, 'fractions': {'trees': 0.52, 'abnn': 0.03, 'templates': 0.45}},
+    'oF': {'n_candidates': 4000, 'fractions': {'trees': 0.34, 'abnn': 0.03, 'templates': 0.63}},
+    'oI': {'n_candidates': 4000, 'fractions': {'trees': 0.46, 'abnn': 0.04, 'templates': 0.50}},
+    'oP': {'n_candidates': 4000, 'fractions': {'trees': 0.71, 'abnn': 0.08, 'templates': 0.21}},
+    'mC': {'n_candidates': 6000, 'fractions': {'trees': 0.29, 'abnn': 0.08, 'templates': 0.63}},
+    'mP': {'n_candidates': 6000, 'fractions': {'trees': 0.45, 'abnn': 0.06, 'templates': 0.49}},
+    'aP': {'n_candidates': 6000, 'fractions': {'trees': 0.20, 'abnn': 0.21, 'templates': 0.59}},
     }
 
 
@@ -68,27 +49,6 @@ def lattice_fractions(bravais_lattice, fractions):
     if unknown:
         raise ValueError(f'fractions names unknown Bravais lattices {unknown}')
     return dict(fractions.get(bravais_lattice, ENSEMBLE[bravais_lattice]['fractions']))
-
-def lattice_redistribution(bravais_lattice, redistribution):
-    """A lattice's (max_neighbors, neighbor_radius): its ENSEMBLE row, unless `redistribution`
-    names the lattice.
-
-    RESEARCH CODE THAT NEEDS TO BE DELETED -- `redistribution` exists so P09c's benchmark runs can
-    put the old and the re-derived constants side by side from one commit. It goes when P09c
-    closes.
-    """
-    unknown = sorted(set(redistribution) - set(ENSEMBLE))
-    if unknown:
-        raise ValueError(f'redistribution names unknown Bravais lattices {unknown}')
-    if bravais_lattice in redistribution:
-        max_neighbors, neighbor_radius = redistribution[bravais_lattice]
-    else:
-        max_neighbors = ENSEMBLE[bravais_lattice]['max_neighbors']
-        neighbor_radius = ENSEMBLE[bravais_lattice]['neighbor_radius']
-    if not (int(max_neighbors) == max_neighbors and max_neighbors >= 1 and neighbor_radius >= 0):
-        raise ValueError(f'{bravais_lattice}: max_neighbors must be a whole number >= 1 and '
-                         f'neighbor_radius >= 0, got {max_neighbors}, {neighbor_radius}')
-    return int(max_neighbors), float(neighbor_radius)
 
 def lattice_budget(bravais_lattice, n_candidates_scale, budget_scale):
     """How many candidates a lattice generates: its ENSEMBLE budget times both scales.

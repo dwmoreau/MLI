@@ -9,10 +9,8 @@ from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL
 from mlindex.optimization.UtilitiesOptimizer import MINIMUM_UNIT_CELL
 from mlindex.optimization.UtilitiesOptimizer import lattice_budget
 from mlindex.optimization.UtilitiesOptimizer import lattice_fractions
-from mlindex.optimization.UtilitiesOptimizer import lattice_redistribution
 from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
-from mlindex.utilities.Redistribution import redistribute_xnn
 from mlindex.utilities.ErrorAdder import perturb_xnn
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.UnitCellTools import fix_unphysical
@@ -30,8 +28,7 @@ def _downsample_chunk(args):
     of the removed points, so the pairwise distances among the survivors are
     unchanged -- recomputing them produced the same numbers ~110 times per
     chunk. Measured 9-22x on captured chunks with bit-identical output
-    (tools/repro_downsample.py). Redistribution.redistribute_xnn already
-    avoided the same rebuild for the same reason.
+    (tools/repro_downsample.py).
 
     ``order`` holds original row indices in their current positions. That is
     what keeps this bit-identical rather than merely equivalent: np.argmax
@@ -270,13 +267,9 @@ class OptimizerManager(OptimizerBase):
             'minimum_uc': MINIMUM_UNIT_CELL,
             'maximum_uc': MAXIMUM_UNIT_CELL,
             'budget_scale': {},
-            # RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c's benchmark runs. `fractions` and
-            # `redistribution` override ENSEMBLE per lattice and go when P09c closes; `redistribute`
-            # goes when P09c records its verdict, since either the step stays and this is dead, or
-            # the step goes with it.
+            # RESEARCH CODE THAT NEEDS TO BE DELETED -- `fractions` overrides ENSEMBLE per lattice
+            # for P09c's benchmark runs and goes when P09c closes.
             'fractions': {},
-            'redistribution': {},
-            'redistribute': True,
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
@@ -440,17 +433,6 @@ class OptimizerManager(OptimizerBase):
             partial_unit_cell=True,
             lattice_system=self.lattice_system
             )
-
-        if self.opt_params['convergence_testing'] == False and self.opt_params['redistribute']:
-            candidate_xnn_all = redistribute_xnn(
-                candidate_xnn_all,
-                self.bravais_lattice,
-                *lattice_redistribution(self.bravais_lattice, self.opt_params['redistribution']),
-                self.rng,
-                minimum_unit_cell=self.opt_params['minimum_uc'],
-                maximum_unit_cell=self.opt_params['maximum_uc'],
-                )
-
         return candidate_xnn_all
 
     def generate_candidates_rank(self):

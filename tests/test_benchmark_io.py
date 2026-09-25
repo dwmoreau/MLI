@@ -497,8 +497,8 @@ def test_the_verdict_follows_the_rule_fixed_before_any_arm_ran(standard_errors, 
 
 
 def test_arms_that_ran_different_candidate_settings_pair_only_when_that_is_the_point():
-    shipped = {'redistribute': True, 'lattices': {'cP': {'n_candidates': 100}}}
-    halved = {'redistribute': True, 'lattices': {'cP': {'n_candidates': 50}}}
+    shipped = {'lattices': {'cP': {'n_candidates': 100}}}
+    halved = {'lattices': {'cP': {'n_candidates': 50}}}
     arms = {'control': _manifest(ensemble=shipped), 'budget_half': _manifest(ensemble=halved)}
     with pytest.raises(ValueError, match='ensemble'):
         Benchmark.manifest_identity(arms)

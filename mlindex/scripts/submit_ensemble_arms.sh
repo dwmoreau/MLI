@@ -24,20 +24,18 @@
 # that failed, `sbatch --array=<index> mlindex/scripts/submit_ensemble_arms.sh`. A run refuses to
 # write into a directory that already holds something, so remove a failed run's pool first.
 #
-# ALL RUNS COME FROM ONE COMMIT. The code holds the new generator fractions and redistribution
-# constants; a run testing an old setting names it on the command line, so nothing needs checking
-# out between tasks and every pair of runs differs only in the settings the manifest records
-# under `ensemble`. The runs refuse to start until the re-derived redistribution constants are in
-# the code -- run submit_redistribution_fit.sh and land its answer first.
+# ALL RUNS COME FROM ONE COMMIT. The code holds the new generator fractions; the run testing the
+# old ones names them on the command line, so nothing needs checking out between tasks and every
+# pair of runs differs only in the settings the manifest records under `ensemble`.
 #
 # WHERE THE OUTPUT GOES. Pools, tens of GB a run, go to $MLI_POOLS_DIR and stay on scratch. The
 # reduced per-entry tables, a few MB, go to $MLI_TABLES_DIR, under the artifacts directory that
 # `sync_record.sh pull-artifacts` copies -- so the pools must NOT be put there, or the pull moves
 # them too.
 #
-# WALLTIME. A general run is ~1 590 patterns and a hard run ~1 800, at up to ~90 s a pattern on one
-# core, over 128 pools: ~20-25 min each. Two hours is generous on purpose; a job killed at the limit
-# leaves an unstamped run and the work is lost.
+# WALLTIME. A general run is ~1 590 patterns and a hard run ~1 800. Measured in P09c at 135 s a
+# pattern on one node core over 128 pools: ~35 min a general run. Two hours is generous on purpose;
+# a job killed at the limit leaves an unstamped run and the work is lost.
 #
 # NOT wrapped in srun: a bare `srun -n 1` pins CPU affinity to one core and strangles the pools.
 # Read SLURM_CPUS_ON_NODE, not nproc, and halve it -- it counts both hyperthreads.
@@ -51,7 +49,7 @@
 #SBATCH -J p09c_ensemble_arms
 #SBATCH -A lcls
 #SBATCH -t 2:00:00
-#SBATCH --array=0-25
+#SBATCH --array=0-21
 #SBATCH -o p09c_ensemble_arms_%A_%a.out
 
 set -euo pipefail

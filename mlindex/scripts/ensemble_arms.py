@@ -2,7 +2,7 @@
 
 RESEARCH CODE THAT NEEDS TO BE DELETED -- P09c. Once P09c's verdicts have landed, the runs below
 describe nothing a later session runs. Delete this file and submit_ensemble_arms.sh in the commit
-that removes the `fractions` and `redistribute` settings.
+that removes the `fractions` setting.
 
 Every run is a `run_benchmark` command; this file only names them, so that nobody has to assemble
 one by hand. `list` prints each command in full, and any of them can be run on its own.
@@ -22,13 +22,8 @@ one by hand. `list` prints each command in full, and any of them can be run on i
         --floor-dir docs/fom_production/artifacts/P04b_arms \
         --out-dir docs/fom_production/artifacts/P09c_arms/compare
 
-`control` is the code as it stands: P09b's generator fractions and the redistribution constants
-re-derived with the same score (run_ensemble_refine --stage redistribution), both in ENSEMBLE.
-The fractions are compared with the old ones, the two together with everything shipped before
-P09c, and the redistribution-off and budget runs with `control`. The re-derived constants are
-judged against switching redistribution off, not against the old constants (DWMM).
-Both are read per Bravais lattice against the measured run-to-run floor, and a lattice is called
-helps, hurts or does not matter much by the rule fixed before any of them ran.
+`control` is the code as it stands, with P09b's generator fractions in ENSEMBLE. The fractions
+are compared with the old ones, and each budget run with `control`.
 
 The populations, crystals per lattice and condition bundles are the ones the floor was measured
 on. Any other choice and the floor no longer describes the runs' noise.
@@ -43,22 +38,15 @@ import pandas as pd
 from mlindex.scripts import run_benchmark
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
-# The generator fractions and redistribution constants shipped before P09c. ENSEMBLE now holds
-# P09b's fractions and the re-derived constants; a run that tests an old setting names it with
-# these, so every run comes from one commit. Fractions are trees, abnn, templates.
+# The generator fractions shipped before P09c. ENSEMBLE now holds P09b's; the `old_fractions` run
+# names these, so every run comes from one commit. Trees, abnn, templates.
 OLD_FRACTIONS = {lattice: (0.45, 0.45, 0.10) for lattice in ('cF', 'cI', 'cP')}
 OLD_FRACTIONS.update({lattice: (0.05, 0.70, 0.25)
                       for lattice in ('hP', 'hR', 'tI', 'tP', 'oC', 'oF', 'oI', 'oP')})
 OLD_FRACTIONS.update({'mC': (0.05, 0.55, 0.40), 'mP': (0.05, 0.55, 0.40),
                       'aP': (0.05, 0.40, 0.55)})
-OLD_REDISTRIBUTION = {lattice: (64, 0.000026) for lattice in ('cF', 'cI', 'cP')}
-OLD_REDISTRIBUTION.update({lattice: (52, 0.000213) for lattice in ('hP', 'hR', 'tI', 'tP')})
-OLD_REDISTRIBUTION.update({lattice: (46, 0.000338) for lattice in ('oC', 'oF', 'oI', 'oP')})
-OLD_REDISTRIBUTION.update({'mC': (42, 0.000547), 'mP': (42, 0.000547), 'aP': (23, 0.000679)})
 _OLD_FRACTIONS = [f'--fractions={lattice}={t},{a},{p}'
                   for lattice, (t, a, p) in OLD_FRACTIONS.items()]
-_OLD_REDISTRIBUTION = [f'--redistribution={lattice}={n},{r}'
-                       for lattice, (n, r) in OLD_REDISTRIBUTION.items()]
 
 FAMILIES = ('cubic', 'hexagonal', 'rhombohedral', 'tetragonal', 'orthorhombic', 'monoclinic',
             'triclinic')
@@ -67,8 +55,6 @@ FAMILIES = ('cubic', 'hexagonal', 'rhombohedral', 'tetragonal', 'orthorhombic', 
 RUNS = {
     'control': [],
     'old_fractions': _OLD_FRACTIONS,
-    'redistribution_off': ['--no-redistribution'],
-    'shipped_before_p09c': _OLD_FRACTIONS + _OLD_REDISTRIBUTION,
     }
 for _family in FAMILIES:
     RUNS[f'budget_half_{_family}'] = [f'--budget-scale={_family}=0.5']
@@ -85,14 +71,12 @@ SCORES = 'M_sym,M20'   # M_sym first: the contrast reads its floor from the firs
 SEED = 12345
 CUT = 1.5
 
-# The comparisons `compare` makes: (name, reference run, the runs read against it). The reference
-# is the setting being replaced, so a verdict of helps means the new setting is better -- except
-# in `against_control`, where it means that change would improve on what ENSEMBLE ships.
+# The comparisons `compare` makes: (name, reference run, the runs read against it). The fractions
+# are read with the old ones as reference, so a verdict of helps means P09b's are better; the
+# budget runs against `control`, so helps means that change would improve on what ENSEMBLE ships.
 QUESTIONS = (
     ('fractions', 'old_fractions', ('control',)),
-    ('all_of_p09c', 'shipped_before_p09c', ('control',)),
-    ('against_control', 'control',
-     ('redistribution_off',) + tuple(name for name in RUNS if name.startswith('budget_'))),
+    ('against_control', 'control', tuple(name for name in RUNS if name.startswith('budget_'))),
     )
 
 def _touches(run, lattices):
@@ -101,21 +85,6 @@ def _touches(run, lattices):
         return True
     family = run.split('_', 2)[2]
     return any(BL_TO_LATTICE_SYSTEM[lattice] == family for lattice in lattices)
-
-
-def _refuse_before_the_constants_land():
-    """Stop before any run is made if ENSEMBLE still holds the old redistribution constants.
-
-    Until the re-derived constants are in ENSEMBLE, `control` would test the old ones and the
-    redistribution-off run would answer a question nobody is asking.
-    """
-    from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
-    current = {lattice: (row['max_neighbors'], row['neighbor_radius'])
-               for lattice, row in ENSEMBLE.items()}
-    if current == OLD_REDISTRIBUTION:
-        raise SystemExit(
-            'ENSEMBLE still holds the old redistribution constants. Put the ones '
-            'run_ensemble_refine --stage redistribution chose into it first.')
 
 
 def jobs():
@@ -248,7 +217,6 @@ def main(argv=None):
             population, _, run = args.run.partition('/')
             if (population, run) not in listed:
                 raise SystemExit(f'No run {args.run!r}; see `list`.')
-        _refuse_before_the_constants_land()
         argv = generate_argv(population, run, args.pools_dir, args.tables_dir,
                              args.split_manifest, args.n_pools, args.dataset_directory)
         if args.limit is not None:
