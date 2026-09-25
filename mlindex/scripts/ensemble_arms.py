@@ -10,8 +10,8 @@ one by hand. `list` prints each command in full, and any of them can be run on i
     # every run, numbered, with the run_benchmark command it stands for
     python -m mlindex.scripts.ensemble_arms list
 
-    # on NERSC: generate, score and reduce one run (submit_ensemble_arms.sh runs them all)
-    python -m mlindex.scripts.ensemble_arms generate --index 0 \
+    # on NERSC: generate, score and reduce one run (submit_ensemble_arms.sh runs a whole batch)
+    python -m mlindex.scripts.ensemble_arms generate --batch fractions --task 0 \
         --pools-dir $SCRATCH/p09c_pools \
         --tables-dir $SCRATCH/fom_production/artifacts/P09c_arms/tables \
         --split-manifest $MLI_SPLIT_MANIFEST --n-pools 128
@@ -88,12 +88,26 @@ def _touches(run, lattices):
 
 
 def jobs():
-    """Every (population, run) to generate, in array-index order."""
+    """Every (population, run) worth generating."""
     out = []
     for population, design in POPULATIONS.items():
         lattices = design.get('bravais_lattices', tuple(BL_TO_LATTICE_SYSTEM))
         out += [(population, run) for run in RUNS if _touches(run, lattices)]
     return out
+
+
+def batches():
+    """The runs grouped as they are submitted: {batch name: [(population, run), ...]}.
+
+    `fractions` is the before/after pair for the generator fractions; `budget` is every budget run,
+    read against the `control` run the first batch makes, so it must come from the same commit.
+    A task number is a position in its batch.
+    """
+    listed = jobs()
+    return {
+        'fractions': [job for job in listed if job[1] in ('control', 'old_fractions')],
+        'budget': [job for job in listed if job[1].startswith('budget_')],
+        }
 
 
 def generate_argv(population, run, pools_dir, tables_dir, split_manifest, n_pools,
@@ -166,14 +180,21 @@ def build_parser():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
 
-    commands.add_parser('list', help='Print every run with its index and command.')
+    commands.add_parser('list', help='Print every batch, its runs by task number, and each '
+                                     'run\'s command.')
 
     generate = commands.add_parser('generate', help='Generate, score and reduce one run.')
     which = generate.add_mutually_exclusive_group(required=True)
-    which.add_argument('--index', type=int, metavar='N',
-                       help='The run with this index in `list` (what the SLURM array passes).')
+    which.add_argument('--batch', choices=('fractions', 'budget'),
+                       help='A batch from `list`; the run is the one at --task in it.')
     which.add_argument('--run', metavar='POPULATION/NAME',
-                       help='The run by name, for example general/budget_half_cubic.')
+                       help='One run by name, for example general/budget_half_cubic.')
+    generate.add_argument('--task', type=int, default=None, metavar='N',
+                          help='With --batch: the run\'s position in it (what the SLURM array '
+                               'passes).')
+    generate.add_argument('--array-size', type=int, default=None, metavar='N',
+                          help='With --batch: how many tasks the array was submitted with. If '
+                               'it is not the size of the batch, stop rather than leave runs out.')
     generate.add_argument('--pools-dir', required=True, metavar='PATH',
                           help='Where the pool, every candidate, is written. Tens of GB a run.')
     generate.add_argument('--tables-dir', required=True, metavar='PATH',
@@ -201,21 +222,27 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.command == 'list':
-        for index, (population, run) in enumerate(jobs()):
-            command = generate_argv(population, run, '$POOLS_DIR', '$TABLES_DIR',
-                                    '$MLI_SPLIT_MANIFEST', '$N_POOLS')
-            print(f'{index:3d}  {population}/{run}\n'
-                  f'     python -m mlindex.scripts.run_benchmark {" ".join(command)}')
+        for name, batch in batches().items():
+            print(f'batch {name}: {len(batch)} runs')
+            for task, (population, run) in enumerate(batch):
+                command = generate_argv(population, run, '$POOLS_DIR', '$TABLES_DIR',
+                                        '$MLI_SPLIT_MANIFEST', '$N_POOLS')
+                print(f'{task:3d}  {population}/{run}\n'
+                      f'     python -m mlindex.scripts.run_benchmark {" ".join(command)}')
         return 0
     if args.command == 'generate':
-        listed = jobs()
-        if args.index is not None:
-            if not 0 <= args.index < len(listed):
-                raise SystemExit(f'--index must be 0 to {len(listed) - 1}; see `list`.')
-            population, run = listed[args.index]
+        if args.batch is not None:
+            batch = batches()[args.batch]
+            if args.array_size is not None and args.array_size != len(batch):
+                raise SystemExit(
+                    f'batch {args.batch} has {len(batch)} runs but the array has '
+                    f'{args.array_size} tasks; submit it with --array=0-{len(batch) - 1}.')
+            if args.task is None or not 0 <= args.task < len(batch):
+                raise SystemExit(f'--task must be 0 to {len(batch) - 1} for batch {args.batch}.')
+            population, run = batch[args.task]
         else:
             population, _, run = args.run.partition('/')
-            if (population, run) not in listed:
+            if (population, run) not in jobs():
                 raise SystemExit(f'No run {args.run!r}; see `list`.')
         argv = generate_argv(population, run, args.pools_dir, args.tables_dir,
                              args.split_manifest, args.n_pools, args.dataset_directory)

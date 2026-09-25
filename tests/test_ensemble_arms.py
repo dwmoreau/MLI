@@ -45,7 +45,18 @@ def test_the_submit_script_array_covers_every_run():
     from pathlib import Path
     script = Path(ensemble_arms.__file__).with_name('submit_ensemble_arms.sh')
     text = script.read_text(encoding='utf-8')
-    assert f'#SBATCH --array=0-{len(ensemble_arms.jobs()) - 1}\n' in text
+    assert f'#SBATCH --array=0-{len(ensemble_arms.batches()["fractions"]) - 1}\n' in text
+
+
+def test_the_batches_hold_every_run_once():
+    runs = [job for batch in ensemble_arms.batches().values() for job in batch]
+    assert sorted(runs) == sorted(ensemble_arms.jobs())
+
+
+def test_a_task_refuses_an_array_that_does_not_fit_its_batch():
+    with pytest.raises(SystemExit, match='submit it with --array=0-17'):
+        ensemble_arms.main(['generate', '--batch', 'budget', '--task', '0', '--array-size', '4',
+                            '--pools-dir', 'p', '--tables-dir', 't', '--split-manifest', 's'])
 
 
 def test_every_comparison_names_runs_that_exist():
