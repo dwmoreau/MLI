@@ -5,8 +5,11 @@
 #
 #   export MLI_PYTHON=/global/cfs/cdirs/m4064/dwmoreau/envs/onnx/bin/python
 #   export MLI_REPO=/global/cfs/cdirs/m4064/dwmoreau/MLI          # checked out at the branch head
-#   export MLI_SPLIT_MANIFEST=$MLI_REPO/docs/fom_campaign2/artifacts/S06_split_manifest.parquet
 #   sbatch mlindex/scripts/submit_ensemble_arms.sh
+#
+# The split manifest defaults to the one the floor was measured on,
+# $MLI_REPO/docs/fom_campaign2/artifacts/S06_split_manifest.parquet; set MLI_SPLIT_MANIFEST only
+# to use another.
 #
 # Then, on the laptop:
 #
@@ -62,7 +65,7 @@ export NUMEXPR_NUM_THREADS=1
 
 : "${MLI_PYTHON:?set MLI_PYTHON to the interpreter that has mlindex installed}"
 : "${MLI_REPO:?set MLI_REPO to the checkout to run}"
-: "${MLI_SPLIT_MANIFEST:?set MLI_SPLIT_MANIFEST to the frozen split manifest}"
+MLI_SPLIT_MANIFEST="${MLI_SPLIT_MANIFEST:-$MLI_REPO/docs/fom_campaign2/artifacts/S06_split_manifest.parquet}"
 MLI_POOLS_DIR="${MLI_POOLS_DIR:-$SCRATCH/p09c_pools}"
 MLI_TABLES_DIR="${MLI_TABLES_DIR:-$SCRATCH/fom_production/artifacts/P09c_arms/tables}"
 
