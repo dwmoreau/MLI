@@ -5,10 +5,10 @@ import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
+from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
 from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL
 from mlindex.optimization.UtilitiesOptimizer import MINIMUM_UNIT_CELL
 from mlindex.optimization.UtilitiesOptimizer import lattice_budget
-from mlindex.optimization.UtilitiesOptimizer import lattice_fractions
 from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
 from mlindex.utilities.ErrorAdder import perturb_xnn
@@ -266,10 +266,6 @@ class OptimizerManager(OptimizerBase):
         opt_params_defaults = {
             'minimum_uc': MINIMUM_UNIT_CELL,
             'maximum_uc': MAXIMUM_UNIT_CELL,
-            'budget_scale': {},
-            # RESEARCH CODE THAT NEEDS TO BE DELETED -- `fractions` overrides ENSEMBLE per lattice
-            # for P09c's benchmark runs and goes when P09c closes.
-            'fractions': {},
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
@@ -292,12 +288,8 @@ class OptimizerManager(OptimizerBase):
             self.rf_params[split_group] = dict(rf_group_params, load_from_tag=True)
             self.abnn_params[split_group] = dict(abnn_group_params, load_from_tag=True)
         self.opt_params['generator_info'] = generator_info_from_fractions(
-            lattice_fractions(self.bravais_lattice, self.opt_params['fractions']),
-            lattice_budget(
-                self.bravais_lattice,
-                self.opt_params['n_candidates_scale'],
-                self.opt_params['budget_scale'],
-                ),
+            ENSEMBLE[self.bravais_lattice]['fractions'],
+            lattice_budget(self.bravais_lattice, self.opt_params['n_candidates_scale']),
             split_groups,
             )
         if self.opt_params['convergence_testing'] == False:

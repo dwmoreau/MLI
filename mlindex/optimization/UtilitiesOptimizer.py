@@ -38,29 +38,9 @@ ENSEMBLE = {
     }
 
 
-def lattice_fractions(bravais_lattice, fractions):
-    """A lattice's generator fractions: its ENSEMBLE row, unless `fractions` names the lattice.
-
-    RESEARCH CODE THAT NEEDS TO BE DELETED -- `fractions` exists so P09c's benchmark runs can put
-    the old and the new fractions side by side from one commit. It goes when P09c closes, and
-    ENSEMBLE is again the only source.
-    """
-    unknown = sorted(set(fractions) - set(ENSEMBLE))
-    if unknown:
-        raise ValueError(f'fractions names unknown Bravais lattices {unknown}')
-    return dict(fractions.get(bravais_lattice, ENSEMBLE[bravais_lattice]['fractions']))
-
-def lattice_budget(bravais_lattice, n_candidates_scale, budget_scale):
-    """How many candidates a lattice generates: its ENSEMBLE budget times both scales.
-
-    `n_candidates_scale` applies to every lattice; `budget_scale` maps a Bravais lattice to a
-    further factor for that lattice alone, and a lattice it does not name keeps a factor of one.
-    """
-    unknown = sorted(set(budget_scale) - set(ENSEMBLE))
-    if unknown:
-        raise ValueError(f'budget_scale names unknown Bravais lattices {unknown}')
-    return int(
-        n_candidates_scale * budget_scale.get(bravais_lattice, 1) * ENSEMBLE[bravais_lattice]['n_candidates'])
+def lattice_budget(bravais_lattice, n_candidates_scale):
+    """How many candidates a lattice generates: its ENSEMBLE budget times `n_candidates_scale`."""
+    return int(n_candidates_scale * ENSEMBLE[bravais_lattice]['n_candidates'])
 
 
 def _env_models_dir_error(env_dir):
