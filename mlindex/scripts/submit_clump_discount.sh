@@ -12,7 +12,7 @@
 #       --out-dir <pulled copy of $MLI_OUT> --roc-dir <the measured convergence curves>
 #
 # The reduction writes one {lattice}_clump_discount.npz, which is the file the ensemble score
-# loads. Without it the mix fit and redistribution testing both refuse to start, deliberately:
+# loads. Without it the mix fit refuses to start, deliberately:
 # assuming candidates are independent is what makes every fitted mix a corner.
 #
 # WHY THIS RUN EXISTS. P09 measured the correlation between candidates starting from an IDENTICAL

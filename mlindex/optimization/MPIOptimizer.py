@@ -5,14 +5,16 @@ import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
+from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
+from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL
+from mlindex.optimization.UtilitiesOptimizer import MINIMUM_UNIT_CELL
+from mlindex.optimization.UtilitiesOptimizer import lattice_budget
+from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
-from mlindex.utilities.ClumpDiscount import clump_weights
-from mlindex.utilities.EnsembleObjective import expected_success_objective
 from mlindex.utilities.ErrorAdder import perturb_xnn
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
-from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
@@ -26,8 +28,7 @@ def _downsample_chunk(args):
     of the removed points, so the pairwise distances among the survivors are
     unchanged -- recomputing them produced the same numbers ~110 times per
     chunk. Measured 9-22x on captured chunks with bit-identical output
-    (tools/repro_downsample.py). redistribute_xnn below already avoided the
-    same rebuild for the same reason.
+    (tools/repro_downsample.py).
 
     ``order`` holds original row indices in their current positions. That is
     what keeps this bit-identical rather than merely equivalent: np.argmax
@@ -145,8 +146,6 @@ class OptimizerBase:
     def _run_loop(self, n_top_candidates):
         self._reseed_for_pattern()
         candidates = self.generate_candidates_rank()
-        if self.opt_params['redistribution_testing']:
-            return None
 
         for iteration_info in self.opt_params['iteration_info']:
             for iter_index in range(iteration_info['n_iterations']):
@@ -248,29 +247,29 @@ class OptimizerWorker(OptimizerBase):
 
 
 class OptimizerManager(OptimizerBase):
-    def __init__(self, data_params, opt_params, rf_params, template_params, abnn_params, random_params, bravais_lattice, comm, fom, seed=12345):
+    def __init__(self, data_params, opt_params, rf_group_params, template_params, abnn_group_params, random_params, bravais_lattice, comm, fom, seed=12345):
+        """`rf_group_params` and `abnn_group_params` are the settings every split group's forest
+        and network share. The split groups themselves are read from the saved models by
+        `Wrapper.setup_from_tag`, and each gets its own copy of these."""
         self.root = comm.Get_rank()
         assert self.root == 0
         self.data_params = data_params
         self.opt_params = opt_params
-        self.rf_params = rf_params
-        self.abnn_params = abnn_params
+        # Filled per split group once the Wrapper has read which split groups the models have.
+        self.rf_params = {}
+        self.abnn_params = {}
         self.random_params = random_params
         self.template_params = template_params
         self.bravais_lattice = bravais_lattice
         self.set_seed(seed)
 
         opt_params_defaults = {
-            'minimum_uc': 2,
-            'maximum_uc': 500,
+            'minimum_uc': MINIMUM_UNIT_CELL,
+            'maximum_uc': MAXIMUM_UNIT_CELL,
             }
         for key in opt_params_defaults.keys():
             if key not in self.opt_params.keys():
                 self.opt_params[key] = opt_params_defaults[key]
-        for key in self.rf_params:
-            self.rf_params[key]['load_from_tag'] = True
-        for key in self.abnn_params:
-            self.abnn_params[key]['load_from_tag'] = True
         self.data_params['load_from_tag'] = True
         self.template_params[self.bravais_lattice]['load_from_tag'] = True
         self.random_params[self.bravais_lattice]['load_from_tag'] = True
@@ -284,6 +283,15 @@ class OptimizerManager(OptimizerBase):
             seed=seed,
             )
         self.wrapper.setup_from_tag(load_bravais_lattice=self.bravais_lattice)
+        split_groups = self.wrapper.data_params['split_groups']
+        for split_group in split_groups:
+            self.rf_params[split_group] = dict(rf_group_params, load_from_tag=True)
+            self.abnn_params[split_group] = dict(abnn_group_params, load_from_tag=True)
+        self.opt_params['generator_info'] = generator_info_from_fractions(
+            ENSEMBLE[self.bravais_lattice]['fractions'],
+            lattice_budget(self.bravais_lattice, self.opt_params['n_candidates_scale']),
+            split_groups,
+            )
         if self.opt_params['convergence_testing'] == False:
             load_random_forest = False
             load_abnn = False
@@ -321,13 +329,11 @@ class OptimizerManager(OptimizerBase):
             self.q2_obs = q2[:self.n_peaks]
         elif (not entry is None) and (q2 is None):
             self.q2_obs = np.array(entry['q2'])[:self.n_peaks]
-            if self.opt_params['convergence_testing'] or self.opt_params['redistribution_testing']:
+            if self.opt_params['convergence_testing']:
                 self.xnn_true = np.array(entry['reindexed_xnn'])[self.wrapper.data_params['unit_cell_indices']]
         self.zero_error = zero_error
         self.wavelength = wavelength
         self.run_common(n_top_candidates=n_top_candidates)
-        if self.opt_params['redistribution_testing']:
-            return self.opt_params['max_neighbors'], self.opt_params['neighbor_radius']
 
     def perform_predictions(self, q2, split_group, top_n=1):
         template_unit_cells = None
@@ -419,12 +425,6 @@ class OptimizerManager(OptimizerBase):
             partial_unit_cell=True,
             lattice_system=self.lattice_system
             )
-
-        if self.opt_params['redistribution_testing']:
-            self.redistrubution_testing(candidate_xnn_all)
-        elif self.opt_params['convergence_testing'] == False:
-            candidate_xnn_all = self.redistribute_xnn(candidate_xnn_all)
-
         return candidate_xnn_all
 
     def generate_candidates_rank(self):
@@ -437,150 +437,6 @@ class OptimizerManager(OptimizerBase):
             else:
                 self.comm.send(candidate_xnn_all[rank_index::self.n_ranks], dest=rank_index)
         return self.generate_candidates_common(candidate_xnn_rank)
-
-    def _redistribution_testing_functional(self, neighbor_radius, xnn, curve, discount):
-        """What a redistributed cloud is worth, NEGATED so that a minimiser can be used on it.
-
-        The expected number of INDEPENDENT candidates that converge, each weighted by its share of
-        its own clump.
-
-        The weight is not optional here, it is the whole measurement. Redistribution moves
-        candidates apart; it barely changes how far any of them is from the true cell, so a score
-        built only on distances cannot see it at all -- which is why the score this replaces read
-        the same value at every setting on six of seven lattices while a third of the pool was
-        being moved. What redistribution changes is how crowded the cloud is, and `clump_weights`
-        is the only term that reads that.
-        """
-        self.opt_params['neighbor_radius'] = neighbor_radius
-        redistributed_xnn = self.redistribute_xnn(xnn)
-        distance = np.linalg.norm(redistributed_xnn - self.xnn_true[np.newaxis], axis=1)
-        weight = clump_weights(redistributed_xnn, *discount)
-        return -expected_success_objective(distance, curve[0], curve[1], weight)
-
-    def redistrubution_testing(self, xnn):
-        import scipy.optimize
-        # Steps:
-        #   Perform a grid search where max_neighbors is a prespecified grid. At each point, do
-        #   an optimization for the best neighbor_radius
-        opt_neighbor_radius = np.zeros(len(self.opt_params['max_neighbors_grid']))
-        objective_function = np.zeros(len(self.opt_params['max_neighbors_grid']))
-        curve = np.asarray(
-            self.opt_params['convergence_radius'][self.bravais_lattice], dtype=float)
-        # Without the clump discount this search is blind: redistribution changes how crowded the
-        # cloud is and almost nothing else, so refusing here is better than returning a flat
-        # objective and a constant chosen from noise.
-        if 'clump_discount' not in self.opt_params:
-            raise KeyError(
-                "redistribution testing needs opt_params['clump_discount'][bravais_lattice], the "
-                "measured (delta, k, alpha) for this lattice. Without it the objective cannot see "
-                "what redistribution does and the search returns whichever setting noise favours."
-                )
-        discount = self.opt_params['clump_discount'][self.bravais_lattice]
-        for index, max_neighors in enumerate(self.opt_params['max_neighbors_grid']):
-            self.opt_params['max_neighbors'] = max_neighors
-            opt_results = scipy.optimize.minimize_scalar(
-                fun=self._redistribution_testing_functional,
-                bounds=[0, 0.001],
-                args=(xnn, curve, discount)
-                )
-            opt_neighbor_radius[index] = opt_results.x
-            objective_function[index] = opt_results.fun
-        best_index = np.argmin(objective_function)
-        self.opt_params['max_neighbors'] = self.opt_params['max_neighbors_grid'][best_index]
-        self.opt_params['neighbor_radius'] = opt_neighbor_radius[best_index]
-
-    def redistribute_xnn(self, xnn):
-        # This function is meant to be called only once before optimization starts
-        redistributed_xnn = xnn.copy()
-        n_redistributed = 0
-        iteration = 0
-        # Capping the number of iterations is arbitrary.
-        # Just an attempt to prevent an excessively long loop
-        largest_neighborhood = self.opt_params['max_neighbors'] + 1
-        from_indices = None
-        while largest_neighborhood > self.opt_params['max_neighbors'] and iteration < 20:
-            # This initial distance calculation is time intensive.
-            # After the first iteration, only calculate distances after they have been updated.
-            if from_indices is None:
-                distance = scipy.spatial.distance.cdist(redistributed_xnn, redistributed_xnn)
-                neighbor_array = distance < self.opt_params['neighbor_radius']
-            else:
-                distance_0 = scipy.spatial.distance.cdist(redistributed_xnn[from_indices], redistributed_xnn)
-                distance[from_indices, :] = distance_0
-                distance[:, from_indices] = distance_0.T
-                neighbor_array[from_indices, :] = distance[from_indices, :] < self.opt_params['neighbor_radius']
-                neighbor_array[:, from_indices] = distance[:, from_indices] < self.opt_params['neighbor_radius']
-            neighbor_count = np.sum(neighbor_array, axis=1)
-            largest_neighborhood = neighbor_count.max()
-            if largest_neighborhood > self.opt_params['max_neighbors']:
-                # This gets the candidate that has the most nearest neighbors and redistributes
-                # a subsample of its neighbors such that it has the correct amount of neighbors
-                highest_density_index = np.argmax(neighbor_count)
-                neighbor_indices = np.where(neighbor_array[highest_density_index])[0]
-                excess_neighbors = neighbor_indices.size - self.opt_params['max_neighbors']
-                from_indices = neighbor_indices[
-                    self.rng.choice(neighbor_indices.size, size=excess_neighbors, replace=False)
-                    ]
-                n_redistributed += excess_neighbors
-
-                # We want to redistribute the excess only to regions where the density is low
-                # Find candidates that have fewer than the number of maximum neighbors and
-                # redistribute excess to neighborhoods near these candidates
-                low_density_indices = np.where(neighbor_count < self.opt_params['max_neighbors'])[0]
-                if low_density_indices.size > 0:
-                    # Bias the redistribution to the lowest density regions by probabalistly sampling
-                    # the low density regions.
-                    prob = self.opt_params['max_neighbors'] - neighbor_count[low_density_indices]
-                    prob = prob / prob.sum()
-                    if excess_neighbors <= low_density_indices.size:
-                        replace = False
-                    else:
-                        replace = True
-                    to_indices = low_density_indices[self.rng.choice(
-                        low_density_indices.size, size=excess_neighbors, replace=replace, p=prob
-                        )]
-                    norm_factor = 1
-                else:
-                    # In the case that there are no low density regions, perturb by selecting the
-                    # lowest density indices, then perturb by a larger amount.
-                    to_indices = np.argsort(neighbor_count)[:excess_neighbors]
-                    norm_factor = 2
-                redistributed_xnn = self.redistribute_and_perturb_xnn(
-                    redistributed_xnn, from_indices, to_indices, norm_factor
-                    )
-            iteration += 1
-        return redistributed_xnn
-
-    def redistribute_and_perturb_xnn(self, xnn, from_indices, to_indices, norm_factor):
-        n_indices = from_indices.size
-        perturbation = self.rng.uniform(low=-1, high=1, size=(n_indices, self.unit_cell_length))
-        perturbation *= (
-            norm_factor*self.opt_params['neighbor_radius'] / np.linalg.norm(perturbation, axis=1)
-            )[:, np.newaxis]
-        xnn[from_indices] = xnn[to_indices] + perturbation
-        xnn[from_indices] = fix_unphysical(
-            xnn=xnn[from_indices],
-            rng=self.rng,
-            minimum_unit_cell=self.opt_params['minimum_uc'],
-            maximum_unit_cell=self.opt_params['maximum_uc'],
-            lattice_system=self.lattice_system
-            )
-
-        # Enforce the constraints on the unit cells by reindexing
-        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-            xnn, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        # This reindexing is time intensive. Only reindex entries that were updated.
-        reciprocal_unit_cell[from_indices] = reindex_entry_basic(
-            reciprocal_unit_cell[from_indices],
-            lattice_system=self.lattice_system,
-            bravais_lattice=self.bravais_lattice,
-            space='reciprocal'
-            )
-        xnn = get_xnn_from_reciprocal_unit_cell(
-            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system
-            )
-        return xnn
 
     def _downsample_computation(self, best_M20_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,

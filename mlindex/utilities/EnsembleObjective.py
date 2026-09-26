@@ -1,8 +1,8 @@
 """What a pool of candidate unit cells is worth, scored against a convergence curve.
 
 The pool is what the generators produce before any refinement; the score says how likely it is to
-hold a cell close enough to the true one to refine to it. It is what the generator mix and the
-redistribution constants are chosen against.
+hold a cell close enough to the true one to refine to it. It is what the generator mix is chosen
+against.
 
 The score is the expected number of candidates that converge. It replaced one that weighted a
 candidate by the whole tail of the curve beyond it rather than by its own chance -- the two agree

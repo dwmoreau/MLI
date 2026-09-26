@@ -6,10 +6,9 @@ counted as k chances. They do not: two candidates that start close together shar
 Miller-index assignment and most of their refinement. This measures by how much, and writes the
 table `mlindex/utilities/ClumpDiscount.py` reads.
 
-It matters most for redistribution. Redistribution moves candidates apart and barely changes how
-far any of them is from the true cell, so a score built only on distances cannot see it at all --
-which is why the search for its constants once returned the same value at every setting while a
-third of the pool was being moved. The discount is the only term that reads crowding.
+The discount is the only term in the ensemble score that reads crowding: a score built only on
+distances from the true cell values a pile of candidates in one place the same as the same number
+spread out.
 
 WHAT IS MEASURED. Groups of k candidates whose centre sits at a shell of the lattice's own
 convergence curve, with the members displaced from each other by delta, given as a fraction of

@@ -459,15 +459,50 @@ def test_a_contrast_is_reported_in_multiples_of_the_measured_floor():
 
     arms = {'before': _floor_reduction([True]*4 + [False]*4),
             'after': _floor_reduction([True]*7 + [False])}
-    floor_table = pd.DataFrame([{'score': 'M20', 'scope': 'aggregate', 'floor_pp': 2.5}])
+    floor_table = pd.DataFrame([{'score': 'M20', 'metric': 'top1', 'scope': 'aggregate',
+                                 'floor_pp': 2.5}])
 
     with_floor = arm_contrast(arms, 'M20', 'before',
                               floors=floors_from_table(floor_table, score='M20'))
     row = with_floor[(with_floor.scope == 'aggregate') & (with_floor.metric == 'top1')].iloc[0]
     assert row['standard_errors'] == pytest.approx(37.5/2.5)
+    # A floor is measured for one metric; another metric is not read against it.
+    other = with_floor[(with_floor.scope == 'aggregate') & (with_floor.metric == 'top10')].iloc[0]
+    assert np.isnan(other['standard_errors'])
+    assert other['verdict'] == ''
 
     without = arm_contrast(arms, 'M20', 'before')
     assert np.isnan(without[without.metric == 'top1'].iloc[0]['standard_errors'])
+
+
+def test_an_arm_contrast_counts_what_it_rescued_and_what_it_broke():
+    """The net change hides a trade: two crystals rescued and one broken reads as +1 either way."""
+    from mlindex.model_training.BenchmarkRuns import arm_contrast
+
+    arms = {'before': _floor_reduction([True, True, False, False]),
+            'after': _floor_reduction([True, False, True, True])}
+    row = arm_contrast(arms, 'M20', 'before').query("scope == 'aggregate' and metric == 'top1'")
+    assert row['n_rescued'].item() == 2
+    assert row['n_broken'].item() == 1
+    assert row['n_discordant'].item() == 3
+
+
+@pytest.mark.parametrize('standard_errors, expected', [
+    (15.0, 'helps'), (2.01, 'helps'), (2.0, 'does not matter much'), (0.0, 'does not matter much'),
+    (-2.0, 'does not matter much'), (-2.01, 'hurts'), (float('nan'), ''),
+    ])
+def test_the_verdict_follows_the_rule_fixed_before_any_arm_ran(standard_errors, expected):
+    from mlindex.model_training.BenchmarkRuns import verdict
+    assert verdict(standard_errors) == expected
+
+
+def test_arms_that_ran_different_candidate_settings_pair_only_when_that_is_the_point():
+    shipped = {'lattices': {'cP': {'n_candidates': 100}}}
+    halved = {'lattices': {'cP': {'n_candidates': 50}}}
+    arms = {'control': _manifest(ensemble=shipped), 'budget_half': _manifest(ensemble=halved)}
+    with pytest.raises(ValueError, match='ensemble'):
+        Benchmark.manifest_identity(arms)
+    assert Benchmark.manifest_identity(arms, allow=('ensemble',))
 
 
 def test_an_arm_contrast_needs_a_reference_that_exists_and_something_to_compare():

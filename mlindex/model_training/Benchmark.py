@@ -62,7 +62,7 @@ ENTRY_COLUMNS = (
 # comparable with another if the code, the machine, the conditions and the search topology were
 # the same; a comparison that deliberately varies one of these names it in `allow`.
 IDENTITY_FIELDS = ('schema_version', 'commit', 'arch', 'condition_set_digest', 'pool_size',
-                   'prune_threshold', 'split_manifest_sha256', 'search_seed', 'seed')
+                   'prune_threshold', 'split_manifest_sha256', 'search_seed', 'seed', 'ensemble')
 
 # The key a candidate row is identified by, and the key a sidecar joins on.
 CANDIDATE_KEY = ['entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id']

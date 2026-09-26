@@ -2,9 +2,8 @@
 
 Two candidates that start close together do not fail independently: they share their first
 Miller-index assignment and much of their refinement, so a clump of `k` is worth fewer than `k`
-tries. Every ensemble score before this one counted it as `k`, which is the assumption
-redistribution exists to exploit and the reason a score built without this term is blind to what
-redistribution does.
+tries. A score that counts it as `k` cannot see how crowded a pool is, and so cannot tell a mix
+that piles candidates into one region from one that spreads them.
 
 `alpha` is the share of one independent candidate that one member of a clump is worth. It is
 measured, not modelled: groups of candidates are started a set distance apart and how often the
@@ -37,7 +36,6 @@ CUBIC = ('cF', 'cI', 'cP')
 #   * the score becomes a plain sum over candidates, which is LINEAR in the mix, so a pooled
 #     optimum on the simplex is always a corner. A cubic fit will hand the whole budget to one
 #     generator, and that is the objective's shape rather than a finding about the generators.
-#   * it cannot see what redistribution does, redistribution existing precisely to break clumps.
 #
 # It is not measurable today because of how the separation job builds a group, not because of
 # anything about cubic: SeparatedStartManager displaces members onto a SPHERE of radius delta/2

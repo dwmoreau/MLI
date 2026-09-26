@@ -1,9 +1,8 @@
 """What a candidate is worth when it is not alone.
 
 The weight is the only term in the ensemble score that can see how crowded a pool is. Everything
-else reads distances from the true cell, and redistribution barely changes those -- which is why a
-score without this term reports the same value at every redistribution setting while a third of the
-pool is being moved.
+else reads distances from the true cell, which say nothing about whether candidates sit on top of
+one another.
 """
 import numpy as np
 import pytest
@@ -27,7 +26,7 @@ def test_a_clump_is_discounted_by_its_size():
 
 
 def test_spreading_a_clump_out_raises_what_it_is_worth():
-    """This is the whole point: it is the only way the score can notice redistribution."""
+    """This is the whole point: it is the only way the score can notice crowding."""
     piled = np.zeros((8, 2))
     spread = np.arange(8.0)[:, np.newaxis]*np.array([1.0, 0.0])
     assert clump_weights(spread, 0.1, K, ALPHA).sum() > clump_weights(piled, 0.1, K, ALPHA).sum()

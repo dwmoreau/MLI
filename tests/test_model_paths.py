@@ -261,7 +261,7 @@ def test_options_reach_opt_params(monkeypatch, fake_models_dir):
     assert captured["prune_m20_threshold"] == 1.5
     assert captured["a_knob_nobody_has_added_yet"] == "x"
     # A key the factory sets itself is still there; options merges, it does not replace.
-    assert "generator_info" in captured
+    assert "iteration_info" in captured
 
     organizers = {"cP": SimpleNamespace(manager=0, workers=[0], split_comm=None, color=None)}
     uo.get_optimizers(

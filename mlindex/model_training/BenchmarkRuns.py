@@ -271,6 +271,18 @@ def _write_bundle(directory, bundle, records, entry_rows):
         Benchmark.write_candidate_shard(block.reset_index(drop=True), directory, bundle, lattice)
 
 
+def ensemble_record():
+    """Every lattice's candidate budget and generator fractions, as the manifest records them.
+
+    Written out rather than left to the commit, so two arms can be compared on what they ran
+    without reading the code they ran.
+    """
+    from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE, lattice_budget
+    return {'lattices': {lattice: {'n_candidates': lattice_budget(lattice, 1),
+                                   'fractions': dict(ENSEMBLE[lattice]['fractions'])}
+                         for lattice in BRAVAIS_LATTICES}}
+
+
 def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed=12345,
             search_seed=12345, cut=1.5, pool_size=1, n_pools=1, bundles=None,
             dataset_directory=None, degeneracy_rule='not_evaluated'):
@@ -291,6 +303,7 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     # produced it -- which is both wrong and invisible, since the manifest still parses and the
     # identity check still compares it against other arms.
     commit = _commit()
+    ensemble = ensemble_record()
     design = POPULATIONS[population]
     bundles = list(bundles or design['bundles'])
     unknown = [bundle for bundle in bundles if bundle not in BenchmarkConditions.BY_TAG]
@@ -338,6 +351,7 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
         'search_seed': int(search_seed),
         'prune_threshold': float(cut),
         'pool_size': int(pool_size),
+        'ensemble': ensemble,
         'n_pools': int(n_pools),
         'n_top_candidates': int(Benchmark.N_TOP_CANDIDATES),
         'broadening_tag': BenchmarkPatterns.BROADENING_TAG,
@@ -480,6 +494,25 @@ def contrast_table(reductions, baseline, top_n=10, depth='all'):
     return pd.DataFrame(rows)
 
 
+# The rule P09b fixed before any arm ran: a change is read in multiples of the measured
+# run-to-run floor, and only a move of more than this many either way is a result.
+VERDICT_STANDARD_ERRORS = 2.0
+
+
+def verdict(standard_errors):
+    """'helps', 'hurts' or 'does not matter much' for a difference in floor multiples.
+
+    Empty when no floor was given, because a difference in percentage points alone cannot be read.
+    """
+    if not np.isfinite(standard_errors):
+        return ''
+    if standard_errors > VERDICT_STANDARD_ERRORS:
+        return 'helps'
+    if standard_errors < -VERDICT_STANDARD_ERRORS:
+        return 'hurts'
+    return 'does not matter much'
+
+
 def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattices=None,
                  floors=None):
     """One arm's outcome against another's, under the same score, paired on the pattern.
@@ -489,8 +522,9 @@ def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattic
     often. `contrast_table` answers a different one -- two scores inside one arm -- and
     `floor_from_arms` a third, the spread of a score-contrast across arms that differ only by seed.
 
-    `floors` maps a scope to that scope's measured run-to-run floor, and turns the difference into
-    the multiple of it that a gate is actually read in. Without it the size is reported in
+    `floors` maps (metric, scope) to that metric's measured run-to-run floor in that scope, and
+    turns the difference into the multiple of it that a gate is actually read in; a metric with no
+    measured floor is left unread. Without it the size is reported in
     percentage points and the caller is told, rather than left to assume the points mean something.
 
     Returns one row per metric per scope, aggregate first.
@@ -528,25 +562,35 @@ def arm_contrast(arm_reductions, score, reference, top_n=10, depth='all', lattic
                 low, high = metrics.paired_delta_ci(
                     left.astype(float), right.astype(float),
                     block['entry_id'].to_numpy())
-                floor = (floors or {}).get(scope)
+                floor = (floors or {}).get((metric, scope))
+                standard_errors = (100.0*test['delta']/floor) if floor else float('nan')
                 rows.append({
                     'arm': name, 'reference': reference, 'score': score, 'scope': scope,
                     'metric': metric, 'n_pairs': test['n_pairs'],
                     'reference_pct': 100.0*left.mean(), 'arm_pct': 100.0*right.mean(),
                     'delta_pp': 100.0*test['delta'],
                     'ci_low_pp': 100.0*low, 'ci_high_pp': 100.0*high,
-                    'n_discordant': test['n_discordant'], 'p_value': test['p_value'],
+                    'n_discordant': test['n_discordant'],
+                    'n_rescued': int(np.sum(~left.astype(bool) & right.astype(bool))),
+                    'n_broken': int(np.sum(left.astype(bool) & ~right.astype(bool))),
+                    'p_value': test['p_value'],
                     'floor_pp': floor,
-                    'standard_errors': (100.0*test['delta']/floor) if floor else float('nan'),
+                    'standard_errors': standard_errors,
+                    'verdict': verdict(standard_errors),
                     })
     return pd.DataFrame(rows)
 
 
 def floors_from_table(table, score=None):
-    """{scope: floor_pp} from a `floor.csv` this harness wrote, for reading a contrast against."""
+    """{(metric, scope): floor_pp} from a `floor.csv` this harness wrote, to read a contrast against.
+
+    Keyed by metric as well as scope because a floor is measured for one metric -- top-10, as the
+    floor stage writes it -- and nothing says another metric's run-to-run spread is the same, so a
+    top-1 difference read against a top-10 floor would be read against the wrong noise.
+    """
     if score is not None:
         table = table.loc[table['score'] == score]
-    return {row.scope: float(row.floor_pp) for row in table.itertuples()
+    return {(row.metric, row.scope): float(row.floor_pp) for row in table.itertuples()
             if np.isfinite(row.floor_pp)}
 
 
