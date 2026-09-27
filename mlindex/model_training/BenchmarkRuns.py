@@ -38,6 +38,10 @@ POPULATIONS = {
 
 REPORTING_SPLIT = 'fom-dev'
 
+# The splits an arm may be drawn from. Choices are made on `fom-train` and reported on `fom-dev`;
+# `fom-test` is sealed until the release benchmark and is not offered here.
+SPLITS = ('fom-train', REPORTING_SPLIT)
+
 # How much of a condition bundle may fail to synthesise before the bundle itself is suspect.
 #
 # A second phase can only contaminate a pattern whose observed range its lines reach, and for the
@@ -128,7 +132,7 @@ def _hkl_of(entry):
                      for axis in ('h', 'k', 'l')], axis=-1)
 
 
-def entry_record(entry, condition, pattern, digest, pool_size_full=-1):
+def entry_record(entry, condition, pattern, digest, split, pool_size_full=-1):
     """One row of the entry table: the pattern as synthesised, and the truth behind it."""
     from mlindex.utilities.ErrorAdder import q2_sigma_params
 
@@ -139,7 +143,7 @@ def entry_record(entry, condition, pattern, digest, pool_size_full=-1):
         'condition_bundle': condition.tag,
         'q2_digest': digest,
         'source_db': entry['database'],
-        'split': REPORTING_SPLIT,
+        'split': split,
         'q2_obs': np.asarray(pattern.q2_obs, dtype=np.float64),
         'n_peaks_available': int(np.count_nonzero(full_peaks > 0)),
         'q2_error_multiplier': float(condition.error_multiplier),
@@ -170,7 +174,7 @@ def entry_record(entry, condition, pattern, digest, pool_size_full=-1):
 
 
 def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_lattices,
-              seed, search_seed, cut, pool_size):
+              seed, search_seed, cut, pool_size, split):
     """Index one stripe of an arm's crystals and write it under `parts/NNN/`.
 
     Module level and taking only picklable arguments, because Windows and macOS spawn rather
@@ -224,7 +228,7 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
                     drained = optimizer.drain()
                     records += drained
                     pool_size_full += sum(int(record['M20'].shape[0]) for record in drained)
-                entry_rows.append(entry_record(entry, condition, pattern, digest,
+                entry_rows.append(entry_record(entry, condition, pattern, digest, split,
                                                pool_size_full=pool_size_full))
                 done += 1
                 if done % PROGRESS_EVERY == 0 or done == total:
@@ -285,8 +289,12 @@ def ensemble_record():
 
 def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed=12345,
             search_seed=12345, cut=1.5, pool_size=1, n_pools=1, bundles=None,
-            dataset_directory=None, degeneracy_rule='not_evaluated'):
+            dataset_directory=None, degeneracy_rule='not_evaluated', split=REPORTING_SPLIT,
+            true_lattices=None):
     """Generate one arm into `pool_dir`, and stamp it complete when every stripe has landed.
+
+    `split` is where the crystals are drawn from, and `true_lattices` narrows the population to
+    crystals of those Bravais lattices. Every pattern is still searched in all fourteen lattices.
 
     Returns the manifest's metadata. The completion stamp is written last and only here: a killed
     run leaves valid shards behind, so an unstamped arm is refused by every reader.
@@ -305,14 +313,21 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     commit = _commit()
     ensemble = ensemble_record()
     design = POPULATIONS[population]
+    if split not in SPLITS:
+        raise ValueError(f'Unknown or sealed split {split!r}. Known: {SPLITS}')
+    true_lattices = list(true_lattices or design['bravais_lattices'])
+    outside = [lattice for lattice in true_lattices if lattice not in design['bravais_lattices']]
+    if outside:
+        raise ValueError(f'{outside} are not in the {population} population, which is '
+                         f'{list(design["bravais_lattices"])}.')
     bundles = list(bundles or design['bundles'])
     unknown = [bundle for bundle in bundles if bundle not in BenchmarkConditions.BY_TAG]
     if unknown:
         raise ValueError(f'Unknown condition bundle(s) {unknown}. '
                          f'Known: {list(BenchmarkConditions.tags())}')
 
-    chosen = draw_entries(split_manifest, per_lattice, seed,
-                          bravais_lattices=design['bravais_lattices'])
+    chosen = draw_entries(split_manifest, per_lattice, seed, split=split,
+                          bravais_lattices=true_lattices)
     source_rows = load_source_rows(chosen, dataset_directory)
     # Built once, from every drawn crystal, and passed down: real contamination is not
     # lattice-matched, and a partner drawn from a stripe rather than from the whole arm would
@@ -321,7 +336,7 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
 
     stripes = [source_rows.iloc[part::n_pools].reset_index(drop=True) for part in range(n_pools)]
     arguments = [(part, pool_dir, stripe, second_phase_pool, bundles, list(BRAVAIS_LATTICES),
-                  seed, search_seed, cut, pool_size)
+                  seed, search_seed, cut, pool_size, split)
                  for part, stripe in enumerate(stripes) if stripe.shape[0]]
     if len(arguments) == 1:
         _run_pool(*arguments[0])
@@ -344,6 +359,8 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
         'population': population,
         'bundles': bundles,
         'bravais_lattices': list(BRAVAIS_LATTICES),
+        'split': split,
+        'true_lattices': true_lattices,
         'n_source_entries': int(source_rows.shape[0]),
         'n_patterns_refused': len(failures),
         'per_lattice': int(per_lattice),
