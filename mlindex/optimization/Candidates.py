@@ -265,20 +265,39 @@ class Candidates:
         target_function.update(self.hkl, self.xnn, power)
         self.iteration_worker_common(target_function)
 
-    def refine_cell(self):
-        # This updates the unit cell only with the peaks assigned at > threshold probability.
-        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
+    def _q2_ref_calc(self, xnn, zeropoint=None):
+        """The reference lines of each cell, shifted by its zero-point when zero_error is set."""
+        q2_ref_calc = self.q2_calculator.get_q2(xnn)
+        if self.zero_error:
+            q2_ref_calc = CandidateOptLoss(
+                np.repeat(self.q2_obs[np.newaxis], xnn.shape[0], axis=0),
+                lattice_system=self.lattice_system,
+                ).apply_zeropoint(zeropoint, self.wavelength, q2_ref_calc)
+        return q2_ref_calc
+
+    def indexed_peaks(self):
+        """Which peaks each best cell assigns at > assignment_threshold posterior probability."""
+        q2_ref_calc = self._q2_ref_calc(
+            self.best_xnn, self.best_zeropoint if self.zero_error else None)
         probability = get_assignment_posterior(self.q2_obs, q2_ref_calc, self.lattice_system)
-        indexed_peaks = probability > self.assignment_threshold
+        return probability > self.assignment_threshold
+
+    def refine_cell(self):
+        """One Gauss-Newton step on the peaks `indexed_peaks` admits, kept where it raises M20.
+
+        With zero_error the zero-point is refined in the same step, from the current estimate.
+        """
+        indexed_peaks = self.indexed_peaks()
         n_indexed_peaks = np.sum(indexed_peaks, axis=1)
-        unique_n_indexed_peaks = np.unique(n_indexed_peaks)
         refined_xnn = self.best_xnn.copy()
-        for n in unique_n_indexed_peaks:
+        if self.zero_error:
+            refined_zeropoint = self.best_zeropoint.copy()
+        for n in np.unique(n_indexed_peaks):
             candidate_indices = n_indexed_peaks == n
-            subsampled_indices = np.argwhere(indexed_peaks[candidate_indices])
             # subsampled_indices: n_candidates x n_peaks
             # hkl:                n_candidates x n_peaks x 3
-            subsampled_indices = subsampled_indices[:, 1].reshape((candidate_indices.sum(), n))
+            subsampled_indices = np.argwhere(indexed_peaks[candidate_indices])[:, 1].reshape(
+                (candidate_indices.sum(), n))
             hkl_subsampled = np.take_along_axis(
                 self.best_hkl[candidate_indices],
                 subsampled_indices[:, :, np.newaxis],
@@ -290,9 +309,16 @@ class Candidates:
                 lattice_system=self.lattice_system,
                 )
             target_function.update(hkl_subsampled, refined_xnn[candidate_indices])
-            refined_xnn[candidate_indices] += target_function.gauss_newton_step(
-                refined_xnn[candidate_indices]
-                )
+            if self.zero_error:
+                delta_gn = target_function.gauss_newton_step_zero_error(
+                    refined_xnn[candidate_indices], self.wavelength,
+                    zeropoint=refined_zeropoint[candidate_indices])
+                refined_xnn[candidate_indices] += delta_gn[:, :-1]
+                refined_zeropoint[candidate_indices] += delta_gn[:, -1]
+            else:
+                refined_xnn[candidate_indices] += target_function.gauss_newton_step(
+                    refined_xnn[candidate_indices]
+                    )
         refined_xnn = fix_unphysical(
             xnn=refined_xnn,
             rng=self.rng,
@@ -300,34 +326,11 @@ class Candidates:
             maximum_unit_cell=self.maximum_unit_cell,
             lattice_system=self.lattice_system,
             )
-        q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
+        q2_ref_calc = self._q2_ref_calc(
+            refined_xnn, refined_zeropoint if self.zero_error else None)
         hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
         refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
         refined_q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
-
-        if self.zero_error:
-            target_function_zp = CandidateOptLoss(
-                np.repeat(self.q2_obs[np.newaxis], self.n, axis=0),
-                lattice_system=self.lattice_system,
-                )
-            target_function_zp.update(refined_hkl, refined_xnn)
-            # Get a per-peak correction for zero and add these to q_calc
-            delta_gn = target_function_zp.gauss_newton_step_zero_error(refined_xnn, self.wavelength)
-            refined_xnn += delta_gn[:, :-1]
-            refined_zeropoint = delta_gn[:, -1]
-
-            q2_ref_calc = self.q2_calculator.get_q2(refined_xnn)
-            q2_ref_calc = target_function_zp.apply_zeropoint(refined_zeropoint, self.wavelength, q2_ref_calc)
-            hkl_assign = fast_assign(self.q2_obs, q2_ref_calc)
-            refined_hkl = np.take(self.hkl_ref, hkl_assign, axis=0)
-            refined_q2_calc = np.take_along_axis(q2_ref_calc, hkl_assign, axis=1)
-            refined_xnn = fix_unphysical(
-                xnn=refined_xnn,
-                rng=self.rng,
-                minimum_unit_cell=self.minimum_unit_cell,
-                maximum_unit_cell=self.maximum_unit_cell,
-                lattice_system=self.lattice_system,
-                )
 
         refined_M20 = get_M20(self.q2_obs, refined_q2_calc, q2_ref_calc)
         improved = refined_M20 > self.best_M20
@@ -609,17 +612,4 @@ class Candidates:
 
 
     def calculate_peaks_indexed(self):
-        q2_ref_calc = self.q2_calculator.get_q2(self.best_xnn)
-        if self.zero_error:
-            target_function_zp = CandidateOptLoss(
-                np.repeat(self.q2_obs[np.newaxis], self.n, axis=0),
-                lattice_system=self.lattice_system,
-                )
-            q2_ref_calc = target_function_zp.apply_zeropoint(
-                self.best_zeropoint, self.wavelength, q2_ref_calc
-                )
-        probability = get_assignment_posterior(self.q2_obs, q2_ref_calc, self.lattice_system)
-        self.n_indexed = np.sum(
-            probability > self.assignment_threshold,
-            axis=1, dtype=int
-            )
+        self.n_indexed = np.sum(self.indexed_peaks(), axis=1, dtype=int)
