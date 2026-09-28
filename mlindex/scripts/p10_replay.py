@@ -92,17 +92,14 @@ class ReplayOptimizer(BenchmarkOptimizer):
             self.variant_records[name] = records
 
 
-def _worker(part, n_procs, args):
+def _worker(part, stripe, second_phase_pool, bundles, args):
+    """Index one stripe of crystals and write every setting's part under `parts/NNN/`.
+
+    Module level, taking only picklable arguments, because macOS and Windows spawn rather than
+    fork. The crystals are drawn once by the parent and handed down, as `run_arm` does.
+    """
     from mlindex.optimization.MPOptimizer import (
         run_mp_bl, setup_mp_optimizers, shutdown_mp_workers)
-
-    design = runs.POPULATIONS[args.population]
-    chosen = runs.draw_entries(args.split_manifest, args.per_lattice, args.seed, split=args.split,
-                               bravais_lattices=design['bravais_lattices'])
-    source_rows = runs.load_source_rows(chosen)
-    second_phase_pool = BenchmarkPatterns.build_second_phase_pool(source_rows)
-    stripe = source_rows.iloc[part::n_procs].reset_index(drop=True)
-    bundles = list(args.bundles or design['bundles'])
 
     optimizers, processes, task_queues = setup_mp_optimizers(
         1, BenchmarkPatterns.BROADENING_TAG, 1, seed=args.search_seed,
@@ -175,8 +172,20 @@ def main(argv=None):
         runs._refuse_an_occupied_directory(out_dir/name)
     commit = runs._commit()
 
-    workers = [Process(target=_worker, args=(part, args.n_procs, args))
+    design = runs.POPULATIONS[args.population]
+    bundles = list(args.bundles or design['bundles'])
+    unknown = [bundle for bundle in bundles if bundle not in BenchmarkConditions.BY_TAG]
+    if unknown:
+        raise SystemExit(f'Unknown condition bundle(s) {unknown}.')
+    chosen = runs.draw_entries(args.split_manifest, args.per_lattice, args.seed, split=args.split,
+                               bravais_lattices=design['bravais_lattices'])
+    source_rows = runs.load_source_rows(chosen)
+    # Built once, from every drawn crystal, as `run_arm` builds it.
+    second_phase_pool = BenchmarkPatterns.build_second_phase_pool(source_rows)
+    stripes = [source_rows.iloc[part::args.n_procs].reset_index(drop=True)
                for part in range(args.n_procs)]
+    workers = [Process(target=_worker, args=(part, stripe, second_phase_pool, bundles, args))
+               for part, stripe in enumerate(stripes) if stripe.shape[0]]
     for worker in workers:
         worker.start()
     for worker in workers:
@@ -184,14 +193,12 @@ def main(argv=None):
     if any(worker.exitcode for worker in workers):
         raise SystemExit('a worker failed; its output is above. Nothing is stamped complete.')
 
-    design = runs.POPULATIONS[args.population]
-    bundles = list(args.bundles or design['bundles'])
+    n_source = int(source_rows.shape[0])
     for name, (threshold, rule, step) in VARIANTS.items():
         pool_dir = out_dir/name
         failures = runs._collect_failures(pool_dir)
+        runs._refuse_a_broken_bundle(failures, bundles, n_source)
         Benchmark.consolidate(pool_dir)
-        n_source = int(pd.read_parquet(next(pool_dir.glob('entries*.parquet')),
-                                       columns=['entry_id'])['entry_id'].nunique())
         Benchmark.write_manifest(
             pool_dir, population=args.population, bundles=bundles,
             bravais_lattices=list(BRAVAIS_LATTICES), split=args.split,

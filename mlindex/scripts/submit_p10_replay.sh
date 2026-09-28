@@ -23,6 +23,15 @@
 #   2     fom-dev    general     40                  3 (error)   ~1 590
 #   3     fom-dev    hard        120                 5           ~1 800
 #
+# RE-RUNNING A TASK. A replay refuses to write into a directory that already holds something, so
+# a failed or killed task is re-run by removing its output and resubmitting that task alone:
+#
+#   rm -rf $SCRATCH/p10_replay/<commit>/<name>        # e.g. .../train_hard
+#   sbatch --array=1 mlindex/scripts/submit_p10_replay.sh
+#
+# If only the scoring failed (the job's .out shows "wrote .../t0.99" for every setting), the
+# pools are complete: re-run the two run_benchmark stages at the end of this script by hand.
+#
 # The threshold is chosen on tasks 0-1; tasks 2-3 report the chosen one. fom-dev uses the sizes
 # and conditions the P04b floors were measured on.
 #
@@ -40,9 +49,11 @@
 # there. The reduced per-entry tables go under $SCRATCH/fom_production/artifacts/P10_replay/, which
 # `sync_record.sh pull-artifacts` copies.
 #
-# WALLTIME. Measured on the laptop: 228 s a pattern for the search plus nine replays (eight now). Over 128
-# processes the largest run (task 1) takes ~1.8 h, then ~1.2 h to score its eight pools in
-# parallel. Six hours is generous on purpose; a job killed at the limit leaves unstamped pools.
+# WALLTIME. The laptop measured 228 s a pattern for the search plus nine replays; a Perlmutter
+# core is ~2.5x slower (P09c: 135 s a pattern for one setting against 51-59 on the laptop), so
+# ~570 s. Over 128 processes that is ~4.5 h for the largest run (task 1, ~3 600 patterns) and ~2 h
+# for the fom-dev runs, before scoring. Twelve hours is generous on purpose: only the time used is
+# charged, and a job killed at the limit leaves unstamped pools and has to be run again whole.
 #
 # NOT wrapped in srun: a bare `srun -n 1` pins CPU affinity to one core and strangles the pools.
 # Read SLURM_CPUS_ON_NODE, not nproc, and halve it -- it counts both hyperthreads.
@@ -55,7 +66,7 @@
 #SBATCH -q regular
 #SBATCH -J p10_replay
 #SBATCH -A lcls
-#SBATCH -t 6:00:00
+#SBATCH -t 12:00:00
 #SBATCH --array=0-3
 #SBATCH -o p10_replay_%A_%a.out
 
@@ -73,7 +84,6 @@ MLI_P10R_SPLITS=(fom-train fom-train fom-dev fom-dev)
 MLI_P10R_POPULATIONS=(general hard general hard)
 MLI_P10R_PER_LATTICE=(80 240 40 120)
 MLI_P10R_GENERAL_BUNDLES="b1_error0.5_cont0,b1_error1_cont0,b1_error2_cont0"
-MLI_P10R_VARIANTS=(no_step t0.95_noA t0.00 t0.50 t0.80 t0.90 t0.95 t0.99)
 
 MLI_P10R_REPO="${MLI_REPO:-${SLURM_SUBMIT_DIR:-$PWD}}"
 MLI_P10R_PYTHON="${MLI_PYTHON:-$(command -v python || true)}"
@@ -120,15 +130,26 @@ echo "commit $MLI_P10R_COMMIT | task $MLI_P10R_TASK $MLI_P10R_NAME | processes $
     --n-procs "$MLI_P10R_PROCS" \
     --out-dir "$MLI_P10R_OUT"
 
-# The eight pools are scored and reduced side by side; scoring one is a single process. Each job
-# is waited on by its own pid, because a bare `wait` reports success whatever the jobs did.
+# Every setting the replay wrote is scored and reduced, side by side; scoring one is a single
+# process. The settings are read from the pools on disk, so their list lives only in
+# p10_replay.py. Each job is waited on by its own pid, because a bare `wait` reports success
+# whatever the jobs did.
 MLI_P10R_PIDS=()
-for MLI_P10R_VARIANT in "${MLI_P10R_VARIANTS[@]}"; do
+MLI_P10R_POOLS=()
+for MLI_P10R_POOL in "$MLI_P10R_OUT"/*/; do
+    # With nothing to match, bash hands the loop the pattern itself; skip it.
+    [ -d "$MLI_P10R_POOL" ] && MLI_P10R_POOLS+=("${MLI_P10R_POOL%/}")
+done
+if [ "${#MLI_P10R_POOLS[@]}" -eq 0 ]; then
+    echo "FATAL: the replay wrote no pools under $MLI_P10R_OUT" >&2
+    exit 1
+fi
+for MLI_P10R_POOL in "${MLI_P10R_POOLS[@]}"; do
     (
         "$MLI_P10R_PYTHON" -m mlindex.scripts.run_benchmark --stage sidecars \
-            --pool "$MLI_P10R_OUT/$MLI_P10R_VARIANT"
+            --pool "$MLI_P10R_POOL"
         "$MLI_P10R_PYTHON" -m mlindex.scripts.run_benchmark --stage reduce \
-            --pool "$MLI_P10R_OUT/$MLI_P10R_VARIANT" --scores M_sym,M20 \
+            --pool "$MLI_P10R_POOL" --scores M_sym,M20 \
             --out-dir "$MLI_P10R_TABLES"
     ) &
     MLI_P10R_PIDS+=($!)
@@ -138,7 +159,7 @@ for MLI_P10R_PID in "${MLI_P10R_PIDS[@]}"; do
     wait "$MLI_P10R_PID" || MLI_P10R_FAILED=$(( MLI_P10R_FAILED + 1 ))
 done
 if [ "$MLI_P10R_FAILED" -gt 0 ]; then
-    echo "FATAL: $MLI_P10R_FAILED of ${#MLI_P10R_VARIANTS[@]} pools failed to score or reduce; see above." >&2
+    echo "FATAL: $MLI_P10R_FAILED of ${#MLI_P10R_POOLS[@]} pools failed to score or reduce; see above." >&2
     exit 1
 fi
 
