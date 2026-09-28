@@ -60,3 +60,33 @@ def test_the_final_step_is_taken_on_the_filtered_peaks(monkeypatch):
     candidates.refine_cell()
 
     assert calls
+
+
+def _perturbed_cubic(n_peaks, n=64, seed=7):
+    hkl_ref = np.load(os.path.join(BASE, 'mlindex', 'models', 'cubic_1', 'data',
+                                   'hkl_ref_cF.npy'))
+    xnn_true = np.array([[1.0 / A_TRUE ** 2]])
+    q2_ref = Q2Calculator(lattice_system='cubic', hkl=hkl_ref, tensorflow=False,
+                          representation='xnn').get_q2(xnn_true)[0]
+    q2_obs = np.sort(q2_ref[q2_ref > 0])[:n_peaks]
+    xnn = xnn_true + np.random.default_rng(seed).normal(0, 2e-4, size=(n, 1))
+    opt_params = {'minimum_uc': 2.0, 'maximum_uc': 60.0, 'assignment_threshold': 0.95,
+                  'figure_of_merit': 'M20'}
+    return Candidates(q2_obs=q2_obs, xnn=xnn, hkl_ref=hkl_ref, lattice_system='cubic',
+                      bravais_lattice='cF', opt_params=opt_params,
+                      rng=np.random.default_rng(seed), fom=None, zero_error=False,
+                      wavelength=None)
+
+
+def test_a_candidate_with_too_few_peaks_keeps_its_cell():
+    """A cubic cell has one parameter, so two peaks are never enough for the step."""
+    few = _perturbed_cubic(n_peaks=2)
+    before = few.best_xnn.copy()
+    few.refine_cell()
+    assert np.array_equal(few.best_xnn, before)
+
+    # The same candidates on a full pattern do move, so the check above can fail.
+    many = _perturbed_cubic(n_peaks=20)
+    before = many.best_xnn.copy()
+    many.refine_cell()
+    assert np.any(many.best_xnn != before)
