@@ -56,7 +56,6 @@ VARIANTS = {
     't0.90': (0.90, True, True),
     't0.95': (0.95, True, True),
     't0.99': (0.99, True, True),
-    't0.999': (0.999, True, True),
     }
 CUT = 1.5
 

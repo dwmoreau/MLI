@@ -1,5 +1,5 @@
 #!/bin/bash
-# Replay the final refinement step under nine settings, score and reduce each: one task per run.
+# Replay the final refinement step under eight settings, score and reduce each: one task per run.
 #
 # RESEARCH CODE THAT NEEDS TO BE DELETED -- P10. Goes with p10_replay.py when P10 closes.
 #
@@ -15,7 +15,7 @@
 # MLI_REPO, MLI_PYTHON, MLI_SPLIT_MANIFEST.
 #
 # THE RUNS. Each writes one pool per setting (no final step; the shipped 0.95 before the
-# minimum-peaks rule; thresholds 0, 0.5, 0.8, 0.9, 0.95, 0.99, 0.999), all from one search.
+# minimum-peaks rule; thresholds 0, 0.5, 0.8, 0.9, 0.95, 0.99), all from one search.
 #
 #   task  split      population  crystals a lattice  conditions  patterns
 #   0     fom-train  general     80                  3 (error)   ~3 200
@@ -40,8 +40,8 @@
 # there. The reduced per-entry tables go under $SCRATCH/fom_production/artifacts/P10_replay/, which
 # `sync_record.sh pull-artifacts` copies.
 #
-# WALLTIME. Measured on the laptop: 228 s a pattern for the search plus nine replays. Over 128
-# processes the largest run (task 1) takes ~1.8 h, then ~1.2 h to score its nine pools in
+# WALLTIME. Measured on the laptop: 228 s a pattern for the search plus nine replays (eight now). Over 128
+# processes the largest run (task 1) takes ~1.8 h, then ~1.2 h to score its eight pools in
 # parallel. Six hours is generous on purpose; a job killed at the limit leaves unstamped pools.
 #
 # NOT wrapped in srun: a bare `srun -n 1` pins CPU affinity to one core and strangles the pools.
@@ -73,7 +73,7 @@ MLI_P10R_SPLITS=(fom-train fom-train fom-dev fom-dev)
 MLI_P10R_POPULATIONS=(general hard general hard)
 MLI_P10R_PER_LATTICE=(80 240 40 120)
 MLI_P10R_GENERAL_BUNDLES="b1_error0.5_cont0,b1_error1_cont0,b1_error2_cont0"
-MLI_P10R_VARIANTS=(no_step t0.95_noA t0.00 t0.50 t0.80 t0.90 t0.95 t0.99 t0.999)
+MLI_P10R_VARIANTS=(no_step t0.95_noA t0.00 t0.50 t0.80 t0.90 t0.95 t0.99)
 
 MLI_P10R_REPO="${MLI_REPO:-${SLURM_SUBMIT_DIR:-$PWD}}"
 MLI_P10R_PYTHON="${MLI_PYTHON:-$(command -v python || true)}"
@@ -120,7 +120,7 @@ echo "commit $MLI_P10R_COMMIT | task $MLI_P10R_TASK $MLI_P10R_NAME | processes $
     --n-procs "$MLI_P10R_PROCS" \
     --out-dir "$MLI_P10R_OUT"
 
-# The nine pools are scored and reduced side by side; scoring one is a single process. Each job
+# The eight pools are scored and reduced side by side; scoring one is a single process. Each job
 # is waited on by its own pid, because a bare `wait` reports success whatever the jobs did.
 MLI_P10R_PIDS=()
 for MLI_P10R_VARIANT in "${MLI_P10R_VARIANTS[@]}"; do
