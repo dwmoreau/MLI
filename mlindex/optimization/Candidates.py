@@ -32,11 +32,6 @@ from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 # `M_rev`'s floor tested, without which a stored 0.0 cannot be told from a floored one.
 PRUNE_CAPTURE_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap', 'n_cal')
 
-# The final refinement step is taken only on candidates whose filtered peaks outnumber the
-# parameters it refines by at least this many; with fewer the system is singular or barely
-# determined, and the step is noise.
-MIN_EXCESS_PEAKS = 2
-
 
 class Candidates:
     def __init__(self, q2_obs, xnn, hkl_ref, lattice_system, bravais_lattice, opt_params, rng, fom, zero_error, wavelength):
@@ -290,15 +285,15 @@ class Candidates:
     def refine_cell(self):
         """One Gauss-Newton step on the peaks `indexed_peaks` admits, kept where it raises M20.
 
-        Only candidates with at least MIN_EXCESS_PEAKS more admitted peaks than refined
-        parameters take the step; the rest keep their cell.
+        Only candidates with at least two more admitted peaks than refined parameters take the
+        step; with fewer the system is singular or barely determined. The rest keep their cell.
 
         With zero_error the zero-point is refined in the same step, from the current estimate.
         """
         indexed_peaks = self.indexed_peaks()
         n_indexed_peaks = np.sum(indexed_peaks, axis=1)
         n_parameters = self.best_xnn.shape[1] + int(self.zero_error)
-        refinable = n_indexed_peaks >= n_parameters + MIN_EXCESS_PEAKS
+        refinable = n_indexed_peaks >= n_parameters + 2
         refined_xnn = self.best_xnn.copy()
         if self.zero_error:
             refined_zeropoint = self.best_zeropoint.copy()
