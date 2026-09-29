@@ -11,6 +11,11 @@ of the list. Two arms are compared paired, against the run-to-run noise of the s
         --population general --per-lattice 40 --cut 1.5 \
         --seed 12345 --search-seed 12345 --n-pools 4 --out-dir results/baseline
 
+    # a selection arm: hard-population conditions on primitive monoclinic crystals from fom-train
+    python -m mlindex.scripts.run_benchmark --stage generate --out-pool arms/select_mP \
+        --split-manifest path/to/split_manifest.parquet --split fom-train \
+        --population hard --true-lattices mP --per-lattice 600 --n-pools 4
+
     # every score a stored pool can carry, aggregate and per lattice, written to a directory
     python -m mlindex.scripts.run_benchmark --pool mlindex/data/my_pool --out-dir results/run1
 
@@ -135,6 +140,14 @@ def build_parser():
                           help="Which population to generate (default: general). 'hard' is the "
                                'severe end of every condition axis over the three lattices where '
                                'the correct cell is hardest to find.')
+    generate.add_argument('--split', default=runs.REPORTING_SPLIT, choices=runs.SPLITS,
+                          help=f'Which split to draw crystals from (default: '
+                               f'{runs.REPORTING_SPLIT}). Choose between settings on fom-train '
+                               'and report the chosen one on fom-dev; fom-test is sealed.')
+    generate.add_argument('--true-lattices', default=None, metavar='A,B',
+                          help='Draw only crystals of these Bravais lattices, a subset of the '
+                               "population's (default: all of them). Every pattern is still "
+                               'searched in all fourteen lattices.')
     generate.add_argument('--per-lattice', type=int, default=40, metavar='N',
                           help='Source crystals per Bravais lattice (default: 40). Balanced '
                                'rather than proportional, because results are an unweighted mean '
@@ -280,7 +293,8 @@ def main(argv=None):
             args.out_pool, args.split_manifest, population=args.population,
             per_lattice=args.per_lattice, seed=args.seed, search_seed=args.search_seed,
             cut=args.cut, pool_size=args.pool_size, n_pools=args.n_pools, bundles=bundles,
-            dataset_directory=args.dataset_directory)
+            dataset_directory=args.dataset_directory, split=args.split,
+            true_lattices=_split(args.true_lattices) or None)
         print(f"generated {metadata['n_source_entries']} crystals x "
               f"{len(metadata['bundles'])} bundles into {args.out_pool}")
         pools = [args.out_pool]

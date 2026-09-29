@@ -186,6 +186,52 @@ def test_the_axis_under_study_is_named_and_everything_else_still_checked():
         Benchmark.manifest_identity(moved, allow=('search_seed',))
 
 
+def test_arms_drawn_from_different_splits_are_not_paired():
+    """A setting chosen on fom-train and confirmed on fom-dev is two populations; pairing them
+    would report the change of crystals as the effect of the setting."""
+    arms = {'a': _manifest(split='fom-train'), 'b': _manifest(split='fom-dev')}
+    with pytest.raises(ValueError, match='split'):
+        Benchmark.manifest_identity(arms)
+
+    narrowed = {'a': _manifest(true_lattices=['mP']), 'b': _manifest(true_lattices=['aP', 'mP'])}
+    with pytest.raises(ValueError, match='true_lattices'):
+        Benchmark.manifest_identity(narrowed)
+
+
+def _split_manifest(path):
+    rows = [{'identifier': f'{split[4:]}{lattice}{i}', 'bravais_lattice': lattice, 'split': split}
+            for split in ('fom-train', 'fom-dev', 'fom-test') for lattice in ('mP', 'aP')
+            for i in range(3)]
+    pd.DataFrame(rows).to_parquet(path)
+    return path
+
+
+def test_a_draw_takes_only_the_named_split_and_lattices(tmp_path):
+    from mlindex.model_training.BenchmarkRuns import draw_entries
+
+    manifest = _split_manifest(tmp_path/'split.parquet')
+    chosen = draw_entries(manifest, 2, 12345, split='fom-train', bravais_lattices=['mP'])
+
+    assert chosen.shape[0] == 2
+    assert set(chosen['split']) == {'fom-train'}
+    assert set(chosen['bravais_lattice']) == {'mP'}
+
+
+@pytest.mark.parametrize('overrides, message', [
+    ({'split': 'fom-test'}, 'sealed'),
+    ({'population': 'hard', 'true_lattices': ['cP']}, 'not in the hard population'),
+    ])
+def test_an_arm_refuses_a_sealed_split_or_a_lattice_outside_its_population(
+        tmp_path, overrides, message):
+    """Refused before a single pattern is drawn, so a mistyped option costs nothing."""
+    from mlindex.model_training.BenchmarkRuns import run_arm
+
+    manifest = _split_manifest(tmp_path/'split.parquet')
+    with pytest.raises(ValueError, match=message):
+        run_arm(tmp_path/'arm', manifest, **overrides)
+    assert not (tmp_path/'arm').exists()
+
+
 def test_one_arm_needs_no_agreement():
     assert Benchmark.manifest_identity({'a': _manifest()})
 
