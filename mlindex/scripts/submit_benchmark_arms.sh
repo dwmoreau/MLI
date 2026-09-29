@@ -72,6 +72,8 @@ export NUMEXPR_NUM_THREADS=1
 : "${MLI_REPO:?set MLI_REPO to the checkout to run}"
 : "${MLI_SPLIT_MANIFEST:?set MLI_SPLIT_MANIFEST to the frozen split manifest}"
 MLI_OUT="${MLI_OUT:-$SCRATCH/benchmark_arms}"
+# The checksum of campaign 2's frozen split. The driver refuses a manifest that differs.
+MLI_SPLIT_SHA256="${MLI_SPLIT_SHA256:-3dd52c5eb2546dacca3034ebd2fd052dcd2acd4a8f9af24ce972fe4e0a210969}"
 
 # Shared by every arm. Moving this moves the peak lists and the floor stops being a floor.
 MLI_SEED="${MLI_SEED:-12345}"
@@ -119,6 +121,7 @@ cd "$MLI_REPO"
 "$MLI_PYTHON" -m mlindex.scripts.run_benchmark --stage generate \
     --out-pool "$MLI_ARM" \
     --split-manifest "$MLI_SPLIT_MANIFEST" \
+    --split-sha256 "$MLI_SPLIT_SHA256" \
     --population "$MLI_POPULATION" \
     --per-lattice "$MLI_PER_LATTICE" \
     ${MLI_BUNDLE_ARGS[@]+"${MLI_BUNDLE_ARGS[@]}"} \
@@ -127,9 +130,5 @@ cd "$MLI_REPO"
     --search-seed "$MLI_SEARCH_SEED" \
     --n-pools "$MLI_POOLS" \
     --pool-size 1
-
-# Merits are computed where the pool is: the shards stay on the cluster and only the reduced
-# per-entry tables come back.
-"$MLI_PYTHON" -m mlindex.scripts.run_benchmark --stage sidecars --pool "$MLI_ARM"
 
 echo "done $MLI_ARM"
