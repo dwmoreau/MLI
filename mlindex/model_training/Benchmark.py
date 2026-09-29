@@ -34,7 +34,7 @@ N_TOP_CANDIDATES = 20
 
 # The schema a pool written here carries. Bumped when a column is added, removed or redefined;
 # `manifest_identity` refuses to pair two arms that disagree on it.
-SCHEMA_VERSION = '4'
+SCHEMA_VERSION = '5'
 
 # The order candidate columns are written in. `xnn` and `unit_cell` are the PARTIAL cell for the
 # candidate's own lattice system, so their width varies by lattice and a shard holds one lattice.
@@ -43,6 +43,7 @@ CANDIDATE_COLUMNS = (
     'candidate_id', 'xnn', 'unit_cell', 'volume', 'reciprocal_volume', 'spacegroup',
     'n_peaks', 'hkl_ref_length', 'M20', 'n_indexed', 'final_rank', 'in_top_n', 'n_entering',
     'assignment_threshold', 'downsample_radius', 'prune_threshold',
+    'm20_at_prune', 'merit_at_prune',
     'is_correct', 'is_off_by_two',
     )
 
@@ -411,9 +412,13 @@ def write_manifest(pool_dir, **metadata):
     cannot be refused a pairing it should be refused, and the omission is invisible at the point
     it matters.
     """
+    from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
+
     payload = dict(metadata)
     payload['schema_version'] = SCHEMA_VERSION
     payload['candidate_columns'] = list(CANDIDATE_COLUMNS)
+    # `merit_at_prune` is a list per candidate, and these name its positions.
+    payload['merit_at_prune_names'] = list(PRUNE_CAPTURE_MERITS)
     payload['entry_columns'] = list(ENTRY_COLUMNS)
     missing = [name for name in IDENTITY_FIELDS if name not in payload]
     if missing:

@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from mlindex.model_training.BenchmarkOptimizer import BenchmarkOptimizer
+from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
 
 
 def _recorder(**overrides):
@@ -32,13 +33,26 @@ def _pool(m20):
             [f'SG{i}' for i in range(n)])
 
 
+def _at_prune(M20):
+    """At-prune values that name their row: M20 at the cut is the final M20 minus a half, and
+    criterion k is the final M20 times k + 1, so a value on the wrong row is visible."""
+    m20 = np.concatenate(M20)
+    return {'m20_at_prune': m20 - 0.5,
+            'merit_at_prune': {name: m20*(k + 1) for k, name in enumerate(PRUNE_CAPTURE_MERITS)}}
+
+
+def _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates):
+    recorder._downsample_computation(M20, xnn, n_indexed, spacegroup,
+                                     n_top_candidates=n_top_candidates, at_prune=_at_prune(M20))
+
+
 def test_every_survivor_is_kept_and_ranked_over_all_of_them():
     """The indexer keeps twenty per lattice; the benchmark needs the rest, because a cell that
     was truncated away has no rank at all. Truncation is therefore a column, not a missing row."""
     recorder = _recorder()
     M20, xnn, n_indexed, spacegroup = _pool([10.0, 40.0, 20.0, 30.0])
 
-    recorder._downsample_computation(M20, xnn, n_indexed, spacegroup, n_top_candidates=2)
+    _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates=2)
     record, = recorder.drain()
 
     assert record['M20'].shape[0] == 4
@@ -61,7 +75,7 @@ def test_a_survivor_keeps_its_own_spacegroup_and_cell():
     n_indexed = [np.array([5, 6, 7])]
     spacegroup = ['A', 'B', 'C']
 
-    recorder._downsample_computation(M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
+    _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
     record, = recorder.drain()
 
     by_score = dict(zip(record['M20'].tolist(), record['spacegroup']))
@@ -80,8 +94,7 @@ def test_a_pattern_that_cannot_name_itself_is_refused():
         recorder = _recorder(dump_context=context)
         M20, xnn, n_indexed, spacegroup = _pool([1.0, 2.0])
         with pytest.raises(ValueError, match=missing):
-            recorder._downsample_computation(M20, xnn, n_indexed, spacegroup,
-                                             n_top_candidates=20)
+            _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
 
 
 def test_the_digest_is_never_taken_from_the_optimizer_s_own_peak_list():
@@ -95,7 +108,7 @@ def test_the_digest_is_never_taken_from_the_optimizer_s_own_peak_list():
     recorder.q2_obs = np.linspace(0.05, 0.5, 10)
     M20, xnn, n_indexed, spacegroup = _pool([1.0, 2.0])
 
-    recorder._downsample_computation(M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
+    _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
     record, = recorder.drain()
 
     assert record['q2_digest'] == 'deadbeefdeadbeef'
@@ -109,7 +122,7 @@ def test_zero_error_refinement_is_refused():
     M20, xnn, n_indexed, spacegroup = _pool([1.0, 2.0])
 
     with pytest.raises(NotImplementedError, match='zero-error'):
-        recorder._downsample_computation(M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
+        _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
 
 
 def test_draining_empties_the_buffer():
@@ -118,6 +131,66 @@ def test_draining_empties_the_buffer():
     recorder = _recorder()
     M20, xnn, n_indexed, spacegroup = _pool([1.0, 2.0])
 
-    recorder._downsample_computation(M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
+    _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
     assert len(recorder.drain()) == 1
     assert recorder.drain() == []
+
+
+def test_a_run_without_the_at_prune_values_is_refused():
+    """Every higher cut is read from this pool as a restriction, which needs the value each
+    criterion had at the cut. A pool without them would load and reduce, and fail only in P16."""
+    recorder = _recorder()
+    M20, xnn, n_indexed, spacegroup = _pool([1.0, 2.0])
+
+    with pytest.raises(ValueError, match='prune_criterion_capture'):
+        recorder._downsample_computation(M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
+
+
+def test_the_at_prune_values_stay_with_their_candidate_across_ranks_and_collapses():
+    """The values arrive concatenated in rank order and are selected by the positions
+    deduplication returns. A row collapsed away, a NaN cell dropped, or a second rank must not
+    shift a survivor onto its neighbour's values."""
+    recorder = _recorder()
+    recorder.opt_params['downsample_radius'] = 1e-3
+    payloads = [
+        {'M20': np.array([10.0, 20.0, 30.0]), 'xnn': np.array([[1.0], [1.0000001], [np.nan]]),
+         'n_indexed': np.array([1, 2, 3]), 'spacegroup': ['A', 'B', 'C']},
+        {'M20': np.array([40.0, 50.0]), 'xnn': np.array([[5.0], [9.0]]),
+         'n_indexed': np.array([4, 5]), 'spacegroup': ['D', 'E']},
+        ]
+    at_prune = _at_prune([p['M20'] for p in payloads])
+    for payload, rows in zip(payloads, (slice(0, 3), slice(3, 5))):
+        payload['m20_at_prune'] = at_prune['m20_at_prune'][rows]
+        payload['merit_at_prune'] = {name: values[rows]
+                                     for name, values in at_prune['merit_at_prune'].items()}
+
+    recorder._downsample_payloads(payloads, n_top_candidates=20)
+    record, = recorder.drain()
+
+    # Row 0 collapsed into row 1, row 2 was a NaN cell: B, D and E survive.
+    assert sorted(record['spacegroup']) == ['B', 'D', 'E']
+    assert np.array_equal(record['m20_at_prune'], record['M20'] - 0.5)
+    for k in range(len(PRUNE_CAPTURE_MERITS)):
+        assert np.array_equal(record['merit_at_prune'][:, k], record['M20']*(k + 1))
+
+
+def test_merit_at_prune_positions_are_the_names_the_manifest_writes(tmp_path):
+    """`merit_at_prune` is a list per candidate, so a column is identified only by its position,
+    and the manifest's `merit_at_prune_names` is the only record of which is which. Pinned against
+    the recorded array, not against the constant both are built from."""
+    import json
+
+    from mlindex.model_training import Benchmark
+
+    recorder = _recorder()
+    M20, xnn, n_indexed, spacegroup = _pool([10.0, 20.0])
+    _record(recorder, M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
+    record, = recorder.drain()
+    identity = {name: 'x' for name in Benchmark.IDENTITY_FIELDS}
+    names = json.loads(Benchmark.write_manifest(tmp_path, **identity).read_text(
+        encoding='utf-8'))['merit_at_prune_names']
+
+    assert names[0] == 'M20' and names[3] == 'M_sym' and len(names) == 8
+    for position, name in enumerate(names):
+        k = PRUNE_CAPTURE_MERITS.index(name)
+        assert np.array_equal(record['merit_at_prune'][:, position], record['M20']*(k + 1))

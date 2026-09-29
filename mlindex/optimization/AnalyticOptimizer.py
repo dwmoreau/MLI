@@ -251,22 +251,13 @@ class MPAnalyticOptimizer(AnalyticOptimizer):
         return self.generate_candidates_common(candidate_xnn_rank)
 
     def downsample_candidates(self, candidates, n_top_candidates):
-        from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
-        best_M20_all = [candidates.best_M20]
-        best_xnn_all = [candidates.best_xnn]
-        best_n_indexed_all = [candidates.n_indexed]
-        best_spacegroup_all = list(candidates.best_spacegroup)
+        payloads = [candidates.downsample_payload()]
         for r in range(1, self.n_ranks):
             result = self._result_queues[r].get()
             if isinstance(result, Exception):
                 raise RuntimeError(f"Worker {r} failed: {result}") from result
-            best_M20_all.append(result['M20'])
-            best_xnn_all.append(result['xnn'])
-            best_n_indexed_all.append(result['n_indexed'])
-            best_spacegroup_all += result['spacegroup']
-        self._downsample_computation(best_M20_all, best_xnn_all,
-                                     best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates)
+            payloads.append(result)
+        self._downsample_payloads(payloads, n_top_candidates)
 
     def convergence_testing(self, candidates):
         from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn

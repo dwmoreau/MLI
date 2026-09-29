@@ -190,7 +190,7 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
     directory.mkdir(parents=True, exist_ok=True)
     optimizers, processes, task_queues = setup_mp_optimizers(
         pool_size, BenchmarkPatterns.BROADENING_TAG, 1, seed=search_seed,
-        options={'prune_m20_threshold': float(cut)},
+        options={'prune_m20_threshold': float(cut), 'prune_criterion_capture': True},
         optimizer_class=BenchmarkOptimizer)
 
     entry_rows = []
