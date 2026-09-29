@@ -27,6 +27,7 @@ COMPLETION_NAME = 'complete.json'
 MERIT_SIDECAR = 'merits'
 FEATURE_SIDECAR = 'features'
 PART_DIR = 'parts'
+SHARD_DIR = 'shards'
 
 # What production keeps per Bravais lattice. A benchmark stores every survivor and marks
 # this many of them `in_top_n`, so the truncation is a column rather than a missing row and
@@ -63,9 +64,9 @@ ENTRY_COLUMNS = (
 # Fields two arms must agree on before their numbers may be paired. A number from one arm is only
 # comparable with another if the code, the machine, the conditions and the search topology were
 # the same; a comparison that deliberately varies one of these names it in `allow`.
-IDENTITY_FIELDS = ('schema_version', 'commit', 'arch', 'condition_set_digest', 'pool_size',
-                   'prune_threshold', 'split_manifest_sha256', 'split', 'true_lattices',
-                   'search_seed', 'seed', 'ensemble')
+IDENTITY_FIELDS = ('schema_version', 'commit', 'models_digest', 'arch', 'condition_set_digest',
+                   'pool_size', 'prune_threshold', 'split_manifest_sha256', 'split',
+                   'true_lattices', 'search_seed', 'seed', 'ensemble')
 
 # The key a candidate row is identified by, and the key a sidecar joins on.
 CANDIDATE_KEY = ['entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id']
@@ -107,12 +108,33 @@ def check_complete(pool_dir, require=True):
     path = Path(pool_dir) / COMPLETION_NAME
     if path.is_file():
         with open(path, encoding='utf-8') as handle:
-            return json.load(handle)
+            stamp = json.load(handle)
+        _refuse_a_stamp_the_entries_contradict(pool_dir, stamp)
+        return stamp
     if require:
         raise FileNotFoundError(
             f'No completion stamp at {path}. A killed run looks finished by its contents, so an '
             'unstamped arm is refused. Pass require=False to inspect one deliberately.')
     return None
+
+
+def _refuse_a_stamp_the_entries_contradict(pool_dir, stamp):
+    """The stamp says how many pattern-conditions the arm holds; the entry table must agree.
+
+    One entry row per crystal per bundle, less the patterns that could not be synthesised.
+    """
+    import pyarrow.parquet as pq
+
+    missing = [name for name in ('n_source_entries', 'n_bundles', 'n_patterns_refused')
+               if name not in stamp]
+    if missing:
+        raise ValueError(f'The completion stamp at {pool_dir} is missing {missing}.')
+    expected = stamp['n_source_entries']*stamp['n_bundles'] - stamp['n_patterns_refused']
+    found = pq.ParquetFile(Path(pool_dir) / ENTRY_TABLE_NAME).metadata.num_rows
+    if found != expected:
+        raise ValueError(
+            f'{pool_dir} is stamped complete with {expected} pattern-conditions but its entry '
+            f'table holds {found}.')
 
 
 def available_bundles(pool_dir):
@@ -341,8 +363,10 @@ def _to_parquet(frame, path, row_group_size=None):
 
 
 def part_dir(pool_dir, part):
-    """Where one pool of processes writes its own stripe of an arm."""
-    return Path(pool_dir) / PART_DIR / f'{int(part):03d}'
+    """Where one pool of processes writes its own stripe of an arm. `part` is a name, or an
+    integer written as three digits."""
+    name = part if isinstance(part, str) else f'{int(part):03d}'
+    return Path(pool_dir) / PART_DIR / name
 
 
 def write_candidate_shard(frame, directory, bundle, bravais_lattice):
@@ -359,14 +383,18 @@ def write_entry_table(frame, directory):
     return _to_parquet(frame[ordered + extra], Path(directory) / ENTRY_TABLE_NAME)
 
 
+# The subdirectories a stripe may carry beside its own shards, each merged into the arm's own.
+SIDECARS = (MERIT_SIDECAR, FEATURE_SIDECAR)
+
+
 def consolidate(pool_dir):
-    """Stream every pool's stripe into one shard per (bundle, lattice), and one entry table.
+    """Stream every pool's stripe into one shard per (bundle, lattice), and one entry table, and
+    do the same for each sidecar the stripes carry.
 
     Streamed rather than concatenated: a triclinic shard of a full arm is millions of rows, and
     holding every stripe of it in memory to write it once is the one thing that does not fit.
     The stripes are removed only after their shard is written.
     """
-    import pyarrow as pa
     import pyarrow.parquet as pq
 
     pool_dir = Path(pool_dir)
@@ -376,22 +404,30 @@ def consolidate(pool_dir):
         raise FileNotFoundError(f'No pool stripes under {pool_dir / PART_DIR}.')
 
     written = []
-    names = sorted({path.name for part in parts for path in part.glob('*.parquet')})
-    for name in names:
-        sources = [part / name for part in parts if (part / name).is_file()]
-        writer = None
-        try:
-            for source in sources:
-                table = pq.read_table(source)
-                if writer is None:
-                    writer = pq.ParquetWriter(pool_dir / name, table.schema)
-                writer.write_table(table.cast(writer.schema))
-        finally:
-            if writer is not None:
-                writer.close()
-        written.append(pool_dir / name)
+    for subdirectory in ('',) + SIDECARS:
+        names = sorted({path.name for part in parts
+                        for path in (part / subdirectory).glob('*.parquet')})
+        if names:
+            (pool_dir / subdirectory).mkdir(parents=True, exist_ok=True)
+        for name in names:
+            sources = [part / subdirectory / name for part in parts
+                       if (part / subdirectory / name).is_file()]
+            writer = None
+            try:
+                for source in sources:
+                    table = pq.read_table(source)
+                    if writer is None:
+                        writer = pq.ParquetWriter(pool_dir / subdirectory / name, table.schema)
+                    writer.write_table(table.cast(writer.schema))
+            finally:
+                if writer is not None:
+                    writer.close()
+            written.append(pool_dir / subdirectory / name)
 
     for part in parts:
+        for subdirectory in SIDECARS:
+            if (part / subdirectory).is_dir():
+                _remove_parquet_directory(part / subdirectory)
         leftover = sorted(path.name for path in part.iterdir()
                           if path.suffix != '.parquet')
         if leftover:
@@ -399,11 +435,15 @@ def consolidate(pool_dir):
                 f'{part} still holds {leftover} after its shards were consolidated. Anything a '
                 'pool writes beside its shards has to be gathered before this point, or it is '
                 'destroyed with the directory.')
-        for path in part.glob('*.parquet'):
-            path.unlink()
-        part.rmdir()
+        _remove_parquet_directory(part)
     (pool_dir / PART_DIR).rmdir()
     return written
+
+
+def _remove_parquet_directory(directory):
+    for path in directory.glob('*.parquet'):
+        path.unlink()
+    directory.rmdir()
 
 
 def write_manifest(pool_dir, **metadata):
