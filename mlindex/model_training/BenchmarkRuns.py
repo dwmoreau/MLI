@@ -802,6 +802,149 @@ def merit_sidecar(pool_dir, bundles=None, bravais_lattices=None):
     return written
 
 
+# ---------------------------------------------------------------------------
+# The feature sidecar
+# ---------------------------------------------------------------------------
+
+# Per-candidate inputs of the learned ranker beyond the merit sidecar's. The structural and
+# probation columns are computed against the candidate's own extinction group's reference list;
+# the absence counts against the lattice's full list, because they count what the group removes.
+STRUCTURAL_FEATURES = ('zone_dominance', 'V_over_Vcrit', 'M_werner_max', 'N_cal_full',
+                       'delta_dewolff61', 'n_dewolff61')
+PROBATION_FEATURES = ('M_wu', 'M_1', 'F_N_q')
+ABSENCE_FEATURES = ('n_absent_extra', 'n_absent_extra_in_range', 'n_ref_in_range',
+                    'n_groups_searched')
+SIDECAR_FEATURES = STRUCTURAL_FEATURES + PROBATION_FEATURES + ABSENCE_FEATURES
+
+# The precision floor in Werner's critical volume. It scales `V_over_Vcrit` and `M_werner_max`
+# by the same factor for every candidate.
+WERNER_G_MIN = 1.0
+
+
+def _candidate_features(q2_obs, xnn, lattice_system, bravais_lattice, calculator):
+    """The structural and probation features, and M20, for candidates of one extinction group.
+
+    `calculator` holds that group's reference list. Returns a dict of arrays keyed by
+    `STRUCTURAL_FEATURES + PROBATION_FEATURES` and 'M20'.
+    """
+    from mlindex.utilities.FigureOfMerits import (
+        _sorted_lines_in_range, get_delta_dewolff61, get_F_N, get_M_1, get_M20, get_M_wu,
+        get_multiplicity_taupin88, get_n_dewolff61, get_N_cal, get_V_over_Vcrit,
+        get_zone_dominance)
+    from mlindex.utilities.numba_functions import fast_assign
+    from mlindex.utilities.UnitCellTools import (
+        get_reciprocal_unit_cell_from_xnn, get_unit_cell_volume)
+
+    q2_ref_calc = calculator.get_q2(xnn)
+    q2_calc = np.take_along_axis(q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)
+    cutoff = q2_calc[:, -1]
+    reciprocal_cell = get_reciprocal_unit_cell_from_xnn(
+        xnn, partial_unit_cell=True, lattice_system=lattice_system)
+    volume = 1/np.maximum(get_unit_cell_volume(
+        reciprocal_cell, partial_unit_cell=True, lattice_system=lattice_system), 1e-300)
+    d_n = 1/np.sqrt(np.maximum(cutoff, 1e-300))
+    over_critical, m_max = get_V_over_Vcrit(
+        volume, d_n, WERNER_G_MIN, get_multiplicity_taupin88(bravais_lattice)[0])
+    sorted_lines = _sorted_lines_in_range(q2_ref_calc, cutoff)
+    return {
+        'zone_dominance': get_zone_dominance(xnn, lattice_system),
+        'V_over_Vcrit': over_critical,
+        'M_werner_max': m_max,
+        'N_cal_full': get_N_cal(q2_ref_calc, np.zeros(xnn.shape[0]), cutoff),
+        'delta_dewolff61': np.mean(
+            get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice), axis=1),
+        'n_dewolff61': get_n_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)[:, -1],
+        'M_wu': get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
+        'M_1': get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
+        'F_N_q': get_F_N(q2_obs, q2_calc, q2_ref_calc)[1],
+        # get_M20 writes into its reference array, so it gets a copy and goes last.
+        'M20': get_M20(q2_obs, q2_calc, q2_ref_calc.copy()),
+        }
+
+
+def feature_sidecar(pool_dir, bundles=None, bravais_lattices=None):
+    """Write `SIDECAR_FEATURES` for every stored candidate, beside the pool.
+
+    The peak list is truncated to the lattice's own count and the structural features use the
+    candidate's own extinction group's lines, as in `merit_sidecar`. The absence counts use the
+    lattice's full reference list and its own cutoff: the line the last peak is assigned to.
+
+    Two checks against what the pipeline wrote, either of which refuses the shard: the full
+    reference list must be as long as the one the search used (`hkl_ref_length`), and the M20
+    recomputed on each candidate's own group must equal the stored M20.
+    """
+    from mlindex.utilities.numba_functions import fast_assign
+    from mlindex.utilities.Q2Calculator import Q2Calculator
+    from mlindex.utilities.SpaceGroups import count_absences_in_range, get_spacegroup_keep_masks
+
+    pool_dir = Path(pool_dir)
+    sidecar_dir = pool_dir / Benchmark.FEATURE_SIDECAR
+    entries = Benchmark.load_entries(pool_dir, columns=['entry_id', 'condition_bundle', 'q2_obs'])
+    peaks = {(row.entry_id, row.condition_bundle): np.asarray(row.q2_obs, dtype=np.float64)
+             for row in entries.itertuples()}
+
+    written = []
+    for bundle in (bundles or Benchmark.available_bundles(pool_dir)):
+        for lattice, path in Benchmark.candidate_shards(pool_dir, bundle, bravais_lattices):
+            frame = pd.read_parquet(path, columns=list(Benchmark.CANDIDATE_KEY) + [
+                'lattice_system', 'xnn', 'spacegroup', 'n_peaks', 'hkl_ref_length', 'M20'])
+            if frame.empty:
+                continue
+            lattice_system = frame['lattice_system'].iloc[0]
+            n_peaks = int(frame['n_peaks'].iloc[0])
+            hkl_ref = _hkl_reference(lattice, lattice_system)
+            stored_length = frame['hkl_ref_length'].unique()
+            if stored_length.tolist() != [hkl_ref.shape[0]]:
+                raise ValueError(
+                    f'{bundle}/{lattice}: the search used a reference list of '
+                    f'{stored_length.tolist()} lines and this models tree has '
+                    f'{hkl_ref.shape[0]}. The features would describe different reflections.')
+            keep_masks = get_spacegroup_keep_masks(hkl_ref, bravais_lattice=lattice)
+            full = Q2Calculator(lattice_system=lattice_system, hkl=hkl_ref, tensorflow=False,
+                                representation='xnn')
+            calculators = {}
+            columns = {name: np.empty(frame.shape[0]) for name in SIDECAR_FEATURES}
+            recomputed = np.empty(frame.shape[0])
+            columns['n_groups_searched'][:] = len(keep_masks)
+            for (entry_id, bundle_tag), entry in frame.groupby(
+                    ['entry_id', 'condition_bundle'], sort=False):
+                q2_obs = peaks[(entry_id, bundle_tag)][:n_peaks]
+                xnn = np.stack([np.asarray(row, dtype=np.float64) for row in entry['xnn']])
+                rows = frame.index.get_indexer(entry.index)
+                q2_ref_calc = full.get_q2(xnn)
+                cutoff = np.take_along_axis(
+                    q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)[:, -1]
+                spacegroups = entry['spacegroup'].to_numpy()
+                for spacegroup in pd.unique(spacegroups):
+                    local = np.flatnonzero(spacegroups == spacegroup)
+                    keep = keep_masks[spacegroup]
+                    removed, in_range = count_absences_in_range(
+                        q2_ref_calc[local], keep, cutoff[local])
+                    columns['n_absent_extra'][rows[local]] = np.count_nonzero(~keep)
+                    columns['n_absent_extra_in_range'][rows[local]] = removed
+                    columns['n_ref_in_range'][rows[local]] = in_range
+                    if spacegroup not in calculators:
+                        calculators[spacegroup] = Q2Calculator(
+                            lattice_system=lattice_system, hkl=hkl_ref[keep], tensorflow=False,
+                            representation='xnn')
+                    values = _candidate_features(q2_obs, xnn[local], lattice_system, lattice,
+                                                 calculators[spacegroup])
+                    recomputed[rows[local]] = values.pop('M20')
+                    for name, value in values.items():
+                        columns[name][rows[local]] = value
+            _refuse_a_disagreeing_sidecar(recomputed, frame['M20'].to_numpy(dtype=np.float64),
+                                          bundle, lattice)
+            sidecar = frame[list(Benchmark.CANDIDATE_KEY)].copy()
+            for name in SIDECAR_FEATURES:
+                sidecar[name] = columns[name]
+            for name in ABSENCE_FEATURES:
+                sidecar[name] = sidecar[name].astype(np.int64)
+            written.append(Benchmark.write_candidate_shard(sidecar, sidecar_dir, bundle, lattice))
+    if not written:
+        raise FileNotFoundError(f'No candidate shards to score under {pool_dir}.')
+    return written
+
+
 def _refuse_a_disagreeing_sidecar(recomputed, stored, bundle, lattice):
     """The merits must be computed on what the pipeline computed its own M20 on.
 
@@ -815,7 +958,7 @@ def _refuse_a_disagreeing_sidecar(recomputed, stored, bundle, lattice):
     if worst > 1e-6:
         n_bad = int(np.count_nonzero(difference > 1e-6))
         raise ValueError(
-            f'The merit sidecar for {bundle}/{lattice} disagrees with the pool it sits beside: '
+            f'The sidecar for {bundle}/{lattice} disagrees with the pool it sits beside: '
             f'{n_bad} of {difference.size} candidates recompute a different M20, worst '
             f'{worst:.4g}. The merits are being computed on a different peak list, a different '
             'reference list or a different cell from the one the search used, and every column '

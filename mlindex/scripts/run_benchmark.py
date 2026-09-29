@@ -318,6 +318,8 @@ def main(argv=None):
     for pool in to_score:
         written = runs.merit_sidecar(pool, bundles=bundles, bravais_lattices=lattices)
         print(f'scored {len(written)} shards of {pool}')
+        written = runs.feature_sidecar(pool, bundles=bundles, bravais_lattices=lattices)
+        print(f'wrote ranker features for {len(written)} shards of {pool}')
 
     if args.stage in ('generate', 'sidecars'):
         return 0

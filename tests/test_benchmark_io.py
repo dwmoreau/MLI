@@ -463,6 +463,58 @@ def test_the_sidecar_matches_merits_computed_independently(tmp_path, models_dir,
                                       err_msg=f'{lattice} {name}')
 
 
+@pytest.mark.skipif(not CAMPAIGN_POOL.is_dir(), reason='campaign pool not on this machine')
+@pytest.mark.parametrize('lattice', ['cF', 'hR', 'oP', 'mC', 'aP'])
+def test_the_feature_sidecar_matches_the_campaign_s_stored_features(tmp_path, models_dir,
+                                                                    lattice):
+    """The campaign's stored structural sidecar and its dump-time absence counts were computed by
+    its own code. Agreement with them, exactly, is what licenses fitting on these columns a model
+    whose earlier version was fitted on theirs. Lattices with one extinction group (aP) and many
+    (oP) take different paths through the absence counts."""
+    from mlindex.model_training.BenchmarkRuns import SIDECAR_FEATURES, feature_sidecar
+
+    bundle = 'c2_error1_cont0'
+    shard = pd.read_parquet(CAMPAIGN_POOL/f'candidates_{bundle}_{lattice}.parquet').head(200)
+    Benchmark.write_candidate_shard(shard, tmp_path, bundle, lattice)
+    Benchmark.write_entry_table(Benchmark.load_entries(CAMPAIGN_POOL), tmp_path)
+
+    feature_sidecar(tmp_path)
+
+    mine = pd.read_parquet(tmp_path/'features'/f'candidates_{bundle}_{lattice}.parquet')
+    theirs = pd.read_parquet(CAMPAIGN_POOL/'structural'/f'candidates_{bundle}_{lattice}.parquet')
+    theirs = theirs.merge(
+        shard[list(Benchmark.CANDIDATE_KEY) + ['n_absent_extra', 'n_groups_searched']],
+        on=list(Benchmark.CANDIDATE_KEY))
+    joined = mine.merge(theirs, on=list(Benchmark.CANDIDATE_KEY),
+                        suffixes=('_mine', '_theirs'), validate='1:1')
+    assert joined.shape[0] == shard.shape[0]
+    for name in SIDECAR_FEATURES:
+        np.testing.assert_array_equal(joined[f'{name}_mine'].to_numpy(dtype=float),
+                                      joined[f'{name}_theirs'].to_numpy(dtype=float),
+                                      err_msg=f'{lattice} {name}')
+
+
+def test_a_feature_sidecar_on_a_different_reference_list_is_refused(tmp_path, models_dir):
+    """The absence counts are counts over the reference list the search used. A models tree with
+    a different list would give counts over different reflections, all finite and plausible."""
+    from mlindex.model_training.BenchmarkRuns import _hkl_reference, feature_sidecar
+
+    n_lines = _hkl_reference('cP', 'cubic').shape[0]
+    frame = pd.DataFrame({
+        'entry_id': ['AAAAAA'], 'condition_bundle': ['b1_error1_cont0'],
+        'bravais_lattice': ['cP'], 'candidate_id': [0], 'lattice_system': ['cubic'],
+        'xnn': [np.array([0.04])], 'spacegroup': ['P - - - e.g. P 2 3'], 'n_peaks': [10],
+        'hkl_ref_length': [n_lines + 1], 'M20': [10.0],
+        })
+    Benchmark.write_candidate_shard(frame, tmp_path, 'b1_error1_cont0', 'cP')
+    Benchmark.write_entry_table(pd.DataFrame([{
+        'entry_id': 'AAAAAA', 'condition_bundle': 'b1_error1_cont0',
+        'q2_obs': np.linspace(0.05, 0.5, 20)}]), tmp_path)
+
+    with pytest.raises(ValueError, match='reference list'):
+        feature_sidecar(tmp_path)
+
+
 def test_a_sidecar_that_disagrees_with_its_pool_is_refused():
     """M20 exists on both sides, so recomputing it checks that the peak list, the reference lines
     and the cell are the ones the search used. Every other merit rides on the same three."""

@@ -25,6 +25,7 @@ MANIFEST_NAME = 'manifest.json'
 ENTRY_TABLE_NAME = 'entries.parquet'
 COMPLETION_NAME = 'complete.json'
 MERIT_SIDECAR = 'merits'
+FEATURE_SIDECAR = 'features'
 PART_DIR = 'parts'
 
 # What production keeps per Bravais lattice. A benchmark stores every survivor and marks
