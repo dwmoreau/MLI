@@ -45,7 +45,10 @@
 #   rm -rf $SCRATCH/fom_production/P12_pools/<commit>/train_general/parts/007_*
 #   rm -f  $SCRATCH/fom_production/P12_pools/<commit>/train_general/shards/007.json
 #   sbatch --array=7 mlindex/scripts/submit_benchmark_pools.sh
-#   sbatch mlindex/scripts/submit_benchmark_pools.sh finalize
+#   sbatch --array=0 mlindex/scripts/submit_benchmark_pools.sh finalize
+#
+# `--array=0` is required on a finalize: without it the #SBATCH line below would start eighteen
+# finalize jobs on the same arm, and the script refuses to run as more than one.
 #
 # A failed dev task is re-run by removing its whole arm directory. If any task fails, the finalize
 # job's dependency can never be met and it stays pending; cancel it with scancel.
@@ -145,6 +148,10 @@ MLI_P12_TABLES="$SCRATCH/fom_production/artifacts/P12_pools/${MLI_P12_LABEL}${ML
 MLI_P12_ARMS=(train_general dev_general dev_hard)
 
 if [ "$MLI_P12_MODE" = "$MLI_P12_FINALIZE_MODE" ]; then
+    if [ "${SLURM_ARRAY_TASK_COUNT:-1}" -ne 1 ]; then
+        echo "FATAL: a finalize must run as one job, not ${SLURM_ARRAY_TASK_COUNT} array tasks merging the same arm at once. Submit it with --array=0." >&2
+        exit 1
+    fi
     echo "finalize commit $MLI_P12_COMMIT | out $MLI_P12_OUT"
     "$MLI_P12_PYTHON" -m mlindex.scripts.run_benchmark --stage finalize \
         --out-pool "$MLI_P12_OUT/train_general"
