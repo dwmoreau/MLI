@@ -24,15 +24,17 @@ What each stage does:
 
 * **export** reads a pool written by `run_benchmark --stage generate`. From a `fom-train` pool it
   holds out a fixed share of crystals (`--selection-fraction`, drawn once with `--split-seed`)
-  for choosing settings, and writes the rest as training rows: every correct candidate and a
-  thinned, seed-keyed sample of the wrong ones, for each of `--seeds`. A training pattern whose
-  search found no correct cell gets the true cell, refined as the search finishes a candidate
-  (`BenchmarkRuns.truth_pool`, written under `truth/`), so every training pattern has one. The
-  held-out crystals, and every crystal of a `fom-dev` pool, are written as evaluation rows: the
-  pool restricted to `--cut`, the top `--depth` per lattice, as the search left it.
+  for choosing settings, and writes the rest as training rows: the pool restricted to `--cut`
+  as a run at that cut would leave it, every correct candidate and a thinned, seed-keyed sample
+  of the wrong ones, for each of `--seeds`. A training pattern whose search found no correct cell
+  gets the true cell, refined as the search finishes a candidate (`BenchmarkRuns.truth_pool`,
+  written under `truth/`), so every training pattern has one. Every crystal, of either split, is
+  also written as evaluation rows: the pool restricted to `--cut`, the top `--depth` per lattice,
+  as the search left it.
 * **fit** divides the training crystals into fit and calibration parts by `--seed`, fits the
-  classifier on the fit part, and at every `--checkpoint-every` trees calibrates on the
-  calibration part and ranks the selection crystals. It writes the model and that curve.
+  classifier on the fit part's training rows, and at every `--checkpoint-every` trees calibrates
+  on the calibration part's evaluation rows -- the rows the probability will be printed for --
+  and ranks the selection crystals. It writes the model and that curve.
 * **evaluate** scores a reporting export with each saved model, checks that the model's ONNX
   export gives the same probabilities and the same ranking, and writes per-pattern outcomes and
   each model's calibration (Brier score and expected calibration error, per lattice).
@@ -103,7 +105,7 @@ def build_parser():
                         help='Wrong candidates kept with certainty per merit and lattice.')
     export.add_argument('--negative-rate', type=float, default=0.05, metavar='R',
                         help='Sampling rate for the other wrong candidates.')
-    export.add_argument('--n-negatives', type=int, default=400, metavar='N',
+    export.add_argument('--n-negatives', type=int, default=40, metavar='N',
                         help='Wrong candidates kept per pattern; the most any fit may use.')
 
     fit = parser.add_argument_group('fit')
@@ -117,8 +119,6 @@ def build_parser():
     fit.add_argument('--checkpoint-every', type=int, default=100, metavar='TREES')
     fit.add_argument('--fit-negatives', type=int, default=40, metavar='N',
                      help='Wrong candidates per pattern in the fit rows.')
-    fit.add_argument('--calibration-negatives', type=int, default=400, metavar='N',
-                     help='Wrong candidates per pattern in the calibration rows.')
     fit.add_argument('--calibration-fraction', type=float, default=0.2, metavar='F',
                      help='Share of training crystals the calibrators are fitted on.')
 
@@ -173,8 +173,11 @@ def run_export(args, commit):
             truth_dir = target / 'truth' / bundle
             truth = BenchmarkRuns.truth_pool(pool, truth_dir, seed=args.split_seed,
                                              bundles=[bundle])
+        # Every crystal gets evaluation rows: the selection crystals' choose the settings, and
+        # the training crystals' are where each fit's calibration crystals are read.
         training, evaluation = Ranker.export_bundle(
-            pool, bundle, entries, parts['training'], parts['selection'], args.seeds,
+            pool, bundle, entries, parts['training'], parts['selection'] | parts['training'],
+            args.seeds,
             cut=args.cut, n_top=depth or Benchmark.N_TOP_CANDIDATES,
             keep_all_depths=depth is None, top_k=args.top_k,
             negative_rate=args.negative_rate, n_negatives=args.n_negatives,
@@ -304,10 +307,9 @@ def run_fit(args, commit):
     if args.seed not in stamps[0]['seeds']:
         raise SystemExit(f'{export_dir} has training rows for seeds {stamps[0]["seeds"]}, '
                          f'not {args.seed}')
-    for wanted in (args.fit_negatives, args.calibration_negatives):
-        if wanted > stamps[0]['n_negatives']:
-            raise SystemExit(f'the export kept {stamps[0]["n_negatives"]} wrong candidates a '
-                             f'pattern; {wanted} cannot be drawn from it')
+    if args.fit_negatives > stamps[0]['n_negatives']:
+        raise SystemExit(f'the export kept {stamps[0]["n_negatives"]} wrong candidates a '
+                         f'pattern; {args.fit_negatives} cannot be drawn from it')
     name = (f'{args.encoding}_lr{args.learning_rate:g}_leaves{args.max_leaf_nodes}'
             f'_iter{args.max_iter}_seed{args.seed}')
     target = Path(args.out_dir) / commit[:7] / name
@@ -328,11 +330,15 @@ def run_fit(args, commit):
     training = pd.concat(frames, ignore_index=True)
     fit_rows = Ranker.cap_negatives(training.loc[training['entry_id'].isin(parts['fit'])],
                                     args.fit_negatives)
-    calibration_rows = Ranker.cap_negatives(
-        training.loc[training['entry_id'].isin(parts['calibration'])],
-        args.calibration_negatives)
     del training, frames
-    selection = _evaluation_frame(export_dir, crystals)
+    # The calibration and selection crystals are both read as the deployed indexer leaves them:
+    # the export's evaluation rows.
+    evaluation = _evaluation_frame(export_dir, crystals)
+    calibration_rows = evaluation.loc[evaluation['entry_id'].isin(parts['calibration'])]
+    selection = evaluation.loc[evaluation['entry_id'].isin(
+        crystals.loc[crystals['part'] == 'selection', 'entry_id'])].reset_index(drop=True)
+    calibration_rows = calibration_rows.reset_index(drop=True)
+    del evaluation
     if set(selection['entry_id']) & (parts['fit'] | parts['calibration']):
         raise SystemExit('a selection crystal is also a fit or calibration crystal')
     print(f'fit {fit_rows.shape[0]} rows ({len(parts["fit"])} crystals), calibrate '
@@ -347,7 +353,6 @@ def run_fit(args, commit):
     combiner.fit_calibrators(calibration_rows)
     combiner.meta.update(commit=commit, export_dir=str(export_dir),
                          fit_negatives=args.fit_negatives,
-                         calibration_negatives=args.calibration_negatives,
                          n_fit_crystals=len(parts['fit']),
                          n_calibration_crystals=len(parts['calibration']))
     combiner.save(target)
@@ -372,7 +377,6 @@ def learning_curve(combiner, calibration, selection, every):
     calibration_matrix = combiner.design_matrix(calibration)
     selection_matrix = combiner.design_matrix(selection)
     target = calibration['is_correct'].to_numpy(dtype=bool)
-    weights = calibration['fit_weight'].to_numpy(dtype=np.float64)
     checkpoints = set(range(every, model.n_iter_ + 1, every)) | {model.n_iter_}
     rows = []
     stages = zip(model.staged_predict_proba(calibration_matrix),
@@ -381,7 +385,7 @@ def learning_curve(combiner, calibration, selection, every):
         if n_trees not in checkpoints:
             continue
         calibrators = Ranker.fit_calibration(raw_calibration[:, 1], target,
-                                             calibration['bravais_lattice'], weights)
+                                             calibration['bravais_lattice'])
         arms = Ranker.calibration_arms(raw_selection[:, 1], selection['bravais_lattice'],
                                        calibrators)
         flags = outcomes(selection, {CURVE_NAMES[arm]: score for arm, score in arms.items()})

@@ -1130,7 +1130,7 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     entries = Benchmark.load_entries(pool_dir)
     columns = list(Benchmark.CANDIDATE_KEY) + [
-        'is_correct', 'lattice_system', 'unit_cell', 'M20', 'n_entering', 'n_peaks', 'hkl_ref_length', 'assignment_threshold',
+        'is_correct', 'M20', 'n_entering', 'n_peaks', 'hkl_ref_length', 'assignment_threshold',
         'downsample_radius', 'prune_threshold']
 
     bundles = list(bundles or Benchmark.available_bundles(pool_dir))
@@ -1148,7 +1148,7 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
             frame = Benchmark.load_candidates(pool_dir, bundle, columns=columns,
                                               bravais_lattices=[lattice], sidecars=())
             frame = frame.loc[frame['entry_id'].isin(truth['entry_id'])]
-            found = set(frame.loc[Benchmark.relabelled(frame, entries), 'entry_id'])
+            found = set(frame.loc[metrics.as_bool(frame['is_correct']), 'entry_id'])
             missing = truth.loc[~truth['entry_id'].isin(found)]
             counts['without_a_correct_cell'] += int(missing.shape[0])
             if not missing.shape[0]:

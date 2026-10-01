@@ -169,7 +169,7 @@ def _reduce_subset(entry_code, values, lattice, lattice_order, candidate_id, cor
     return columns
 
 
-def restrict_at_cut(frame, cut, n_top=20, column='m20_at_prune'):
+def restrict_at_cut(frame, cut, n_top=20, column='m20_at_prune', always_keep=None):
     """The candidates a run at a higher M20 cut would have kept, from a pool generated lower.
 
     Keeps every row whose at-prune value reaches `cut`, and where a (pattern, condition, lattice)
@@ -177,6 +177,8 @@ def restrict_at_cut(frame, cut, n_top=20, column='m20_at_prune'):
     recomputes what the cut moves: `final_rank` (by M20 within the lattice), `in_top_n`, and
     `pool_size_full` (the survivors of the pattern). `n_entering` is left as the generating run's,
     so this gives the candidates a higher cut admits, not the cells it would have refined.
+
+    `always_keep` marks rows kept whatever the cut, which then rank and count as survivors.
     """
     lattice_key = ['entry_id', 'condition_bundle', 'bravais_lattice']
     at_prune = frame[column].to_numpy(dtype=np.float64)
@@ -185,6 +187,8 @@ def restrict_at_cut(frame, cut, n_top=20, column='m20_at_prune'):
     # A pool whose best row is below the cut (`best < cut` is False for an all-NaN pool, and no
     # NaN row equals its best, so such a pool keeps nothing).
     keep = (at_prune >= cut) | ((best < cut) & (at_prune == best))
+    if always_keep is not None:
+        keep |= np.asarray(always_keep, dtype=bool)
     out = frame.loc[keep].copy()
     out['final_rank'] = out.groupby(lattice_key, sort=False)['M20'].rank(
         method='first', ascending=False).to_numpy(dtype=np.int64) - 1

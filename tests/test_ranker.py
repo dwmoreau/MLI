@@ -80,20 +80,17 @@ def test_thinning_keeps_every_correct_candidate_and_weights_the_sampled_ones():
     assert 0.15 < (~certain).sum()/n_other < 0.35
 
 
-def test_the_cap_is_a_nested_uniform_sample_with_its_inclusion_weight():
+def test_the_cap_is_a_nested_uniform_sample_that_keeps_every_correct_candidate():
     frame = _pool(n_per_lattice=40).assign(sampling_weight=2.0)
     frame['negative_order'] = ranker.negative_order(frame, 12345)
-    frame['n_negatives_thinned'] = frame.groupby(['entry_id', 'condition_bundle'])[
-        'is_correct'].transform(lambda values: (~values).sum())
     small = ranker.cap_negatives(frame, 10)
     large = ranker.cap_negatives(frame, 30)
     key = ['entry_id', 'condition_bundle', 'bravais_lattice', 'candidate_id']
     assert set(map(tuple, small[key].to_numpy())) <= set(map(tuple, large[key].to_numpy()))
     negatives = small.loc[~small['is_correct']]
     assert (negatives.groupby(['entry_id', 'condition_bundle']).size() == 10).all()
-    # 119 wrong candidates a pattern, 10 kept: each stands for 11.9 of them.
-    np.testing.assert_allclose(negatives['fit_weight'], 2.0*119/10)
-    np.testing.assert_allclose(small.loc[small['is_correct'], 'fit_weight'], 2.0)
+    assert small['is_correct'].sum() == frame['is_correct'].sum()
+    np.testing.assert_allclose(small['sampling_weight'], 2.0)
     other = ranker.cap_negatives(frame.assign(negative_order=ranker.negative_order(frame, 777)), 10)
     assert set(map(tuple, other[key].to_numpy())) != set(map(tuple, small[key].to_numpy()))
 
@@ -133,6 +130,21 @@ def test_restricting_at_a_cut_keeps_each_lattices_best_and_reranks():
     assert set(out['pool_size_full']) == {3.0}
 
 
+def test_a_row_kept_whatever_the_cut_ranks_and_counts_as_a_survivor():
+    """An added true cell is kept below the cut, and the lattice's ranks and the pattern's
+    survivor count include it, as they would a candidate the search had kept."""
+    frame = pd.DataFrame({
+        'entry_id': 'E', 'condition_bundle': 'b0', 'bravais_lattice': 'aP',
+        'candidate_id': [0, 1, 2, -1], 'M20': [9.0, 4.0, 2.0, 3.0],
+        'm20_at_prune': [9.0, 4.0, 2.0, 3.0], 'final_rank': [0, 1, 2, 1], 'in_top_n': True,
+        'pool_size_full': 3.0})
+    out = metrics.restrict_at_cut(frame, 3.5, n_top=20,
+                                  always_keep=frame['candidate_id'].to_numpy() == -1)
+    assert sorted(out['candidate_id']) == [-1, 0, 1]
+    assert dict(zip(out['candidate_id'], out['final_rank'])) == {0: 0, 1: 1, -1: 2}
+    assert set(out['pool_size_full']) == {3.0}
+
+
 def test_split_crystals_is_disjoint_stratified_and_seeded():
     entries = pd.DataFrame({
         'entry_id': [f'C{index:03d}' for index in range(200)],
@@ -168,7 +180,7 @@ def _fitted(encoding, seed=12345):
     member = frame['bravais_lattice'].isin(['cF', 'oC', 'aP']).to_numpy()
     rng = np.random.default_rng(seed)
     frame['is_correct'] = rng.random(frame.shape[0]) < np.where(member, 0.6, 0.1)
-    frame = frame.assign(sampling_weight=1.0, fit_weight=1.0)
+    frame = frame.assign(sampling_weight=1.0)
     combiner = ranker.FomCombiner.fit(frame, encoding=encoding, seed=seed,
                                       params=dict(max_iter=40, max_leaf_nodes=15))
     return combiner.fit_calibrators(frame, minimum=20), frame
@@ -220,7 +232,7 @@ def test_calibration_falls_back_to_the_pooled_curve_for_a_small_lattice():
     raw = np.linspace(0, 1, 300)
     target = (raw > 0.5).astype(float)
     lattice = np.array(['aP']*250 + ['cF']*50)
-    calibrators = ranker.fit_calibration(raw, target, lattice, np.ones(300), minimum=100)
+    calibrators = ranker.fit_calibration(raw, target, lattice, minimum=100)
     assert set(calibrators) == {ranker.POOLED, 'aP'}
     out = ranker.apply_calibration(np.array([0.9, 0.1]), np.array(['cF', 'cF']), calibrators)
     np.testing.assert_allclose(out, [1.0, 0.0])

@@ -5,20 +5,17 @@ lattices, from 31 inputs: seven merits, four systematic-absence counts, three fu
 twelve structural quantities, the candidate's Bravais lattice, and four pool-context gaps (how far
 the candidate sits below the pattern's best value of a merit). Its output is mapped to a
 probability by an isotonic regression fitted separately for each Bravais lattice, on crystals the
-classifier was not fitted on.
+classifier was not fitted on, using the rows it will score: the pool as a run at the cut leaves it.
 
-Training data comes from a benchmark pool (`Benchmark.py`) in two thinning steps, because a pool
-holds of order one correct candidate in several thousand:
+The classifier's rows come from a benchmark pool (`Benchmark.py`) in two thinning steps, because a
+pool holds of order one correct candidate in several thousand:
 
 1. `thin_negatives`, per (pattern, condition, lattice): every correct candidate, the union of the
    `top_k` best candidates by each merit, and a Bernoulli sample of the rest. `sampling_weight` is
-   the inverse of each row's inclusion probability (1 or 1/rate).
+   the inverse of each row's inclusion probability (1 or 1/rate), and the fit is weighted by it.
 2. `cap_negatives`, per (pattern, condition): every correct candidate and at most `n_negatives`
-   wrong ones. `fit_weight` is `sampling_weight` times the inverse of this step's inclusion rate.
-
-The classifier is fitted with `sampling_weight` and the calibrators with `fit_weight`. Weighting
-the fit by `fit_weight` would restore the pool's base rate, and at that base rate the trees learn
-almost nothing; the calibrators, which state the probability, need the pool's base rate.
+   wrong ones. This rebalancing is deliberately not weighted back: at the pool's base rate the
+   trees learn almost nothing. The calibrators, fitted on unthinned rows, state the probability.
 
 Both thinnings draw their random numbers from `keyed_uniform`, a hash of the candidate's key and a
 seed, so whether a candidate is kept does not depend on the order or grouping its rows are read in.
@@ -74,13 +71,13 @@ FORBIDDEN_COLUMNS = frozenset({
     'is_correct', 'is_off_by_two', 'is_degenerate', 'split', 'condition_bundle',
     'q2_error_multiplier', 'intercept_scale', 'n_contaminants', 'n_contaminants_achieved',
     'n_dropout', 'n_dropout_achieved', 'second_phase_lines', 'second_phase_achieved',
-    'second_phase_partner', 'sampling_weight', 'fit_weight', 'm20_at_prune', 'merit_at_prune',
+    'second_phase_partner', 'sampling_weight', 'm20_at_prune', 'merit_at_prune',
     'in_top_n', 'prune_threshold', 'downsample_radius', 'assignment_threshold', 'q2_digest',
     'ctx_pool_size',
     })
 FORBIDDEN_SUFFIX = '_true'
 
-ALLOWED_WEIGHT_COLUMNS = ('sampling_weight', 'fit_weight')
+ALLOWED_WEIGHT_COLUMNS = ('sampling_weight',)
 POOLED = '__pooled__'
 
 # The classifier settings the tuned ones override.
@@ -181,22 +178,14 @@ def negative_order(frame, seed):
     return np.where(correct, -1, position - n_correct[codes]).astype(np.int64)
 
 
-def cap_negatives(frame, n_negatives, order_column='negative_order',
-                  count_column='n_negatives_thinned'):
+def cap_negatives(frame, n_negatives, order_column='negative_order'):
     """Every correct candidate and the first `n_negatives` wrong ones per (pattern, condition).
 
-    `order_column` is `negative_order`; `count_column` is how many wrong candidates the pattern
-    had after `thin_negatives`. Adds `fit_weight`, `sampling_weight` times the inverse of this
-    step's inclusion rate.
+    `order_column` is `negative_order`.
     """
     order = frame[order_column].to_numpy()
-    correct = order < 0
-    keep = correct | (order < n_negatives)
-    n_negative = frame[count_column].to_numpy(dtype=np.float64)
-    n_kept = np.minimum(n_negative, float(n_negatives))
-    inflation = np.where(correct | (n_kept <= 0), 1.0, n_negative/np.maximum(n_kept, 1.0))
-    fit_weight = frame['sampling_weight'].to_numpy(dtype=np.float64)*inflation
-    return frame.loc[keep].assign(fit_weight=fit_weight[keep]).reset_index(drop=True)
+    keep = (order < 0) | (order < n_negatives)
+    return frame.loc[keep].reset_index(drop=True)
 
 
 def context_best(frame):
@@ -271,18 +260,16 @@ def split_crystals(entries, fractions, rng):
 # What is read from a pool's candidate shards, beside the key. The merit and feature sidecars are
 # read whole; the entry table supplies the two per-pattern inputs.
 SHARD_COLUMNS = ('M20', 'n_indexed', 'final_rank', 'n_entering', 'volume', 'm20_at_prune',
-                 'in_top_n', 'is_correct', 'lattice_system', 'unit_cell')
+                 'in_top_n', 'is_correct')
 ENTRY_FEATURES = ('n_peaks_available', 'pool_size_full')
-TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order',
-                                           'n_negatives_thinned')
+TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order')
 EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n')
 
 
-def _read_lattice(pool, bundle, lattice, entry_ids, entries, columns=SHARD_COLUMNS,
+def _read_lattice(pool, bundle, lattice, entry_ids, columns=SHARD_COLUMNS,
                   sidecar_columns=None, truth_dir=None, truth_ids=()):
-    """One lattice's candidates of one bundle, for the crystals in `entry_ids`, labelled by
-    `Benchmark.label_frame`'s rule. `sidecar_columns` maps a sidecar to the columns wanted from
-    it; without it both sidecars are read whole.
+    """One lattice's candidates of one bundle, for the crystals in `entry_ids`. `sidecar_columns`
+    maps a sidecar to the columns wanted from it; without it both sidecars are read whole.
 
     `truth_dir`, a `BenchmarkRuns.truth_pool` of the same bundle, adds its true cells for the
     crystals in `truth_ids`, those still correct after their refinement.
@@ -291,8 +278,7 @@ def _read_lattice(pool, bundle, lattice, entry_ids, entries, columns=SHARD_COLUM
 
     if sidecar_columns is None:
         sidecar_columns = {Benchmark.MERIT_SIDECAR: None, Benchmark.FEATURE_SIDECAR: None}
-    wanted = list(CANDIDATE_KEY) + list(dict.fromkeys(
-        list(columns) + ['is_correct', 'lattice_system', 'unit_cell']))
+    wanted = list(CANDIDATE_KEY) + list(dict.fromkeys(list(columns) + ['is_correct']))
 
     def read(directory, ids):
         frame = Benchmark.load_candidates(
@@ -301,7 +287,6 @@ def _read_lattice(pool, bundle, lattice, entry_ids, entries, columns=SHARD_COLUM
         return frame.loc[frame['entry_id'].isin(ids)]
 
     frame = read(pool, entry_ids)
-    frame['is_correct'] = Benchmark.relabelled(frame, entries)
     shard = Path(truth_dir or '.') / f'candidates_{bundle}_{lattice}.parquet'
     if truth_dir is not None and len(truth_ids) and shard.exists():
         truth = read(truth_dir, truth_ids)
@@ -322,79 +307,86 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
                   keep_all_depths, top_k, negative_rate, n_negatives, truth_dir=None):
     """One condition bundle of a pool as ranker frames: training rows per seed, evaluation rows.
 
-    Training rows, for the crystals in `training_ids`: the pool at its own cut, thinned by
-    `thin_negatives` and then to the first `n_negatives` wrong candidates per pattern by
-    `negative_order` -- both draws keyed on the seed -- with the context gaps taken over every
-    lattice of the pattern before any thinning. A later `cap_negatives` at or below `n_negatives`
-    selects from these rows exactly as it would from the whole pool.
+    Both are the pool as a run at `cut` would leave it (`restrict_at_cut`): `final_rank`,
+    `pool_size_full` and the context gaps are recomputed over the restricted pool, the gaps over
+    every lattice of the pattern.
 
-    Evaluation rows, for the crystals in `evaluation_ids`: the pool restricted to `cut`
-    (`restrict_at_cut`), with `pool_size_full` and the context gaps recomputed over the restricted
-    pool, and only the `n_top` per lattice unless `keep_all_depths`.
+    Training rows, for the crystals in `training_ids`: every depth, and every correct cell kept
+    whatever the cut -- the search's own, and the bundle's true cells from `truth_dir` (a
+    `BenchmarkRuns.truth_pool`) where the search had none -- as candidates of their patterns, in
+    the ranks, the survivor counts and the gaps, so every training pattern has a correct cell. Then thinned by `thin_negatives` and to the first `n_negatives` wrong candidates
+    per pattern by `negative_order`, both draws keyed on the seed; a later `cap_negatives` at or
+    below `n_negatives` selects from these rows exactly as it would from the whole pool.
 
-    `truth_dir` is the bundle's `BenchmarkRuns.truth_pool`. Its true cells join the training
-    rows only, as candidates of their patterns -- in the context gaps too -- so every training
-    pattern has a correct cell; evaluation rows are what the search found.
+    Evaluation rows, for the crystals in `evaluation_ids`: as the search left them, the `n_top`
+    per lattice unless `keep_all_depths`.
 
     The pool is read one lattice at a time, twice: once for each pattern's best values and
-    survivor count, once for the rows. Returns ({seed: frame}, frame).
+    survivor counts, once for the rows. Returns ({seed: frame}, frame).
     """
     from mlindex.model_training import Benchmark
     from mlindex.model_training.BenchmarkMetrics import restrict_at_cut
+    from mlindex.model_training.BenchmarkRuns import TRUTH_CANDIDATE_ID
 
     lattices = [lattice for lattice, _ in Benchmark.candidate_shards(pool, bundle)]
     wanted = set(training_ids) | set(evaluation_ids)
     context_columns = {Benchmark.MERIT_SIDECAR: ['M_sym', 'n_over', 'max_gap']}
 
-    best_training, best_evaluation, survivors = [], [], []
+    def restricted(frame):
+        """(training rows, evaluation rows) of one lattice, each restricted to the cut."""
+        added = frame['candidate_id'].to_numpy() == TRUTH_CANDIDATE_ID
+        in_training = frame['entry_id'].isin(training_ids).to_numpy()
+        # A training pattern keeps its correct cells below the cut, as it keeps an added one.
+        training = restrict_at_cut(frame.loc[in_training], cut, n_top=n_top,
+                                   always_keep=as_bool(frame['is_correct'])[in_training])
+        evaluation = restrict_at_cut(
+            frame.loc[frame['entry_id'].isin(evaluation_ids) & ~added], cut, n_top=n_top)
+        return training, evaluation
+
+    best, survivors = {'training': [], 'evaluation': []}, {'training': [], 'evaluation': []}
     for lattice in lattices:
-        frame = _read_lattice(pool, bundle, lattice, wanted, entries,
-                              columns=('M20', 'm20_at_prune'), sidecar_columns=context_columns,
-                              truth_dir=truth_dir, truth_ids=training_ids)
-        training = frame.loc[frame['entry_id'].isin(training_ids)]
-        if training.shape[0]:
-            best_training.append(context_best(training))
-        evaluation = frame.loc[frame['entry_id'].isin(evaluation_ids)]
-        if evaluation.shape[0]:
-            restricted = restrict_at_cut(evaluation, cut, n_top=n_top)
-            best_evaluation.append(context_best(restricted))
-            survivors.append(restricted.groupby(ENTRY_KEY, as_index=False).size())
+        frame = _read_lattice(pool, bundle, lattice, wanted, columns=('M20', 'm20_at_prune'),
+                              sidecar_columns=context_columns, truth_dir=truth_dir,
+                              truth_ids=training_ids)
+        for name, rows in zip(('training', 'evaluation'), restricted(frame)):
+            if rows.shape[0]:
+                best[name].append(context_best(rows))
+                survivors[name].append(rows.groupby(ENTRY_KEY, as_index=False).size())
 
     def combine(parts, how):
         return (pd.concat(parts).groupby(ENTRY_KEY, as_index=False).agg(how) if parts else None)
 
-    best_training = combine(best_training, 'max')
-    best_evaluation = combine(best_evaluation, 'max')
-    survivors = combine(survivors, 'sum')
+    best = {name: combine(parts, 'max') for name, parts in best.items()}
+    survivors = {name: combine(parts, 'sum') for name, parts in survivors.items()}
+
+    def in_restricted_pool(rows, name):
+        """`pool_size_full` and the context gaps over the whole restricted pattern."""
+        rows = rows.drop(columns='pool_size_full').merge(
+            survivors[name].rename(columns={'size': 'pool_size_full'}), on=ENTRY_KEY,
+            how='left')
+        return add_context(rows, best[name])
 
     kept = {seed: [] for seed in seeds}
-    n_thinned = {seed: [] for seed in seeds}
     evaluation_parts = []
     for lattice in lattices:
         frame = add_derived(Benchmark.attach_entry_columns(
-            _read_lattice(pool, bundle, lattice, wanted, entries, truth_dir=truth_dir,
+            _read_lattice(pool, bundle, lattice, wanted, truth_dir=truth_dir,
                           truth_ids=training_ids), entries, ENTRY_FEATURES))
-        training = frame.loc[frame['entry_id'].isin(training_ids)].reset_index(drop=True)
+        training, evaluation = restricted(frame)
         if training.shape[0]:
+            training = in_restricted_pool(training, 'training').reset_index(drop=True)
             in_top_k = top_k_mask(training, top_k)
             for seed in seeds:
-                thinned = add_context(thin_negatives(training, top_k, negative_rate, seed,
-                                                     in_top_k=in_top_k), best_training)
-                n_thinned[seed].append(thinned.loc[~as_bool(thinned['is_correct'])].groupby(
-                    ENTRY_KEY, as_index=False).size())
+                thinned = thin_negatives(training, top_k, negative_rate, seed, in_top_k=in_top_k)
                 # The first `n_negatives` of the pattern overall are among the first
                 # `n_negatives` of the lattices read so far, so truncating as we go loses none.
                 kept[seed] = [_first_negatives(pd.concat(kept[seed] + [thinned],
                                                          ignore_index=True), n_negatives, seed)]
-        evaluation = frame.loc[frame['entry_id'].isin(evaluation_ids)]
         if evaluation.shape[0]:
-            restricted = restrict_at_cut(evaluation, cut, n_top=n_top).drop(
-                columns='pool_size_full').merge(
-                survivors.rename(columns={'size': 'pool_size_full'}), on=ENTRY_KEY, how='left')
-            restricted = add_context(restricted, best_evaluation)
+            evaluation = in_restricted_pool(evaluation, 'evaluation')
             if not keep_all_depths:
-                restricted = restricted.loc[restricted['in_top_n']]
-            evaluation_parts.append(restricted[list(EVALUATION_COLUMNS) + [
+                evaluation = evaluation.loc[evaluation['in_top_n']]
+            evaluation_parts.append(evaluation[list(EVALUATION_COLUMNS) + [
                 name for name in FEATURES if name not in EVALUATION_COLUMNS]])
 
     training_frames = {}
@@ -402,9 +394,6 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
         if not kept[seed]:
             continue
         frame = kept[seed][0]
-        counts = combine(n_thinned[seed], 'sum').rename(columns={'size': 'n_negatives_thinned'})
-        frame = frame.merge(counts, on=ENTRY_KEY, how='left')
-        frame['n_negatives_thinned'] = frame['n_negatives_thinned'].fillna(0).astype(np.int64)
         frame['negative_order'] = negative_order(frame, seed)
         training_frames[seed] = _float32(frame[list(TRAINING_COLUMNS) + [
             name for name in FEATURES if name not in TRAINING_COLUMNS]])
@@ -416,7 +405,7 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
 # ---------------------------------------------------------------------------------------------
 # Calibration
 # ---------------------------------------------------------------------------------------------
-def fit_calibration(raw, target, lattice, weights, minimum=200):
+def fit_calibration(raw, target, lattice, minimum=200):
     """Isotonic knots per Bravais lattice, and pooled ones for a lattice with too few rows.
 
     A lattice gets its own calibrator when it has at least `minimum` rows and both classes.
@@ -426,14 +415,13 @@ def fit_calibration(raw, target, lattice, weights, minimum=200):
 
     def knots(mask):
         fitted = IsotonicRegression(out_of_bounds='clip', y_min=0.0, y_max=1.0)
-        fitted.fit(raw[mask], target[mask], sample_weight=weights[mask])
+        fitted.fit(raw[mask], target[mask])
         return (np.asarray(fitted.X_thresholds_, dtype=np.float64),
                 np.asarray(fitted.y_thresholds_, dtype=np.float64))
 
     raw = np.asarray(raw, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
     lattice = np.asarray(lattice)
-    weights = np.asarray(weights, dtype=np.float64)
     calibrators = {POOLED: knots(np.ones(raw.size, dtype=bool))}
     for name in np.unique(lattice):
         mask = lattice == name
@@ -544,12 +532,12 @@ class FomCombiner:
         return combiner
 
     def fit_calibrators(self, frame, minimum=200):
-        """Per-lattice isotonic calibration on rows the classifier was not fitted on."""
+        """Per-lattice isotonic calibration on rows the classifier was not fitted on, of the kind
+        it will score."""
         self.calibrators = fit_calibration(
             self.raw_score(frame), as_bool(frame['is_correct']), frame[LATTICE_FEATURE],
-            fit_weights(frame, 'fit_weight'), minimum=minimum)
+            minimum=minimum)
         self.meta.update(n_calibration_rows=int(frame.shape[0]),
-                         calibration_weight_column='fit_weight',
                          calibrated_lattices=sorted(set(self.calibrators) - {POOLED}))
         return self
 
