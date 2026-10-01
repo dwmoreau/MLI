@@ -343,13 +343,23 @@ def label_frame(candidates, entries, rtol=1e-2):
                     'compare different quantities.')
             correct, off_by_two = label_known_bl_batch(
                 partial_true, predicted, lattice_system, rtol=rtol)
-            correct &= (group['bravais_lattice'].to_numpy()
-                        == truth.loc[entry_id, 'bravais_lattice_true'])
             is_correct[positions] = correct
             is_off_by_two[positions] = off_by_two
-    result['is_correct'] = is_correct
+    result['is_correct'] = is_correct & in_true_lattice(result, entries)
     result['is_off_by_two'] = is_off_by_two
     return result
+
+
+def in_true_lattice(candidates, entries):
+    """True where a candidate is in its pattern's true Bravais lattice.
+
+    The lattice half of `label_frame`'s rule. A pool labelled before that rule had it carries the
+    cell comparison alone in `is_correct`, so `is_correct & in_true_lattice(...)` is its label
+    under the rule, with nothing recomputed.
+    """
+    truth = entries.drop_duplicates('entry_id').set_index('entry_id')['bravais_lattice_true']
+    return (candidates['bravais_lattice'].to_numpy()
+            == truth.reindex(candidates['entry_id'].to_numpy()).to_numpy())
 
 
 def _to_parquet(frame, path, row_group_size=None):
