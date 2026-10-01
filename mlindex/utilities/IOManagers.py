@@ -104,6 +104,19 @@ class SKLearnManager:
         elif self.model_type == 'custom':
             return self.model.predict(X)
     
+    def predict_proba(self, X):
+        """Class probabilities of a loaded classifier, (n_samples, n_classes).
+
+        An ONNX classifier exported by `_save_onnx` has the label as its first output and the
+        probabilities as its second.
+        """
+        if self.model_type == 'onnx':
+            return self.model.run(
+                [self.model.get_outputs()[1].name],
+                {self.model.get_inputs()[0].name: X.astype(np.float32)}
+            )[0]
+        return self.model.predict_proba(X)
+
     def predict_individual_trees(self, X, n_outputs):
         """
         Get predictions from individual trees (for ensemble models).
