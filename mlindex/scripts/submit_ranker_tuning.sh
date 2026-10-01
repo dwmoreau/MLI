@@ -201,7 +201,7 @@ case "$MLI_P13_MODE" in
         evaluate_seeds "$2" "$3" "$4" "$5"
         ;;
     rehearse)
-        # A rehearsal pool has a crystal or two a lattice, and 15 % or 20 % of two rounds to none.
+        # A rehearsal pool has a crystal or two a lattice; holding out half at each step leaves every part some.
         MLI_P13_SELECTION=0.5
         MLI_P13_CALIBRATION=0.5
         for MLI_P13_TASK in $(seq 0 13); do

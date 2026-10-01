@@ -251,16 +251,19 @@ def split_crystals(entries, fractions, rng):
     crystals = entries[['entry_id', 'bravais_lattice_true']].drop_duplicates('entry_id')
     parts = {name: set() for name in fractions}
     names = list(fractions)
-    edges = np.cumsum([fractions[name] for name in names])
+    edges = np.cumsum([fractions[name] for name in names])[:-1]
     for lattice in BRAVAIS_LATTICES:
         ids = np.sort(crystals.loc[crystals['bravais_lattice_true'] == lattice,
                                    'entry_id'].to_numpy())
         if not ids.size:
             continue
-        shuffled = ids[rng.permutation(ids.size)]
-        bounds = np.concatenate([[0], np.round(edges*ids.size).astype(int)])
+        # A stratified position in [0, 1): the k-th of n crystals, in random order, lands in
+        # [k/n, (k+1)/n). Each part gets its share of a lattice to within one crystal, and a
+        # lattice too small to divide is assigned by chance rather than always to the first part.
+        position = (rng.permutation(ids.size) + rng.random(ids.size))/ids.size
+        assigned = np.searchsorted(edges, position, side='right')
         for index, name in enumerate(names):
-            parts[name].update(shuffled[bounds[index]:bounds[index + 1]].tolist())
+            parts[name].update(ids[assigned == index].tolist())
     return parts
 
 
