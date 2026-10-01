@@ -58,6 +58,7 @@ SEEDS = (12345, 777, 20260826)
 CRYSTALS_NAME = 'crystals.parquet'
 OUTCOMES = ('found', 'top1', 'top5', 'top10', 'reciprocal_rank')
 REFERENCE_SCORES = ('M20', 'M_sym')
+ONNX_CHECK_ROWS = 2_000_000
 
 
 def _integers(text):
@@ -385,6 +386,16 @@ def calibration_rows(probability, correct, lattice, n_bins=10):
     return rows
 
 
+def onnx_check_rows(frame, limit=ONNX_CHECK_ROWS, seed=12345):
+    """Whole crystals, drawn in a fixed random order until `limit` rows: the rows the ONNX export
+    is compared on. A whole-pool export is too large to score twice."""
+    crystals = np.sort(frame['entry_id'].unique())
+    order = crystals[np.random.default_rng(seed).permutation(crystals.size)]
+    sizes = frame.groupby('entry_id').size().reindex(order).to_numpy()
+    keep = order[:max(1, int(np.searchsorted(np.cumsum(sizes), limit, side='right')))]
+    return frame['entry_id'].isin(keep)
+
+
 def run_evaluate(args, commit):
     export_dir = Path(args.export_dir)
     crystals, stamps = _read_export(export_dir)
@@ -399,6 +410,7 @@ def run_evaluate(args, commit):
 
     scores = {name: name for name in REFERENCE_SCORES}
     agreement, calibration = [], []
+    sample = onnx_check_rows(frame)
     for directory in args.model_dir:
         directory = Path(directory)
         name = directory.name
@@ -412,16 +424,20 @@ def run_evaluate(args, commit):
         calibration += [dict(model=name, **row) for row in calibration_rows(
             probability, frame['is_correct'].to_numpy(dtype=bool), frame['bravais_lattice'])]
         if combiner.encoding in Ranker.EXPORTABLE_ENCODINGS:
+            check = sample.to_numpy()
             onnx_raw = Ranker.onnx_probability(directory / 'model.onnx',
-                                               combiner.design_matrix(frame))
-            onnx_probability = Ranker.apply_calibration(onnx_raw, frame['bravais_lattice'],
-                                                        combiner.calibrators)
-            same = outcomes(frame, {'sklearn': probability, 'onnx': onnx_probability})
+                                               combiner.design_matrix(frame.loc[check]))
+            onnx_probability = Ranker.apply_calibration(
+                onnx_raw, frame.loc[check, 'bravais_lattice'], combiner.calibrators)
+            same = outcomes(frame.loc[check].reset_index(drop=True),
+                            {'sklearn': probability[check], 'onnx': onnx_probability})
             pivot = same.pivot_table(index=Benchmark.ENTRY_KEY, columns='score',
                                      values=['top1', 'top10'])
             agreement.append(dict(
-                model=name, max_abs_raw=float(np.max(np.abs(onnx_raw - raw))),
-                max_abs_calibrated=float(np.max(np.abs(onnx_probability - probability))),
+                model=name, n_rows_checked=int(check.sum()),
+                n_patterns_checked=int(pivot.shape[0]),
+                max_abs_raw=float(np.max(np.abs(onnx_raw - raw[check]))),
+                max_abs_calibrated=float(np.max(np.abs(onnx_probability - probability[check]))),
                 top1_disagreements=int((pivot['top1']['sklearn'] != pivot['top1']['onnx']).sum()),
                 top10_disagreements=int(
                     (pivot['top10']['sklearn'] != pivot['top10']['onnx']).sum())))

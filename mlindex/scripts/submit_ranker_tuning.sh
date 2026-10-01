@@ -194,7 +194,7 @@ case "$MLI_P13_MODE" in
             # The submitting job: one fit per seed, then the evaluation once all have succeeded.
             MLI_P13_JOB=$(sbatch --parsable --array=0-2 -t 6:00:00 -J ranker_seeds \
                 mlindex/scripts/submit_ranker_tuning.sh seeds "$2" "$3" "$4" "$5")
-            sbatch --array=0 -t 4:00:00 -J ranker_evaluate --dependency="afterok:${MLI_P13_JOB}" \
+            sbatch --array=0 -t 12:00:00 -J ranker_evaluate --dependency="afterok:${MLI_P13_JOB}" \
                 mlindex/scripts/submit_ranker_tuning.sh evaluate "$2" "$3" "$4" "$5"
             exit 0
         fi
