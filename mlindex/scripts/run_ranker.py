@@ -32,7 +32,8 @@ What each stage does:
   classifier on the fit part, and at every `--checkpoint-every` trees calibrates on the
   calibration part and ranks the selection crystals. It writes the model and that curve.
 * **evaluate** scores a reporting export with each saved model, checks that the model's ONNX
-  export gives the same probabilities and the same ranking, and writes per-pattern outcomes.
+  export gives the same probabilities and the same ranking, and writes per-pattern outcomes and
+  each model's calibration (Brier score and expected calibration error, per lattice).
 
 Every output directory names the commit that wrote it, and no stage writes over an existing
 result.
@@ -361,6 +362,29 @@ def learning_curve(combiner, calibration, selection, every):
 # ---------------------------------------------------------------------------------------------
 # evaluate
 # ---------------------------------------------------------------------------------------------
+def calibration_rows(probability, correct, lattice, n_bins=10):
+    """Brier score and expected calibration error, over all rows and per Bravais lattice.
+
+    The calibration error is the row-weighted mean, over `n_bins` bins of equal row count by
+    predicted probability, of |mean predicted - share correct|.
+    """
+    def one(p, y):
+        order = np.argsort(p, kind='stable')
+        bins = np.array_split(order, n_bins)
+        gaps = [abs(p[b].mean() - y[b].mean())*b.size for b in bins if b.size]
+        return dict(n_rows=int(p.size), base_rate=float(y.mean()), brier=float(np.mean((p - y)**2)),
+                    ece=float(np.sum(gaps)/p.size))
+
+    probability = np.asarray(probability, dtype=np.float64)
+    correct = np.asarray(correct, dtype=np.float64)
+    lattice = np.asarray(lattice)
+    rows = [dict(scope='aggregate', **one(probability, correct))]
+    for name in np.unique(lattice):
+        mask = lattice == name
+        rows.append(dict(scope=f'bravais_lattice={name}', **one(probability[mask], correct[mask])))
+    return rows
+
+
 def run_evaluate(args, commit):
     export_dir = Path(args.export_dir)
     crystals, stamps = _read_export(export_dir)
@@ -374,7 +398,7 @@ def run_evaluate(args, commit):
     target.mkdir(parents=True, exist_ok=True)
 
     scores = {name: name for name in REFERENCE_SCORES}
-    agreement = []
+    agreement, calibration = [], []
     for directory in args.model_dir:
         directory = Path(directory)
         name = directory.name
@@ -385,6 +409,8 @@ def run_evaluate(args, commit):
         probability = Ranker.apply_calibration(raw, frame['bravais_lattice'],
                                                combiner.calibrators)
         scores[name] = probability
+        calibration += [dict(model=name, **row) for row in calibration_rows(
+            probability, frame['is_correct'].to_numpy(dtype=bool), frame['bravais_lattice'])]
         if combiner.encoding in Ranker.EXPORTABLE_ENCODINGS:
             onnx_raw = Ranker.onnx_probability(directory / 'model.onnx',
                                                combiner.design_matrix(frame))
@@ -405,6 +431,7 @@ def run_evaluate(args, commit):
         flags.loc[flags['score'] == name].to_parquet(target / f'outcomes_{name}.parquet',
                                                      index=False)
     population_means(flags).to_csv(target / 'summary.csv', index=False)
+    pd.DataFrame(calibration).to_csv(target / 'calibration.csv', index=False)
     with open(target / 'onnx_agreement.json', 'w', encoding='utf-8') as handle:
         json.dump(dict(commit=commit, export_dir=str(export_dir), models=agreement), handle,
                   indent=2)
