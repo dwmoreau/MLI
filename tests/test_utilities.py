@@ -389,6 +389,35 @@ def test_spacegroup_hkl_ref():
             )
 
 
+def test_every_lattice_has_one_extinction_group_that_removes_nothing():
+    """The reference lists already exclude each lattice's centring absences, so exactly one group
+    -- the generic one -- keeps every line. The absence counts are counts against that list; if
+    it were not the generic group's, every count would include the centring absences too."""
+    from mlindex.utilities.SpaceGroups import get_spacegroup_keep_masks
+
+    models = Path(__file__).resolve().parent.parent / 'mlindex' / 'models'
+    for bl, lattice_system in BL_TO_LATTICE_SYSTEM.items():
+        hkl_ref = np.load(models / f'{lattice_system}_1' / 'data' / f'hkl_ref_{bl}.npy')
+        masks = get_spacegroup_keep_masks(hkl_ref, bl)
+        keeps_all = [key for key, keep in masks.items() if keep.all()]
+        assert len(keeps_all) == 1, f'{bl}: {keeps_all}'
+        assert all(keep.shape == (hkl_ref.shape[0],) for keep in masks.values())
+
+
+def test_absences_are_counted_strictly_below_the_cutoff():
+    """`get_M20` counts reference lines strictly below the last assigned line, and the in-range
+    absence count must see the same window or the two disagree about one quantity."""
+    from mlindex.utilities.SpaceGroups import count_absences_in_range
+
+    q2_ref_calc = np.array([[0.1, 0.2, 0.3, 0.4], [0.1, 0.2, 0.3, 0.4]])
+    keep = np.array([True, False, True, False])
+    removed, in_range = count_absences_in_range(q2_ref_calc, keep, np.array([0.4, 0.2]))
+
+    assert removed.tolist() == [1, 0]
+    assert in_range.tolist() == [3, 1]
+    assert removed.dtype == np.int64 and in_range.dtype == np.int64
+
+
 def test_load_peaks_npy(test_metadata):
     from mlindex.command_line.run import _load_peaks
     import types

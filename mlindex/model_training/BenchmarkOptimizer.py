@@ -18,6 +18,7 @@ produces several thousand survivors and a pool holds hundreds of patterns.
 
 import numpy as np
 
+from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
 from mlindex.optimization.MPOptimizer import MPOptimizerManager
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
@@ -72,6 +73,18 @@ class BenchmarkOptimizer(MPOptimizerManager):
                 'recorded cells would not reproduce the M20 the pipeline computed.'
                 )
 
+        # A pool is generated once at a low cut and every higher cut is read from it as a
+        # restriction, which needs the value each criterion had where the cut was applied. A pool
+        # without them cannot answer that, and nothing downstream would notice they were missing.
+        at_prune = survivors['at_prune']
+        if at_prune is None:
+            raise ValueError(
+                'No at-prune values reached the recorder: set opt_params '
+                "'prune_criterion_capture' for a benchmark run.")
+        positions = np.asarray(survivors['positions'], dtype=np.int64)
+        merit_at_prune = np.column_stack(
+            [at_prune['merit_at_prune'][name][positions] for name in PRUNE_CAPTURE_MERITS])
+
         xnn = survivors['xnn']
         n_candidates = xnn.shape[0]
 
@@ -117,4 +130,8 @@ class BenchmarkOptimizer(MPOptimizerManager):
             'n_indexed': np.array(survivors['n_indexed'], dtype=np.int64, copy=True),
             'final_rank': final_rank,
             'in_top_n': final_rank < int(n_top_candidates),
+            # The running-best M20 the cut tested, and every criterion at that point in
+            # `PRUNE_CAPTURE_MERITS` order, which the manifest records as `merit_at_prune_names`.
+            'm20_at_prune': np.array(at_prune['m20_at_prune'][positions], dtype=np.float64),
+            'merit_at_prune': merit_at_prune.astype(np.float64),
             })

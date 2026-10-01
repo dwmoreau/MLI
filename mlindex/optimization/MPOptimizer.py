@@ -92,21 +92,13 @@ class MPOptimizerManager(OptimizerManager):
         return self.generate_candidates_common(candidate_xnn_rank)
 
     def downsample_candidates(self, candidates, n_top_candidates):
-        best_M20_all = [candidates.best_M20]
-        best_xnn_all = [candidates.best_xnn]
-        best_n_indexed_all = [candidates.n_indexed]
-        best_spacegroup_all = list(candidates.best_spacegroup)
+        payloads = [candidates.downsample_payload()]
         for r in range(1, self.n_ranks):
             result = self._result_queues[r].get()
             if isinstance(result, Exception):
                 raise RuntimeError(f"Worker {r} failed: {result}") from result
-            best_M20_all.append(result['M20'])
-            best_xnn_all.append(result['xnn'])
-            best_n_indexed_all.append(result['n_indexed'])
-            best_spacegroup_all += result['spacegroup']
-        self._downsample_computation(best_M20_all, best_xnn_all,
-                                     best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates)
+            payloads.append(result)
+        self._downsample_payloads(payloads, n_top_candidates)
 
     def convergence_testing(self, candidates):
         n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])
@@ -152,13 +144,7 @@ class MPOptimizerWorker(OptimizerWorker):
         return self.generate_candidates_common(self._data_q.get())
 
     def downsample_candidates(self, candidates, n_top_candidates):
-        result = {
-            'M20': candidates.best_M20,
-            'xnn': candidates.best_xnn,
-            'n_indexed': candidates.n_indexed,
-            'spacegroup': list(candidates.best_spacegroup),
-        }
-        self._result_q.put(result)
+        self._result_q.put(candidates.downsample_payload())
 
     def convergence_testing(self, candidates):
         self._result_q.put({'M20': candidates.best_M20, 'xnn': candidates.best_xnn})

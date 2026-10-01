@@ -230,15 +230,7 @@ class OptimizerWorker(OptimizerBase):
         # everything in one object means the arrays and the spacegroup list cannot
         # disagree about the count, which is the failure this replaces. MPOptimizer has
         # always worked this way; the two paths now match.
-        self.comm.send(
-            {
-                'M20': candidates.best_M20,
-                'xnn': candidates.best_xnn,
-                'n_indexed': candidates.n_indexed,
-                'spacegroup': list(candidates.best_spacegroup),
-                },
-            dest=self.root,
-            )
+        self.comm.send(candidates.downsample_payload(), dest=self.root)
 
     def convergence_testing(self, candidates):
         self.comm.send(
@@ -440,7 +432,7 @@ class OptimizerManager(OptimizerBase):
 
     def _downsample_computation(self, best_M20_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
-                                n_top_candidates):
+                                n_top_candidates, at_prune=None):
         best_M20_all = np.concatenate(best_M20_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
@@ -532,10 +524,12 @@ class OptimizerManager(OptimizerBase):
         spacegroup_downsampled = [best_spacegroup_all[i] for i in survivor_positions]
 
         order = np.argsort(M20_downsampled)[::-1]
+        # `at_prune` is passed as received, indexed like the concatenated inputs, so
+        # `positions` selects the survivors' rows from it.
         self._on_downsample(
             {'xnn': xnn_downsampled, 'M20': M20_downsampled,
              'n_indexed': n_indexed_downsampled, 'spacegroup': spacegroup_downsampled,
-             'positions': survivor_positions},
+             'positions': survivor_positions, 'at_prune': at_prune},
             order, n_entering, n_top_candidates,
             )
 
@@ -559,17 +553,31 @@ class OptimizerManager(OptimizerBase):
         itself neither overrides it nor reads anything it is given.
         """
 
+    def _downsample_payloads(self, payloads, n_top_candidates):
+        """Deduplicate the candidates of every rank, given each rank's `downsample_payload`
+        in rank order."""
+        at_prune = None
+        # RESEARCH CODE THAT NEEDS TO BE DELETED -- see Candidates.PRUNE_CAPTURE_MERITS.
+        # Concatenated in the same rank order as the arrays, so the `positions` that
+        # `_downsample_computation` hands `_on_downsample` index these too.
+        if 'm20_at_prune' in payloads[0]:
+            at_prune = {
+                'm20_at_prune': np.concatenate([p['m20_at_prune'] for p in payloads]),
+                'merit_at_prune': {
+                    name: np.concatenate([p['merit_at_prune'][name] for p in payloads])
+                    for name in payloads[0]['merit_at_prune']},
+                }
+        self._downsample_computation(
+            [p['M20'] for p in payloads], [p['xnn'] for p in payloads],
+            [p['n_indexed'] for p in payloads],
+            [spacegroup for p in payloads for spacegroup in p['spacegroup']],
+            n_top_candidates, at_prune=at_prune)
+
     def downsample_candidates(self, candidates, n_top_candidates):
-        best_M20_all = []
-        best_xnn_all = []
-        best_n_indexed_all = []
-        best_spacegroup_all = []
+        payloads = []
         for rank_index in range(self.n_ranks):
             if rank_index == self.root:
-                best_M20_all.append(candidates.best_M20)
-                best_xnn_all.append(candidates.best_xnn)
-                best_n_indexed_all.append(candidates.n_indexed)
-                best_spacegroup_all += candidates.best_spacegroup
+                payloads.append(candidates.downsample_payload())
             else:
                 # `recv` returns the arrays at the length the rank actually produced, so
                 # nothing has to be sized in advance. Sizing these from
@@ -577,15 +585,8 @@ class OptimizerManager(OptimizerBase):
                 # zero-padded the arrays up to the outgoing count while the spacegroup
                 # list arrived at its true, shorter length, and the two then disagreed in
                 # `_downsample_computation`.
-                result = self.comm.recv(source=rank_index)
-                best_M20_all.append(result['M20'])
-                best_xnn_all.append(result['xnn'])
-                best_n_indexed_all.append(result['n_indexed'])
-                best_spacegroup_all += result['spacegroup']
-
-        self._downsample_computation(best_M20_all, best_xnn_all,
-                                     best_n_indexed_all, best_spacegroup_all,
-                                     n_top_candidates)
+                payloads.append(self.comm.recv(source=rank_index))
+        self._downsample_payloads(payloads, n_top_candidates)
 
     def convergence_testing(self, candidates):
         n_candidates = self.opt_params['convergence_candidates'] * len(self.opt_params['convergence_distances'])

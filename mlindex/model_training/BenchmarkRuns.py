@@ -11,7 +11,6 @@ on their peaks, so every arm of a comparison must share it or the arms differ in
 `search_seed` reaches the search alone. A floor moves the second and nothing else.
 """
 
-import hashlib
 import json
 import time
 from itertools import combinations
@@ -24,7 +23,7 @@ from mlindex.model_training import Benchmark
 from mlindex.model_training import BenchmarkConditions
 from mlindex.model_training import BenchmarkMetrics as metrics
 from mlindex.model_training import BenchmarkPatterns
-from mlindex.utilities.Digests import q2_digest
+from mlindex.utilities.Digests import file_digest, q2_digest, tree_digest
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
@@ -59,15 +58,6 @@ MAX_BUNDLE_FAILURE_FRACTION = 0.20
 # How often a pool says where it has got to. A pattern takes tens of seconds, so this is
 # a line every few minutes per pool.
 PROGRESS_EVERY = 10
-
-
-def file_digest(path):
-    """The sha256 of a file, so a manifest can name the split it drew from and prove it."""
-    digest = hashlib.sha256()
-    with open(path, 'rb') as handle:
-        for block in iter(lambda: handle.read(1 << 20), b''):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def draw_entries(split_manifest, per_lattice, seed, split=REPORTING_SPLIT,
@@ -190,7 +180,7 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
     directory.mkdir(parents=True, exist_ok=True)
     optimizers, processes, task_queues = setup_mp_optimizers(
         pool_size, BenchmarkPatterns.BROADENING_TAG, 1, seed=search_seed,
-        options={'prune_m20_threshold': float(cut)},
+        options={'prune_m20_threshold': float(cut), 'prune_criterion_capture': True},
         optimizer_class=BenchmarkOptimizer)
 
     entry_rows = []
@@ -240,6 +230,11 @@ def _run_pool(part, pool_dir, source_rows, second_phase_pool, bundles, bravais_l
 
     Benchmark.write_entry_table(pd.DataFrame(entry_rows, columns=list(Benchmark.ENTRY_COLUMNS)),
                                 directory)
+    # Scored here, on this stripe, rather than on the merged arm: a merged shard of a large arm
+    # is millions of rows for one process, while the stripes are scored by every pool at once.
+    if entry_rows:
+        merit_sidecar(directory)
+        feature_sidecar(directory)
     # Written even when empty, so a reader can tell "nothing failed" from "nobody looked".
     with open(directory/'failures.json', 'w', encoding='utf-8') as handle:
         json.dump(failures, handle, indent=2, sort_keys=True)
@@ -255,7 +250,7 @@ def _report_progress(part, done, total, started):
     """
     elapsed = time.perf_counter() - started
     rate = elapsed/done
-    print(f'pool {part:02d}: {done}/{total} patterns, {rate:.1f} s each, '
+    print(f'pool {part}: {done}/{total} patterns, {rate:.1f} s each, '
           f'{(total - done)*rate/60:.1f} min left', flush=True)
 
 
@@ -287,17 +282,24 @@ def ensemble_record():
                          for lattice in BRAVAIS_LATTICES}}
 
 
-def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed=12345,
-            search_seed=12345, cut=1.5, pool_size=1, n_pools=1, bundles=None,
+def run_arm(pool_dir, split_manifest, split_sha256, population='general', per_lattice=40,
+            seed=12345, search_seed=12345, cut=1.5, pool_size=1, n_pools=1, bundles=None,
             dataset_directory=None, degeneracy_rule='not_evaluated', split=REPORTING_SPLIT,
-            true_lattices=None):
-    """Generate one arm into `pool_dir`, and stamp it complete when every stripe has landed.
+            true_lattices=None, shard=0, n_shards=1):
+    """Generate one arm into `pool_dir`, or shard `shard` of `n_shards` of it.
 
     `split` is where the crystals are drawn from, and `true_lattices` narrows the population to
     crystals of those Bravais lattices. Every pattern is still searched in all fourteen lattices.
+    `split_sha256` is the checksum the split manifest must have; anything else is refused before
+    a crystal is drawn.
 
-    Returns the manifest's metadata. The completion stamp is written last and only here: a killed
-    run leaves valid shards behind, so an unstamped arm is refused by every reader.
+    Every shard draws the whole arm and builds its second-phase partners from all of it, then
+    indexes `source_rows.iloc[shard::n_shards]`, so a pattern does not depend on how the arm was
+    divided. Each of its `n_pools` processes writes its stripe, with both sidecars, under
+    `parts/`, and the shard writes its stamp under `shards/` once they have all exited cleanly.
+    `finalize_arm` merges the shards when every one is stamped; with one shard that happens here.
+
+    Returns the arm's manifest metadata when finalized, otherwise the shard's stamp.
     """
     import platform
     from multiprocessing import Process
@@ -305,13 +307,8 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     import mlindex
 
     pool_dir = Path(pool_dir)
-    _refuse_an_occupied_directory(pool_dir)
-    # Read before a single pattern is indexed, not at the end beside the rest of the manifest.
-    # An arm takes hours, and a commit made while it runs would be recorded as the revision that
-    # produced it -- which is both wrong and invisible, since the manifest still parses and the
-    # identity check still compares it against other arms.
-    commit = _commit()
-    ensemble = ensemble_record()
+    if not 0 <= shard < n_shards:
+        raise ValueError(f'shard {shard} is not one of 0..{n_shards - 1}.')
     design = POPULATIONS[population]
     if split not in SPLITS:
         raise ValueError(f'Unknown or sealed split {split!r}. Known: {SPLITS}')
@@ -325,22 +322,34 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
     if unknown:
         raise ValueError(f'Unknown condition bundle(s) {unknown}. '
                          f'Known: {list(BenchmarkConditions.tags())}')
+    split_manifest_sha256 = file_digest(split_manifest)
+    if split_manifest_sha256 != split_sha256:
+        raise ValueError(
+            f'{split_manifest} has sha256 {split_manifest_sha256}, not the {split_sha256} it was '
+            'expected to have. An arm drawn from a different split cannot be paired with any '
+            'other, and could draw crystals from the sealed one.')
+    _refuse_an_occupied_directory(pool_dir, shard, n_shards)
+    # Read before a single pattern is indexed: an arm takes hours, and a commit made while it
+    # runs would otherwise be recorded as the revision that produced it.
+    provenance = _provenance()
+    ensemble = ensemble_record()
 
     chosen = draw_entries(split_manifest, per_lattice, seed, split=split,
                           bravais_lattices=true_lattices)
     source_rows = load_source_rows(chosen, dataset_directory)
     # Built once, from every drawn crystal, and passed down: real contamination is not
-    # lattice-matched, and a partner drawn from a stripe rather than from the whole arm would
-    # depend on how the arm was divided.
+    # lattice-matched, and a partner drawn from a stripe or a shard rather than from the whole
+    # arm would depend on how the arm was divided.
     second_phase_pool = BenchmarkPatterns.build_second_phase_pool(source_rows)
 
-    stripes = [source_rows.iloc[part::n_pools].reset_index(drop=True) for part in range(n_pools)]
-    arguments = [(part, pool_dir, stripe, second_phase_pool, bundles, list(BRAVAIS_LATTICES),
-                  seed, search_seed, cut, pool_size, split)
+    shard_rows = source_rows.iloc[shard::n_shards].reset_index(drop=True)
+    stripes = [shard_rows.iloc[part::n_pools].reset_index(drop=True) for part in range(n_pools)]
+    arguments = [(f'{shard:03d}_{part:03d}', pool_dir, stripe, second_phase_pool, bundles,
+                  list(BRAVAIS_LATTICES), seed, search_seed, cut, pool_size, split)
                  for part, stripe in enumerate(stripes) if stripe.shape[0]]
     if len(arguments) == 1:
         _run_pool(*arguments[0])
-    else:
+    elif arguments:
         processes = [Process(target=_run_pool, args=argument) for argument in arguments]
         for process in processes:
             process.start()
@@ -349,20 +358,16 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
         failed = [process.exitcode for process in processes if process.exitcode]
         if failed:
             raise RuntimeError(
-                f'{len(failed)} of {len(processes)} pools exited non-zero: {failed}. The arm is '
+                f'{len(failed)} of {len(processes)} pools exited non-zero: {failed}. The shard is '
                 'left unstamped, so nothing will read it as finished.')
 
-    failures = _collect_failures(pool_dir)
-    _refuse_a_broken_bundle(failures, bundles, source_rows.shape[0])
-    Benchmark.consolidate(pool_dir)
-    metadata = {
+    stamp = {
         'population': population,
         'bundles': bundles,
         'bravais_lattices': list(BRAVAIS_LATTICES),
         'split': split,
         'true_lattices': true_lattices,
         'n_source_entries': int(source_rows.shape[0]),
-        'n_patterns_refused': len(failures),
         'per_lattice': int(per_lattice),
         'seed': int(seed),
         'search_seed': int(search_seed),
@@ -370,43 +375,114 @@ def run_arm(pool_dir, split_manifest, population='general', per_lattice=40, seed
         'pool_size': int(pool_size),
         'ensemble': ensemble,
         'n_pools': int(n_pools),
+        'n_shards': int(n_shards),
         'n_top_candidates': int(Benchmark.N_TOP_CANDIDATES),
         'broadening_tag': BenchmarkPatterns.BROADENING_TAG,
         'condition_set_digest': BenchmarkConditions.condition_set_digest(),
         'split_manifest': str(split_manifest),
-        'split_manifest_sha256': file_digest(split_manifest),
+        'split_manifest_sha256': split_manifest_sha256,
         'degeneracy_rule': degeneracy_rule,
-        'commit': commit,
+        **provenance,
         'arch': platform.machine(),
         'platform': platform.platform(),
         'python_version': platform.python_version(),
         'numpy_version': np.__version__,
         'mlindex_version': getattr(mlindex, '__version__', 'unknown'),
+        'shard': int(shard),
+        'n_shard_entries': int(shard_rows.shape[0]),
+        'failures': _collect_failures(pool_dir, shard),
         }
+    path = pool_dir / Benchmark.SHARD_DIR / f'{shard:03d}.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(stamp, handle, indent=2, sort_keys=True)
+    if n_shards == 1:
+        return finalize_arm(pool_dir)
+    return stamp
+
+
+# What a shard's stamp carries that is its own rather than the arm's.
+SHARD_FIELDS = ('shard', 'n_shard_entries', 'failures')
+
+
+def finalize_arm(pool_dir):
+    """Merge a generated arm's shards into one pool and stamp it complete.
+
+    Refused unless every shard of the arm is stamped, every stamp describes the same arm, and
+    together they hold every drawn crystal exactly once. A shard that died leaves valid stripes
+    behind and no stamp, so its absence is the only thing that tells it apart from one that
+    finished. Returns the manifest's metadata.
+    """
+    pool_dir = Path(pool_dir)
+    if (pool_dir / Benchmark.COMPLETION_NAME).exists():
+        raise FileExistsError(f'{pool_dir} is already finalized.')
+    paths = sorted((pool_dir / Benchmark.SHARD_DIR).glob('*.json'))
+    if not paths:
+        raise FileNotFoundError(f'No shard stamps under {pool_dir / Benchmark.SHARD_DIR}.')
+    stamps = []
+    for path in paths:
+        with open(path, encoding='utf-8') as handle:
+            stamps.append(json.load(handle))
+    arm = {name: value for name, value in stamps[0].items() if name not in SHARD_FIELDS}
+    for stamp in stamps[1:]:
+        differing = sorted(name for name in set(arm) | set(stamp)
+                           if name not in SHARD_FIELDS and stamp.get(name) != arm.get(name))
+        if differing:
+            raise ValueError(
+                f'Shard {stamp["shard"]} differs from shard {stamps[0]["shard"]} in '
+                f'{differing}; they are not shards of one arm.')
+    found = sorted(stamp['shard'] for stamp in stamps)
+    missing = sorted(set(range(arm['n_shards'])) - set(found))
+    if missing or len(found) != arm['n_shards']:
+        raise RuntimeError(
+            f'Shards {missing} of {arm["n_shards"]} have no stamp (found {found}). The arm is '
+            'left unfinalized: a merge now would describe the crystals that happened to finish.')
+    n_entries = sum(stamp['n_shard_entries'] for stamp in stamps)
+    if n_entries != arm['n_source_entries']:
+        raise RuntimeError(f'The shards hold {n_entries} crystals and the arm drew '
+                           f'{arm["n_source_entries"]}.')
+
+    failures = [failure for stamp in stamps for failure in stamp['failures']]
+    _refuse_a_broken_bundle(failures, arm['bundles'], arm['n_source_entries'])
+    Benchmark.consolidate(pool_dir)
+    # Written even when empty, so a reader can tell "nothing was refused" from "nobody recorded".
+    with open(pool_dir/'failures.json', 'w', encoding='utf-8') as handle:
+        json.dump(failures, handle, indent=2, sort_keys=True)
+    metadata = dict(arm, n_patterns_refused=len(failures),
+                    n_shard_entries=[stamp['n_shard_entries'] for stamp in stamps])
     Benchmark.write_manifest(pool_dir, **metadata)
-    Benchmark.stamp_complete(pool_dir, n_source_entries=metadata['n_source_entries'],
-                             n_bundles=len(bundles))
+    Benchmark.stamp_complete(pool_dir, n_source_entries=arm['n_source_entries'],
+                             n_bundles=len(arm['bundles']), n_patterns_refused=len(failures),
+                             n_shards=arm['n_shards'])
     return metadata
 
 
-def _refuse_an_occupied_directory(pool_dir):
-    """Refuse to generate into a directory that already holds something.
+def _refuse_an_occupied_directory(pool_dir, shard=0, n_shards=1):
+    """Refuse to generate where an earlier run left something this one would be merged with.
 
-    An arm that died leaves its finished pools' stripes under `parts/`, and a re-run writing into
-    the same place would consolidate those stale stripes together with the new ones. Nothing in the
-    result would say which run a given shard came from, and the arm would carry a manifest
-    describing only the second. Remove the directory and start it again.
+    A shard that died leaves its finished pools' stripes under `parts/`, and a re-run writing
+    beside them would consolidate stale stripes with new ones. Nothing in the result would say
+    which run a shard came from. An unsharded arm needs an empty directory; a shard needs no
+    finished arm there and nothing of its own.
     """
     pool_dir = Path(pool_dir)
     if not pool_dir.exists():
         return
-    occupants = sorted(path.name for path in pool_dir.iterdir())
+    if n_shards == 1:
+        occupants = sorted(path.name for path in pool_dir.iterdir())
+    else:
+        occupants = sorted(
+            [path.name for path in (pool_dir/Benchmark.COMPLETION_NAME,
+                                    pool_dir/Benchmark.MANIFEST_NAME,
+                                    pool_dir/Benchmark.SHARD_DIR/f'{shard:03d}.json')
+             if path.exists()]
+            + [path.name for path in (pool_dir/Benchmark.PART_DIR).glob(f'{shard:03d}_*')])
     if occupants:
         raise FileExistsError(
             f'{pool_dir} already holds {occupants[:4]}{"..." if len(occupants) > 4 else ""}. '
-            'Generating into it would mix this run with whatever is there -- a failed arm leaves '
-            'its finished pools behind, and consolidation cannot tell them apart. Remove the '
-            'directory and re-run.')
+            'Generating into it would mix this run with whatever is there -- a failed run leaves '
+            'its finished pools behind, and consolidation cannot tell them apart. Remove it and '
+            're-run.')
 
 
 def _refuse_a_broken_bundle(failures, bundles, n_crystals):
@@ -425,35 +501,59 @@ def _refuse_a_broken_bundle(failures, bundles, n_crystals):
                 'survivors would describe a population nobody chose. See failures.json.')
 
 
-def _collect_failures(pool_dir):
-    """Merge every pool's refused patterns into one file at the arm's root, before consolidation.
-
-    Each pool writes its own, and `consolidate` removes the part directories -- so they have to be
-    gathered first. The merged file is written even when empty: a reader can then tell "nothing was
-    refused" from "nobody recorded it", which for a population that may be smaller than it looks is
-    the difference that matters.
-    """
+def _collect_failures(pool_dir, shard):
+    """One shard's refused patterns, gathered from its pools before consolidation removes them."""
     pool_dir = Path(pool_dir)
     failures = []
-    for path in sorted((pool_dir/Benchmark.PART_DIR).glob('*/failures.json')):
+    for path in sorted((pool_dir/Benchmark.PART_DIR).glob(f'{shard:03d}_*/failures.json')):
         with open(path, encoding='utf-8') as handle:
             failures += json.load(handle)
         path.unlink()
-    with open(pool_dir/'failures.json', 'w', encoding='utf-8') as handle:
-        json.dump(failures, handle, indent=2, sort_keys=True)
     return failures
 
 
-def _commit():
-    """The revision the arm was generated at, or 'unknown' outside a checkout."""
+def _git(*arguments):
+    """A git command's output in the checkout this module is in, or None outside one."""
     import subprocess
 
     try:
-        result = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
+        result = subprocess.run(['git', *arguments], capture_output=True, text=True,
                                 cwd=str(Path(__file__).resolve().parent))
     except (OSError, ValueError):
-        return 'unknown'
-    return result.stdout.strip() if result.returncode == 0 else 'unknown'
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _provenance():
+    """The code and the model files an arm is generated from.
+
+    Refused unless the code is a commit with no uncommitted changes to tracked files: a number
+    has to be attributable to code somebody can read. The model tree is excluded from that check
+    and identified by its own digest instead, over the directories the search reads.
+    """
+    from importlib.resources import files
+
+    from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+    from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+
+    commit = (_git('rev-parse', 'HEAD') or '').strip()
+    if not commit:
+        raise RuntimeError('An arm has to be generated from a git checkout, so that its manifest '
+                           'can name the commit that produced it.')
+    modified = _git('status', '--porcelain', '--untracked-files=no', '--', ':(top)',
+                    ':(top,exclude)mlindex/models')
+    if modified is None or modified.strip():
+        raise RuntimeError(
+            f'The checkout has uncommitted changes to tracked files:\n{modified}\nCommit them '
+            f'first; the manifest would name {commit[:10]}, which is not the code that ran.')
+    models_dir = _resolve_models_dir()
+    systems = sorted(set(BL_TO_LATTICE_SYSTEM.values()))
+    models_digest, n_model_files = tree_digest(
+        models_dir, [f'{system}_{BenchmarkPatterns.BROADENING_TAG}' for system in systems])
+    metadata = json.loads(files('mlindex').joinpath('model_metadata.json').read_text(
+        encoding='utf-8'))
+    return {'commit': commit, 'models_dir': str(models_dir), 'models_digest': models_digest,
+            'n_model_files': n_model_files, 'model_revision': metadata['model_revision']}
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +902,149 @@ def merit_sidecar(pool_dir, bundles=None, bravais_lattices=None):
     return written
 
 
+# ---------------------------------------------------------------------------
+# The feature sidecar
+# ---------------------------------------------------------------------------
+
+# Per-candidate inputs of the learned ranker beyond the merit sidecar's. The structural and
+# probation columns are computed against the candidate's own extinction group's reference list;
+# the absence counts against the lattice's full list, because they count what the group removes.
+STRUCTURAL_FEATURES = ('zone_dominance', 'V_over_Vcrit', 'M_werner_max', 'N_cal_full',
+                       'delta_dewolff61', 'n_dewolff61')
+PROBATION_FEATURES = ('M_wu', 'M_1', 'F_N_q')
+ABSENCE_FEATURES = ('n_absent_extra', 'n_absent_extra_in_range', 'n_ref_in_range',
+                    'n_groups_searched')
+SIDECAR_FEATURES = STRUCTURAL_FEATURES + PROBATION_FEATURES + ABSENCE_FEATURES
+
+# The precision floor in Werner's critical volume. It scales `V_over_Vcrit` and `M_werner_max`
+# by the same factor for every candidate.
+WERNER_G_MIN = 1.0
+
+
+def _candidate_features(q2_obs, xnn, lattice_system, bravais_lattice, calculator):
+    """The structural and probation features, and M20, for candidates of one extinction group.
+
+    `calculator` holds that group's reference list. Returns a dict of arrays keyed by
+    `STRUCTURAL_FEATURES + PROBATION_FEATURES` and 'M20'.
+    """
+    from mlindex.utilities.FigureOfMerits import (
+        _sorted_lines_in_range, get_delta_dewolff61, get_F_N, get_M_1, get_M20, get_M_wu,
+        get_multiplicity_taupin88, get_n_dewolff61, get_N_cal, get_V_over_Vcrit,
+        get_zone_dominance)
+    from mlindex.utilities.numba_functions import fast_assign
+    from mlindex.utilities.UnitCellTools import (
+        get_reciprocal_unit_cell_from_xnn, get_unit_cell_volume)
+
+    q2_ref_calc = calculator.get_q2(xnn)
+    q2_calc = np.take_along_axis(q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)
+    cutoff = q2_calc[:, -1]
+    reciprocal_cell = get_reciprocal_unit_cell_from_xnn(
+        xnn, partial_unit_cell=True, lattice_system=lattice_system)
+    volume = 1/np.maximum(get_unit_cell_volume(
+        reciprocal_cell, partial_unit_cell=True, lattice_system=lattice_system), 1e-300)
+    d_n = 1/np.sqrt(np.maximum(cutoff, 1e-300))
+    over_critical, m_max = get_V_over_Vcrit(
+        volume, d_n, WERNER_G_MIN, get_multiplicity_taupin88(bravais_lattice)[0])
+    sorted_lines = _sorted_lines_in_range(q2_ref_calc, cutoff)
+    return {
+        'zone_dominance': get_zone_dominance(xnn, lattice_system),
+        'V_over_Vcrit': over_critical,
+        'M_werner_max': m_max,
+        'N_cal_full': get_N_cal(q2_ref_calc, np.zeros(xnn.shape[0]), cutoff),
+        'delta_dewolff61': np.mean(
+            get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice), axis=1),
+        'n_dewolff61': get_n_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)[:, -1],
+        'M_wu': get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
+        'M_1': get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
+        'F_N_q': get_F_N(q2_obs, q2_calc, q2_ref_calc)[1],
+        # get_M20 writes into its reference array, so it gets a copy and goes last.
+        'M20': get_M20(q2_obs, q2_calc, q2_ref_calc.copy()),
+        }
+
+
+def feature_sidecar(pool_dir, bundles=None, bravais_lattices=None):
+    """Write `SIDECAR_FEATURES` for every stored candidate, beside the pool.
+
+    The peak list is truncated to the lattice's own count and the structural features use the
+    candidate's own extinction group's lines, as in `merit_sidecar`. The absence counts use the
+    lattice's full reference list and its own cutoff: the line the last peak is assigned to.
+
+    Two checks against what the pipeline wrote, either of which refuses the shard: the full
+    reference list must be as long as the one the search used (`hkl_ref_length`), and the M20
+    recomputed on each candidate's own group must equal the stored M20.
+    """
+    from mlindex.utilities.numba_functions import fast_assign
+    from mlindex.utilities.Q2Calculator import Q2Calculator
+    from mlindex.utilities.SpaceGroups import count_absences_in_range, get_spacegroup_keep_masks
+
+    pool_dir = Path(pool_dir)
+    sidecar_dir = pool_dir / Benchmark.FEATURE_SIDECAR
+    entries = Benchmark.load_entries(pool_dir, columns=['entry_id', 'condition_bundle', 'q2_obs'])
+    peaks = {(row.entry_id, row.condition_bundle): np.asarray(row.q2_obs, dtype=np.float64)
+             for row in entries.itertuples()}
+
+    written = []
+    for bundle in (bundles or Benchmark.available_bundles(pool_dir)):
+        for lattice, path in Benchmark.candidate_shards(pool_dir, bundle, bravais_lattices):
+            frame = pd.read_parquet(path, columns=list(Benchmark.CANDIDATE_KEY) + [
+                'lattice_system', 'xnn', 'spacegroup', 'n_peaks', 'hkl_ref_length', 'M20'])
+            if frame.empty:
+                continue
+            lattice_system = frame['lattice_system'].iloc[0]
+            n_peaks = int(frame['n_peaks'].iloc[0])
+            hkl_ref = _hkl_reference(lattice, lattice_system)
+            stored_length = frame['hkl_ref_length'].unique()
+            if stored_length.tolist() != [hkl_ref.shape[0]]:
+                raise ValueError(
+                    f'{bundle}/{lattice}: the search used a reference list of '
+                    f'{stored_length.tolist()} lines and this models tree has '
+                    f'{hkl_ref.shape[0]}. The features would describe different reflections.')
+            keep_masks = get_spacegroup_keep_masks(hkl_ref, bravais_lattice=lattice)
+            full = Q2Calculator(lattice_system=lattice_system, hkl=hkl_ref, tensorflow=False,
+                                representation='xnn')
+            calculators = {}
+            columns = {name: np.empty(frame.shape[0]) for name in SIDECAR_FEATURES}
+            recomputed = np.empty(frame.shape[0])
+            columns['n_groups_searched'][:] = len(keep_masks)
+            for (entry_id, bundle_tag), entry in frame.groupby(
+                    ['entry_id', 'condition_bundle'], sort=False):
+                q2_obs = peaks[(entry_id, bundle_tag)][:n_peaks]
+                xnn = np.stack([np.asarray(row, dtype=np.float64) for row in entry['xnn']])
+                rows = frame.index.get_indexer(entry.index)
+                q2_ref_calc = full.get_q2(xnn)
+                cutoff = np.take_along_axis(
+                    q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)[:, -1]
+                spacegroups = entry['spacegroup'].to_numpy()
+                for spacegroup in pd.unique(spacegroups):
+                    local = np.flatnonzero(spacegroups == spacegroup)
+                    keep = keep_masks[spacegroup]
+                    removed, in_range = count_absences_in_range(
+                        q2_ref_calc[local], keep, cutoff[local])
+                    columns['n_absent_extra'][rows[local]] = np.count_nonzero(~keep)
+                    columns['n_absent_extra_in_range'][rows[local]] = removed
+                    columns['n_ref_in_range'][rows[local]] = in_range
+                    if spacegroup not in calculators:
+                        calculators[spacegroup] = Q2Calculator(
+                            lattice_system=lattice_system, hkl=hkl_ref[keep], tensorflow=False,
+                            representation='xnn')
+                    values = _candidate_features(q2_obs, xnn[local], lattice_system, lattice,
+                                                 calculators[spacegroup])
+                    recomputed[rows[local]] = values.pop('M20')
+                    for name, value in values.items():
+                        columns[name][rows[local]] = value
+            _refuse_a_disagreeing_sidecar(recomputed, frame['M20'].to_numpy(dtype=np.float64),
+                                          bundle, lattice)
+            sidecar = frame[list(Benchmark.CANDIDATE_KEY)].copy()
+            for name in SIDECAR_FEATURES:
+                sidecar[name] = columns[name]
+            for name in ABSENCE_FEATURES:
+                sidecar[name] = sidecar[name].astype(np.int64)
+            written.append(Benchmark.write_candidate_shard(sidecar, sidecar_dir, bundle, lattice))
+    if not written:
+        raise FileNotFoundError(f'No candidate shards to score under {pool_dir}.')
+    return written
+
+
 def _refuse_a_disagreeing_sidecar(recomputed, stored, bundle, lattice):
     """The merits must be computed on what the pipeline computed its own M20 on.
 
@@ -815,7 +1058,7 @@ def _refuse_a_disagreeing_sidecar(recomputed, stored, bundle, lattice):
     if worst > 1e-6:
         n_bad = int(np.count_nonzero(difference > 1e-6))
         raise ValueError(
-            f'The merit sidecar for {bundle}/{lattice} disagrees with the pool it sits beside: '
+            f'The sidecar for {bundle}/{lattice} disagrees with the pool it sits beside: '
             f'{n_bad} of {difference.size} candidates recompute a different M20, worst '
             f'{worst:.4g}. The merits are being computed on a different peak list, a different '
             'reference list or a different cell from the one the search used, and every column '

@@ -375,6 +375,21 @@ class Candidates:
             self.best_zeropoint = self.best_zeropoint[keep]
         self.n = self.best_xnn.shape[0]
 
+    def downsample_payload(self):
+        """What a rank hands to its manager for deduplication: one object, so the arrays and the
+        spacegroup list cannot disagree about how many candidates there are."""
+        payload = {
+            'M20': self.best_M20,
+            'xnn': self.best_xnn,
+            'n_indexed': self.n_indexed,
+            'spacegroup': list(self.best_spacegroup),
+            }
+        # RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS.
+        if self.m20_at_prune is not None:
+            payload['m20_at_prune'] = self.m20_at_prune
+            payload['merit_at_prune'] = self.merit_at_prune
+        return payload
+
     def _capture_merits_at_prune(self):
         """RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS.
 

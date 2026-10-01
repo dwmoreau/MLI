@@ -30,3 +30,31 @@ def peak_list_bytes(q2):
 def q2_digest(q2, digest_size=8):
     """A short hexadecimal digest of a peak list, for checking a join rather than securing one."""
     return hashlib.blake2b(peak_list_bytes(q2), digest_size=digest_size).hexdigest()
+
+
+def file_digest(path):
+    """The sha256 of a file's bytes."""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def tree_digest(root, subdirectories):
+    """The sha256 of every file under `root/<subdirectory>`, names and contents together.
+
+    Files are taken in sorted order of their path relative to `root`, written with forward
+    slashes, so the same tree digests the same on every operating system. Returns
+    (hexdigest, number of files).
+    """
+    from pathlib import Path
+
+    root = Path(root)
+    names = sorted(path.relative_to(root).as_posix() for subdirectory in subdirectories
+                   for path in (root / subdirectory).rglob('*') if path.is_file())
+    digest = hashlib.sha256()
+    for name in names:
+        digest.update(name.encode('utf-8'))
+        digest.update(bytes.fromhex(file_digest(root.joinpath(*name.split('/')))))
+    return digest.hexdigest(), len(names)

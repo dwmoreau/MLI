@@ -7,14 +7,20 @@ of the list. Two arms are compared paired, against the run-to-run noise of the s
 
     # generate an arm, score it, reduce it and report it -- the whole chain, one command
     python -m mlindex.scripts.run_benchmark --stage all --out-pool arms/baseline \
-        --split-manifest path/to/split_manifest.parquet \
+        --split-manifest path/to/split_manifest.parquet --split-sha256 <its sha256> \
         --population general --per-lattice 40 --cut 1.5 \
         --seed 12345 --search-seed 12345 --n-pools 4 --out-dir results/baseline
 
     # a selection arm: hard-population conditions on primitive monoclinic crystals from fom-train
     python -m mlindex.scripts.run_benchmark --stage generate --out-pool arms/select_mP \
-        --split-manifest path/to/split_manifest.parquet --split fom-train \
-        --population hard --true-lattices mP --per-lattice 600 --n-pools 4
+        --split-manifest path/to/split_manifest.parquet --split-sha256 <its sha256> \
+        --split fom-train --population hard --true-lattices mP --per-lattice 600 --n-pools 4
+
+    # one arm divided over two nodes: each runs a shard, then one merges them
+    python -m mlindex.scripts.run_benchmark --stage generate --out-pool arms/train \
+        --split-manifest path/to/split_manifest.parquet --split-sha256 <its sha256> \
+        --split fom-train --per-lattice 1800 --n-pools 128 --shard 0 --n-shards 2
+    python -m mlindex.scripts.run_benchmark --stage finalize --out-pool arms/train
 
     # every score a stored pool can carry, aggregate and per lattice, written to a directory
     python -m mlindex.scripts.run_benchmark --pool mlindex/data/my_pool --out-dir results/run1
@@ -83,8 +89,8 @@ def build_parser():
     parser.add_argument('--out-dir', default=None, metavar='PATH',
                         help='Where to write the tables (default: print only).')
     parser.add_argument('--stage', default='all',
-                        choices=('all', 'generate', 'sidecars', 'reduce', 'report', 'floor',
-                                 'contrast'),
+                        choices=('all', 'generate', 'finalize', 'sidecars', 'reduce', 'report',
+                                 'floor', 'contrast'),
                         help='Which part to run (default: all, which is the whole chain). The '
                              'stages exist because a cluster needs them as separate jobs with '
                              'different walltimes.')
@@ -128,13 +134,24 @@ def build_parser():
 
     generate = parser.add_argument_group(
         'generating an arm',
-        'Indexing the benchmark patterns and keeping every candidate. An arm is written to '
-        '--out-pool and stamped complete only when every pool has landed.')
+        'Indexing the benchmark patterns and keeping every candidate, with both sidecars. An arm '
+        'is written to --out-pool and stamped complete only when every pool has landed. A large '
+        'arm is divided across nodes with --shard/--n-shards and merged by --stage finalize.')
     generate.add_argument('--out-pool', default=None, metavar='PATH',
                           help='Where to write the generated pool.')
     generate.add_argument('--split-manifest', default=None, metavar='PATH',
                           help='The frozen train/dev/test split to draw crystals from. Its '
                                'sha256 is recorded in the manifest.')
+    generate.add_argument('--split-sha256', default=None, metavar='HEX',
+                          help='The sha256 the split manifest must have. Required: an arm is '
+                               'refused before any crystal is drawn if the file differs.')
+    generate.add_argument('--shard', type=int, default=0, metavar='K',
+                          help='Which shard of the arm to generate, 0 to N-1 (default: 0).')
+    generate.add_argument('--n-shards', type=int, default=1, metavar='N',
+                          help='How many shards the arm is divided into, one per node '
+                               '(default: 1). Every shard draws the whole arm, so a pattern does '
+                               'not depend on N; with N above one, run --stage finalize on '
+                               '--out-pool once every shard has finished.')
     generate.add_argument('--population', default='general',
                           choices=tuple(runs.POPULATIONS),
                           help="Which population to generate (default: general). 'hard' is the "
@@ -286,38 +303,50 @@ def main(argv=None):
         raise SystemExit(f'Unknown score(s) {unknown}. Known: {sorted(SCORE_SOURCES)}')
 
     if args.stage in ('all', 'generate') and args.out_pool:
-        if not args.split_manifest:
-            raise SystemExit('Generating an arm needs --split-manifest: the crystals are read '
-                             'from the frozen split, never re-drawn by sampling.')
-        metadata = runs.run_arm(
-            args.out_pool, args.split_manifest, population=args.population,
+        if not (args.split_manifest and args.split_sha256):
+            raise SystemExit('Generating an arm needs --split-manifest and --split-sha256: the '
+                             'crystals are read from the frozen split, and the file is checked '
+                             'to be that split before any is drawn.')
+        if args.stage == 'all' and args.n_shards != 1:
+            raise SystemExit('--stage all runs one shard; generate each shard with --stage '
+                             'generate, then --stage finalize.')
+        result = runs.run_arm(
+            args.out_pool, args.split_manifest, args.split_sha256, population=args.population,
             per_lattice=args.per_lattice, seed=args.seed, search_seed=args.search_seed,
             cut=args.cut, pool_size=args.pool_size, n_pools=args.n_pools, bundles=bundles,
             dataset_directory=args.dataset_directory, split=args.split,
-            true_lattices=_split(args.true_lattices) or None)
-        print(f"generated {metadata['n_source_entries']} crystals x "
-              f"{len(metadata['bundles'])} bundles into {args.out_pool}")
+            true_lattices=_split(args.true_lattices) or None, shard=args.shard,
+            n_shards=args.n_shards)
+        if args.n_shards == 1:
+            print(f"generated {result['n_source_entries']} crystals x "
+                  f"{len(result['bundles'])} bundles into {args.out_pool}")
+        else:
+            print(f"generated shard {args.shard} of {args.n_shards}: "
+                  f"{result['n_shard_entries']} of {result['n_source_entries']} crystals x "
+                  f"{len(result['bundles'])} bundles into {args.out_pool}")
         pools = [args.out_pool]
-        generated = [args.out_pool]
     elif args.stage == 'generate':
         raise SystemExit('--stage generate needs --out-pool.')
     else:
         pools = list(args.pool or [])
-        generated = []
 
-    # Scored only where this invocation generated the pool, or where --stage sidecars asks for it
-    # by name. `--stage all --pool <existing>` must not rewrite a sidecar somebody already has:
-    # the merit columns are an input to whatever is being measured, and silently replacing them
-    # would change a stored arm rather than read it.
+    if args.stage == 'finalize':
+        if not args.out_pool:
+            raise SystemExit('--stage finalize needs --out-pool, the arm its shards wrote to.')
+        metadata = runs.finalize_arm(args.out_pool)
+        print(f"finalized {metadata['n_shards']} shards of {metadata['n_source_entries']} "
+              f"crystals x {len(metadata['bundles'])} bundles into {args.out_pool}")
+        return 0
+
+    # A generated arm is scored as it is written; this re-scores a stored one, by name only.
     if args.stage == 'sidecars':
         if not pools:
             raise SystemExit('--stage sidecars needs --pool.')
-        to_score = pools
-    else:
-        to_score = generated if args.stage == 'all' else []
-    for pool in to_score:
-        written = runs.merit_sidecar(pool, bundles=bundles, bravais_lattices=lattices)
-        print(f'scored {len(written)} shards of {pool}')
+        for pool in pools:
+            written = runs.merit_sidecar(pool, bundles=bundles, bravais_lattices=lattices)
+            print(f'scored {len(written)} shards of {pool}')
+            written = runs.feature_sidecar(pool, bundles=bundles, bravais_lattices=lattices)
+            print(f'wrote ranker features for {len(written)} shards of {pool}')
 
     if args.stage in ('generate', 'sidecars'):
         return 0

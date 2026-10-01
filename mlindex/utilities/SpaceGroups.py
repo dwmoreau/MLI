@@ -2,6 +2,19 @@ import numpy as np
 
 
 def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
+    """{extinction group key: the reflections of `hkl_ref` that group allows}. Needs cctbx."""
+    return {key: hkl_ref[keep] for key, keep
+            in get_spacegroup_keep_masks(hkl_ref, bravais_lattice).items()}
+
+
+def get_spacegroup_keep_masks(hkl_ref, bravais_lattice):
+    """{extinction group key: boolean mask over `hkl_ref`, True where the group allows the
+    reflection}. Needs cctbx.
+
+    Keys are "<extinction group> e.g. <spacegroup>", which is what a candidate's `spacegroup`
+    carries. `hkl_ref` already excludes the lattice's centring absences, so a mask removes only
+    what the extinction group adds; the lattice's generic group keeps every reflection.
+    """
     from cctbx import sgtbx
 
     # https://www.ba.ic.cnr.it/softwareic/expo/extinction_symbols/
@@ -344,7 +357,7 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
         extinction_groups = ["P -"]
 
     keys = [f"{i} e.g. {j}" for i, j in zip(extinction_groups, spacegroups)]
-    hkl_ref_sg = dict.fromkeys(keys)
+    keep_masks = dict.fromkeys(keys)
     for index, key in enumerate(keys):
         if bravais_lattice == "hR":
             # sgtbx defaults to the hexagonal setting for R groups; ':R' requests rhombohedral
@@ -357,8 +370,22 @@ def get_spacegroup_hkl_ref(hkl_ref, bravais_lattice):
         systematically_absent = np.array([
             sg.is_sys_absent(tuple((int(i) for i in hkl))) for hkl in hkl_ref
         ])
-        hkl_ref_sg[key] = hkl_ref[np.invert(systematically_absent)]
-    return hkl_ref_sg
+        keep_masks[key] = np.invert(systematically_absent)
+    return keep_masks
+
+
+def count_absences_in_range(q2_ref_calc, keep_mask, cutoff):
+    """Reflections an extinction group removes below the cutoff, and all reflections below it.
+
+    `q2_ref_calc` is (n_candidates, n_ref), calculated from the lattice's full reference list;
+    `keep_mask` is (n_ref,) from `get_spacegroup_keep_masks`; `cutoff` is (n_candidates,). The
+    comparison is strict, as in `get_M20`, whose N counts `q2_ref_calc < q2_calc[:, -1]`, so both
+    see the same window. Returns two int64 arrays of length n_candidates.
+    """
+    in_range = q2_ref_calc < cutoff[:, np.newaxis]
+    n_removed = np.count_nonzero(in_range & ~keep_mask[np.newaxis, :], axis=1)
+    n_in_range = np.count_nonzero(in_range, axis=1)
+    return n_removed.astype(np.int64), n_in_range.astype(np.int64)
 
 
 def map_spacegroup_to_extinction_group(spacegroup_symbol_hm):

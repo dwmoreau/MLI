@@ -127,11 +127,11 @@ def test_two_pools_stripe_an_arm_and_consolidate_into_one_shard_per_lattice(tmp_
 
     Benchmark.consolidate(tmp_path)
     Benchmark.write_manifest(tmp_path, **_manifest())
-    Benchmark.stamp_complete(tmp_path, n_entries=2)
+    Benchmark.stamp_complete(tmp_path, n_source_entries=2, n_bundles=1, n_patterns_refused=0)
 
     assert not (tmp_path / Benchmark.PART_DIR).exists()
     assert Benchmark.available_bundles(tmp_path) == ['b1_error1_cont0']
-    assert Benchmark.check_complete(tmp_path)['n_entries'] == 2
+    assert Benchmark.check_complete(tmp_path)['n_source_entries'] == 2
 
     read = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0', sidecars=())
     assert read.shape[0] == 4
@@ -225,11 +225,59 @@ def test_an_arm_refuses_a_sealed_split_or_a_lattice_outside_its_population(
         tmp_path, overrides, message):
     """Refused before a single pattern is drawn, so a mistyped option costs nothing."""
     from mlindex.model_training.BenchmarkRuns import run_arm
+    from mlindex.utilities.Digests import file_digest
 
     manifest = _split_manifest(tmp_path/'split.parquet')
     with pytest.raises(ValueError, match=message):
-        run_arm(tmp_path/'arm', manifest, **overrides)
+        run_arm(tmp_path/'arm', manifest, file_digest(manifest), **overrides)
     assert not (tmp_path/'arm').exists()
+
+
+def test_an_arm_refuses_a_split_manifest_that_is_not_the_one_expected(tmp_path):
+    """The split is proved before the run, not after: a different file could draw crystals from
+    the sealed split, and nothing downstream would notice."""
+    from mlindex.model_training.BenchmarkRuns import run_arm
+    from mlindex.utilities.Digests import file_digest
+
+    manifest = _split_manifest(tmp_path/'split.parquet')
+    expected = file_digest(manifest)
+    other = _split_manifest(tmp_path/'other.parquet')
+    pd.read_parquet(other).iloc[:-1].to_parquet(other)
+
+    with pytest.raises(ValueError, match='sha256'):
+        run_arm(tmp_path/'arm', other, expected)
+    assert not (tmp_path/'arm').exists()
+
+
+def test_an_arm_is_refused_from_a_checkout_with_uncommitted_changes(monkeypatch):
+    """The manifest names a commit; with tracked files modified, that commit is not the code
+    that ran and the number cannot be attributed to anything readable."""
+    from mlindex.model_training import BenchmarkRuns
+
+    answers = {'rev-parse': 'abc123\n', 'status': ' M mlindex/optimization/Candidates.py\n'}
+    monkeypatch.setattr(BenchmarkRuns, '_git', lambda *arguments: answers[arguments[0]])
+    with pytest.raises(RuntimeError, match='uncommitted'):
+        BenchmarkRuns._provenance()
+
+    answers['status'] = ''
+    provenance = BenchmarkRuns._provenance()
+    assert provenance['commit'] == 'abc123'
+    assert provenance['n_model_files'] > 0 and len(provenance['models_digest']) == 64
+
+
+def test_a_models_digest_changes_with_any_file_and_ignores_other_directories(tmp_path):
+    from mlindex.utilities.Digests import tree_digest
+
+    (tmp_path/'cubic_1'/'data').mkdir(parents=True)
+    (tmp_path/'cubic_1'/'data'/'a.npy').write_bytes(b'one')
+    (tmp_path/'unrelated').mkdir()
+    (tmp_path/'unrelated'/'b').write_bytes(b'two')
+    before, n_files = tree_digest(tmp_path, ['cubic_1'])
+
+    (tmp_path/'unrelated'/'b').write_bytes(b'three')
+    assert tree_digest(tmp_path, ['cubic_1']) == (before, 1)
+    (tmp_path/'cubic_1'/'data'/'a.npy').write_bytes(b'uno')
+    assert tree_digest(tmp_path, ['cubic_1'])[0] != before
 
 
 def test_one_arm_needs_no_agreement():
@@ -377,7 +425,8 @@ def test_the_floor_stage_refuses_arms_that_differ_in_more_than_the_seed(tmp_path
         Benchmark.write_candidate_shard(frame, directory, 'b1_error1_cont0', 'cP')
         Benchmark.write_entry_table(entries, directory)
         Benchmark.write_manifest(directory, **_manifest(commit=commit, search_seed=12345))
-        Benchmark.stamp_complete(directory, n_entries=1)
+        Benchmark.stamp_complete(directory, n_source_entries=1, n_bundles=1,
+                                 n_patterns_refused=0)
 
     with pytest.raises(ValueError, match='commit'):
         main(['--stage', 'floor', '--arm', f'armA={tmp_path/"armA"}',
@@ -407,6 +456,87 @@ def test_refusals_are_counted_against_their_own_bundle():
     failures = [{'entry_id': f'C{i}', 'condition_bundle': bundles[0], 'reason': 'x'}
                 for i in range(30)]
     _refuse_a_broken_bundle(failures, bundles, n_crystals=360)
+
+
+def _shard(pool_dir, shard, n_shards, entry_ids, **overrides):
+    """What `run_arm` leaves for one shard: its pools' stripes, with a sidecar, and its stamp."""
+    entries = pd.concat([_entries(entry_id) for entry_id in entry_ids], ignore_index=True)
+    for index, entry_id in enumerate(entry_ids):
+        directory = Benchmark.part_dir(pool_dir, f'{shard:03d}_{index:03d}')
+        frame = Benchmark.label_frame(Benchmark.records_to_frame([_record(entry_id=entry_id)]),
+                                      entries)
+        Benchmark.write_candidate_shard(frame, directory, 'b1_error1_cont0', 'cP')
+        Benchmark.write_candidate_shard(frame[list(Benchmark.CANDIDATE_KEY)].assign(M_sym=1.0),
+                                        directory/Benchmark.MERIT_SIDECAR, 'b1_error1_cont0', 'cP')
+        Benchmark.write_entry_table(entries.iloc[[index]], directory)
+    stamp = dict(_manifest(), bundles=['b1_error1_cont0'], n_source_entries=4, n_shards=n_shards,
+                 shard=shard, n_shard_entries=len(entry_ids), failures=[])
+    stamp.update(overrides)
+    (pool_dir/Benchmark.SHARD_DIR).mkdir(parents=True, exist_ok=True)
+    (pool_dir/Benchmark.SHARD_DIR/f'{shard:03d}.json').write_text(json.dumps(stamp),
+                                                                 encoding='utf-8')
+
+
+def test_an_arm_is_finalized_only_when_every_shard_is_stamped(tmp_path):
+    """A shard that died leaves valid stripes and no stamp; merging without it would describe the
+    crystals that happened to finish, and the stamp would say complete."""
+    from mlindex.model_training.BenchmarkRuns import finalize_arm
+
+    _shard(tmp_path, 0, 2, ['AAAAAA', 'BBBBBB'])
+    with pytest.raises(RuntimeError, match=r'Shards \[1\] of 2 have no stamp'):
+        finalize_arm(tmp_path)
+    assert not (tmp_path/Benchmark.COMPLETION_NAME).exists()
+
+    _shard(tmp_path, 1, 2, ['CCCCCC', 'DDDDDD'])
+    metadata = finalize_arm(tmp_path)
+
+    assert metadata['n_shard_entries'] == [2, 2]
+    assert Benchmark.check_complete(tmp_path)['n_shards'] == 2
+    read = Benchmark.load_candidates(tmp_path, 'b1_error1_cont0')
+    assert sorted(read['entry_id'].unique()) == ['AAAAAA', 'BBBBBB', 'CCCCCC', 'DDDDDD']
+    assert read['M_sym'].notna().all()
+    assert not (tmp_path/Benchmark.PART_DIR).exists()
+    with pytest.raises(FileExistsError, match='already finalized'):
+        finalize_arm(tmp_path)
+
+
+@pytest.mark.parametrize('overrides, message', [
+    ({'commit': 'other'}, 'differs'),
+    ({'n_shard_entries': 3}, 'hold 5 crystals'),
+    ])
+def test_shards_of_different_arms_or_the_wrong_size_are_not_merged(tmp_path, overrides, message):
+    from mlindex.model_training.BenchmarkRuns import finalize_arm
+
+    _shard(tmp_path, 0, 2, ['AAAAAA', 'BBBBBB'])
+    _shard(tmp_path, 1, 2, ['CCCCCC', 'DDDDDD'], **overrides)
+    with pytest.raises((ValueError, RuntimeError), match=message):
+        finalize_arm(tmp_path)
+    assert not (tmp_path/Benchmark.COMPLETION_NAME).exists()
+
+
+def test_a_completion_stamp_the_entry_table_contradicts_is_refused(tmp_path):
+    """A stamp that exists is not the same as a stamp that describes what is there."""
+    Benchmark.write_entry_table(pd.concat([_entries('AAAAAA'), _entries('BBBBBB')]), tmp_path)
+    Benchmark.stamp_complete(tmp_path, n_source_entries=2, n_bundles=2, n_patterns_refused=0)
+    with pytest.raises(ValueError, match='holds 2'):
+        Benchmark.check_complete(tmp_path)
+
+    Benchmark.stamp_complete(tmp_path, n_source_entries=2, n_bundles=2, n_patterns_refused=2)
+    assert Benchmark.check_complete(tmp_path)['n_patterns_refused'] == 2
+
+
+def test_a_shard_is_refused_only_where_it_would_collide(tmp_path):
+    """Several shards write into one arm, so another shard's stripes are expected there; this
+    shard's own, or a finished arm, are not."""
+    from mlindex.model_training.BenchmarkRuns import _refuse_an_occupied_directory
+
+    (tmp_path/Benchmark.PART_DIR/'001_000').mkdir(parents=True)
+    _refuse_an_occupied_directory(tmp_path, shard=0, n_shards=2)
+    with pytest.raises(FileExistsError, match='001_000'):
+        _refuse_an_occupied_directory(tmp_path, shard=1, n_shards=2)
+    Benchmark.write_manifest(tmp_path, **_manifest())
+    with pytest.raises(FileExistsError, match='manifest'):
+        _refuse_an_occupied_directory(tmp_path, shard=0, n_shards=2)
 
 
 def test_generating_into_an_occupied_directory_is_refused(tmp_path):
@@ -461,6 +591,58 @@ def test_the_sidecar_matches_merits_computed_independently(tmp_path, models_dir,
         right = joined[f'{other}_theirs'] if f'{other}_theirs' in joined else joined[other]
         np.testing.assert_array_equal(left.to_numpy(), right.to_numpy(),
                                       err_msg=f'{lattice} {name}')
+
+
+@pytest.mark.skipif(not CAMPAIGN_POOL.is_dir(), reason='campaign pool not on this machine')
+@pytest.mark.parametrize('lattice', ['cF', 'hR', 'oP', 'mC', 'aP'])
+def test_the_feature_sidecar_matches_the_campaign_s_stored_features(tmp_path, models_dir,
+                                                                    lattice):
+    """The campaign's stored structural sidecar and its dump-time absence counts were computed by
+    its own code. Agreement with them, exactly, is what licenses fitting on these columns a model
+    whose earlier version was fitted on theirs. Lattices with one extinction group (aP) and many
+    (oP) take different paths through the absence counts."""
+    from mlindex.model_training.BenchmarkRuns import SIDECAR_FEATURES, feature_sidecar
+
+    bundle = 'c2_error1_cont0'
+    shard = pd.read_parquet(CAMPAIGN_POOL/f'candidates_{bundle}_{lattice}.parquet').head(200)
+    Benchmark.write_candidate_shard(shard, tmp_path, bundle, lattice)
+    Benchmark.write_entry_table(Benchmark.load_entries(CAMPAIGN_POOL), tmp_path)
+
+    feature_sidecar(tmp_path)
+
+    mine = pd.read_parquet(tmp_path/'features'/f'candidates_{bundle}_{lattice}.parquet')
+    theirs = pd.read_parquet(CAMPAIGN_POOL/'structural'/f'candidates_{bundle}_{lattice}.parquet')
+    theirs = theirs.merge(
+        shard[list(Benchmark.CANDIDATE_KEY) + ['n_absent_extra', 'n_groups_searched']],
+        on=list(Benchmark.CANDIDATE_KEY))
+    joined = mine.merge(theirs, on=list(Benchmark.CANDIDATE_KEY),
+                        suffixes=('_mine', '_theirs'), validate='1:1')
+    assert joined.shape[0] == shard.shape[0]
+    for name in SIDECAR_FEATURES:
+        np.testing.assert_array_equal(joined[f'{name}_mine'].to_numpy(dtype=float),
+                                      joined[f'{name}_theirs'].to_numpy(dtype=float),
+                                      err_msg=f'{lattice} {name}')
+
+
+def test_a_feature_sidecar_on_a_different_reference_list_is_refused(tmp_path, models_dir):
+    """The absence counts are counts over the reference list the search used. A models tree with
+    a different list would give counts over different reflections, all finite and plausible."""
+    from mlindex.model_training.BenchmarkRuns import _hkl_reference, feature_sidecar
+
+    n_lines = _hkl_reference('cP', 'cubic').shape[0]
+    frame = pd.DataFrame({
+        'entry_id': ['AAAAAA'], 'condition_bundle': ['b1_error1_cont0'],
+        'bravais_lattice': ['cP'], 'candidate_id': [0], 'lattice_system': ['cubic'],
+        'xnn': [np.array([0.04])], 'spacegroup': ['P - - - e.g. P 2 3'], 'n_peaks': [10],
+        'hkl_ref_length': [n_lines + 1], 'M20': [10.0],
+        })
+    Benchmark.write_candidate_shard(frame, tmp_path, 'b1_error1_cont0', 'cP')
+    Benchmark.write_entry_table(pd.DataFrame([{
+        'entry_id': 'AAAAAA', 'condition_bundle': 'b1_error1_cont0',
+        'q2_obs': np.linspace(0.05, 0.5, 20)}]), tmp_path)
+
+    with pytest.raises(ValueError, match='reference list'):
+        feature_sidecar(tmp_path)
 
 
 def test_a_sidecar_that_disagrees_with_its_pool_is_refused():
@@ -573,7 +755,8 @@ def test_vary_names_a_field_the_identity_check_actually_compares(tmp_path):
         Benchmark.write_candidate_shard(frame, directory, 'b1_error1_cont0', 'cP')
         Benchmark.write_entry_table(entries, directory)
         Benchmark.write_manifest(directory, **_manifest(commit=name))
-        Benchmark.stamp_complete(directory, n_entries=1)
+        Benchmark.stamp_complete(directory, n_source_entries=1, n_bundles=1,
+                                 n_patterns_refused=0)
 
     with pytest.raises(SystemExit, match='does not compare'):
         main(['--stage', 'contrast', '--arm', f'a={tmp_path/"a"}', '--arm', f'b={tmp_path/"b"}',
@@ -597,7 +780,7 @@ def test_an_arm_can_be_read_from_reduced_tables_and_is_still_identity_checked(tm
     Benchmark.write_candidate_shard(frame, pool, 'b1_error1_cont0', 'cP')
     Benchmark.write_entry_table(entries, pool)
     Benchmark.write_manifest(pool, **_manifest())
-    Benchmark.stamp_complete(pool, n_entries=1)
+    Benchmark.stamp_complete(pool, n_source_entries=1, n_bundles=1, n_patterns_refused=0)
 
     main(['--stage', 'reduce', '--pool', str(pool), '--scores', 'M20',
           '--out-dir', str(tmp_path/'reduced')])
@@ -630,3 +813,39 @@ def test_an_arm_with_no_manifest_beside_its_tables_is_refused(tmp_path):
     with pytest.raises(SystemExit, match='No manifest for arm'):
         main(['--stage', 'contrast', '--arm', f'a={tmp_path/"a"/"a"}',
               '--arm', f'b={tmp_path/"a"/"b"}', '--scores', 'M20', '--vary', 'commit'])
+
+
+FROZEN_SPLIT = Path('docs/fom_campaign2/artifacts/S06_split_manifest.parquet')
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not FROZEN_SPLIT.is_file(), reason='frozen split not on this machine')
+def test_an_arm_divided_into_shards_is_the_arm_undivided(tmp_path, models_dir, monkeypatch):
+    """Every shard draws the whole arm and builds its second-phase partners from all of it, so how
+    an arm is divided across nodes changes no candidate. A partner pool built per shard would
+    leave a one-crystal shard with no partner at all."""
+    from mlindex.model_training import BenchmarkRuns
+    from mlindex.utilities.Digests import file_digest
+
+    monkeypatch.setattr(BenchmarkRuns, '_provenance', lambda: {
+        'commit': 'test', 'models_dir': 'test', 'models_digest': 'test', 'n_model_files': 0,
+        'model_revision': 'test'})
+    settings = dict(split_sha256=file_digest(FROZEN_SPLIT), true_lattices=['cP', 'hP'],
+                    per_lattice=1, bundles=['b1_error1_cont0_phase3', 'b1_error1_cont0'])
+    BenchmarkRuns.run_arm(tmp_path/'whole', FROZEN_SPLIT, **settings)
+    for shard in (0, 1):
+        BenchmarkRuns.run_arm(tmp_path/'sharded', FROZEN_SPLIT, shard=shard, n_shards=2,
+                              **settings)
+    BenchmarkRuns.finalize_arm(tmp_path/'sharded')
+
+    for bundle in settings['bundles']:
+        whole, sharded = (
+            Benchmark.load_candidates(tmp_path/name, bundle, sidecars=('merits', 'features'))
+            .sort_values(Benchmark.CANDIDATE_KEY, ignore_index=True)
+            for name in ('whole', 'sharded'))
+        assert whole.shape[0] > 0 and whole['entry_id'].nunique() == 2
+        pd.testing.assert_frame_equal(whole, sharded)
+    whole, sharded = (Benchmark.load_entries(tmp_path/name).sort_values(
+        Benchmark.ENTRY_KEY, ignore_index=True) for name in ('whole', 'sharded'))
+    pd.testing.assert_frame_equal(whole, sharded)
+    assert whole['second_phase_partner'].notna().sum() == 2
