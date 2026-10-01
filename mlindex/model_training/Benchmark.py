@@ -201,12 +201,23 @@ def load_candidates(pool_dir, bundle, columns=None, bravais_lattices=None, sidec
     Shards are read in canonical lattice order so a pool reads the same way twice; the ranking
     does not depend on it, because the tie-break is total, but a stable order makes two runs
     comparable row for row.
+
+    `is_correct` is recomputed under `label_frame`'s current rule (`relabelled`) whenever it is
+    returned, because a pool stores the labels of the rule it was generated under.
     """
     _refuse_zero_error([bundle])
+    read = None if not columns else list(dict.fromkeys(
+        list(columns) + (['lattice_system', 'unit_cell'] if 'is_correct' in columns else [])))
     frames = []
     for _, path in candidate_shards(pool_dir, bundle, bravais_lattices):
-        frames.append(pd.read_parquet(path, columns=list(columns) if columns else None))
+        frames.append(pd.read_parquet(path, columns=read))
     frame = pd.concat(frames, ignore_index=True)
+    if 'is_correct' in frame.columns:
+        entries = load_entries(pool_dir, bundles=[bundle], columns=ENTRY_KEY + [
+            'bravais_lattice_true', 'unit_cell_true'])
+        frame['is_correct'] = relabelled(frame, entries)
+        if columns:
+            frame = frame[list(dict.fromkeys(columns))]
 
     for sidecar in sidecars or ():
         directory = Path(pool_dir) / sidecar
