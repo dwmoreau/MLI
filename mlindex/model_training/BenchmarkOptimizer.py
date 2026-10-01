@@ -95,43 +95,55 @@ class BenchmarkOptimizer(MPOptimizerManager):
         final_rank = np.empty(n_candidates, dtype=np.int64)
         final_rank[order] = np.arange(n_candidates)
 
-        unit_cell = get_unit_cell_from_xnn(
-            xnn, partial_unit_cell=True, lattice_system=self.lattice_system)
-        reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-            xnn, partial_unit_cell=True, lattice_system=self.lattice_system)
+        self._records.append(candidate_record(
+            self._identified(), self.bravais_lattice, self.lattice_system, self.n_peaks,
+            self.hkl_ref_length, n_entering, self.opt_params, xnn, survivors['spacegroup'],
+            survivors['M20'], survivors['n_indexed'], final_rank, n_top_candidates,
+            at_prune['m20_at_prune'][positions], merit_at_prune,
+            candidate_id=np.arange(n_candidates, dtype=np.int64)))
 
-        context = self._identified()
-        self._records.append({
-            'entry_id': context['entry_id'],
-            'condition_bundle': context['condition_bundle'],
-            # The join-integrity check: the entry table carries the digest of the same peak list,
-            # and a shard whose rows disagree with it is describing a different pattern.
-            'q2_digest': context['q2_digest'],
-            'bravais_lattice': self.bravais_lattice,
-            'lattice_system': self.lattice_system,
-            'n_peaks': int(self.n_peaks),
-            'hkl_ref_length': int(self.hkl_ref_length),
-            'n_entering': int(n_entering),
-            'assignment_threshold': float(self.opt_params['assignment_threshold']),
-            'downsample_radius': float(self.opt_params['downsample_radius']),
-            'prune_threshold': float(self.opt_params.get('prune_m20_threshold', 5.0)),
-            # Position in this shard, which is the order deduplication returned them in. It is the
-            # last tie-break the reduction falls back to, so it only has to be stable.
-            'candidate_id': np.arange(n_candidates, dtype=np.int64),
-            'xnn': np.array(xnn, dtype=np.float64, copy=True),
-            'unit_cell': np.array(unit_cell, dtype=np.float64, copy=True),
-            'volume': get_unit_cell_volume(
-                unit_cell, partial_unit_cell=True, lattice_system=self.lattice_system),
-            'reciprocal_volume': get_unit_cell_volume(
-                reciprocal_unit_cell, partial_unit_cell=True,
-                lattice_system=self.lattice_system),
-            'spacegroup': list(survivors['spacegroup']),
-            'M20': np.array(survivors['M20'], dtype=np.float64, copy=True),
-            'n_indexed': np.array(survivors['n_indexed'], dtype=np.int64, copy=True),
-            'final_rank': final_rank,
-            'in_top_n': final_rank < int(n_top_candidates),
-            # The running-best M20 the cut tested, and every criterion at that point in
-            # `PRUNE_CAPTURE_MERITS` order, which the manifest records as `merit_at_prune_names`.
-            'm20_at_prune': np.array(at_prune['m20_at_prune'][positions], dtype=np.float64),
-            'merit_at_prune': merit_at_prune.astype(np.float64),
-            })
+
+def candidate_record(context, bravais_lattice, lattice_system, n_peaks, hkl_ref_length,
+                     n_entering, opt_params, xnn, spacegroup, M20, n_indexed, final_rank,
+                     n_top_candidates, m20_at_prune, merit_at_prune, candidate_id):
+    """One (pattern, Bravais lattice) block of candidate columns, in the pool's schema.
+
+    `context` names the pattern (`entry_id`, `condition_bundle`, `q2_digest`); `xnn` is the
+    partial cell of each candidate; the run settings are read from `opt_params`.
+    """
+    unit_cell = get_unit_cell_from_xnn(xnn, partial_unit_cell=True, lattice_system=lattice_system)
+    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
+        xnn, partial_unit_cell=True, lattice_system=lattice_system)
+    return {
+        'entry_id': context['entry_id'],
+        'condition_bundle': context['condition_bundle'],
+        # The join-integrity check: the entry table carries the digest of the same peak list,
+        # and a shard whose rows disagree with it is describing a different pattern.
+        'q2_digest': context['q2_digest'],
+        'bravais_lattice': bravais_lattice,
+        'lattice_system': lattice_system,
+        'n_peaks': int(n_peaks),
+        'hkl_ref_length': int(hkl_ref_length),
+        'n_entering': int(n_entering),
+        'assignment_threshold': float(opt_params['assignment_threshold']),
+        'downsample_radius': float(opt_params['downsample_radius']),
+        'prune_threshold': float(opt_params.get('prune_m20_threshold', 5.0)),
+        # Position in this shard, which is the order deduplication returned them in. It is the
+        # last tie-break the reduction falls back to, so it only has to be stable.
+        'candidate_id': np.asarray(candidate_id, dtype=np.int64),
+        'xnn': np.array(xnn, dtype=np.float64, copy=True),
+        'unit_cell': np.array(unit_cell, dtype=np.float64, copy=True),
+        'volume': get_unit_cell_volume(
+            unit_cell, partial_unit_cell=True, lattice_system=lattice_system),
+        'reciprocal_volume': get_unit_cell_volume(
+            reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system),
+        'spacegroup': list(spacegroup),
+        'M20': np.array(M20, dtype=np.float64, copy=True),
+        'n_indexed': np.array(n_indexed, dtype=np.int64, copy=True),
+        'final_rank': np.asarray(final_rank, dtype=np.int64),
+        'in_top_n': np.asarray(final_rank) < int(n_top_candidates),
+        # The running-best M20 the cut tested, and every criterion at that point in
+        # `PRUNE_CAPTURE_MERITS` order, which the manifest records as `merit_at_prune_names`.
+        'm20_at_prune': np.array(m20_at_prune, dtype=np.float64),
+        'merit_at_prune': np.asarray(merit_at_prune, dtype=np.float64),
+        }
