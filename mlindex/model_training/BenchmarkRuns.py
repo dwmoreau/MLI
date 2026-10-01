@@ -23,7 +23,7 @@ from mlindex.model_training import Benchmark
 from mlindex.model_training import BenchmarkConditions
 from mlindex.model_training import BenchmarkMetrics as metrics
 from mlindex.model_training import BenchmarkPatterns
-from mlindex.utilities.Digests import file_digest, q2_digest, tree_digest
+from mlindex.utilities.Digests import derived_seed, file_digest, q2_digest, tree_digest
 from mlindex.utilities.ErrorAdder import ContaminantPlacementError
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
@@ -1080,15 +1080,6 @@ TRUTH_POOL_STAMP = 'truth_pool.json'
 TRUTH_CANDIDATE_ID = -1
 
 
-def _pattern_rng(seed, entry_id, condition_bundle):
-    """A generator keyed by the pattern alone, so a pattern's refinement does not depend on which
-    patterns were refined before it."""
-    import hashlib
-
-    key = hashlib.sha256(f'{seed}:{entry_id}:{condition_bundle}'.encode('utf-8')).digest()
-    return np.random.default_rng(int.from_bytes(key[:8], 'big'))
-
-
 def refine_true_cell(q2_obs, unit_cell_true, bravais_lattice, lattice_system, hkl_ref, opt_params,
                      rng):
     """The true cell as the search would have finished it, had it been found.
@@ -1139,7 +1130,7 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     entries = Benchmark.load_entries(pool_dir)
     columns = list(Benchmark.CANDIDATE_KEY) + [
-        'is_correct', 'M20', 'n_entering', 'n_peaks', 'hkl_ref_length', 'assignment_threshold',
+        'is_correct', 'lattice_system', 'unit_cell', 'M20', 'n_entering', 'n_peaks', 'hkl_ref_length', 'assignment_threshold',
         'downsample_radius', 'prune_threshold']
 
     counts = {'patterns': int(entries.shape[0]), 'without_a_correct_cell': 0, 'added': 0,
@@ -1157,9 +1148,7 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
             frame = Benchmark.load_candidates(pool_dir, bundle, columns=columns,
                                               bravais_lattices=[lattice], sidecars=())
             frame = frame.loc[frame['entry_id'].isin(truth['entry_id'])]
-            # Only the true lattice is read, where the stored label already is `label_frame`'s:
-            # a pool labelled before the lattice test differs from it only in other lattices.
-            found = set(frame.loc[metrics.as_bool(frame['is_correct']), 'entry_id'])
+            found = set(frame.loc[Benchmark.relabelled(frame, entries), 'entry_id'])
             missing = truth.loc[~truth['entry_id'].isin(found)]
             counts['without_a_correct_cell'] += int(missing.shape[0])
             if not missing.shape[0]:
@@ -1183,7 +1172,9 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
                 candidates = refine_true_cell(
                     np.asarray(entry.q2_obs, dtype=np.float64)[:n_peaks], entry.unit_cell_true,
                     lattice, lattice_system, hkl_ref, opt_params,
-                    _pattern_rng(seed, entry.entry_id, bundle))
+                    # Keyed by the pattern alone, so its refinement does not depend on which
+                    # patterns were refined before it.
+                    np.random.default_rng(derived_seed(f'{entry.entry_id}:{bundle}', seed)))
                 pool = by_entry.get(entry.entry_id)
                 m20 = float(candidates.best_M20[0])
                 records.append(candidate_record(

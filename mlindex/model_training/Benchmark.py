@@ -351,12 +351,8 @@ def label_frame(candidates, entries, rtol=1e-2):
 
 
 def in_true_lattice(candidates, entries):
-    """True where a candidate is in its pattern's true Bravais lattice.
-
-    The lattice half of `label_frame`'s rule. A pool labelled before that rule had it carries the
-    cell comparison alone in `is_correct`, so `is_correct & in_true_lattice(...)` is its label
-    under the rule, with nothing recomputed.
-    """
+    """True where a candidate is in its pattern's true Bravais lattice: the lattice half of
+    `label_frame`'s rule."""
     truth = entries.drop_duplicates('entry_id').set_index('entry_id')['bravais_lattice_true']
     return (candidates['bravais_lattice'].to_numpy()
             == truth.reindex(candidates['entry_id'].to_numpy()).to_numpy())
@@ -521,3 +517,18 @@ def manifest_identity(manifests, allow=()):
             'result:\n  ' + '\n  '.join(disagreements)
             + f'\nVarying one of these on purpose? Name it in allow=; currently {tuple(allow)}.')
     return True
+
+
+def relabelled(candidates, entries, rtol=1e-2):
+    """`is_correct` under `label_frame`'s current rule, for a frame whose stored labels may
+    predate it.
+
+    Only candidates in their pattern's true lattice can be correct, so `label_frame` is rerun on
+    those alone; every other candidate is not. Needs `unit_cell` and `lattice_system`.
+    """
+    correct = np.zeros(candidates.shape[0], dtype=bool)
+    mask = in_true_lattice(candidates, entries)
+    if mask.any():
+        rows = candidates.loc[mask].drop(columns=['is_correct', 'is_off_by_two'], errors='ignore')
+        correct[mask] = label_frame(rows, entries, rtol=rtol)['is_correct'].to_numpy()
+    return correct

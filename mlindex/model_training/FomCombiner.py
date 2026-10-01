@@ -42,6 +42,7 @@ import pandas as pd
 from mlindex.model_training.Benchmark import CANDIDATE_KEY
 from mlindex.model_training.Benchmark import ENTRY_KEY
 from mlindex.model_training.BenchmarkMetrics import as_bool
+from mlindex.model_training.BenchmarkMetrics import lattice_order_of
 from mlindex.utilities.FigureOfMerits import HIGHER_IS_BETTER
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
@@ -66,10 +67,6 @@ LATTICE_ENCODINGS = ('onehot', 'ordinal', 'native')
 # Only these encodings have an ONNX export that scores as the classifier does.
 EXPORTABLE_ENCODINGS = ('onehot', 'ordinal')
 
-# The native encoding's category codes, as the campaign's model assigned them (sorted names).
-_NATIVE_CODES = {lattice: code + 1 for code, lattice in enumerate(sorted(BRAVAIS_LATTICES))}
-# The ordinal encoding follows the canonical lattice order, highest symmetry first.
-_ORDINAL_CODES = {lattice: code + 1 for code, lattice in enumerate(BRAVAIS_LATTICES)}
 
 # Columns no feature may be: labels, quantities derived from the true cell, properties of the
 # synthetic conditions, the thinning weights, and constants of the generation run.
@@ -274,7 +271,7 @@ def split_crystals(entries, fractions, rng):
 # What is read from a pool's candidate shards, beside the key. The merit and feature sidecars are
 # read whole; the entry table supplies the two per-pattern inputs.
 SHARD_COLUMNS = ('M20', 'n_indexed', 'final_rank', 'n_entering', 'volume', 'm20_at_prune',
-                 'in_top_n', 'is_correct')
+                 'in_top_n', 'is_correct', 'lattice_system', 'unit_cell')
 ENTRY_FEATURES = ('n_peaks_available', 'pool_size_full')
 TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order',
                                            'n_negatives_thinned')
@@ -294,7 +291,8 @@ def _read_lattice(pool, bundle, lattice, entry_ids, entries, columns=SHARD_COLUM
 
     if sidecar_columns is None:
         sidecar_columns = {Benchmark.MERIT_SIDECAR: None, Benchmark.FEATURE_SIDECAR: None}
-    wanted = list(CANDIDATE_KEY) + list(dict.fromkeys(list(columns) + ['is_correct']))
+    wanted = list(CANDIDATE_KEY) + list(dict.fromkeys(
+        list(columns) + ['is_correct', 'lattice_system', 'unit_cell']))
 
     def read(directory, ids):
         frame = Benchmark.load_candidates(
@@ -303,8 +301,7 @@ def _read_lattice(pool, bundle, lattice, entry_ids, entries, columns=SHARD_COLUM
         return frame.loc[frame['entry_id'].isin(ids)]
 
     frame = read(pool, entry_ids)
-    # A pool labelled before the lattice test carries the cell comparison alone.
-    frame['is_correct'] = as_bool(frame['is_correct']) & Benchmark.in_true_lattice(frame, entries)
+    frame['is_correct'] = Benchmark.relabelled(frame, entries)
     shard = Path(truth_dir or '.') / f'candidates_{bundle}_{lattice}.parquet'
     if truth_dir is not None and len(truth_ids) and shard.exists():
         truth = read(truth_dir, truth_ids)
@@ -516,16 +513,13 @@ class FomCombiner:
             if name != LATTICE_FEATURE:
                 columns.append(frame[name].to_numpy(dtype=np.float32)[:, np.newaxis])
                 continue
-            lattice = frame[LATTICE_FEATURE].astype(str)
-            unknown = sorted(set(lattice) - set(BRAVAIS_LATTICES))
-            if unknown:
-                raise ValueError(f'unknown Bravais lattice(s): {unknown}')
+            # Position in the canonical lattice order, highest symmetry first; refuses a lattice
+            # outside it.
+            position = lattice_order_of(frame[LATTICE_FEATURE].astype(str).to_numpy())
             if self.encoding == 'onehot':
-                columns.append(np.stack([(lattice == value).to_numpy() for value in
-                                         BRAVAIS_LATTICES], axis=1).astype(np.float32))
+                columns.append(np.eye(len(BRAVAIS_LATTICES), dtype=np.float32)[position])
             else:
-                codes = _NATIVE_CODES if self.encoding == 'native' else _ORDINAL_CODES
-                columns.append(lattice.map(codes).to_numpy(dtype=np.float32)[:, np.newaxis])
+                columns.append((position + 1).astype(np.float32)[:, np.newaxis])
         return np.concatenate(columns, axis=1)
 
     @classmethod
@@ -613,11 +607,9 @@ class FomCombiner:
 
 
 def onnx_probability(path, matrix):
-    """The positive-class probability an ONNX classifier export gives for a design matrix."""
-    import onnxruntime
+    """The positive-class probability the ONNX export at `path` gives for a design matrix."""
+    from mlindex.utilities.IOManagers import SKLearnManager
 
-    session = onnxruntime.InferenceSession(str(path))
-    names = [output.name for output in session.get_outputs()]
-    probabilities = session.run([names[1]], {session.get_inputs()[0].name:
-                                             np.asarray(matrix, dtype=np.float32)})[0]
-    return np.asarray(probabilities, dtype=np.float64)[:, 1]
+    manager = SKLearnManager(filename=str(Path(path).with_suffix('')), model_type='onnx')
+    manager.load()
+    return np.asarray(manager.predict_proba(np.asarray(matrix)), dtype=np.float64)[:, 1]
