@@ -59,8 +59,11 @@
 #
 # WHERE THE OUTPUT GOES: $SCRATCH/fom_production/P13_ranker/<commit>/{export,fits,evaluate}/.
 #
-# WALLTIME: not yet measured on Perlmutter; set from the laptop rehearsal with room to spare, and
-# only the time used is charged.
+# WALLTIME: not yet measured on Perlmutter. Estimated on the laptop (10 cores, 2026-10-01): an
+# export bundle holds ~265 M candidate rows (~70 M in its largest lattice file), ~3.5 us a row, so
+# well under an hour; a fit is 0.4-0.55 s a tree on ~3.4 M rows plus ~0.35 s a tree for its curve,
+# so ~1 h for the longest (4000 trees). Six hours a task leaves room, and only the time used is
+# charged.
 #
 # NOT wrapped in srun: a bare `srun -n 1` pins CPU affinity to one core. Variable names are
 # MLI_P13_-prefixed so a setting exported by another submit script cannot reach this one.
@@ -167,7 +170,7 @@ case "$MLI_P13_MODE" in
     export)
         MLI_P13_TASK="${SLURM_ARRAY_TASK_ID:-0}"
         if [ "$MLI_P13_TASK" -eq 0 ] && [ "${SLURM_ARRAY_TASK_COUNT:-0}" -eq 14 ]; then
-            sbatch --array=0-24 -t 12:00:00 -J ranker_fit --dependency="afterok:${SLURM_ARRAY_JOB_ID}" \
+            sbatch --array=0-24 -t 6:00:00 -J ranker_fit --dependency="afterok:${SLURM_ARRAY_JOB_ID}" \
                 mlindex/scripts/submit_ranker_tuning.sh fit
         fi
         export_task "$MLI_P13_TASK"
@@ -189,7 +192,7 @@ case "$MLI_P13_MODE" in
         fi
         if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
             # The submitting job: one fit per seed, then the evaluation once all have succeeded.
-            MLI_P13_JOB=$(sbatch --parsable --array=0-2 -t 12:00:00 -J ranker_seeds \
+            MLI_P13_JOB=$(sbatch --parsable --array=0-2 -t 6:00:00 -J ranker_seeds \
                 mlindex/scripts/submit_ranker_tuning.sh seeds "$2" "$3" "$4" "$5")
             sbatch --array=0 -t 4:00:00 -J ranker_evaluate --dependency="afterok:${MLI_P13_JOB}" \
                 mlindex/scripts/submit_ranker_tuning.sh evaluate "$2" "$3" "$4" "$5"
