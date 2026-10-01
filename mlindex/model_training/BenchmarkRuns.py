@@ -524,28 +524,34 @@ def _git(*arguments):
     return result.stdout if result.returncode == 0 else None
 
 
-def _provenance():
-    """The code and the model files an arm is generated from.
+def committed_checkout():
+    """The commit this checkout is at, refused unless no tracked file is modified.
 
-    Refused unless the code is a commit with no uncommitted changes to tracked files: a number
-    has to be attributable to code somebody can read. The model tree is excluded from that check
-    and identified by its own digest instead, over the directories the search reads.
+    A number has to be attributable to code somebody can read. The model tree is excluded from the
+    check; a caller that reads model files identifies them by their own digest.
     """
-    from importlib.resources import files
-
-    from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
-    from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
-
     commit = (_git('rev-parse', 'HEAD') or '').strip()
     if not commit:
-        raise RuntimeError('An arm has to be generated from a git checkout, so that its manifest '
-                           'can name the commit that produced it.')
+        raise RuntimeError('This has to run from a git checkout, so that its output can name the '
+                           'commit that produced it.')
     modified = _git('status', '--porcelain', '--untracked-files=no', '--', ':(top)',
                     ':(top,exclude)mlindex/models')
     if modified is None or modified.strip():
         raise RuntimeError(
             f'The checkout has uncommitted changes to tracked files:\n{modified}\nCommit them '
-            f'first; the manifest would name {commit[:10]}, which is not the code that ran.')
+            f'first; the output would name {commit[:10]}, which is not the code that ran.')
+    return commit
+
+
+def _provenance():
+    """The code and the model files an arm is generated from: the commit, and a digest over the
+    model directories the search reads."""
+    from importlib.resources import files
+
+    from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+    from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+
+    commit = committed_checkout()
     models_dir = _resolve_models_dir()
     systems = sorted(set(BL_TO_LATTICE_SYSTEM.values()))
     models_digest, n_model_files = tree_digest(
