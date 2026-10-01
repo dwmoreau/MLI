@@ -150,3 +150,40 @@ def test_the_truth_is_sliced_the_way_the_scalar_routine_slices_it():
     for lattice_system, want in expected.items():
         np.testing.assert_array_equal(_sliced(unit_cell, lattice_system), np.array(want),
                                       err_msg=lattice_system)
+
+
+def _in_setting(unit_cell, transformation):
+    """The full cell `unit_cell` re-expressed in the basis `cell_matrix(...) @ transformation`."""
+    from mlindex.utilities.Reindexing import cell_matrix, unit_cell_from_matrix
+    basis = cell_matrix(np.asarray(unit_cell)[np.newaxis])[0]
+    return unit_cell_from_matrix(basis @ transformation)
+
+
+def test_a_triclinic_cell_in_another_reduced_setting_is_the_true_cell():
+    """Replacing c by -(a+b+c), the fourth vector of the reduced set, gives another cell of the
+    same lattice; the labeller compared triclinic cells only as given and called it wrong."""
+    truth = np.array([12.67, 15.30, 21.50, np.radians(109.28), np.radians(99.16),
+                      np.radians(123.40)])
+    other = _in_setting(truth, np.array([[1, 0, -1], [0, 1, -1], [0, 0, -1]]))
+    assert not np.allclose(other, truth, rtol=1e-2)
+    distorted = other*np.array([1, 1, 1.05, 1, 1, 1])
+    correct = is_correct_known_bl_batch(truth, np.stack([other, distorted]), 'triclinic')
+    assert correct.tolist() == [True, False]
+
+
+def test_a_monoclinic_cell_in_a_setting_outside_the_twenty_is_the_true_cell():
+    """Of the basis changes that keep b unique with entries in {-1, 0, 1}, sixteen give this cell a
+    setting the twenty MONOCLINIC_BASIS_CHANGES never reach; a cell in one of them is still the
+    true cell. Here a stays, b is reversed, and c becomes c - a."""
+    from mlindex.utilities.Reindexing import monoclinic_settings
+    transformation = np.array([[-1, 0, -1], [0, -1, 0], [0, 0, 1]])
+    truth = np.array([11.34, 18.49, 19.73, np.radians(93.13)])
+    full_truth = np.array([11.34, 18.49, 19.73, np.pi/2, np.radians(93.13), np.pi/2])
+    other = _in_setting(full_truth, transformation)
+    assert np.allclose(other[[3, 5]], np.pi/2)
+    candidate = other[[0, 1, 2, 4]]
+    walked = monoclinic_settings(candidate[np.newaxis])[:, 0]
+    assert not np.all(np.isclose(walked, truth, rtol=1e-2), axis=1).any()
+    assert is_correct_known_bl_batch(truth, candidate[np.newaxis], 'monoclinic').tolist() == [True]
+    assert is_correct_known_bl_batch(truth, (candidate*[1, 1.05, 1, 1])[np.newaxis],
+                                     'monoclinic').tolist() == [False]

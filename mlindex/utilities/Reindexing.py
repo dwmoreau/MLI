@@ -1,4 +1,6 @@
 import copy
+import itertools
+
 import numpy as np
 
 
@@ -52,6 +54,21 @@ MONOCLINIC_BASIS_CHANGES = np.stack([
     for ac in (np.eye(3), AC_SWAP)
     for obtuse in (np.eye(3), OBTUSE_FLIP)
     ])
+
+def _unimodular_transformations():
+    entries = np.array(list(itertools.product((-1, 0, 1), repeat=9))).reshape(-1, 3, 3)
+    return entries[np.abs(np.rint(np.linalg.det(entries))) == 1].astype(np.float64)
+
+
+# Every basis change with entries in {-1, 0, 1} and determinant +-1, 6 960 of them: the settings
+# `same_cell_in_some_setting` walks. Each re-expresses a cell of the same lattice, and the twenty
+# MONOCLINIC_BASIS_CHANGES and the identity are among them.
+UNIMODULAR_TRANSFORMATIONS = _unimodular_transformations()
+
+# The thirteen lattice vectors, up to sign, that a column of such a basis change can make.
+AXIS_COMBINATIONS = np.array(
+    [v for v in itertools.product((-1, 0, 1), repeat=3)
+     if any(v) and next(x for x in v if x) > 0], dtype=np.float64)
 
 # The rhombohedral sub- and super-cell relations the validator tests a candidate against.
 # Stacked, like MONOCLINIC_BASIS_CHANGES: iterating it yields the individual matrices, and a
@@ -730,7 +747,11 @@ def monoclinic_standardization(unit_cell, partial_unit_cell=False):
         return standardized_unit_cell_full
 
 
-def get_s6_from_unit_cell(unit_cell):
+def cell_matrix(unit_cell):
+    """The Cartesian basis of each full cell, as the columns of a (n, 3, 3) array.
+
+    a along x and b in the xy plane. `unit_cell` is (n, 6), angles in radians.
+    """
     a = unit_cell[:, 0]
     b = unit_cell[:, 1]
     c = unit_cell[:, 2]
@@ -747,7 +768,55 @@ def get_s6_from_unit_cell(unit_cell):
     cz = c * np.sqrt(np.sin(beta) ** 2 - arg**2)
     z = np.zeros(unit_cell.shape[0])
     om = np.array([[ax, bx, cx], [z, by, cy], [z, z, cz]])
-    om = np.moveaxis(om, [0, 1, 2], [1, 2, 0])
+    return np.moveaxis(om, [0, 1, 2], [1, 2, 0])
+
+
+def unit_cell_from_matrix(matrix):
+    """The full cells, (..., 6) with angles in radians, of bases given as columns (..., 3, 3)."""
+    lengths = np.linalg.norm(matrix, axis=-2)
+
+    def angle(i, j):
+        cosine = np.einsum('...k,...k->...', matrix[..., :, i], matrix[..., :, j])
+        with np.errstate(invalid='ignore', divide='ignore'):
+            return np.arccos(np.clip(cosine / (lengths[..., i] * lengths[..., j]), -1, 1))
+
+    return np.concatenate([lengths, np.stack([angle(1, 2), angle(0, 2), angle(0, 1)], axis=-1)],
+                          axis=-1)
+
+
+def same_cell_in_some_setting(unit_cell_pred, unit_cell_true, rtol,
+                              transformations=None):
+    """Is each predicted cell the true cell in some setting? (n,) bool.
+
+    Both are full cells, angles in radians: `unit_cell_pred` (n, 6), `unit_cell_true` (6,).
+    Each prediction is re-expressed under every basis change in `transformations` (default
+    `UNIMODULAR_TRANSFORMATIONS`) and matches when one setting agrees with the truth to `rtol` in
+    every parameter. Every axis of such a setting is one of the thirteen combinations of the
+    prediction's axes with coefficients in {-1, 0, 1}, so only predictions where each true axis
+    length is one of those lengths, to `rtol`, are walked.
+    """
+    if transformations is None:
+        transformations = UNIMODULAR_TRANSFORMATIONS
+    unit_cell_pred = np.atleast_2d(np.asarray(unit_cell_pred, dtype=np.float64))
+    unit_cell_true = np.asarray(unit_cell_true, dtype=np.float64)
+    matches = np.zeros(unit_cell_pred.shape[0], dtype=bool)
+    basis = cell_matrix(unit_cell_pred)
+    lengths = np.linalg.norm(np.einsum('nij,kj->nki', basis, AXIS_COMBINATIONS), axis=2)
+    with np.errstate(invalid='ignore'):
+        found = np.isclose(lengths[:, :, np.newaxis], unit_cell_true[:3], rtol=rtol).any(axis=1)
+    near = np.flatnonzero(found.all(axis=1))
+    # Blocks of candidates x every setting at once; a block of 64 is ~450 000 cells.
+    for start in range(0, near.size, 64):
+        block = near[start:start + 64]
+        settings = unit_cell_from_matrix(
+            np.einsum('nij,kjl->nkil', basis[block], transformations))
+        matches[block] = np.any(np.all(np.isclose(settings, unit_cell_true, rtol=rtol), axis=2),
+                                axis=1)
+    return matches
+
+
+def get_s6_from_unit_cell(unit_cell):
+    om = cell_matrix(unit_cell)
     d = -np.sum(om, axis=2)
 
     s6 = np.column_stack(
