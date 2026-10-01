@@ -25,9 +25,11 @@ What each stage does:
 * **export** reads a pool written by `run_benchmark --stage generate`. From a `fom-train` pool it
   holds out a fixed share of crystals (`--selection-fraction`, drawn once with `--split-seed`)
   for choosing settings, and writes the rest as training rows: every correct candidate and a
-  thinned, seed-keyed sample of the wrong ones, for each of `--seeds`. The held-out crystals, and
-  every crystal of a `fom-dev` pool, are written as evaluation rows: the pool restricted to
-  `--cut`, the top `--depth` per lattice.
+  thinned, seed-keyed sample of the wrong ones, for each of `--seeds`. A training pattern whose
+  search found no correct cell gets the true cell, refined as the search finishes a candidate
+  (`BenchmarkRuns.truth_pool`, written under `truth/`), so every training pattern has one. The
+  held-out crystals, and every crystal of a `fom-dev` pool, are written as evaluation rows: the
+  pool restricted to `--cut`, the top `--depth` per lattice, as the search left it.
 * **fit** divides the training crystals into fit and calibration parts by `--seed`, fits the
   classifier on the fit part, and at every `--checkpoint-every` trees calibrates on the
   calibration part and ranks the selection crystals. It writes the model and that curve.
@@ -52,6 +54,7 @@ import numpy as np
 import pandas as pd
 
 from mlindex.model_training import Benchmark
+from mlindex.model_training import BenchmarkRuns
 from mlindex.model_training import FomCombiner as Ranker
 from mlindex.model_training.BenchmarkMetrics import derive_flags
 from mlindex.model_training.BenchmarkMetrics import reduce_many
@@ -89,7 +92,8 @@ def build_parser():
     export.add_argument('--selection-fraction', type=float, default=0.15, metavar='F',
                         help='Share of fom-train crystals held out for choosing settings.')
     export.add_argument('--split-seed', type=int, default=12345, metavar='S',
-                        help='Draws the selection crystals; fixed across fits.')
+                        help='Draws the selection crystals, and seeds the refinement of added '
+                             'true cells; fixed across fits.')
     export.add_argument('--cut', type=float, default=3.5, metavar='M20',
                         help='The M20 cut the evaluation rows are restricted to.')
     export.add_argument('--depth', default='20', metavar='N|all',
@@ -162,11 +166,18 @@ def run_export(args, commit):
         stamp = target / f'export_{bundle}.json'
         if stamp.exists():
             raise SystemExit(f'{stamp} exists: this bundle is already exported to {target}')
+        truth_dir, truth = None, None
+        if parts['training']:
+            # The true cell of every pattern the search did not find, for the training rows.
+            truth_dir = target / 'truth' / bundle
+            truth = BenchmarkRuns.truth_pool(pool, truth_dir, seed=args.split_seed,
+                                             bundles=[bundle])
         training, evaluation = Ranker.export_bundle(
             pool, bundle, entries, parts['training'], parts['selection'], args.seeds,
             cut=args.cut, n_top=depth or Benchmark.N_TOP_CANDIDATES,
             keep_all_depths=depth is None, top_k=args.top_k,
-            negative_rate=args.negative_rate, n_negatives=args.n_negatives)
+            negative_rate=args.negative_rate, n_negatives=args.n_negatives,
+            truth_dir=truth_dir)
         for seed, frame in training.items():
             frame.to_parquet(target / f'training_{bundle}_seed{seed}.parquet', index=False)
         if evaluation is not None:
@@ -177,7 +188,10 @@ def run_export(args, commit):
                       n_negatives=args.n_negatives, seeds=sorted(training),
                       n_training_rows={str(seed): int(frame.shape[0])
                                        for seed, frame in training.items()},
-                      n_evaluation_rows=0 if evaluation is None else int(evaluation.shape[0]))
+                      n_evaluation_rows=0 if evaluation is None else int(evaluation.shape[0]),
+                      truth_pool=None if truth is None else {
+                          key: truth[key] for key in ('without_a_correct_cell', 'added',
+                                                      'correct_after_refinement')})
         with open(stamp, 'w', encoding='utf-8') as handle:
             json.dump(record, handle, indent=2)
         print(f'export {bundle}: {record["n_training_rows"]} training rows, '
@@ -227,7 +241,8 @@ def _read_export(directory):
 
 
 def _evaluation_frame(directory, crystals):
-    frames = [pd.read_parquet(path) for path in sorted(Path(directory).glob('evaluation_*.parquet'))]
+    paths = sorted(Path(directory).glob('evaluation_*.parquet'))
+    frames = [pd.read_parquet(path) for path in paths]
     frame = pd.concat(frames, ignore_index=True)
     return frame.merge(crystals[['entry_id', 'bravais_lattice_true']], on='entry_id',
                        how='left', validate='m:1')
@@ -387,8 +402,8 @@ def calibration_rows(probability, correct, lattice, n_bins=10):
         order = np.argsort(p, kind='stable')
         bins = np.array_split(order, n_bins)
         gaps = [abs(p[b].mean() - y[b].mean())*b.size for b in bins if b.size]
-        return dict(n_rows=int(p.size), base_rate=float(y.mean()), brier=float(np.mean((p - y)**2)),
-                    ece=float(np.sum(gaps)/p.size))
+        return dict(n_rows=int(p.size), base_rate=float(y.mean()),
+                    brier=float(np.mean((p - y)**2)), ece=float(np.sum(gaps)/p.size))
 
     probability = np.asarray(probability, dtype=np.float64)
     correct = np.asarray(correct, dtype=np.float64)

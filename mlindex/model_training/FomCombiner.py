@@ -211,7 +211,8 @@ def context_best(frame):
 
 
 def add_context(frame, best=None):
-    """The four `ctx_*_gap_to_best` columns: each candidate's oriented merit minus its pattern's best.
+    """The four `ctx_*_gap_to_best` columns: each candidate's oriented merit minus its
+    pattern's best.
 
     `best` is `context_best` over the whole pattern, all fourteen lattices; it is computed from
     `frame` when not given, which is only right when `frame` holds every lattice of each pattern.
@@ -280,17 +281,35 @@ TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'neg
 EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n')
 
 
-def _read_lattice(pool, bundle, lattice, entry_ids, columns=SHARD_COLUMNS, sidecar_columns=None):
-    """One lattice's candidates of one bundle, for the given crystals. `sidecar_columns` maps a
-    sidecar to the columns wanted from it; without it both sidecars are read whole."""
+def _read_lattice(pool, bundle, lattice, entry_ids, entries, columns=SHARD_COLUMNS,
+                  sidecar_columns=None, truth_dir=None, truth_ids=()):
+    """One lattice's candidates of one bundle, for the crystals in `entry_ids`, labelled by
+    `Benchmark.label_frame`'s rule. `sidecar_columns` maps a sidecar to the columns wanted from
+    it; without it both sidecars are read whole.
+
+    `truth_dir`, a `BenchmarkRuns.truth_pool` of the same bundle, adds its true cells for the
+    crystals in `truth_ids`, those still correct after their refinement.
+    """
     from mlindex.model_training import Benchmark
 
     if sidecar_columns is None:
         sidecar_columns = {Benchmark.MERIT_SIDECAR: None, Benchmark.FEATURE_SIDECAR: None}
-    frame = Benchmark.load_candidates(
-        pool, bundle, columns=list(CANDIDATE_KEY) + list(columns), bravais_lattices=[lattice],
-        sidecars=tuple(sidecar_columns), sidecar_columns=sidecar_columns)
-    return frame.loc[frame['entry_id'].isin(entry_ids)].reset_index(drop=True)
+    wanted = list(CANDIDATE_KEY) + list(dict.fromkeys(list(columns) + ['is_correct']))
+
+    def read(directory, ids):
+        frame = Benchmark.load_candidates(
+            directory, bundle, columns=wanted, bravais_lattices=[lattice],
+            sidecars=tuple(sidecar_columns), sidecar_columns=sidecar_columns)
+        return frame.loc[frame['entry_id'].isin(ids)]
+
+    frame = read(pool, entry_ids)
+    # A pool labelled before the lattice test carries the cell comparison alone.
+    frame['is_correct'] = as_bool(frame['is_correct']) & Benchmark.in_true_lattice(frame, entries)
+    shard = Path(truth_dir or '.') / f'candidates_{bundle}_{lattice}.parquet'
+    if truth_dir is not None and len(truth_ids) and shard.exists():
+        truth = read(truth_dir, truth_ids)
+        frame = pd.concat([frame, truth.loc[as_bool(truth['is_correct'])]])
+    return frame.reset_index(drop=True)
 
 
 def _first_negatives(frame, n_negatives, seed):
@@ -303,7 +322,7 @@ def _float32(frame):
 
 
 def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cut, n_top,
-                  keep_all_depths, top_k, negative_rate, n_negatives):
+                  keep_all_depths, top_k, negative_rate, n_negatives, truth_dir=None):
     """One condition bundle of a pool as ranker frames: training rows per seed, evaluation rows.
 
     Training rows, for the crystals in `training_ids`: the pool at its own cut, thinned by
@@ -315,6 +334,10 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
     Evaluation rows, for the crystals in `evaluation_ids`: the pool restricted to `cut`
     (`restrict_at_cut`), with `pool_size_full` and the context gaps recomputed over the restricted
     pool, and only the `n_top` per lattice unless `keep_all_depths`.
+
+    `truth_dir` is the bundle's `BenchmarkRuns.truth_pool`. Its true cells join the training
+    rows only, as candidates of their patterns -- in the context gaps too -- so every training
+    pattern has a correct cell; evaluation rows are what the search found.
 
     The pool is read one lattice at a time, twice: once for each pattern's best values and
     survivor count, once for the rows. Returns ({seed: frame}, frame).
@@ -328,8 +351,9 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
 
     best_training, best_evaluation, survivors = [], [], []
     for lattice in lattices:
-        frame = _read_lattice(pool, bundle, lattice, wanted, columns=('M20', 'm20_at_prune'),
-                              sidecar_columns=context_columns)
+        frame = _read_lattice(pool, bundle, lattice, wanted, entries,
+                              columns=('M20', 'm20_at_prune'), sidecar_columns=context_columns,
+                              truth_dir=truth_dir, truth_ids=training_ids)
         training = frame.loc[frame['entry_id'].isin(training_ids)]
         if training.shape[0]:
             best_training.append(context_best(training))
@@ -350,8 +374,9 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
     n_thinned = {seed: [] for seed in seeds}
     evaluation_parts = []
     for lattice in lattices:
-        frame = _read_lattice(pool, bundle, lattice, wanted)
-        frame = add_derived(Benchmark.attach_entry_columns(frame, entries, ENTRY_FEATURES))
+        frame = add_derived(Benchmark.attach_entry_columns(
+            _read_lattice(pool, bundle, lattice, wanted, entries, truth_dir=truth_dir,
+                          truth_ids=training_ids), entries, ENTRY_FEATURES))
         training = frame.loc[frame['entry_id'].isin(training_ids)].reset_index(drop=True)
         if training.shape[0]:
             in_top_k = top_k_mask(training, top_k)
