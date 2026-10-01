@@ -35,6 +35,10 @@ What each stage does:
   export gives the same probabilities and the same ranking, and writes per-pattern outcomes and
   each model's calibration (Brier score and expected calibration error, per lattice).
 
+Every ranking a fit or an evaluation reports comes three ways: through the per-lattice isotonic
+maps (the shipped design), through one pooled map, and by the classifier's raw score, so whether
+the per-lattice calibration earns its place in the ranking is measured on the same models.
+
 Every output directory names the commit that wrote it, and no stage writes over an existing
 result.
 """
@@ -59,6 +63,9 @@ CRYSTALS_NAME = 'crystals.parquet'
 OUTCOMES = ('found', 'top1', 'top5', 'top10', 'reciprocal_rank')
 REFERENCE_SCORES = ('M20', 'M_sym')
 ONNX_CHECK_ROWS = 2_000_000
+# How each calibration arm is named in a learning curve and in an evaluation's outcome files.
+CURVE_NAMES = {'per_lattice': 'ranker', 'pooled': 'ranker_pooled', 'raw': 'ranker_raw'}
+ARM_SUFFIX = {'per_lattice': '', 'pooled': '__pooled', 'raw': '__raw'}
 
 
 def _integers(text):
@@ -327,7 +334,12 @@ def run_fit(args, commit):
 
 
 def learning_curve(combiner, calibration, selection, every):
-    """Selection outcomes at every `every` trees, calibrating on `calibration` at each stage."""
+    """Selection outcomes at every `every` trees, calibrating on `calibration` at each stage.
+
+    Each checkpoint is ranked three ways (`FomCombiner.CALIBRATION_ARMS`): `ranker@T` through
+    the per-lattice maps, `ranker_pooled@T` through the pooled map, `ranker_raw@T` by the raw
+    score.
+    """
     from sklearn.metrics import log_loss
 
     model = combiner.model
@@ -344,13 +356,15 @@ def learning_curve(combiner, calibration, selection, every):
             continue
         calibrators = Ranker.fit_calibration(raw_calibration[:, 1], target,
                                              calibration['bravais_lattice'], weights)
-        probability = Ranker.apply_calibration(raw_selection[:, 1], selection['bravais_lattice'],
-                                               calibrators)
-        flags = outcomes(selection, {'ranker': probability})
-        flags['curve_point'] = f'ranker@{n_trees:05d}'
+        arms = Ranker.calibration_arms(raw_selection[:, 1], selection['bravais_lattice'],
+                                       calibrators)
+        flags = outcomes(selection, {CURVE_NAMES[arm]: score for arm, score in arms.items()})
+        flags['curve_point'] = flags['score'] + f'@{n_trees:05d}'
         flags['n_trees'] = n_trees
-        flags['selection_log_loss'] = log_loss(selection['is_correct'].to_numpy(dtype=bool),
-                                               np.clip(probability, 1e-15, 1 - 1e-15))
+        truth = selection['is_correct'].to_numpy(dtype=bool)
+        losses = {CURVE_NAMES[arm]: log_loss(truth, np.clip(score, 1e-15, 1 - 1e-15))
+                  for arm, score in arms.items()}
+        flags['selection_log_loss'] = flags['score'].map(losses)
         rows.append(flags.drop(columns='score'))
     if not rows:
         raise SystemExit('no checkpoint reached; lower --checkpoint-every')
@@ -418,11 +432,13 @@ def run_evaluate(args, commit):
             raise SystemExit(f'{target} already holds outcomes for {name}')
         combiner = Ranker.FomCombiner.load(directory)
         raw = combiner.raw_score(frame)
-        probability = Ranker.apply_calibration(raw, frame['bravais_lattice'],
-                                               combiner.calibrators)
-        scores[name] = probability
-        calibration += [dict(model=name, **row) for row in calibration_rows(
-            probability, frame['is_correct'].to_numpy(dtype=bool), frame['bravais_lattice'])]
+        arms = Ranker.calibration_arms(raw, frame['bravais_lattice'], combiner.calibrators)
+        probability = arms['per_lattice']
+        for arm, score in arms.items():
+            scores[name + ARM_SUFFIX[arm]] = score
+            calibration += [dict(model=name, calibration_arm=arm, **row) for row in
+                            calibration_rows(score, frame['is_correct'].to_numpy(dtype=bool),
+                                             frame['bravais_lattice'])]
         if combiner.encoding in Ranker.EXPORTABLE_ENCODINGS:
             check = sample.to_numpy()
             onnx_raw = Ranker.onnx_probability(directory / 'model.onnx',

@@ -420,6 +420,22 @@ def fit_calibration(raw, target, lattice, weights, minimum=200):
     return calibrators
 
 
+# The three ways one fitted classifier can rank a pool: through each lattice's isotonic map (the
+# shipped design), through the one pooled map for every lattice, and by its raw score. The pooled
+# map preserves the raw order except where its steps make ties; the per-lattice maps can reorder
+# candidates of different lattices.
+CALIBRATION_ARMS = ('per_lattice', 'pooled', 'raw')
+
+
+def calibration_arms(raw, lattice, calibrators):
+    """{arm: score} for each of `CALIBRATION_ARMS`, from one raw score."""
+    raw = np.asarray(raw, dtype=np.float64)
+    thresholds, values = calibrators[POOLED]
+    return {'per_lattice': apply_calibration(raw, lattice, calibrators),
+            'pooled': np.interp(raw, thresholds, values),
+            'raw': raw}
+
+
 def apply_calibration(raw, lattice, calibrators):
     """The calibrated probability: each row's raw score through its lattice's isotonic knots."""
     raw = np.asarray(raw, dtype=np.float64)

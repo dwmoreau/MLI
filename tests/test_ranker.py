@@ -224,3 +224,19 @@ def test_calibration_falls_back_to_the_pooled_curve_for_a_small_lattice():
     assert set(calibrators) == {ranker.POOLED, 'aP'}
     out = ranker.apply_calibration(np.array([0.9, 0.1]), np.array(['cF', 'cF']), calibrators)
     np.testing.assert_allclose(out, [1.0, 0.0])
+
+
+def test_only_the_per_lattice_calibration_can_reorder_two_lattices():
+    """The ablation's three rankings: the pooled map is monotone in the raw score, so it can tie
+    candidates the raw score separates but never reverse them; separate maps per lattice can."""
+    raw = np.array([0.2, 0.3, 0.6, 0.7])
+    lattice = np.array(['aP', 'aP', 'cF', 'cF'])
+    calibrators = {ranker.POOLED: (np.array([0.0, 1.0]), np.array([0.0, 1.0])),
+                   'aP': (np.array([0.0, 1.0]), np.array([0.5, 1.0])),
+                   'cF': (np.array([0.0, 1.0]), np.array([0.0, 0.5]))}
+    arms = ranker.calibration_arms(raw, lattice, calibrators)
+    assert set(arms) == set(ranker.CALIBRATION_ARMS)
+    np.testing.assert_array_equal(arms['raw'], raw)
+    assert list(np.argsort(arms['pooled'])) == list(np.argsort(raw))
+    # aP's map lifts its candidates above cF's, which the raw score ranked higher.
+    assert arms['per_lattice'][1] > arms['per_lattice'][2] and raw[1] < raw[2]
