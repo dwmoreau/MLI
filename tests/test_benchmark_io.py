@@ -88,6 +88,30 @@ def test_the_true_cell_is_labelled_correct_and_a_wrong_one_is_not():
     assert labelled['is_correct'].tolist() == [True, False]
 
 
+def test_a_cell_is_correct_only_in_the_true_lattice_but_in_any_of_its_settings():
+    """The cell comparison slices the truth to the candidate's lattice system, so on its own it
+    compares a cubic candidate with an orthorhombic truth on `a` alone. A different setting of the
+    true cell -- here the axes in another order -- is the true cell and must still count."""
+    def block(lattice, lattice_system, cell):
+        record = _record(lattice=lattice, lattice_system=lattice_system, m20=(30.0,),
+                         cells=(cell[0],))
+        record['unit_cell'] = np.array([cell], dtype=float)
+        record['xnn'] = np.array([cell], dtype=float)
+        return record
+
+    frame = Benchmark.records_to_frame([
+        block('cP', 'cubic', [5.0]),
+        block('oP', 'orthorhombic', [7.0, 5.0, 6.0]),
+        block('oC', 'orthorhombic', [5.0, 6.0, 7.0]),
+        ])
+    entries = _entries().assign(bravais_lattice_true='oP', lattice_system_true='orthorhombic')
+    entries['unit_cell_true'] = [np.array([5.0, 6.0, 7.0, 90.0, 90.0, 90.0])]
+    labelled = Benchmark.label_frame(frame, entries)
+
+    assert labelled['bravais_lattice'].tolist() == ['cP', 'oP', 'oC']
+    assert labelled['is_correct'].tolist() == [False, True, False]
+
+
 def test_a_candidate_whose_pattern_has_no_truth_is_refused():
     """Labelling it would leave `is_correct` false for a reason that has nothing to do with the
     cell, and false is what the overwhelming majority of rows carry legitimately."""

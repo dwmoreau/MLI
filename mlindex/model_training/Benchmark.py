@@ -299,10 +299,12 @@ def records_to_frame(records):
 def label_frame(candidates, entries, rtol=1e-2):
     """Attach `is_correct` and `is_off_by_two`, which need truth the recorder cannot see.
 
-    Labels are attached at generation, before anything else reads the frame: the question every
-    reported number rests on is whether a candidate cell *is* the true cell, allowing for
-    reindexing and for sub- and super-cells, and it is not recoverable from a stored pool that
-    does not carry it.
+    A candidate is correct when it is in the true Bravais lattice and its cell is the true cell in
+    some setting of that lattice: orthorhombic axes in any order, any monoclinic or rhombohedral
+    basis change (`label_known_bl_batch`). The cell comparison alone is not enough. It slices the
+    truth to the candidate's own lattice system, so a cubic candidate would be compared with an
+    orthorhombic truth on `a` alone; the lattice test is the one `validate_candidate` applies.
+    `is_off_by_two` marks a sub- or super-cell of the truth, in any lattice, as it does there.
 
     Batched per (pattern, lattice system). The scalar `validate_candidate_known_bl` costs
     milliseconds a candidate against pools of millions, so it is not an option here; the batch
@@ -341,6 +343,8 @@ def label_frame(candidates, entries, rtol=1e-2):
                     'compare different quantities.')
             correct, off_by_two = label_known_bl_batch(
                 partial_true, predicted, lattice_system, rtol=rtol)
+            correct &= (group['bravais_lattice'].to_numpy()
+                        == truth.loc[entry_id, 'bravais_lattice_true'])
             is_correct[positions] = correct
             is_off_by_two[positions] = off_by_two
     result['is_correct'] = is_correct
