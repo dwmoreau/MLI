@@ -873,3 +873,29 @@ def test_an_arm_divided_into_shards_is_the_arm_undivided(tmp_path, models_dir, m
         Benchmark.ENTRY_KEY, ignore_index=True) for name in ('whole', 'sharded'))
     pd.testing.assert_frame_equal(whole, sharded)
     assert whole['second_phase_partner'].notna().sum() == 2
+
+
+def _cubic_reference(limit=40):
+    hkl = np.array([(h, k, l) for h in range(7) for k in range(h + 1) for l in range(k + 1)
+                    if 0 < h*h + k*k + l*l <= limit], dtype=float)
+    return hkl[np.argsort((hkl**2).sum(axis=1), kind='stable')]
+
+
+def test_a_true_cell_is_finished_as_the_search_finishes_a_candidate_and_stays_correct():
+    """The added true cell is refined against the noisy peaks and assigned an extinction group
+    by the search's own steps. It must come out still the true cell, with a real M20."""
+    from mlindex.model_training.BenchmarkRuns import refine_true_cell
+    from mlindex.optimization.CandidateValidation import is_correct_known_bl_batch
+
+    hkl = _cubic_reference()
+    a = 5.0
+    q2 = np.unique((hkl**2).sum(axis=1))[:10]/a**2
+    q2_obs = q2*(1 + np.random.default_rng(0).normal(0, 2e-4, q2.size))
+    opt_params = {'minimum_uc': 2, 'maximum_uc': 500, 'assignment_threshold': 0.95,
+                  'figure_of_merit': 'M20'}
+    candidates = refine_true_cell(q2_obs, [a, a, a, np.pi/2, np.pi/2, np.pi/2], 'cP', 'cubic',
+                                  hkl, opt_params, np.random.default_rng(1))
+    cell = 1/np.sqrt(candidates.best_xnn[:, 0])
+    assert is_correct_known_bl_batch(np.array([a]), cell[:, np.newaxis], 'cubic').all()
+    assert candidates.best_M20[0] > 10 and candidates.n_indexed[0] >= 8
+    assert len(candidates.best_spacegroup) == 1

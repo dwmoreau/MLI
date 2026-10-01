@@ -1069,3 +1069,144 @@ def _refuse_a_disagreeing_sidecar(recomputed, stored, bundle, lattice):
             f'{worst:.4g}. The merits are being computed on a different peak list, a different '
             'reference list or a different cell from the one the search used, and every column '
             'written here would be a plausible number answering the wrong question.')
+
+
+# ---------------------------------------------------------------------------
+# The true cell, where the search did not find it
+# ---------------------------------------------------------------------------
+
+TRUTH_POOL_STAMP = 'truth_pool.json'
+# The candidate id an added true cell carries; every searched candidate's is >= 0.
+TRUTH_CANDIDATE_ID = -1
+
+
+def _pattern_rng(seed, entry_id, condition_bundle):
+    """A generator keyed by the pattern alone, so a pattern's refinement does not depend on which
+    patterns were refined before it."""
+    import hashlib
+
+    key = hashlib.sha256(f'{seed}:{entry_id}:{condition_bundle}'.encode('utf-8')).digest()
+    return np.random.default_rng(int.from_bytes(key[:8], 'big'))
+
+
+def refine_true_cell(q2_obs, unit_cell_true, bravais_lattice, lattice_system, hkl_ref, opt_params,
+                     rng):
+    """The true cell as the search would have finished it, had it been found.
+
+    Starts from the true cell in its lattice's partial form and applies the search's last steps
+    in the search's order: one Gauss-Newton refinement (kept only where it raises M20), the
+    standard setting, the extinction group that maximises M20, and the indexed-peak count. The
+    M20 cut and the off-by-two copies are not applied. Returns the `Candidates` holding one cell.
+    """
+    from mlindex.optimization.Candidates import Candidates
+    from mlindex.utilities.UnitCellTools import get_partial_unit_cell, get_xnn_from_unit_cell
+
+    partial = get_partial_unit_cell(np.asarray(unit_cell_true, dtype=np.float64),
+                                    lattice_system=lattice_system)
+    xnn = get_xnn_from_unit_cell(partial[np.newaxis], partial_unit_cell=True,
+                                 lattice_system=lattice_system)
+    candidates = Candidates(
+        q2_obs=q2_obs, xnn=xnn, hkl_ref=hkl_ref, lattice_system=lattice_system,
+        bravais_lattice=bravais_lattice, opt_params=opt_params, rng=rng, fom=None,
+        zero_error=False, wavelength=None)
+    candidates.refine_cell()
+    candidates.standardize_cell()
+    candidates.assign_extinction_group()
+    candidates.calculate_peaks_indexed()
+    return candidates
+
+
+def truth_pool(pool_dir, out_dir, seed, bundles=None):
+    """A companion pool holding the refined true cell of every pattern whose pool lacks one.
+
+    For each pattern-condition with no correct candidate (`is_correct` under `label_frame`'s rule,
+    which needs the true Bravais lattice), the true cell is finished by `refine_true_cell` and
+    written as one candidate of the true lattice, in the pool's schema: `candidate_id`
+    `TRUTH_CANDIDATE_ID`, `final_rank` where its M20 ranks among that lattice's survivors,
+    `n_entering` that lattice's, and the run settings the pool recorded. Both sidecars are then
+    computed on it by the functions that compute the pool's own. `bundles` limits it to some
+    condition bundles. Returns the stamp it writes.
+    """
+    from mlindex.model_training.BenchmarkOptimizer import candidate_record
+    from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
+    from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL, MINIMUM_UNIT_CELL
+    from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+
+    commit = committed_checkout()
+    pool_dir, out_dir = Path(pool_dir), Path(out_dir)
+    if (out_dir / TRUTH_POOL_STAMP).exists() or any(out_dir.glob('candidates_*.parquet')):
+        raise FileExistsError(f'{out_dir} already holds a truth pool')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    entries = Benchmark.load_entries(pool_dir)
+    columns = list(Benchmark.CANDIDATE_KEY) + [
+        'is_correct', 'M20', 'n_entering', 'n_peaks', 'hkl_ref_length', 'assignment_threshold',
+        'downsample_radius', 'prune_threshold']
+
+    counts = {'patterns': int(entries.shape[0]), 'without_a_correct_cell': 0, 'added': 0,
+              'correct_after_refinement': 0}
+    bundles = list(bundles or Benchmark.available_bundles(pool_dir))
+    entries = entries.loc[entries['condition_bundle'].isin(bundles)].reset_index(drop=True)
+    for bundle in bundles:
+        in_bundle = entries.loc[entries['condition_bundle'] == bundle]
+        shards = dict(Benchmark.candidate_shards(pool_dir, bundle))
+        for lattice in BRAVAIS_LATTICES:
+            truth = in_bundle.loc[in_bundle['bravais_lattice_true'] == lattice]
+            if not truth.shape[0] or lattice not in shards:
+                continue
+            lattice_system = BL_TO_LATTICE_SYSTEM[lattice]
+            frame = Benchmark.load_candidates(pool_dir, bundle, columns=columns,
+                                              bravais_lattices=[lattice], sidecars=())
+            frame = frame.loc[frame['entry_id'].isin(truth['entry_id'])]
+            # Only the true lattice is read, where the stored label already is `label_frame`'s:
+            # a pool labelled before the lattice test differs from it only in other lattices.
+            found = set(frame.loc[metrics.as_bool(frame['is_correct']), 'entry_id'])
+            missing = truth.loc[~truth['entry_id'].isin(found)]
+            counts['without_a_correct_cell'] += int(missing.shape[0])
+            if not missing.shape[0]:
+                continue
+            hkl_ref = _hkl_reference(lattice, lattice_system)
+            settings = frame.iloc[0]
+            if int(settings['hkl_ref_length']) != hkl_ref.shape[0]:
+                raise ValueError(f'{bundle}/{lattice}: the search used '
+                                 f'{settings["hkl_ref_length"]} reference lines and this models '
+                                 f'tree has {hkl_ref.shape[0]}')
+            opt_params = {
+                'minimum_uc': MINIMUM_UNIT_CELL, 'maximum_uc': MAXIMUM_UNIT_CELL,
+                'figure_of_merit': 'M20',
+                'assignment_threshold': float(settings['assignment_threshold']),
+                'downsample_radius': float(settings['downsample_radius']),
+                'prune_m20_threshold': float(settings['prune_threshold'])}
+            n_peaks = int(settings['n_peaks'])
+            by_entry = dict(tuple(frame.groupby('entry_id', sort=False)))
+            records = []
+            for entry in missing.itertuples():
+                candidates = refine_true_cell(
+                    np.asarray(entry.q2_obs, dtype=np.float64)[:n_peaks], entry.unit_cell_true,
+                    lattice, lattice_system, hkl_ref, opt_params,
+                    _pattern_rng(seed, entry.entry_id, bundle))
+                pool = by_entry.get(entry.entry_id)
+                m20 = float(candidates.best_M20[0])
+                records.append(candidate_record(
+                    {'entry_id': entry.entry_id, 'condition_bundle': bundle,
+                     'q2_digest': entry.q2_digest},
+                    lattice, lattice_system, n_peaks, hkl_ref.shape[0],
+                    0 if pool is None else int(pool['n_entering'].iloc[0]), opt_params,
+                    candidates.best_xnn, candidates.best_spacegroup, candidates.best_M20,
+                    candidates.n_indexed,
+                    [0 if pool is None else int((pool['M20'].to_numpy() > m20).sum())],
+                    Benchmark.N_TOP_CANDIDATES, [m20],
+                    np.full((1, len(PRUNE_CAPTURE_MERITS)), np.nan),
+                    candidate_id=[TRUTH_CANDIDATE_ID]))
+            added = Benchmark.label_frame(Benchmark.records_to_frame(records), entries)
+            counts['added'] += int(added.shape[0])
+            counts['correct_after_refinement'] += int(added['is_correct'].sum())
+            Benchmark.write_candidate_shard(added, out_dir, bundle, lattice)
+    Benchmark.write_entry_table(entries, out_dir)
+    if counts['added']:
+        merit_sidecar(out_dir)
+        feature_sidecar(out_dir)
+    stamp = dict(counts, bundles=bundles, source_pool=str(pool_dir), commit=commit, seed=int(seed),
+                 source_commit=Benchmark.load_manifest(pool_dir).get('commit'))
+    with open(out_dir / TRUTH_POOL_STAMP, 'w', encoding='utf-8') as handle:
+        json.dump(stamp, handle, indent=2)
+    return stamp
