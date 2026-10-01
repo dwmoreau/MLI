@@ -62,12 +62,12 @@
 #
 # copies back.
 #
-# WALLTIME. P09c measured 135 s a pattern on a Perlmutter core. A train shard is 113 960 / 16 =
-# ~7 100 patterns over 128 pools, ~56 each: ~2.1 h, plus the sidecars, which each pool writes for
-# its own stripe (a few percent more). Six hours is ~2.5x that on purpose: only the time used is
-# charged, and a shard killed at the limit leaves no stamp and has to be run again whole. dev_general
-# is ~1.5 h and dev_hard ~0.5 h. The finalize job merges ~850 GB and reduces three arms; twelve
-# hours.
+# WALLTIME AND MEMORY, measured on the first run (2026-09-30): a train shard took 2.4 h and peaked
+# at ~295 GB, ~146 s a pattern and ~2.3 GB a process on a full node; dev_general 2.1 h, dev_hard
+# 0.8 h; the finalize job 5.6 h at 248 GB; ~47 node-hours in all. Six hours a task and twelve for
+# the finalize leave room on purpose: only the time used is charged, and a shard killed at the limit
+# leaves no stamp and has to be run again whole. A rehearsal leaves most of a node idle and runs
+# faster (80 s a pattern), so do not size a run from one.
 #
 # NOT wrapped in srun: a bare `srun -n 1` pins CPU affinity to one core and strangles the pools.
 # Read SLURM_CPUS_ON_NODE, not nproc, and halve it -- it counts both hyperthreads.
