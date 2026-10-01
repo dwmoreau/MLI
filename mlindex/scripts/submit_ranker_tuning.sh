@@ -190,9 +190,15 @@ case "$MLI_P13_MODE" in
             echo "FATAL: seeds takes <encoding> <learning rate> <leaves> <trees>, e.g. seeds onehot 0.04 63 1200" >&2
             exit 1
         fi
-        if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
-            # The submitting job: one fit per seed, then the evaluation once all have succeeded.
+        if [ -z "${MLI_P13_SEED_FIT:-}" ]; then
+            # A plain sbatch of this mode runs as the header's 14-task array. Task 0 submits one
+            # fit per seed, marked so they know they are the fits, and the evaluation to follow
+            # them; every other task has nothing to do.
+            if [ "${SLURM_ARRAY_TASK_ID:-0}" -ne 0 ]; then
+                exit 0
+            fi
             MLI_P13_JOB=$(sbatch --parsable --array=0-2 -t 6:00:00 -J ranker_seeds \
+                --export=ALL,MLI_P13_SEED_FIT=1 \
                 mlindex/scripts/submit_ranker_tuning.sh seeds "$2" "$3" "$4" "$5")
             sbatch --array=0 -t 12:00:00 -J ranker_evaluate --dependency="afterok:${MLI_P13_JOB}" \
                 mlindex/scripts/submit_ranker_tuning.sh evaluate "$2" "$3" "$4" "$5"

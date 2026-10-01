@@ -47,6 +47,7 @@ result.
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -205,6 +206,8 @@ def _write_crystals(target, entries, parts, settings):
     crystals = crystals.assign(part=np.where(crystals['entry_id'].isin(parts['training']),
                                              'training', 'selection'))
     crystals = crystals.sort_values('entry_id').reset_index(drop=True)
+    # The export's array tasks share this directory, so each writes its own temporary files and
+    # moves them into place in one step: no task reads a half-written table.
     path = target / CRYSTALS_NAME
     if path.exists():
         existing = pd.read_parquet(path)
@@ -212,9 +215,12 @@ def _write_crystals(target, entries, parts, settings):
             raise SystemExit(f'{path} holds a different crystal division; export into a fresh '
                              'directory or with the same --selection-fraction and --split-seed')
         return
-    crystals.to_parquet(path, index=False)
-    with open(target / 'crystals.json', 'w', encoding='utf-8') as handle:
+    suffix = f'.{os.getpid()}.tmp'
+    with open(target / f'crystals.json{suffix}', 'w', encoding='utf-8') as handle:
         json.dump(settings, handle, indent=2)
+    crystals.to_parquet(target / f'{CRYSTALS_NAME}{suffix}', index=False)
+    os.replace(target / f'crystals.json{suffix}', target / 'crystals.json')
+    os.replace(target / f'{CRYSTALS_NAME}{suffix}', path)
 
 
 def _read_export(directory):
@@ -244,8 +250,13 @@ def _evaluation_frame(directory, crystals):
     paths = sorted(Path(directory).glob('evaluation_*.parquet'))
     frames = [pd.read_parquet(path) for path in paths]
     frame = pd.concat(frames, ignore_index=True)
-    return frame.merge(crystals[['entry_id', 'bravais_lattice_true']], on='entry_id',
-                       how='left', validate='m:1')
+    frame = frame.merge(crystals[['entry_id', 'bravais_lattice_true']], on='entry_id',
+                        how='left', validate='m:1')
+    # The degeneracy flag the benchmark's own reduction excludes on, from the pool's entries.
+    with open(Path(directory) / 'crystals.json', encoding='utf-8') as handle:
+        pool = json.load(handle)['pool']
+    entries = Benchmark.load_entries(pool, columns=Benchmark.ENTRY_KEY + ['is_degenerate'])
+    return Benchmark.attach_entry_columns(frame, entries, ['is_degenerate'])
 
 
 # ---------------------------------------------------------------------------------------------
@@ -435,6 +446,8 @@ def run_evaluate(args, commit):
         raise SystemExit('name at least one --model-dir')
     frame = _evaluation_frame(export_dir, crystals)
     target = Path(args.out_dir) / commit[:7] / export_dir.name
+    if (target / 'summary.csv').exists():
+        raise SystemExit(f'{target} already holds an evaluation; name another --out-dir')
     target.mkdir(parents=True, exist_ok=True)
 
     scores = {name: name for name in REFERENCE_SCORES}
@@ -443,8 +456,6 @@ def run_evaluate(args, commit):
     for directory in args.model_dir:
         directory = Path(directory)
         name = directory.name
-        if (target / f'outcomes_{name}.parquet').exists():
-            raise SystemExit(f'{target} already holds outcomes for {name}')
         combiner = Ranker.FomCombiner.load(directory)
         raw = combiner.raw_score(frame)
         arms = Ranker.calibration_arms(raw, frame['bravais_lattice'], combiner.calibrators)

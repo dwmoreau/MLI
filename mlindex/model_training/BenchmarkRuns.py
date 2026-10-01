@@ -1133,10 +1133,10 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
         'is_correct', 'lattice_system', 'unit_cell', 'M20', 'n_entering', 'n_peaks', 'hkl_ref_length', 'assignment_threshold',
         'downsample_radius', 'prune_threshold']
 
-    counts = {'patterns': int(entries.shape[0]), 'without_a_correct_cell': 0, 'added': 0,
-              'correct_after_refinement': 0}
     bundles = list(bundles or Benchmark.available_bundles(pool_dir))
     entries = entries.loc[entries['condition_bundle'].isin(bundles)].reset_index(drop=True)
+    counts = {'patterns': int(entries.shape[0]), 'without_a_correct_cell': 0, 'added': 0,
+              'correct_after_refinement': 0}
     for bundle in bundles:
         in_bundle = entries.loc[entries['condition_bundle'] == bundle]
         shards = dict(Benchmark.candidate_shards(pool_dir, bundle))
