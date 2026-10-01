@@ -437,6 +437,9 @@ def run_evaluate(args, commit):
                 model=name, n_rows_checked=int(check.sum()),
                 n_patterns_checked=int(pivot.shape[0]),
                 max_abs_raw=float(np.max(np.abs(onnx_raw - raw[check]))),
+                # A float32 input equal to a float64 split threshold rounded up takes the other
+                # branch in ONNX, which compares in float32; this counts the rows it reaches.
+                n_rows_raw_differ=int(np.sum(np.abs(onnx_raw - raw[check]) > 1e-5)),
                 max_abs_calibrated=float(np.max(np.abs(onnx_probability - probability[check]))),
                 top1_disagreements=int((pivot['top1']['sklearn'] != pivot['top1']['onnx']).sum()),
                 top10_disagreements=int(
