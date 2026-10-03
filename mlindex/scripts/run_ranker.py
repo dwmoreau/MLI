@@ -14,6 +14,12 @@ Three stages, each a separate job on a cluster:
         --out-dir ranker/fits --encoding onehot --learning-rate 0.04 --max-leaf-nodes 63 \
         --max-iter 2000 --seed 12345
 
+    # the same fit without some inputs, as one step of a feature ablation
+    python -m mlindex.scripts.run_ranker --stage fit \
+        --export-dir ranker/export/<commit>/train_general_cut3.5_depth20 \
+        --out-dir ranker/fits --encoding ordinal --max-iter 1100 --seed 12345 \
+        --drop-features n_entering,final_rank
+
     # 3. evaluate: saved models on a reporting pool, beside M20 and M_sym
     python -m mlindex.scripts.run_ranker --stage evaluate \
         --export-dir ranker/export/<commit>/dev_general_cut3.5_depth20 \
@@ -34,7 +40,9 @@ What each stage does:
 * **fit** divides the training crystals into fit and calibration parts by `--seed`, fits the
   classifier on the fit part's training rows, and at every `--checkpoint-every` trees calibrates
   on the calibration part's evaluation rows -- the rows the probability will be printed for --
-  and ranks the selection crystals. It writes the model and that curve.
+  and ranks the selection crystals. It writes the model and that curve. `--drop-features` fits
+  on every input but the ones named; the directory name then ends in their count and a digest of
+  their names, and the model's `specification.json` lists the inputs it reads.
 * **evaluate** scores a reporting export with each saved model, checks that the model's ONNX
   export gives the same probabilities and the same ranking, and writes per-pattern outcomes and
   each model's calibration (Brier score and expected calibration error, per lattice).
@@ -48,6 +56,7 @@ result.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -76,6 +85,10 @@ ARM_SUFFIX = {'per_lattice': '', 'pooled': '__pooled', 'raw': '__raw'}
 
 def _integers(text):
     return tuple(int(value) for value in text.split(',') if value)
+
+
+def _names(text):
+    return tuple(value for value in text.split(',') if value)
 
 
 def build_parser():
@@ -121,6 +134,8 @@ def build_parser():
                      help='Wrong candidates per pattern in the fit rows.')
     fit.add_argument('--calibration-fraction', type=float, default=0.2, metavar='F',
                      help='Share of training crystals the calibrators are fitted on.')
+    fit.add_argument('--drop-features', type=_names, default=(), metavar='NAME,...',
+                     help='Ranker inputs to leave out of the fit (default: none).')
 
     evaluate = parser.add_argument_group('evaluate')
     evaluate.add_argument('--model-dir', action='append', default=[], metavar='DIR',
@@ -301,6 +316,18 @@ def population_means(flags, by='score'):
 # ---------------------------------------------------------------------------------------------
 # fit
 # ---------------------------------------------------------------------------------------------
+def fit_name(encoding, learning_rate, max_leaf_nodes, max_iter, seed, drop_features=()):
+    """A fit's directory name. Without some inputs it ends in how many were left out and a
+    digest of their names, whatever order they were given in."""
+    name = (f'{encoding}_lr{learning_rate:g}_leaves{max_leaf_nodes}_iter{max_iter}'
+            f'_seed{seed}')
+    if drop_features:
+        dropped = sorted(set(drop_features))
+        digest = hashlib.sha1(','.join(dropped).encode('utf-8')).hexdigest()[:8]
+        name += f'_drop{len(dropped)}_{digest}'
+    return name
+
+
 def run_fit(args, commit):
     export_dir = Path(args.export_dir)
     crystals, stamps = _read_export(export_dir)
@@ -310,8 +337,9 @@ def run_fit(args, commit):
     if args.fit_negatives > stamps[0]['n_negatives']:
         raise SystemExit(f'the export kept {stamps[0]["n_negatives"]} wrong candidates a '
                          f'pattern; {args.fit_negatives} cannot be drawn from it')
-    name = (f'{args.encoding}_lr{args.learning_rate:g}_leaves{args.max_leaf_nodes}'
-            f'_iter{args.max_iter}_seed{args.seed}')
+    features = Ranker.features_without(args.drop_features)
+    name = fit_name(args.encoding, args.learning_rate, args.max_leaf_nodes, args.max_iter,
+                    args.seed, args.drop_features)
     target = Path(args.out_dir) / commit[:7] / name
     if target.exists():
         raise SystemExit(f'{target} exists; every fit writes its own directory')
@@ -346,13 +374,14 @@ def run_fit(args, commit):
           f'{selection.shape[0]} rows ({selection["entry_id"].nunique()} crystals)')
 
     combiner = Ranker.FomCombiner.fit(
-        fit_rows, encoding=args.encoding, seed=args.seed,
+        fit_rows, encoding=args.encoding, seed=args.seed, features=features,
         params=dict(max_iter=args.max_iter, learning_rate=args.learning_rate,
                     max_leaf_nodes=args.max_leaf_nodes))
     curve = learning_curve(combiner, calibration_rows, selection, args.checkpoint_every)
     combiner.fit_calibrators(calibration_rows)
     combiner.meta.update(commit=commit, export_dir=str(export_dir),
                          fit_negatives=args.fit_negatives,
+                         dropped_features=sorted(set(args.drop_features)),
                          n_fit_crystals=len(parts['fit']),
                          n_calibration_crystals=len(parts['calibration']))
     combiner.save(target)

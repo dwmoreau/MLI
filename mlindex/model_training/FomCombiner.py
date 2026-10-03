@@ -60,6 +60,17 @@ CONTEXT_FEATURES = tuple(f'ctx_{merit}_gap_to_best' for merit in CONTEXT_MERITS)
 FEATURES = (RAW_MERITS + ABSENCE_FEATURES + PROBATION_MERITS + STRUCTURAL_FEATURES
             + (LATTICE_FEATURE,) + CONTEXT_FEATURES)
 
+
+def features_without(names):
+    """`FEATURES` in their order, less `names`; refuses a name that is not one of them."""
+    unknown = sorted(set(names) - set(FEATURES))
+    if unknown:
+        raise ValueError(f'not ranker inputs: {unknown}; the inputs are {list(FEATURES)}')
+    if set(names) >= set(FEATURES):
+        raise ValueError('removing every input leaves nothing to fit on')
+    return tuple(name for name in FEATURES if name not in set(names))
+
+
 LATTICE_ENCODINGS = ('onehot', 'ordinal', 'native')
 # Only these encodings have an ONNX export that scores as the classifier does.
 EXPORTABLE_ENCODINGS = ('onehot', 'ordinal')

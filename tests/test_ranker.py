@@ -174,21 +174,27 @@ def test_the_lattice_encodings_shape_the_design_matrix():
         ranker.FomCombiner('ordinal').design_matrix(frame.assign(bravais_lattice='xX'))
 
 
-def _fitted(encoding, seed=12345):
+def _fitted(encoding, seed=12345, features=ranker.FEATURES):
     frame = _pool(n_entries=12, n_per_lattice=30, lattices=('cF', 'tI', 'oC', 'mP', 'aP'))
     # A lattice dependence only a split on a set of lattices captures exactly.
     member = frame['bravais_lattice'].isin(['cF', 'oC', 'aP']).to_numpy()
     rng = np.random.default_rng(seed)
     frame['is_correct'] = rng.random(frame.shape[0]) < np.where(member, 0.6, 0.1)
     frame = frame.assign(sampling_weight=1.0)
-    combiner = ranker.FomCombiner.fit(frame, encoding=encoding, seed=seed,
+    combiner = ranker.FomCombiner.fit(frame, encoding=encoding, seed=seed, features=features,
                                       params=dict(max_iter=40, max_leaf_nodes=15))
     return combiner.fit_calibrators(frame, minimum=20), frame
 
 
+# A model on fewer inputs, as a feature ablation fits: the lattice and a context gap removed, so
+# the design matrix's columns shift past both.
+REDUCED = ranker.features_without(('n_entering', 'bravais_lattice', 'ctx_M20_gap_to_best'))
+
+
+@pytest.mark.parametrize('features', (ranker.FEATURES, REDUCED), ids=('all', 'reduced'))
 @pytest.mark.parametrize('encoding', ranker.EXPORTABLE_ENCODINGS)
-def test_an_exportable_model_scores_the_same_through_onnx(tmp_path, encoding):
-    combiner, frame = _fitted(encoding)
+def test_an_exportable_model_scores_the_same_through_onnx(tmp_path, encoding, features):
+    combiner, frame = _fitted(encoding, features=features)
     combiner.save(tmp_path / 'model')
     onnx = ranker.onnx_probability(tmp_path / 'model' / 'model.onnx',
                                    combiner.design_matrix(frame))
@@ -252,3 +258,37 @@ def test_only_the_per_lattice_calibration_can_reorder_two_lattices():
     assert list(np.argsort(arms['pooled'])) == list(np.argsort(raw))
     # aP's map lifts its candidates above cF's, which the raw score ranked higher.
     assert arms['per_lattice'][1] > arms['per_lattice'][2] and raw[1] < raw[2]
+
+
+def test_removing_inputs_keeps_the_others_in_order_and_refuses_a_name_that_is_not_one():
+    kept = ranker.features_without(('M_wu', 'n_entering'))
+    assert len(kept) == len(ranker.FEATURES) - 2
+    assert 'M_wu' not in kept and 'n_entering' not in kept
+    assert list(kept) == [name for name in ranker.FEATURES if name in kept]
+    assert ranker.features_without(()) == ranker.FEATURES
+    with pytest.raises(ValueError, match='M_wuu'):
+        ranker.features_without(('M_wuu',))
+    with pytest.raises(ValueError):
+        ranker.features_without(ranker.FEATURES)
+
+
+def test_a_model_without_an_input_never_reads_its_column(tmp_path):
+    combiner, frame = _fitted('ordinal', features=REDUCED)
+    stripped = frame.drop(columns=['n_entering', 'ctx_M20_gap_to_best'])
+    np.testing.assert_array_equal(combiner.score(stripped), combiner.score(frame))
+    assert combiner.design_matrix(frame).shape[1] == len(ranker.FEATURES) - 3
+    combiner.save(tmp_path / 'model')
+    assert ranker.FomCombiner.load(tmp_path / 'model').features == REDUCED
+    with pytest.raises(KeyError):
+        _fitted('ordinal')[0].design_matrix(stripped)
+
+
+def test_a_fit_without_inputs_is_named_for_the_set_not_the_order():
+    from mlindex.scripts.run_ranker import fit_name
+
+    base = fit_name('ordinal', 0.04, 63, 1100, 12345)
+    assert base == 'ordinal_lr0.04_leaves63_iter1100_seed12345'
+    one = fit_name('ordinal', 0.04, 63, 1100, 12345, ('M_1', 'M_wu'))
+    assert one == fit_name('ordinal', 0.04, 63, 1100, 12345, ('M_wu', 'M_1', 'M_wu'))
+    assert one.startswith(base + '_drop2_')
+    assert one != fit_name('ordinal', 0.04, 63, 1100, 12345, ('M_1', 'F_N_q'))
