@@ -57,7 +57,14 @@
 # A partial resubmission of the exports does not submit the fits; submit them with the command
 # above and --array=0-24.
 #
-# WHERE THE OUTPUT GOES: $SCRATCH/fom_production/P13_ranker/<commit>/{export,fits,evaluate}/.
+# WHERE THE OUTPUT GOES. The export frames, tens of GB, stay on the cluster under
+# $SCRATCH/fom_production/P13_ranker/export/<commit>/. The results -- each fit's model, ONNX file
+# and learning curve, and each fom-dev evaluation -- go under
+# $SCRATCH/fom_production/artifacts/P13_ranker/{fits,evaluate}/<commit>/, which, on the laptop,
+#
+#   MLI_CAMPAIGN=fom_production docs/sync_record.sh pull-artifacts P13_ranker
+#
+# copies back to docs/fom_production/artifacts/P13_ranker/.
 #
 # WALLTIME: not yet measured on Perlmutter. Estimated on the laptop (10 cores, 2026-10-01): an
 # export bundle holds ~265 M candidate rows (~70 M in its largest lattice file), ~3.5 us a row, so
@@ -100,8 +107,8 @@ fi
 MLI_P13_POOLS="${MLI_P13_POOLS:-$SCRATCH/fom_production/P12_pools/dadd59d}"
 cd "$MLI_P13_REPO"
 MLI_P13_COMMIT="$(git rev-parse HEAD | cut -c1-7)"
-MLI_P13_OUT="$SCRATCH/fom_production/P13_ranker"
-MLI_P13_EXPORT="$MLI_P13_OUT/export"
+MLI_P13_EXPORT="$SCRATCH/fom_production/P13_ranker/export"
+MLI_P13_OUT="$SCRATCH/fom_production/artifacts/P13_ranker"
 MLI_P13_TRAIN_EXPORT="$MLI_P13_EXPORT/$MLI_P13_COMMIT/train_general_cut3.5_depth20"
 MLI_P13_CPUS=$(( ${SLURM_CPUS_ON_NODE:-8} / 2 ))
 
