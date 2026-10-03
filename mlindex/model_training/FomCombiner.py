@@ -1,8 +1,8 @@
 """The learned ranker: a calibrated probability that a candidate unit cell is correct.
 
 One gradient-boosted classifier scores every candidate of a pattern, across all fourteen Bravais
-lattices, from 31 inputs: seven merits, four systematic-absence counts, three further merits,
-twelve structural quantities, the candidate's Bravais lattice, and four pool-context gaps (how far
+lattices, from 30 inputs: seven merits, four systematic-absence counts, three further merits,
+eleven structural quantities, the candidate's Bravais lattice, and four pool-context gaps (how far
 the candidate sits below the pattern's best value of a merit). Its output is mapped to a
 probability by an isotonic regression fitted separately for each Bravais lattice, on crystals the
 classifier was not fitted on, using the rows it will score: the pool as a run at the cut leaves it.
@@ -49,8 +49,7 @@ ABSENCE_FEATURES = ('n_absent_extra', 'n_absent_extra_in_range', 'f_absent_extra
 PROBATION_MERITS = ('M_wu', 'M_1', 'F_N_q')
 STRUCTURAL_FEATURES = (
     'n_indexed', 'n_entering', 'final_rank', 'N_cal_full', 'zone_dominance', 'V_over_Vcrit',
-    'delta_dewolff61', 'n_dewolff61', 'M_werner_max', 'log_volume', 'n_peaks_available',
-    'pool_size_full',
+    'delta_dewolff61', 'n_dewolff61', 'M_werner_max', 'log_volume', 'pool_size_full',
     )
 LATTICE_FEATURE = 'bravais_lattice'
 # The merits whose gap to the pattern's best value is an input.
@@ -85,6 +84,9 @@ FORBIDDEN_COLUMNS = frozenset({
     'second_phase_partner', 'sampling_weight', 'm20_at_prune', 'merit_at_prune',
     'in_top_n', 'prune_threshold', 'downsample_radius', 'assignment_threshold', 'q2_digest',
     'ctx_pool_size',
+    # The peak count of the crystal's whole simulated pattern: set by its true cell and symmetry,
+    # and not available from a peak list.
+    'n_peaks_available',
     })
 FORBIDDEN_SUFFIX = '_true'
 
@@ -269,10 +271,10 @@ def split_crystals(entries, fractions, rng):
 # Exporting a pool, one condition bundle at a time
 # ---------------------------------------------------------------------------------------------
 # What is read from a pool's candidate shards, beside the key. The merit and feature sidecars are
-# read whole; the entry table supplies the two per-pattern inputs.
+# read whole; the entry table supplies `pool_size_full`, the one per-pattern input.
 SHARD_COLUMNS = ('M20', 'n_indexed', 'final_rank', 'n_entering', 'volume', 'm20_at_prune',
                  'in_top_n', 'is_correct')
-ENTRY_FEATURES = ('n_peaks_available', 'pool_size_full')
+ENTRY_FEATURES = ('pool_size_full',)
 TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order')
 EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n')
 

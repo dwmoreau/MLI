@@ -159,7 +159,8 @@ def test_split_crystals_is_disjoint_stratified_and_seeded():
 
 
 def test_the_leakage_guard_refuses_labels_and_generator_columns():
-    for name in ('is_correct', 'sampling_weight', 'm20_at_prune', 'volume_true'):
+    for name in ('is_correct', 'sampling_weight', 'm20_at_prune', 'volume_true',
+                 'n_peaks_available'):
         with pytest.raises(ValueError):
             ranker.FomCombiner('onehot', features=ranker.FEATURES + (name,))
     ranker.check_no_leakage(ranker.FEATURES)
@@ -169,7 +170,7 @@ def test_the_lattice_encodings_shape_the_design_matrix():
     frame = _pool(n_entries=1, n_per_lattice=3)
     widths = {encoding: ranker.FomCombiner(encoding).design_matrix(frame).shape[1]
               for encoding in ranker.LATTICE_ENCODINGS}
-    assert widths == {'onehot': 31 + 13, 'ordinal': 31, 'native': 31}
+    assert widths == {'onehot': 30 + 13, 'ordinal': 30, 'native': 30}
     with pytest.raises(ValueError):
         ranker.FomCombiner('ordinal').design_matrix(frame.assign(bravais_lattice='xX'))
 
