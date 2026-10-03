@@ -104,6 +104,19 @@ class SKLearnManager:
         elif self.model_type == 'custom':
             return self.model.predict(X)
     
+    def predict_proba(self, X):
+        """Class probabilities of a loaded classifier, (n_samples, n_classes).
+
+        An ONNX classifier exported by `_save_onnx` has the label as its first output and the
+        probabilities as its second.
+        """
+        if self.model_type == 'onnx':
+            return self.model.run(
+                [self.model.get_outputs()[1].name],
+                {self.model.get_inputs()[0].name: X.astype(np.float32)}
+            )[0]
+        return self.model.predict_proba(X)
+
     def predict_individual_trees(self, X, n_outputs):
         """
         Get predictions from individual trees (for ensemble models).
@@ -166,17 +179,15 @@ class SKLearnManager:
                 *args, nodes_missing_value_tracks_true=int(nodes_missing_value_tracks_true),
                 **kwargs)
 
-        # Convert to ONNX with appropriate options
-        #is_classifier = hasattr(model, 'classes_')
-        #options = {id(model): {'zipmap': False}} if is_classifier else None
-        options = {type(model): {'output_type': 'tensor(float)'}}
+        # A classifier's probabilities come out as one array rather than a dictionary per row.
+        options = {id(model): {'zipmap': False}} if hasattr(model, 'classes_') else None
         tree_ensemble.add_node = add_node_with_integer_flag
         try:
             onnx_model = convert_sklearn(
                 model,
                 initial_types=initial_types,
                 target_opset=15,
-                #options=options
+                options=options,
             )
         finally:
             tree_ensemble.add_node = add_node

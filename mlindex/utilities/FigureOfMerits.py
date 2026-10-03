@@ -36,6 +36,20 @@ SIGMA_TREATMENT = {
 }
 
 
+# Which way each ranking merit points. The de Wolff family grows with agreement; X_N, n_over and
+# max_gap count what the candidate gets wrong, so a smaller value is the better candidate. Anything
+# that ranks or takes a best value over these orients them by this table first.
+HIGHER_IS_BETTER = {
+    "M20": True,
+    "M_tilde": True,
+    "M_rev": True,
+    "M_sym": True,
+    "X_N": False,
+    "n_over": False,
+    "max_gap": False,
+}
+
+
 # de Wolff (1961), Acta Cryst. 14, 579-582, Table 1: the coefficients in
 #
 #     N(Q) = Q(C0 sqrt(Q) + C1 a* + C2 b* + C3 c*) / V*

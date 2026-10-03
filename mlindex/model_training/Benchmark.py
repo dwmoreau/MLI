@@ -201,12 +201,23 @@ def load_candidates(pool_dir, bundle, columns=None, bravais_lattices=None, sidec
     Shards are read in canonical lattice order so a pool reads the same way twice; the ranking
     does not depend on it, because the tie-break is total, but a stable order makes two runs
     comparable row for row.
+
+    `is_correct` is recomputed under `label_frame`'s current rule (`relabelled`) whenever it is
+    returned, because a pool stores the labels of the rule it was generated under.
     """
     _refuse_zero_error([bundle])
+    read = None if not columns else list(dict.fromkeys(
+        list(columns) + (['lattice_system', 'unit_cell'] if 'is_correct' in columns else [])))
     frames = []
     for _, path in candidate_shards(pool_dir, bundle, bravais_lattices):
-        frames.append(pd.read_parquet(path, columns=list(columns) if columns else None))
+        frames.append(pd.read_parquet(path, columns=read))
     frame = pd.concat(frames, ignore_index=True)
+    if 'is_correct' in frame.columns:
+        entries = load_entries(pool_dir, bundles=[bundle], columns=ENTRY_KEY + [
+            'bravais_lattice_true', 'unit_cell_true'])
+        frame['is_correct'] = relabelled(frame, entries)
+        if columns:
+            frame = frame[list(dict.fromkeys(columns))]
 
     for sidecar in sidecars or ():
         directory = Path(pool_dir) / sidecar
@@ -299,10 +310,12 @@ def records_to_frame(records):
 def label_frame(candidates, entries, rtol=1e-2):
     """Attach `is_correct` and `is_off_by_two`, which need truth the recorder cannot see.
 
-    Labels are attached at generation, before anything else reads the frame: the question every
-    reported number rests on is whether a candidate cell *is* the true cell, allowing for
-    reindexing and for sub- and super-cells, and it is not recoverable from a stored pool that
-    does not carry it.
+    A candidate is correct when it is in the true Bravais lattice and its cell is the true cell in
+    some setting of that lattice: orthorhombic axes in any order, any monoclinic or rhombohedral
+    basis change (`label_known_bl_batch`). The cell comparison alone is not enough. It slices the
+    truth to the candidate's own lattice system, so a cubic candidate would be compared with an
+    orthorhombic truth on `a` alone; the lattice test is the one `validate_candidate` applies.
+    `is_off_by_two` marks a sub- or super-cell of the truth, in any lattice, as it does there.
 
     Batched per (pattern, lattice system). The scalar `validate_candidate_known_bl` costs
     milliseconds a candidate against pools of millions, so it is not an option here; the batch
@@ -343,9 +356,17 @@ def label_frame(candidates, entries, rtol=1e-2):
                 partial_true, predicted, lattice_system, rtol=rtol)
             is_correct[positions] = correct
             is_off_by_two[positions] = off_by_two
-    result['is_correct'] = is_correct
+    result['is_correct'] = is_correct & in_true_lattice(result, entries)
     result['is_off_by_two'] = is_off_by_two
     return result
+
+
+def in_true_lattice(candidates, entries):
+    """True where a candidate is in its pattern's true Bravais lattice: the lattice half of
+    `label_frame`'s rule."""
+    truth = entries.drop_duplicates('entry_id').set_index('entry_id')['bravais_lattice_true']
+    return (candidates['bravais_lattice'].to_numpy()
+            == truth.reindex(candidates['entry_id'].to_numpy()).to_numpy())
 
 
 def _to_parquet(frame, path, row_group_size=None):
@@ -507,3 +528,18 @@ def manifest_identity(manifests, allow=()):
             'result:\n  ' + '\n  '.join(disagreements)
             + f'\nVarying one of these on purpose? Name it in allow=; currently {tuple(allow)}.')
     return True
+
+
+def relabelled(candidates, entries, rtol=1e-2):
+    """`is_correct` under `label_frame`'s current rule, for a frame whose stored labels may
+    predate it.
+
+    Only candidates in their pattern's true lattice can be correct, so `label_frame` is rerun on
+    those alone; every other candidate is not. Needs `unit_cell` and `lattice_system`.
+    """
+    correct = np.zeros(candidates.shape[0], dtype=bool)
+    mask = in_true_lattice(candidates, entries)
+    if mask.any():
+        rows = candidates.loc[mask].drop(columns=['is_correct', 'is_off_by_two'], errors='ignore')
+        correct[mask] = label_frame(rows, entries, rtol=rtol)['is_correct'].to_numpy()
+    return correct

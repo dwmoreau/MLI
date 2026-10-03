@@ -6,7 +6,9 @@ from mlindex.utilities.Reindexing import monoclinic_cell_matrix
 from mlindex.utilities.Reindexing import monoclinic_settings
 from mlindex.utilities.Reindexing import rhombohedral_cell_matrix
 from mlindex.utilities.Reindexing import rhombohedral_settings
+from mlindex.utilities.Reindexing import same_cell_in_some_setting
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+from mlindex.utilities.UnitCellTools import get_full_unit_cell
 from mlindex.utilities.UnitCellTools import get_partial_unit_cell
 
 
@@ -108,7 +110,6 @@ def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_
                         return False, True
     elif lattice_system_pred == 'monoclinic':
         ucm = monoclinic_cell_matrix(unit_cell_pred, partial_unit_cell=True)
-        found = False
         off_by_two = False
         for basis_change in MONOCLINIC_BASIS_CHANGES:
             rucm = ucm @ basis_change
@@ -119,21 +120,20 @@ def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_
             dot_product = np.dot(rucm[:, 0], rucm[:, 2])
             mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
             reindexed_unit_cell[3] = np.arccos(dot_product / mag)
-            if np.all(np.isclose(reindexed_unit_cell, unit_cell_true, rtol=rtol)):
-                found = True
             for mf0 in MULTIPLIERS_UNIT:
                 for mf1 in MULTIPLIERS_UNIT:
                     for mf2 in MULTIPLIERS_UNIT:
                         mf = np.array([mf0, mf1, mf2, 1])
                         if np.all(np.isclose(mf * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
                             off_by_two = True
+        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, 'monoclinic',
+                                               rtol=rtol)[0])
         return found, off_by_two
     elif lattice_system_pred == 'triclinic':
         reindexed_unit_cell, _ = reindex_entry_triclinic(unit_cell_pred)
-        found = False
+        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, 'triclinic',
+                                               rtol=rtol)[0])
         off_by_two = False
-        if np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol)):
-            found = True
         for mf0 in MULTIPLIERS_UNIT:
             for mf1 in MULTIPLIERS_UNIT:
                 for mf2 in MULTIPLIERS_UNIT:
@@ -166,11 +166,15 @@ def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
     if unit_cell_pred.shape[0] == 0:
         return np.zeros(0, dtype=bool)
 
-    if lattice_system in ('cubic', 'tetragonal', 'hexagonal', 'triclinic'):
-        # No basis walk: the scalar routine compares the cell as given. Triclinic compares the
-        # *unreindexed* prediction here and the Selling-reduced one in the off-by-two arm, which
-        # is the production definition and so the one this has to match.
+    if lattice_system in ('cubic', 'tetragonal', 'hexagonal'):
+        # No basis walk: the scalar routine compares the cell as given.
         return np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol), axis=1)
+
+    if lattice_system in ('monoclinic', 'triclinic'):
+        # The true cell in any setting: every small basis change of the prediction is tried.
+        return same_cell_in_some_setting(
+            get_full_unit_cell(unit_cell_pred, lattice_system),
+            get_full_unit_cell(unit_cell_true, lattice_system), rtol=rtol)
 
     if lattice_system == 'orthorhombic':
         # Both sides are sorted before comparing, so an axis permutation is correct rather than
@@ -180,8 +184,6 @@ def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
 
     if lattice_system == 'rhombohedral':
         reindexed = rhombohedral_settings(unit_cell_pred)
-    elif lattice_system == 'monoclinic':
-        reindexed = monoclinic_settings(unit_cell_pred)
     else:
         raise ValueError(
             f'is_correct_known_bl_batch does not implement {lattice_system!r}. '
