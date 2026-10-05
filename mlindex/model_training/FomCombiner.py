@@ -273,10 +273,19 @@ def split_crystals(entries, fractions, rng):
 # What is read from a pool's candidate shards, beside the key. The merit and feature sidecars are
 # read whole; the entry table supplies `pool_size_full`, the one per-pattern input.
 SHARD_COLUMNS = ('M20', 'n_indexed', 'final_rank', 'n_entering', 'volume', 'm20_at_prune',
-                 'in_top_n', 'is_correct')
-ENTRY_FEATURES = ('pool_size_full',)
+                 'in_top_n', 'is_correct', 'n_peaks')
+ENTRY_FEATURES = ('pool_size_full', 'q2_obs')
 TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order')
 EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n')
+
+# RESEARCH CODE THAT NEEDS TO BE DELETED -- P14b (docs/fom_production/artifacts/P14b_model_audit.md).
+# Pattern-only stand-ins for the inputs that describe the search (`n_entering`, `pool_size_full`,
+# `n_groups_searched`), written by the export beside `FEATURES` for P14b's replacement arm and
+# for its reading of what `n_entering` encodes: `q2_last_obs`, the q^2 of the last observed line
+# the lattice reads, and `lattice_best_M20_gap`, the lattice's best M20 in the pattern minus the
+# pattern's best (0 for the lattice holding it). Promoted into `FEATURES` or deleted once DWMM has
+# read the arm; nothing in the package reads them.
+STANDIN_INPUTS = ('q2_last_obs', 'lattice_best_M20_gap')
 
 
 def _read_lattice(pool, bundle, lattice, entry_ids, columns=SHARD_COLUMNS,
@@ -357,28 +366,50 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
             frame.loc[frame['entry_id'].isin(evaluation_ids) & ~added], cut, n_top=n_top)
         return training, evaluation
 
-    best, survivors = {'training': [], 'evaluation': []}, {'training': [], 'evaluation': []}
+    parts = ('training', 'evaluation')
+    best, survivors = {name: [] for name in parts}, {name: [] for name in parts}
+    lattice_best = {name: [] for name in parts}
     for lattice in lattices:
         frame = _read_lattice(pool, bundle, lattice, wanted, columns=('M20', 'm20_at_prune'),
                               sidecar_columns=context_columns, truth_dir=truth_dir,
                               truth_ids=training_ids)
-        for name, rows in zip(('training', 'evaluation'), restricted(frame)):
+        for name, rows in zip(parts, restricted(frame)):
             if rows.shape[0]:
                 best[name].append(context_best(rows))
                 survivors[name].append(rows.groupby(ENTRY_KEY, as_index=False).size())
+                lattice_best[name].append(rows.groupby(
+                    ENTRY_KEY + ['bravais_lattice'], as_index=False)['M20'].max().rename(
+                        columns={'M20': 'lattice_best_M20'}))
 
     def combine(parts, how):
         return (pd.concat(parts).groupby(ENTRY_KEY, as_index=False).agg(how) if parts else None)
 
     best = {name: combine(parts, 'max') for name, parts in best.items()}
     survivors = {name: combine(parts, 'sum') for name, parts in survivors.items()}
+    lattice_best = {name: (pd.concat(parts, ignore_index=True) if parts else None)
+                    for name, parts in lattice_best.items()}
 
     def in_restricted_pool(rows, name):
-        """`pool_size_full` and the context gaps over the whole restricted pattern."""
+        """`pool_size_full` and the context gaps over the whole restricted pattern, and the
+        stand-in inputs (`STANDIN_INPUTS`)."""
         rows = rows.drop(columns='pool_size_full').merge(
             survivors[name].rename(columns={'size': 'pool_size_full'}), on=ENTRY_KEY,
             how='left')
-        return add_context(rows, best[name])
+        rows = add_context(rows, best[name])
+        # RESEARCH CODE THAT NEEDS TO BE DELETED -- P14b: the stand-ins. `n_peaks` is one value
+        # for the lattice, so the last observed line is read once per pattern, on the entries.
+        n_peaks = rows['n_peaks'].unique()
+        if n_peaks.size != 1:
+            raise ValueError(f'one lattice, several peak counts: {n_peaks.tolist()}')
+        last = entries[ENTRY_KEY].assign(q2_last_obs=[
+            float(np.asarray(q2, dtype=np.float64)[int(n_peaks[0]) - 1])
+            for q2 in entries['q2_obs']])
+        rows = rows.drop(columns='q2_obs').merge(last, on=ENTRY_KEY, how='left')
+        rows = rows.merge(lattice_best[name], on=ENTRY_KEY + ['bravais_lattice'], how='left')
+        rows = rows.merge(best[name][ENTRY_KEY + ['best_M20']], on=ENTRY_KEY, how='left')
+        rows['lattice_best_M20_gap'] = (rows['lattice_best_M20'].to_numpy(dtype=np.float64)
+                                        - rows['best_M20'].to_numpy(dtype=np.float64))
+        return rows.drop(columns=['lattice_best_M20', 'best_M20'])
 
     kept = {seed: [] for seed in seeds}
     evaluation_parts = []
@@ -401,7 +432,7 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
             if not keep_all_depths:
                 evaluation = evaluation.loc[evaluation['in_top_n']]
             evaluation_parts.append(evaluation[list(EVALUATION_COLUMNS) + [
-                name for name in FEATURES if name not in EVALUATION_COLUMNS]])
+                name for name in FEATURES + STANDIN_INPUTS if name not in EVALUATION_COLUMNS]])
 
     training_frames = {}
     for seed in seeds:
@@ -410,7 +441,7 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
         frame = kept[seed][0]
         frame['negative_order'] = negative_order(frame, seed)
         training_frames[seed] = _float32(frame[list(TRAINING_COLUMNS) + [
-            name for name in FEATURES if name not in TRAINING_COLUMNS]])
+            name for name in FEATURES + STANDIN_INPUTS if name not in TRAINING_COLUMNS]])
     evaluation_frame = (_float32(pd.concat(evaluation_parts, ignore_index=True))
                         if evaluation_parts else None)
     return training_frames, evaluation_frame
