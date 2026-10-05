@@ -324,12 +324,14 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
     `pool_size_full` and the context gaps are recomputed over the restricted pool, the gaps over
     every lattice of the pattern.
 
-    Training rows, for the crystals in `training_ids`: every depth, and every correct cell kept
-    whatever the cut -- the search's own, and the bundle's true cells from `truth_dir` (a
-    `BenchmarkRuns.truth_pool`) where the search had none -- as candidates of their patterns, in
-    the ranks, the survivor counts and the gaps, so every training pattern has a correct cell. Then thinned by `thin_negatives` and to the first `n_negatives` wrong candidates
-    per pattern by `negative_order`, both draws keyed on the seed; a later `cap_negatives` at or
-    below `n_negatives` selects from these rows exactly as it would from the whole pool.
+    Training rows, for the crystals in `training_ids`: every depth, restricted at the cut by the
+    same rule as the evaluation rows, so no row is kept for being correct. The bundle's true
+    cells from `truth_dir` (a `BenchmarkRuns.truth_pool`), added where the search found none, are
+    candidates of their patterns under that rule too: one that refines to an M20 below the cut
+    is a cell the run would not have kept, and is not a row. Then thinned by `thin_negatives` and
+    to the first `n_negatives` wrong candidates per pattern by `negative_order`, both draws keyed
+    on the seed; a later `cap_negatives` at or below `n_negatives` selects from these rows exactly
+    as it would from the whole pool.
 
     Evaluation rows, for the crystals in `evaluation_ids`: as the search left them, the `n_top`
     per lattice unless `keep_all_depths`.
@@ -346,12 +348,11 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
     context_columns = {Benchmark.MERIT_SIDECAR: ['M_sym', 'n_over', 'max_gap']}
 
     def restricted(frame):
-        """(training rows, evaluation rows) of one lattice, each restricted to the cut."""
+        """(training rows, evaluation rows) of one lattice, each restricted to the cut by the
+        one rule; the added true cells are training rows only."""
         added = frame['candidate_id'].to_numpy() == TRUTH_CANDIDATE_ID
-        in_training = frame['entry_id'].isin(training_ids).to_numpy()
-        # A training pattern keeps its correct cells below the cut, as it keeps an added one.
-        training = restrict_at_cut(frame.loc[in_training], cut, n_top=n_top,
-                                   always_keep=as_bool(frame['is_correct'])[in_training])
+        training = restrict_at_cut(frame.loc[frame['entry_id'].isin(training_ids)], cut,
+                                   n_top=n_top)
         evaluation = restrict_at_cut(
             frame.loc[frame['entry_id'].isin(evaluation_ids) & ~added], cut, n_top=n_top)
         return training, evaluation

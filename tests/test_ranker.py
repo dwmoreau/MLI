@@ -6,6 +6,8 @@ inputs do not depend on the thinning, and that a model's ONNX export scores as t
 Each is checked against a case whose answer is known, never against the implementation itself.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -130,19 +132,71 @@ def test_restricting_at_a_cut_keeps_each_lattices_best_and_reranks():
     assert set(out['pool_size_full']) == {3.0}
 
 
-def test_a_row_kept_whatever_the_cut_ranks_and_counts_as_a_survivor():
-    """An added true cell is kept below the cut, and the lattice's ranks and the pattern's
-    survivor count include it, as they would a candidate the search had kept."""
-    frame = pd.DataFrame({
-        'entry_id': 'E', 'condition_bundle': 'b0', 'bravais_lattice': 'aP',
-        'candidate_id': [0, 1, 2, -1], 'M20': [9.0, 4.0, 2.0, 3.0],
-        'm20_at_prune': [9.0, 4.0, 2.0, 3.0], 'final_rank': [0, 1, 2, 1], 'in_top_n': True,
-        'pool_size_full': 3.0})
-    out = metrics.restrict_at_cut(frame, 3.5, n_top=20,
-                                  always_keep=frame['candidate_id'].to_numpy() == -1)
-    assert sorted(out['candidate_id']) == [-1, 0, 1]
-    assert dict(zip(out['candidate_id'], out['final_rank'])) == {0: 0, 1: 1, -1: 2}
-    assert set(out['pool_size_full']) == {3.0}
+def _write_pool(directory, frame):
+    """`frame`, a `_pool()`, written as a benchmark pool `export_bundle` reads: candidate shards
+    carrying the cells the labeller needs, both sidecars, and the entry table. Every pattern's
+    true cell is cubic 5 A; a correct row carries it and a wrong row does not."""
+    from mlindex.model_training import Benchmark
+    from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM, get_partial_unit_cell
+
+    directory = Path(directory)
+    frame = frame.copy()
+    true_cell = np.array([5.0, 5.0, 5.0, 90.0, 90.0, 90.0])
+    wrong_cell = np.array([7.0, 8.0, 9.0, 80.0, 95.0, 100.0])
+    frame['lattice_system'] = frame['bravais_lattice'].map(BL_TO_LATTICE_SYSTEM)
+    frame['unit_cell'] = [
+        get_partial_unit_cell(true_cell if correct else wrong_cell, lattice_system=system)
+        for correct, system in zip(frame['is_correct'], frame['lattice_system'])]
+    frame['volume'] = np.exp(frame['log_volume'].to_numpy())
+    frame['n_indexed'] = 20
+    frame['n_entering'] = 1000
+    frame['n_ref_in_range'] = 50
+    shard = list(ranker.CANDIDATE_KEY) + ['lattice_system', 'unit_cell'] + list(ranker.SHARD_COLUMNS)
+    derived = ('log_volume', 'f_absent_extra', 'pool_size_full', ranker.LATTICE_FEATURE)
+    features = [name for name in ranker.FEATURES
+                if name not in shard and name not in derived
+                and name not in ranker.RAW_MERITS and name not in ranker.CONTEXT_FEATURES]
+    for (bundle, lattice), rows in frame.groupby(['condition_bundle', 'bravais_lattice']):
+        Benchmark.write_candidate_shard(rows[shard], directory, bundle, lattice)
+        Benchmark.write_candidate_shard(
+            rows[list(ranker.CANDIDATE_KEY) + list(ranker.RAW_MERITS)],
+            directory / Benchmark.MERIT_SIDECAR, bundle, lattice)
+        Benchmark.write_candidate_shard(
+            rows[list(ranker.CANDIDATE_KEY) + features + ['n_ref_in_range']],
+            directory / Benchmark.FEATURE_SIDECAR, bundle, lattice)
+    entries = frame[list(ranker.ENTRY_KEY)].drop_duplicates().reset_index(drop=True)
+    entries['bravais_lattice_true'] = 'cP'
+    entries['unit_cell_true'] = [true_cell] * entries.shape[0]
+    entries['pool_size_full'] = float(frame.shape[0])
+    Benchmark.write_entry_table(entries, directory)
+    return entries
+
+
+def test_training_rows_are_chosen_without_the_label(tmp_path):
+    """A run at the cut keeps a candidate for its M20, never for whether it is correct. Training
+    rows that kept every correct cell below the cut, while wrong cells below it survive only as
+    their lattice's best, made "below the cut and not the lattice's best" a label the model could
+    read from M20 and final_rank -- and whole-pool rows are full of wrong cells there. So the
+    training rows of a pattern are exactly its evaluation rows."""
+    frame = _pool(n_entries=2, n_per_lattice=8)
+    correct = frame['is_correct'].to_numpy()
+    # Every wrong cell clears the cut; every correct cell is below it and never its lattice's
+    # best, except one pattern's, which clears it and must stay.
+    frame.loc[~correct, ['M20', 'm20_at_prune']] = 4.0 + frame.loc[~correct, 'candidate_id']
+    frame.loc[correct, ['M20', 'm20_at_prune']] = 2.0
+    survivor = frame.index[correct][0]
+    frame.loc[survivor, ['M20', 'm20_at_prune']] = 5.0
+    entries = _write_pool(tmp_path, frame)
+    crystals = set(frame['entry_id'])
+
+    training, evaluation = ranker.export_bundle(
+        tmp_path, 'b0', entries, crystals, crystals, seeds=(1,), cut=3.5, n_top=20,
+        keep_all_depths=True, top_k=1000, negative_rate=1.0, n_negatives=10**6)
+    key = list(ranker.CANDIDATE_KEY)
+    rows = training[1].merge(evaluation, on=key, how='outer', indicator=True, suffixes=('', '_e'))
+    assert (rows['_merge'] == 'both').all(), rows.loc[rows['_merge'] != 'both', key]
+    assert training[1]['is_correct'].sum() == 1
+    assert (training[1]['M20'] >= 3.5).all()
 
 
 def test_split_crystals_is_disjoint_stratified_and_seeded():
