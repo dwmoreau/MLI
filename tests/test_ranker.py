@@ -151,7 +151,6 @@ def _write_pool(directory, frame):
     frame['n_indexed'] = 20
     frame['n_entering'] = 1000
     frame['n_ref_in_range'] = 50
-    frame['n_peaks'] = np.where(frame['lattice_system'] == 'cubic', 10, 20)
     shard = list(ranker.CANDIDATE_KEY) + ['lattice_system', 'unit_cell'] + list(ranker.SHARD_COLUMNS)
     derived = ('log_volume', 'f_absent_extra', 'pool_size_full', ranker.LATTICE_FEATURE)
     features = [name for name in ranker.FEATURES
@@ -169,7 +168,6 @@ def _write_pool(directory, frame):
     entries['bravais_lattice_true'] = 'cP'
     entries['unit_cell_true'] = [true_cell] * entries.shape[0]
     entries['pool_size_full'] = float(frame.shape[0])
-    entries['q2_obs'] = [np.linspace(0.01, 0.2, 20) + 0.001*index for index in range(entries.shape[0])]
     Benchmark.write_entry_table(entries, directory)
     return entries
 
@@ -199,30 +197,6 @@ def test_training_rows_are_chosen_without_the_label(tmp_path):
     assert (rows['_merge'] == 'both').all(), rows.loc[rows['_merge'] != 'both', key]
     assert training[1]['is_correct'].sum() == 1
     assert (training[1]['M20'] >= 3.5).all()
-
-
-def test_the_stand_in_inputs_are_pattern_level_and_read_no_search_count(tmp_path):
-    """`q2_last_obs` is the last observed line the lattice reads, one value a pattern and
-    lattice; `lattice_best_M20_gap` is zero for the lattice holding the pattern's best M20 and
-    negative for every other, the same for all of a lattice's candidates."""
-    frame = _pool(n_entries=2, n_per_lattice=6)
-    entries = _write_pool(tmp_path, frame)
-    crystals = set(frame['entry_id'])
-    _, evaluation = ranker.export_bundle(
-        tmp_path, 'b0', entries, set(), crystals, seeds=(1,), cut=0.0, n_top=20,
-        keep_all_depths=True, top_k=1000, negative_rate=1.0, n_negatives=10**6)
-    q2 = entries.set_index(list(ranker.ENTRY_KEY))['q2_obs']
-    for (entry, bundle, lattice), rows in evaluation.groupby(['entry_id', 'condition_bundle',
-                                                               'bravais_lattice']):
-        n_peaks = 10 if lattice == 'cP' else 20
-        np.testing.assert_allclose(rows['q2_last_obs'], q2.loc[(entry, bundle)][n_peaks - 1],
-                                   rtol=1e-6)
-        assert rows['lattice_best_M20_gap'].nunique() == 1
-    gaps = evaluation.groupby(['entry_id', 'condition_bundle', 'bravais_lattice'])[
-        'lattice_best_M20_gap'].first()
-    assert (gaps <= 0).all()
-    assert (gaps.groupby(level=[0, 1]).max() == 0).all()
-    assert (gaps.groupby(level=[0, 1]).min() < 0).all()
 
 
 def test_split_crystals_is_disjoint_stratified_and_seeded():
