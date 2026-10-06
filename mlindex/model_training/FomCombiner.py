@@ -273,10 +273,13 @@ def split_crystals(entries, fractions, rng):
 # What is read from a pool's candidate shards, beside the key. The merit and feature sidecars are
 # read whole; the entry table supplies `pool_size_full`, the one per-pattern input.
 SHARD_COLUMNS = ('M20', 'n_indexed', 'final_rank', 'n_entering', 'volume', 'm20_at_prune',
-                 'in_top_n', 'is_correct')
+                 'in_top_n', 'is_correct', 'spacegroup')
 ENTRY_FEATURES = ('pool_size_full',)
-TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order')
-EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n')
+# `spacegroup`, the candidate's extinction group, rides along as a plain column: not an input,
+# but what a prior on the group is looked up by.
+TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order',
+                                           'spacegroup')
+EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n', 'spacegroup')
 
 
 def _read_lattice(pool, bundle, lattice, entry_ids, columns=SHARD_COLUMNS,

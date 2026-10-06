@@ -151,6 +151,7 @@ def _write_pool(directory, frame):
     frame['n_indexed'] = 20
     frame['n_entering'] = 1000
     frame['n_ref_in_range'] = 50
+    frame['spacegroup'] = 'G e.g. G'
     shard = list(ranker.CANDIDATE_KEY) + ['lattice_system', 'unit_cell'] + list(ranker.SHARD_COLUMNS)
     derived = ('log_volume', 'f_absent_extra', 'pool_size_full', ranker.LATTICE_FEATURE)
     features = [name for name in ranker.FEATURES
@@ -197,6 +198,9 @@ def test_training_rows_are_chosen_without_the_label(tmp_path):
     assert (rows['_merge'] == 'both').all(), rows.loc[rows['_merge'] != 'both', key]
     assert training[1]['is_correct'].sum() == 1
     assert (training[1]['M20'] >= 3.5).all()
+    # The group rides along for a prior to be looked up by; it is not an input.
+    assert set(training[1]['spacegroup']) == {'G e.g. G'} == set(evaluation['spacegroup'])
+    assert 'spacegroup' not in ranker.FEATURES
 
 
 def test_split_crystals_is_disjoint_stratified_and_seeded():
