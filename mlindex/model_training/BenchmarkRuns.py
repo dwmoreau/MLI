@@ -922,52 +922,6 @@ ABSENCE_FEATURES = ('n_absent_extra', 'n_absent_extra_in_range', 'n_ref_in_range
                     'n_groups_searched')
 SIDECAR_FEATURES = STRUCTURAL_FEATURES + PROBATION_FEATURES + ABSENCE_FEATURES
 
-# The precision floor in Werner's critical volume. It scales `V_over_Vcrit` and `M_werner_max`
-# by the same factor for every candidate.
-WERNER_G_MIN = 1.0
-
-
-def _candidate_features(q2_obs, xnn, lattice_system, bravais_lattice, calculator):
-    """The structural and probation features, and M20, for candidates of one extinction group.
-
-    `calculator` holds that group's reference list. Returns a dict of arrays keyed by
-    `STRUCTURAL_FEATURES + PROBATION_FEATURES` and 'M20'.
-    """
-    from mlindex.utilities.FigureOfMerits import (
-        _sorted_lines_in_range, get_delta_dewolff61, get_F_N, get_M_1, get_M20, get_M_wu,
-        get_multiplicity_taupin88, get_n_dewolff61, get_N_cal, get_V_over_Vcrit,
-        get_zone_dominance)
-    from mlindex.utilities.numba_functions import fast_assign
-    from mlindex.utilities.UnitCellTools import (
-        get_reciprocal_unit_cell_from_xnn, get_unit_cell_volume)
-
-    q2_ref_calc = calculator.get_q2(xnn)
-    q2_calc = np.take_along_axis(q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)
-    cutoff = q2_calc[:, -1]
-    reciprocal_cell = get_reciprocal_unit_cell_from_xnn(
-        xnn, partial_unit_cell=True, lattice_system=lattice_system)
-    volume = 1/np.maximum(get_unit_cell_volume(
-        reciprocal_cell, partial_unit_cell=True, lattice_system=lattice_system), 1e-300)
-    d_n = 1/np.sqrt(np.maximum(cutoff, 1e-300))
-    over_critical, m_max = get_V_over_Vcrit(
-        volume, d_n, WERNER_G_MIN, get_multiplicity_taupin88(bravais_lattice)[0])
-    sorted_lines = _sorted_lines_in_range(q2_ref_calc, cutoff)
-    return {
-        'zone_dominance': get_zone_dominance(xnn, lattice_system),
-        'V_over_Vcrit': over_critical,
-        'M_werner_max': m_max,
-        'N_cal_full': get_N_cal(q2_ref_calc, np.zeros(xnn.shape[0]), cutoff),
-        'delta_dewolff61': np.mean(
-            get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice), axis=1),
-        'n_dewolff61': get_n_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)[:, -1],
-        'M_wu': get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
-        'M_1': get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
-        'F_N_q': get_F_N(q2_obs, q2_calc, q2_ref_calc)[1],
-        # get_M20 writes into its reference array, so it gets a copy and goes last.
-        'M20': get_M20(q2_obs, q2_calc, q2_ref_calc.copy()),
-        }
-
-
 def feature_sidecar(pool_dir, bundles=None, bravais_lattices=None):
     """Write `SIDECAR_FEATURES` for every stored candidate, beside the pool.
 
@@ -979,9 +933,9 @@ def feature_sidecar(pool_dir, bundles=None, bravais_lattices=None):
     reference list must be as long as the one the search used (`hkl_ref_length`), and the M20
     recomputed on each candidate's own group must equal the stored M20.
     """
-    from mlindex.utilities.numba_functions import fast_assign
     from mlindex.utilities.Q2Calculator import Q2Calculator
-    from mlindex.utilities.SpaceGroups import count_absences_in_range, get_spacegroup_keep_masks
+    from mlindex.utilities.Ranker import absence_inputs, structural_inputs
+    from mlindex.utilities.SpaceGroups import get_spacegroup_keep_masks
 
     pool_dir = Path(pool_dir)
     sidecar_dir = pool_dir / Benchmark.FEATURE_SIDECAR
@@ -1017,24 +971,19 @@ def feature_sidecar(pool_dir, bundles=None, bravais_lattices=None):
                 q2_obs = peaks[(entry_id, bundle_tag)][:n_peaks]
                 xnn = np.stack([np.asarray(row, dtype=np.float64) for row in entry['xnn']])
                 rows = frame.index.get_indexer(entry.index)
-                q2_ref_calc = full.get_q2(xnn)
-                cutoff = np.take_along_axis(
-                    q2_ref_calc, fast_assign(q2_obs, q2_ref_calc), axis=1)[:, -1]
                 spacegroups = entry['spacegroup'].to_numpy()
+                for name, value in absence_inputs(q2_obs, full.get_q2(xnn), spacegroups,
+                                                  keep_masks).items():
+                    columns[name][rows] = value
                 for spacegroup in pd.unique(spacegroups):
                     local = np.flatnonzero(spacegroups == spacegroup)
-                    keep = keep_masks[spacegroup]
-                    removed, in_range = count_absences_in_range(
-                        q2_ref_calc[local], keep, cutoff[local])
-                    columns['n_absent_extra'][rows[local]] = np.count_nonzero(~keep)
-                    columns['n_absent_extra_in_range'][rows[local]] = removed
-                    columns['n_ref_in_range'][rows[local]] = in_range
                     if spacegroup not in calculators:
                         calculators[spacegroup] = Q2Calculator(
-                            lattice_system=lattice_system, hkl=hkl_ref[keep], tensorflow=False,
-                            representation='xnn')
-                    values = _candidate_features(q2_obs, xnn[local], lattice_system, lattice,
-                                                 calculators[spacegroup])
+                            lattice_system=lattice_system, hkl=hkl_ref[keep_masks[spacegroup]],
+                            tensorflow=False, representation='xnn')
+                    values = structural_inputs(q2_obs, xnn[local],
+                                               calculators[spacegroup].get_q2(xnn[local]),
+                                               lattice_system, lattice)
                     recomputed[rows[local]] = values.pop('M20')
                     for name, value in values.items():
                         columns[name][rows[local]] = value

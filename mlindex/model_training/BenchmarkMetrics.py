@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
+from mlindex.utilities.UnitCellTools import lattice_order_of
 
 # Rank metrics reported for every scope. `found` is the share with a correct cell anywhere in the
 # pool -- the ceiling a perfect re-ranker reaches, and the line between a generation failure and a
@@ -57,23 +58,6 @@ def _group_codes(entry_id, condition_bundle):
 def _count(group_code, flags, n_groups):
     return np.bincount(group_code, weights=np.asarray(flags, dtype=float),
                        minlength=n_groups).astype(np.int64)
-
-
-# Position of each Bravais lattice in the canonical order, which is what breaks a score tie.
-_LATTICE_POSITION = {lattice: position for position, lattice in enumerate(BRAVAIS_LATTICES)}
-
-
-def lattice_order_of(bravais_lattice):
-    """Position in the canonical lattice order, refusing anything not in it.
-
-    An unrecognised lattice must not sort to one end: it would take every tie or lose every one,
-    and the effect would look like a property of the ranking.
-    """
-    values = np.asarray(bravais_lattice)
-    unknown = sorted(set(values.tolist()) - set(_LATTICE_POSITION))
-    if unknown:
-        raise ValueError(f'Unknown Bravais lattice in the candidate frame: {unknown}')
-    return np.array([_LATTICE_POSITION[value] for value in values.tolist()], dtype=np.int64)
 
 
 def _sort_key(values):

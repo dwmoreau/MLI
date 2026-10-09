@@ -39,8 +39,11 @@ import pandas as pd
 from mlindex.model_training.Benchmark import CANDIDATE_KEY
 from mlindex.model_training.Benchmark import ENTRY_KEY
 from mlindex.model_training.BenchmarkMetrics import as_bool
-from mlindex.model_training.BenchmarkMetrics import lattice_order_of
-from mlindex.utilities.FigureOfMerits import HIGHER_IS_BETTER
+from mlindex.utilities import Ranker
+from mlindex.utilities.Ranker import LATTICE_FEATURE
+from mlindex.utilities.Ranker import POOLED
+from mlindex.utilities.Ranker import apply_calibration
+from mlindex.utilities.Ranker import check_no_leakage
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
 RAW_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
@@ -51,7 +54,6 @@ STRUCTURAL_FEATURES = (
     'n_indexed', 'n_entering', 'final_rank', 'N_cal_full', 'zone_dominance', 'V_over_Vcrit',
     'delta_dewolff61', 'n_dewolff61', 'M_werner_max', 'log_volume', 'pool_size_full',
     )
-LATTICE_FEATURE = 'bravais_lattice'
 # The merits whose gap to the pattern's best value is an input.
 CONTEXT_MERITS = ('M20', 'M_sym', 'n_over', 'max_gap')
 CONTEXT_FEATURES = tuple(f'ctx_{merit}_gap_to_best' for merit in CONTEXT_MERITS)
@@ -74,37 +76,11 @@ LATTICE_ENCODINGS = ('onehot', 'ordinal', 'native')
 # Only these encodings have an ONNX export that scores as the classifier does.
 EXPORTABLE_ENCODINGS = ('onehot', 'ordinal')
 
-
-# Columns no feature may be: labels, quantities derived from the true cell, properties of the
-# synthetic conditions, the thinning weights, and constants of the generation run.
-FORBIDDEN_COLUMNS = frozenset({
-    'is_correct', 'is_off_by_two', 'is_degenerate', 'split', 'condition_bundle',
-    'q2_error_multiplier', 'intercept_scale', 'n_contaminants', 'n_contaminants_achieved',
-    'n_dropout', 'n_dropout_achieved', 'second_phase_lines', 'second_phase_achieved',
-    'second_phase_partner', 'sampling_weight', 'm20_at_prune', 'merit_at_prune',
-    'in_top_n', 'prune_threshold', 'downsample_radius', 'assignment_threshold', 'q2_digest',
-    'ctx_pool_size',
-    # The peak count of the crystal's whole simulated pattern: set by its true cell and symmetry,
-    # and not available from a peak list.
-    'n_peaks_available',
-    })
-FORBIDDEN_SUFFIX = '_true'
-
 ALLOWED_WEIGHT_COLUMNS = ('sampling_weight',)
-POOLED = '__pooled__'
 
 # The classifier settings the tuned ones override.
 DEFAULT_PARAMS = dict(max_iter=600, learning_rate=0.04, max_leaf_nodes=63, min_samples_leaf=40,
                       l2_regularization=1.0)
-
-
-def check_no_leakage(names):
-    """Raise if any feature is a label, is derived from the truth, or describes the generator."""
-    offenders = sorted({name for name in names
-                        if name in FORBIDDEN_COLUMNS or name.endswith(FORBIDDEN_SUFFIX)})
-    if offenders:
-        raise ValueError(f'features that are unavailable at inference or derived from the truth: '
-                         f'{offenders}')
 
 
 def fit_weights(frame, column):
@@ -137,8 +113,7 @@ def keyed_uniform(frame, seed, stream=0):
 
 def oriented(frame, merit):
     """The merit with its sign set so that larger is better."""
-    values = frame[merit].to_numpy(dtype=np.float64)
-    return values if HIGHER_IS_BETTER[merit] else -values
+    return Ranker.oriented(frame[merit].to_numpy(dtype=np.float64), merit)
 
 
 def top_k_mask(frame, top_k):
@@ -230,13 +205,10 @@ def add_context(frame, best=None):
 
 def add_derived(frame):
     """`log_volume` and `f_absent_extra`, which are computed from columns already on the row."""
-    in_range = frame['n_ref_in_range'].to_numpy(dtype=np.float64)
     return frame.assign(
         log_volume=np.log(frame['volume'].to_numpy(dtype=np.float64)),
-        f_absent_extra=np.where(
-            in_range > 0,
-            frame['n_absent_extra_in_range'].to_numpy(dtype=np.float64)/np.maximum(in_range, 1.0),
-            np.nan))
+        f_absent_extra=Ranker.absent_fraction(frame['n_absent_extra_in_range'],
+                                              frame['n_ref_in_range']))
 
 
 def split_crystals(entries, fractions, rng):
@@ -463,18 +435,6 @@ def calibration_arms(raw, lattice, calibrators):
             'raw': raw}
 
 
-def apply_calibration(raw, lattice, calibrators):
-    """The calibrated probability: each row's raw score through its lattice's isotonic knots."""
-    raw = np.asarray(raw, dtype=np.float64)
-    lattice = np.asarray(lattice)
-    out = np.empty(raw.size, dtype=np.float64)
-    for name in np.unique(lattice):
-        mask = lattice == name
-        thresholds, values = calibrators.get(str(name), calibrators[POOLED])
-        out[mask] = np.interp(raw[mask], thresholds, values)
-    return out
-
-
 # ---------------------------------------------------------------------------------------------
 # The model
 # ---------------------------------------------------------------------------------------------
@@ -510,22 +470,7 @@ class FomCombiner:
 
     def design_matrix(self, frame):
         """The float32 (n_candidates, n_columns) array the classifier and its ONNX export read."""
-        missing = [name for name in self.features if name not in frame.columns]
-        if missing:
-            raise KeyError(f'frame is missing feature column(s): {missing}')
-        columns = []
-        for name in self.features:
-            if name != LATTICE_FEATURE:
-                columns.append(frame[name].to_numpy(dtype=np.float32)[:, np.newaxis])
-                continue
-            # Position in the canonical lattice order, highest symmetry first; refuses a lattice
-            # outside it.
-            position = lattice_order_of(frame[LATTICE_FEATURE].astype(str).to_numpy())
-            if self.encoding == 'onehot':
-                columns.append(np.eye(len(BRAVAIS_LATTICES), dtype=np.float32)[position])
-            else:
-                columns.append((position + 1).astype(np.float32)[:, np.newaxis])
-        return np.concatenate(columns, axis=1)
+        return Ranker.design_matrix(frame, self.features, self.encoding)
 
     @classmethod
     def fit(cls, frame, encoding, seed, params=None, features=FEATURES):
@@ -577,9 +522,7 @@ class FomCombiner:
             raise FileExistsError(f'{directory} already holds a model; each fit writes its own')
         directory.mkdir(parents=True, exist_ok=True)
         joblib.dump(self.model, directory/'model.joblib')
-        np.savez_compressed(directory/'calibrators.npz', **{
-            f'{name}__{part}': array for name, (x, y) in self.calibrators.items()
-            for part, array in (('x', x), ('y', y))})
+        Ranker.write_calibrators(directory/'calibrators.npz', self.calibrators)
         onnx_name = None
         if self.encoding in EXPORTABLE_ENCODINGS:
             from mlindex.utilities.IOManagers import SKLearnManager
@@ -600,9 +543,7 @@ class FomCombiner:
         directory = Path(directory)
         with open(directory/'specification.json', encoding='utf-8') as handle:
             specification = json.load(handle)
-        arrays = np.load(directory/'calibrators.npz')
-        names = {key.rsplit('__', 1)[0] for key in arrays.files}
-        calibrators = {name: (arrays[f'{name}__x'], arrays[f'{name}__y']) for name in names}
+        calibrators = Ranker.read_calibrators(directory/'calibrators.npz')
         combiner = cls(specification['encoding'], features=specification['features'],
                        model=joblib.load(directory/'model.joblib'), calibrators=calibrators,
                        meta=specification['meta'])

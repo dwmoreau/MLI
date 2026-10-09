@@ -17,6 +17,23 @@ BL_TO_LATTICE_SYSTEM = {
     'aP': 'triclinic',
     }
 
+# Position of each Bravais lattice in `BRAVAIS_LATTICES`, which is what breaks a score tie and what
+# the learned ranker reads as its ordinal lattice input.
+_LATTICE_POSITION = {lattice: position for position, lattice in enumerate(BRAVAIS_LATTICES)}
+
+
+def lattice_order_of(bravais_lattice):
+    """Position in the canonical lattice order, refusing anything not in it.
+
+    An unrecognised lattice must not sort to one end: it would take every tie or lose every one,
+    and the effect would look like a property of the ranking.
+    """
+    values = np.asarray(bravais_lattice)
+    unknown = sorted(set(values.tolist()) - set(_LATTICE_POSITION))
+    if unknown:
+        raise ValueError(f'Unknown Bravais lattice in the candidate frame: {unknown}')
+    return np.array([_LATTICE_POSITION[value] for value in values.tolist()], dtype=np.int64)
+
 # Which entries of a full [a, b, c, alpha, beta, gamma] a lattice system leaves free. Triclinic is
 # absent on purpose: all six are free, so `get_partial_unit_cell` hands back the array it was given
 # rather than a fancy-indexed copy, which is what it has always done.
