@@ -1,9 +1,10 @@
 """The learned ranker: a calibrated probability that a candidate unit cell is correct.
 
 One gradient-boosted classifier scores every candidate of a pattern, across all fourteen Bravais
-lattices, from 30 inputs: seven merits, four systematic-absence counts, three further merits,
-eleven structural quantities, the candidate's Bravais lattice, and four pool-context gaps (how far
-the candidate sits below the pattern's best value of a merit). Its output is mapped to a
+lattices, from sixteen inputs: figures of merit of the candidate against the peak list, the share
+of the reference lines in range its extinction group removes, how common that group is among
+known structures of its lattice, the candidate's Bravais lattice, and three pool-context gaps (how
+far the candidate sits below the pattern's best value of a merit). Its output is mapped to a
 probability by an isotonic regression fitted separately for each Bravais lattice, on crystals the
 classifier was not fitted on, using the rows it will score: the pool as a run at the cut leaves it.
 
@@ -46,20 +47,17 @@ from mlindex.utilities.Ranker import apply_calibration
 from mlindex.utilities.Ranker import check_no_leakage
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 
+# The merits the training rows are thinned by: a candidate among the best few of its lattice by
+# any of them is always kept.
 RAW_MERITS = ('M20', 'M_tilde', 'M_rev', 'M_sym', 'X_N', 'n_over', 'max_gap')
-ABSENCE_FEATURES = ('n_absent_extra', 'n_absent_extra_in_range', 'f_absent_extra',
-                    'n_groups_searched')
-PROBATION_MERITS = ('M_wu', 'M_1', 'F_N_q')
-STRUCTURAL_FEATURES = (
-    'n_indexed', 'n_entering', 'final_rank', 'N_cal_full', 'zone_dominance', 'V_over_Vcrit',
-    'delta_dewolff61', 'n_dewolff61', 'M_werner_max', 'log_volume', 'pool_size_full',
-    )
 # The merits whose gap to the pattern's best value is an input.
-CONTEXT_MERITS = ('M20', 'M_sym', 'n_over', 'max_gap')
+CONTEXT_MERITS = ('M20', 'M_sym', 'n_over')
 CONTEXT_FEATURES = tuple(f'ctx_{merit}_gap_to_best' for merit in CONTEXT_MERITS)
 
-FEATURES = (RAW_MERITS + ABSENCE_FEATURES + PROBATION_MERITS + STRUCTURAL_FEATURES
-            + (LATTICE_FEATURE,) + CONTEXT_FEATURES)
+# The inputs, in the order the design matrix has them.
+FEATURES = ('M20', 'M_rev', 'M_sym', 'X_N', 'f_absent_extra', 'M_wu', 'F_N_q', 'n_indexed',
+            'zone_dominance', 'V_over_Vcrit', 'n_dewolff61', LATTICE_FEATURE) + CONTEXT_FEATURES + (
+            'group_frequency',)
 
 
 def features_without(names):
@@ -203,12 +201,16 @@ def add_context(frame, best=None):
     return merged.drop(columns=[f'best_{merit}' for merit in CONTEXT_MERITS]).assign(**columns)
 
 
-def add_derived(frame):
-    """`log_volume` and `f_absent_extra`, which are computed from columns already on the row."""
+def add_derived(frame, group_frequency):
+    """`f_absent_extra` and `group_frequency`, which are computed from columns already on the row.
+
+    `group_frequency` is the table `Ranker.read_group_frequency` reads.
+    """
     return frame.assign(
-        log_volume=np.log(frame['volume'].to_numpy(dtype=np.float64)),
         f_absent_extra=Ranker.absent_fraction(frame['n_absent_extra_in_range'],
-                                              frame['n_ref_in_range']))
+                                              frame['n_ref_in_range']),
+        group_frequency=Ranker.group_frequency(frame['bravais_lattice'].to_numpy(),
+                                               frame['spacegroup'].to_numpy(), group_frequency))
 
 
 def split_crystals(entries, fractions, rng):
@@ -243,12 +245,10 @@ def split_crystals(entries, fractions, rng):
 # Exporting a pool, one condition bundle at a time
 # ---------------------------------------------------------------------------------------------
 # What is read from a pool's candidate shards, beside the key. The merit and feature sidecars are
-# read whole; the entry table supplies `pool_size_full`, the one per-pattern input.
-SHARD_COLUMNS = ('M20', 'n_indexed', 'final_rank', 'n_entering', 'volume', 'm20_at_prune',
-                 'in_top_n', 'is_correct', 'spacegroup')
-ENTRY_FEATURES = ('pool_size_full',)
+# read whole.
+SHARD_COLUMNS = ('M20', 'n_indexed', 'm20_at_prune', 'is_correct', 'spacegroup')
 # `spacegroup`, the candidate's extinction group, rides along as a plain column: not an input,
-# but what a prior on the group is looked up by.
+# but what `group_frequency` is looked up by.
 TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order',
                                            'spacegroup')
 EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n', 'spacegroup')
@@ -291,13 +291,14 @@ def _float32(frame):
     return frame.astype({name: np.float32 for name in floats})
 
 
-def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cut, n_top,
-                  keep_all_depths, top_k, negative_rate, n_negatives, truth_dir=None):
+def export_bundle(pool, bundle, training_ids, evaluation_ids, seeds, cut, n_top,
+                  keep_all_depths, top_k, negative_rate, n_negatives, group_frequency,
+                  truth_dir=None):
     """One condition bundle of a pool as ranker frames: training rows per seed, evaluation rows.
 
-    Both are the pool as a run at `cut` would leave it (`restrict_at_cut`): `final_rank`,
-    `pool_size_full` and the context gaps are recomputed over the restricted pool, the gaps over
-    every lattice of the pattern.
+    Both are the pool as a run at `cut` would leave it (`restrict_at_cut`), with the context gaps
+    recomputed over the restricted pool, every lattice of the pattern. `group_frequency` is the
+    table `Ranker.read_group_frequency` reads.
 
     Training rows, for the crystals in `training_ids`: every depth, restricted at the cut by the
     same rule as the evaluation rows, so no row is kept for being correct. The bundle's true
@@ -311,8 +312,8 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
     Evaluation rows, for the crystals in `evaluation_ids`: as the search left them, the `n_top`
     per lattice unless `keep_all_depths`.
 
-    The pool is read one lattice at a time, twice: once for each pattern's best values and
-    survivor counts, once for the rows. Returns ({seed: frame}, frame).
+    The pool is read one lattice at a time, twice: once for each pattern's best values, once for
+    the rows. Returns ({seed: frame}, frame).
     """
     from mlindex.model_training import Benchmark
     from mlindex.model_training.BenchmarkMetrics import restrict_at_cut
@@ -320,7 +321,7 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
 
     lattices = [lattice for lattice, _ in Benchmark.candidate_shards(pool, bundle)]
     wanted = set(training_ids) | set(evaluation_ids)
-    context_columns = {Benchmark.MERIT_SIDECAR: ['M_sym', 'n_over', 'max_gap']}
+    context_columns = {Benchmark.MERIT_SIDECAR: ['M_sym', 'n_over']}
 
     def restricted(frame):
         """(training rows, evaluation rows) of one lattice, each restricted to the cut by the
@@ -332,7 +333,7 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
             frame.loc[frame['entry_id'].isin(evaluation_ids) & ~added], cut, n_top=n_top)
         return training, evaluation
 
-    best, survivors = {'training': [], 'evaluation': []}, {'training': [], 'evaluation': []}
+    best = {'training': [], 'evaluation': []}
     for lattice in lattices:
         frame = _read_lattice(pool, bundle, lattice, wanted, columns=('M20', 'm20_at_prune'),
                               sidecar_columns=context_columns, truth_dir=truth_dir,
@@ -340,30 +341,17 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
         for name, rows in zip(('training', 'evaluation'), restricted(frame)):
             if rows.shape[0]:
                 best[name].append(context_best(rows))
-                survivors[name].append(rows.groupby(ENTRY_KEY, as_index=False).size())
-
-    def combine(parts, how):
-        return (pd.concat(parts).groupby(ENTRY_KEY, as_index=False).agg(how) if parts else None)
-
-    best = {name: combine(parts, 'max') for name, parts in best.items()}
-    survivors = {name: combine(parts, 'sum') for name, parts in survivors.items()}
-
-    def in_restricted_pool(rows, name):
-        """`pool_size_full` and the context gaps over the whole restricted pattern."""
-        rows = rows.drop(columns='pool_size_full').merge(
-            survivors[name].rename(columns={'size': 'pool_size_full'}), on=ENTRY_KEY,
-            how='left')
-        return add_context(rows, best[name])
+    best = {name: (pd.concat(parts).groupby(ENTRY_KEY, as_index=False).max() if parts else None)
+            for name, parts in best.items()}
 
     kept = {seed: [] for seed in seeds}
     evaluation_parts = []
     for lattice in lattices:
-        frame = add_derived(Benchmark.attach_entry_columns(
-            _read_lattice(pool, bundle, lattice, wanted, truth_dir=truth_dir,
-                          truth_ids=training_ids), entries, ENTRY_FEATURES))
+        frame = add_derived(_read_lattice(pool, bundle, lattice, wanted, truth_dir=truth_dir,
+                                          truth_ids=training_ids), group_frequency)
         training, evaluation = restricted(frame)
         if training.shape[0]:
-            training = in_restricted_pool(training, 'training').reset_index(drop=True)
+            training = add_context(training, best['training']).reset_index(drop=True)
             in_top_k = top_k_mask(training, top_k)
             for seed in seeds:
                 thinned = thin_negatives(training, top_k, negative_rate, seed, in_top_k=in_top_k)
@@ -372,7 +360,7 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
                 kept[seed] = [_first_negatives(pd.concat(kept[seed] + [thinned],
                                                          ignore_index=True), n_negatives, seed)]
         if evaluation.shape[0]:
-            evaluation = in_restricted_pool(evaluation, 'evaluation')
+            evaluation = add_context(evaluation, best['evaluation'])
             if not keep_all_depths:
                 evaluation = evaluation.loc[evaluation['in_top_n']]
             evaluation_parts.append(evaluation[list(EVALUATION_COLUMNS) + [

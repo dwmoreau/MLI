@@ -915,11 +915,9 @@ def merit_sidecar(pool_dir, bundles=None, bravais_lattices=None):
 # Per-candidate inputs of the learned ranker beyond the merit sidecar's. The structural and
 # probation columns are computed against the candidate's own extinction group's reference list;
 # the absence counts against the lattice's full list, because they count what the group removes.
-STRUCTURAL_FEATURES = ('zone_dominance', 'V_over_Vcrit', 'M_werner_max', 'N_cal_full',
-                       'delta_dewolff61', 'n_dewolff61')
-PROBATION_FEATURES = ('M_wu', 'M_1', 'F_N_q')
-ABSENCE_FEATURES = ('n_absent_extra', 'n_absent_extra_in_range', 'n_ref_in_range',
-                    'n_groups_searched')
+STRUCTURAL_FEATURES = ('zone_dominance', 'V_over_Vcrit', 'n_dewolff61')
+PROBATION_FEATURES = ('M_wu', 'F_N_q')
+ABSENCE_FEATURES = ('n_absent_extra_in_range', 'n_ref_in_range')
 SIDECAR_FEATURES = STRUCTURAL_FEATURES + PROBATION_FEATURES + ABSENCE_FEATURES
 
 def feature_sidecar(pool_dir, bundles=None, bravais_lattices=None):
@@ -965,7 +963,6 @@ def feature_sidecar(pool_dir, bundles=None, bravais_lattices=None):
             calculators = {}
             columns = {name: np.empty(frame.shape[0]) for name in SIDECAR_FEATURES}
             recomputed = np.empty(frame.shape[0])
-            columns['n_groups_searched'][:] = len(keep_masks)
             for (entry_id, bundle_tag), entry in frame.groupby(
                     ['entry_id', 'condition_bundle'], sort=False):
                 q2_obs = peaks[(entry_id, bundle_tag)][:n_peaks]

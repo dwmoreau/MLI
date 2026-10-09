@@ -8,6 +8,8 @@ absence counts the lattice's full list, because they count the lines the group r
     from mlindex.utilities.Ranker import structural_inputs
     values = structural_inputs(q2_obs, xnn, q2_ref_calc, 'monoclinic', 'mP')
 """
+import csv
+
 import numpy as np
 
 from mlindex.utilities.FigureOfMerits import HIGHER_IS_BETTER
@@ -34,8 +36,8 @@ FORBIDDEN_SUFFIX = '_true'
 # The calibrator a lattice without its own falls back to.
 POOLED = '__pooled__'
 
-# The precision floor in Werner's critical volume. It scales `V_over_Vcrit` and `M_werner_max`
-# by the same factor for every candidate.
+# The precision floor in Werner's critical volume. It scales `V_over_Vcrit` by the same factor
+# for every candidate.
 WERNER_G_MIN = 1.0
 
 
@@ -63,15 +65,15 @@ def absent_fraction(n_removed, n_in_range):
 
 
 def structural_inputs(q2_obs, xnn, q2_ref_calc, lattice_system, bravais_lattice):
-    """The structural and probation inputs, and M20, for candidates of one extinction group.
+    """`zone_dominance`, `V_over_Vcrit`, `n_dewolff61`, `M_wu`, `F_N_q` and M20, for candidates of
+    one extinction group.
 
     `q2_ref_calc` is (n_candidates, n_ref), from that group's reference list. Returns a dict of
     arrays.
     """
     from mlindex.utilities.FigureOfMerits import (
-        _sorted_lines_in_range, get_delta_dewolff61, get_F_N, get_M_1, get_M20, get_M_wu,
-        get_multiplicity_taupin88, get_n_dewolff61, get_N_cal, get_V_over_Vcrit,
-        get_zone_dominance)
+        get_F_N, get_M20, get_M_wu, get_multiplicity_taupin88, get_n_dewolff61,
+        get_V_over_Vcrit, get_zone_dominance)
     from mlindex.utilities.numba_functions import fast_assign
     from mlindex.utilities.UnitCellTools import (
         get_reciprocal_unit_cell_from_xnn, get_unit_cell_volume)
@@ -83,28 +85,21 @@ def structural_inputs(q2_obs, xnn, q2_ref_calc, lattice_system, bravais_lattice)
     volume = 1/np.maximum(get_unit_cell_volume(
         reciprocal_cell, partial_unit_cell=True, lattice_system=lattice_system), 1e-300)
     d_n = 1/np.sqrt(np.maximum(cutoff, 1e-300))
-    over_critical, m_max = get_V_over_Vcrit(
+    over_critical, _ = get_V_over_Vcrit(
         volume, d_n, WERNER_G_MIN, get_multiplicity_taupin88(bravais_lattice)[0])
-    sorted_lines = _sorted_lines_in_range(q2_ref_calc, cutoff)
     return {
         'zone_dominance': get_zone_dominance(xnn, lattice_system),
         'V_over_Vcrit': over_critical,
-        'M_werner_max': m_max,
-        'N_cal_full': get_N_cal(q2_ref_calc, np.zeros(xnn.shape[0]), cutoff),
-        'delta_dewolff61': np.mean(
-            get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice), axis=1),
         'n_dewolff61': get_n_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)[:, -1],
-        'M_wu': get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
-        'M_1': get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines),
+        'M_wu': get_M_wu(q2_obs, q2_calc, q2_ref_calc),
         'F_N_q': get_F_N(q2_obs, q2_calc, q2_ref_calc)[1],
-        # get_M20 writes into its reference array, so it gets a copy and goes last.
-        'M20': get_M20(q2_obs, q2_calc, q2_ref_calc.copy()),
+        'M20': get_M20(q2_obs, q2_calc, q2_ref_calc),
         }
 
 
 def absence_inputs(q2_obs, q2_ref_calc_full, spacegroups, keep_masks):
-    """For each candidate, the reference lines its extinction group removes in total and below
-    the cutoff, and all reference lines below the cutoff.
+    """For each candidate, the reference lines its extinction group removes below the cutoff, and
+    all reference lines below the cutoff.
 
     `q2_ref_calc_full` is (n_candidates, n_ref) from the lattice's full reference list, and the
     cutoff is the line of that list the last observed peak is assigned to. `keep_masks` is
@@ -119,15 +114,32 @@ def absence_inputs(q2_obs, q2_ref_calc_full, spacegroups, keep_masks):
     spacegroups = np.asarray(spacegroups)
     n = spacegroups.size
     values = {name: np.empty(n, dtype=np.int64)
-              for name in ('n_absent_extra', 'n_absent_extra_in_range', 'n_ref_in_range')}
+              for name in ('n_absent_extra_in_range', 'n_ref_in_range')}
     for spacegroup in dict.fromkeys(spacegroups.tolist()):
         local = np.flatnonzero(spacegroups == spacegroup)
-        keep = keep_masks[spacegroup]
-        removed, in_range = count_absences_in_range(q2_ref_calc_full[local], keep, cutoff[local])
-        values['n_absent_extra'][local] = np.count_nonzero(~keep)
+        removed, in_range = count_absences_in_range(
+            q2_ref_calc_full[local], keep_masks[spacegroup], cutoff[local])
         values['n_absent_extra_in_range'][local] = removed
         values['n_ref_in_range'][local] = in_range
     return values
+
+
+def read_group_frequency(path):
+    """{(Bravais lattice, extinction group key): the share of the lattice's known structures in
+    that group}, from a table `make_group_frequency` wrote."""
+    with open(path, newline='', encoding='utf-8') as handle:
+        return {(row['bravais_lattice'], row['spacegroup']): float(row['group_frequency'])
+                for row in csv.DictReader(handle)}
+
+
+def group_frequency(bravais_lattice, spacegroups, table):
+    """Each candidate's extinction group's share of its lattice's known structures, 0 for a group
+    the table does not list. `bravais_lattice` is one lattice or one per candidate."""
+    spacegroups = np.asarray(spacegroups)
+    lattices = np.broadcast_to(np.asarray(bravais_lattice), spacegroups.shape)
+    return np.array([table.get((lattice, spacegroup), 0.0)
+                     for lattice, spacegroup in zip(lattices.tolist(), spacegroups.tolist())],
+                    dtype=np.float64)
 
 
 def design_matrix(columns, features, encoding):
