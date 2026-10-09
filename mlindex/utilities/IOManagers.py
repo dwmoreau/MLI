@@ -33,9 +33,9 @@ def hist_gradient_boosting_to_onnx(model, n_features):
     precision the classifier adds them in. Its outputs match a skl2onnx classifier's with
     `zipmap=False`: `label`, then `probabilities` as (n_samples, 2).
 
-    The baseline enters as one more tree that sends every row to a leaf holding it. That tree is
-    written as a split on +inf with two leaves of the same value, because onnxruntime misreads a
-    node whose two branches name the same leaf.
+    The baseline enters as one more tree that sends every row to a leaf holding it, written as a
+    split on +inf with two leaves of the same value: a root whose two branches name one leaf would
+    be read by onnxruntime as a leaf itself.
     """
     from onnx import TensorProto, helper, numpy_helper
 
@@ -66,8 +66,13 @@ def hist_gradient_boosting_to_onnx(model, n_features):
         position = np.empty(nodes.shape[0], dtype=np.int64)
         leaves = np.flatnonzero(is_leaf)
         splits_at = np.flatnonzero(~is_leaf)
-        position[leaves] = len(leaf_weights) + np.arange(leaves.size)
         position[splits_at] = len(featureids) + np.arange(splits_at.size)
+        position[leaves] = len(leaf_weights) + np.arange(leaves.size)
+        if position[nodes['left'][0]] == position[nodes['right'][0]]:
+            # onnxruntime reads a root whose two children carry the same number as a leaf, without
+            # looking at which of them is a leaf. One unused leaf renumbers this tree's leaves.
+            leaf_weights.append(0.0)
+            position[leaves] += 1
         leaf_weights.extend(nodes['value'][leaves].tolist())
         roots.append(int(position[0]))
 
