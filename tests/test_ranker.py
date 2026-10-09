@@ -257,20 +257,42 @@ def test_an_exportable_model_scores_the_same_through_onnx(tmp_path, encoding, fe
     combiner.save(tmp_path / 'model')
     onnx = ranker.onnx_probability(tmp_path / 'model' / 'model.onnx',
                                    combiner.design_matrix(frame))
-    np.testing.assert_allclose(onnx, combiner.raw_score(frame), atol=1e-6)
+    np.testing.assert_allclose(onnx, combiner.raw_score(frame), rtol=0, atol=1e-12)
 
 
-def test_a_native_categorical_model_does_not_survive_onnx_conversion(tmp_path):
-    """Why `native` is never exported: skl2onnx writes a categorical split as a threshold split,
-    converts without complaint, and scores differently. This is the case the test above exists to
-    catch, so it must fail it."""
+def _threshold_edges(model, n_rows, seed=0):
+    """Inputs on the classifier's split thresholds: each the float32 nearest a threshold or
+    one float32 step either side of it, with 2 % missing. A float32 threshold that rounds up
+    sends the rows equal to the float32 value down the other branch."""
+    rng = np.random.default_rng(seed)
+    columns = []
+    for thresholds in model._bin_mapper.bin_thresholds_:
+        value = np.asarray(thresholds)[rng.integers(0, len(thresholds), n_rows)].astype(np.float32)
+        step = rng.integers(-1, 2, n_rows)
+        value = np.where(step < 0, np.nextafter(value, np.float32(-np.inf)),
+                         np.where(step > 0, np.nextafter(value, np.float32(np.inf)), value))
+        value[rng.random(n_rows) < 0.02] = np.nan
+        columns.append(value)
+    return np.stack(columns, axis=1).astype(np.float32)
+
+
+def test_the_onnx_export_takes_every_branch_the_classifier_takes(tmp_path):
+    combiner, _ = _fitted('ordinal')
+    combiner.save(tmp_path / 'model')
+    matrix = _threshold_edges(combiner.model, 20_000)
+    onnx = ranker.onnx_probability(tmp_path / 'model' / 'model.onnx', matrix)
+    np.testing.assert_allclose(onnx, combiner.model.predict_proba(matrix)[:, 1], rtol=0,
+                               atol=1e-12)
+
+
+def test_a_native_categorical_model_refuses_to_convert(tmp_path):
+    """Why `native` is never exported: a categorical split has no threshold form."""
     from mlindex.utilities.IOManagers import SKLearnManager
 
-    combiner, frame = _fitted('native')
-    SKLearnManager(filename=str(tmp_path / 'native'), model_type='onnx').save(
-        model=combiner.model, n_features=len(combiner.matrix_names))
-    onnx = ranker.onnx_probability(tmp_path / 'native.onnx', combiner.design_matrix(frame))
-    assert np.max(np.abs(onnx - combiner.raw_score(frame))) > 1e-2
+    combiner, _ = _fitted('native')
+    with pytest.raises(ValueError, match='categorical'):
+        SKLearnManager(filename=str(tmp_path / 'native'), model_type='onnx').save(
+            model=combiner.model, n_features=len(combiner.matrix_names))
 
 
 def test_a_saved_model_loads_identically_and_is_never_overwritten(tmp_path):
