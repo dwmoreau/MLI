@@ -293,16 +293,6 @@ def _build_group_optimizers(bl_list, group_size, data_queues, result_queues,
     return optimizers
 
 
-def _group_result(optimizer):
-    """The four arrays `run.py` needs back from a lattice, ready to pickle."""
-    return {
-        'top_unit_cell': optimizer.top_unit_cell,
-        'top_M20': optimizer.top_M20,
-        'top_spacegroup': optimizer.top_spacegroup,
-        'top_n_indexed': optimizer.top_n_indexed,
-        }
-
-
 def _mp_group_manager_fn(bl_list, group_size, data_queues, result_queues, task_queues,
                          control_queue, output_queue, broadening_tag,
                          n_candidates_scale, seed, options):
@@ -333,7 +323,9 @@ def _mp_group_manager_fn(bl_list, group_size, data_queues, result_queues, task_q
                 run_mp_bl(optimizers[bl], bl, task_queues, q2=q2,
                           zero_error=zero_error, wavelength=wavelength,
                           n_top=n_top)
-                payload[bl] = _group_result(optimizers[bl])
+                # In the group's own process, so the groups compute their ranking inputs at
+                # the same time.
+                payload[bl] = optimizers[bl].result()
             output_queue.put(('results', payload))
     except Exception as e:
         # Reported rather than raised: the coordinator is blocked on output_queue
@@ -410,7 +402,7 @@ def setup_lattice_groups(assignment, broadening_tag, n_candidates_scale,
 def run_lattice_groups(groups, q2, zero_error, wavelength, n_top):
     """Run one pattern across every group concurrently.
 
-    Returns {bravais_lattice: `_group_result` dict}. There is no per-run seed to
+    Returns {bravais_lattice: `OptimizerBase.result()`}. There is no per-run seed to
     pass: every rank re-keys its own generator from the peak list at the top of
     `OptimizerBase._run_loop`, so a group needs nothing but the pattern itself.
     """
@@ -423,7 +415,7 @@ def run_lattice_groups(groups, q2, zero_error, wavelength, n_top):
     for bl in local['bravais_lattices']:
         run_mp_bl(local['optimizers'][bl], bl, local['task_queues'], q2=q2,
                   zero_error=zero_error, wavelength=wavelength, n_top=n_top)
-        results[bl] = _group_result(local['optimizers'][bl])
+        results[bl] = local['optimizers'][bl].result()
 
     for group in groups[1:]:
         tag, payload = group['output_queue'].get()

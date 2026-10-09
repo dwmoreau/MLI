@@ -384,6 +384,8 @@ class Candidates:
             'n_indexed': self.n_indexed,
             'spacegroup': list(self.best_spacegroup),
             }
+        if self.zero_error:
+            payload['zeropoint'] = self.best_zeropoint
         # RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS.
         if self.m20_at_prune is not None:
             payload['m20_at_prune'] = self.m20_at_prune

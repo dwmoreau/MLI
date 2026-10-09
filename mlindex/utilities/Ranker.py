@@ -129,6 +129,56 @@ def absence_inputs(q2_obs, q2_ref_calc_full, spacegroups, keep_masks):
     return values
 
 
+# The inputs `candidate_inputs` computes, beside M20 and n_indexed, which the search provides.
+CANDIDATE_INPUTS = ('M_rev', 'M_sym', 'X_N', 'n_over', 'M_wu', 'F_N_q', 'zone_dominance',
+                    'V_over_Vcrit', 'n_dewolff61', 'f_absent_extra')
+# The merits whose gap to the pattern's best value is an input.
+CONTEXT_MERITS = ('M20', 'M_sym', 'n_over')
+
+
+def candidate_inputs(q2_obs, xnn, q2_ref_calc_full, spacegroups, keep_masks, lattice_system,
+                     bravais_lattice):
+    """The inputs of one lattice's candidates that are read from the candidate and the peaks.
+
+    `q2_obs` is the peak list the lattice was fitted on; `q2_ref_calc_full` is (n_candidates,
+    n_ref), every candidate's lines from the lattice's full reference list (shifted by its
+    zero-point where there is one); `keep_masks` is `SpaceGroups.get_spacegroup_keep_masks` of
+    that list, keyed as `spacegroups` is. Each candidate is scored against its own extinction
+    group's lines, and its absences counted against the full list. Returns {name: array} for
+    `CANDIDATE_INPUTS`, and the M20 those lines give, under `M20_recomputed`.
+    """
+    from mlindex.utilities.FigureOfMerits import merit_set
+
+    spacegroups = np.asarray(spacegroups)
+    values = {name: np.empty(spacegroups.size) for name in CANDIDATE_INPUTS + ('M20_recomputed',)}
+    absences = absence_inputs(q2_obs, q2_ref_calc_full, spacegroups, keep_masks)
+    values['f_absent_extra'] = absent_fraction(absences['n_absent_extra_in_range'],
+                                               absences['n_ref_in_range'])
+    for spacegroup in dict.fromkeys(spacegroups.tolist()):
+        local = np.flatnonzero(spacegroups == spacegroup)
+        q2_ref_calc = q2_ref_calc_full[local][:, keep_masks[spacegroup]]
+        merits = merit_set(q2_obs, q2_ref_calc)
+        structural = structural_inputs(q2_obs, xnn[local], q2_ref_calc, lattice_system,
+                                       bravais_lattice)
+        values['M20_recomputed'][local] = structural['M20']
+        for name in CANDIDATE_INPUTS:
+            if name in merits:
+                values[name][local] = merits[name]
+            elif name in structural:
+                values[name][local] = structural[name]
+    return values
+
+
+def context_gaps(columns):
+    """Each candidate's gap to the best value of `CONTEXT_MERITS` over the candidates given, all
+    of one pattern: 0 for the best, negative below it."""
+    gaps = {}
+    for merit in CONTEXT_MERITS:
+        values = oriented(columns[merit], merit)
+        gaps[f'ctx_{merit}_gap_to_best'] = values - np.nanmax(values)
+    return gaps
+
+
 def read_group_frequency(path):
     """{(Bravais lattice, extinction group key): the share of the lattice's known structures in
     that group}, from a table `make_group_frequency` wrote."""
@@ -241,3 +291,45 @@ class LearnedRanker:
         """The calibrated probability that each candidate is correct."""
         return apply_calibration(self.predict_batch(self.design_matrix(columns)),
                                  columns[LATTICE_FEATURE], self.calibrators)
+
+
+def load_ranker():
+    """(the packaged ranker, a line saying what ranks the output). The ranker is None, and the
+    line says why, when the model tree holds no `ranker_1`: the output is then ranked by M_sym."""
+    from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
+
+    try:
+        directory = _resolve_models_dir() / RANKER_DIRECTORY
+    except FileNotFoundError:
+        directory = None
+    if directory is None or not (directory / 'specification.json').is_file():
+        return None, (f'M_sym (fallback): no learned ranker found at {directory}; run '
+                      'python -m mlindex.download_models to fetch it')
+    ranker = LearnedRanker.load(directory)
+    return ranker, f'learned ranker ({RANKER_DIRECTORY}, seed {ranker.specification["seed"]})'
+
+
+def score_pool(pools, ranker):
+    """Score every candidate of one pattern in one batch.
+
+    `pools` maps each Bravais lattice to its candidates' `candidate_inputs` beside `M20`,
+    `n_indexed` and `spacegroup`. The context gaps are taken over all of them together. With
+    `ranker` None the score is M_sym. Returns {lattice: score array}, in each pool's order.
+    """
+    lattices = [lattice for lattice in pools if len(pools[lattice]['M20'])]
+    if not lattices:
+        return {lattice: np.zeros(0) for lattice in pools}
+    columns = {name: np.concatenate([np.asarray(pools[lattice][name]) for lattice in lattices])
+               for name in pools[lattices[0]]}
+    columns[LATTICE_FEATURE] = np.concatenate(
+        [np.full(len(pools[lattice]['M20']), lattice) for lattice in lattices])
+    if ranker is None:
+        score = np.asarray(columns['M_sym'], dtype=np.float64)
+    else:
+        columns.update(context_gaps(columns))
+        columns['group_frequency'] = group_frequency(
+            columns[LATTICE_FEATURE], columns['spacegroup'], ranker.group_frequency)
+        score = ranker.score(columns)
+    ends = np.cumsum([len(pools[lattice]['M20']) for lattice in lattices])
+    scores = dict(zip(lattices, np.split(score, ends[:-1])))
+    return {lattice: scores.get(lattice, np.zeros(0)) for lattice in pools}
