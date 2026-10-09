@@ -6,6 +6,8 @@ inputs do not depend on the thinning, and that a model's ONNX export scores as t
 Each is checked against a case whose answer is known, never against the implementation itself.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -130,19 +132,75 @@ def test_restricting_at_a_cut_keeps_each_lattices_best_and_reranks():
     assert set(out['pool_size_full']) == {3.0}
 
 
-def test_a_row_kept_whatever_the_cut_ranks_and_counts_as_a_survivor():
-    """An added true cell is kept below the cut, and the lattice's ranks and the pattern's
-    survivor count include it, as they would a candidate the search had kept."""
-    frame = pd.DataFrame({
-        'entry_id': 'E', 'condition_bundle': 'b0', 'bravais_lattice': 'aP',
-        'candidate_id': [0, 1, 2, -1], 'M20': [9.0, 4.0, 2.0, 3.0],
-        'm20_at_prune': [9.0, 4.0, 2.0, 3.0], 'final_rank': [0, 1, 2, 1], 'in_top_n': True,
-        'pool_size_full': 3.0})
-    out = metrics.restrict_at_cut(frame, 3.5, n_top=20,
-                                  always_keep=frame['candidate_id'].to_numpy() == -1)
-    assert sorted(out['candidate_id']) == [-1, 0, 1]
-    assert dict(zip(out['candidate_id'], out['final_rank'])) == {0: 0, 1: 1, -1: 2}
-    assert set(out['pool_size_full']) == {3.0}
+def _write_pool(directory, frame):
+    """`frame`, a `_pool()`, written as a benchmark pool `export_bundle` reads: candidate shards
+    carrying the cells the labeller needs, both sidecars, and the entry table. Every pattern's
+    true cell is cubic 5 A; a correct row carries it and a wrong row does not."""
+    from mlindex.model_training import Benchmark
+    from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM, get_partial_unit_cell
+
+    directory = Path(directory)
+    frame = frame.copy()
+    true_cell = np.array([5.0, 5.0, 5.0, 90.0, 90.0, 90.0])
+    wrong_cell = np.array([7.0, 8.0, 9.0, 80.0, 95.0, 100.0])
+    frame['lattice_system'] = frame['bravais_lattice'].map(BL_TO_LATTICE_SYSTEM)
+    frame['unit_cell'] = [
+        get_partial_unit_cell(true_cell if correct else wrong_cell, lattice_system=system)
+        for correct, system in zip(frame['is_correct'], frame['lattice_system'])]
+    frame['volume'] = np.exp(frame['log_volume'].to_numpy())
+    frame['n_indexed'] = 20
+    frame['n_entering'] = 1000
+    frame['n_ref_in_range'] = 50
+    frame['spacegroup'] = 'G e.g. G'
+    shard = list(ranker.CANDIDATE_KEY) + ['lattice_system', 'unit_cell'] + list(ranker.SHARD_COLUMNS)
+    derived = ('log_volume', 'f_absent_extra', 'pool_size_full', ranker.LATTICE_FEATURE)
+    features = [name for name in ranker.FEATURES
+                if name not in shard and name not in derived
+                and name not in ranker.RAW_MERITS and name not in ranker.CONTEXT_FEATURES]
+    for (bundle, lattice), rows in frame.groupby(['condition_bundle', 'bravais_lattice']):
+        Benchmark.write_candidate_shard(rows[shard], directory, bundle, lattice)
+        Benchmark.write_candidate_shard(
+            rows[list(ranker.CANDIDATE_KEY) + list(ranker.RAW_MERITS)],
+            directory / Benchmark.MERIT_SIDECAR, bundle, lattice)
+        Benchmark.write_candidate_shard(
+            rows[list(ranker.CANDIDATE_KEY) + features + ['n_ref_in_range']],
+            directory / Benchmark.FEATURE_SIDECAR, bundle, lattice)
+    entries = frame[list(ranker.ENTRY_KEY)].drop_duplicates().reset_index(drop=True)
+    entries['bravais_lattice_true'] = 'cP'
+    entries['unit_cell_true'] = [true_cell] * entries.shape[0]
+    entries['pool_size_full'] = float(frame.shape[0])
+    Benchmark.write_entry_table(entries, directory)
+    return entries
+
+
+def test_training_rows_are_chosen_without_the_label(tmp_path):
+    """A run at the cut keeps a candidate for its M20, never for whether it is correct. Training
+    rows that kept every correct cell below the cut, while wrong cells below it survive only as
+    their lattice's best, made "below the cut and not the lattice's best" a label the model could
+    read from M20 and final_rank -- and whole-pool rows are full of wrong cells there. So the
+    training rows of a pattern are exactly its evaluation rows."""
+    frame = _pool(n_entries=2, n_per_lattice=8)
+    correct = frame['is_correct'].to_numpy()
+    # Every wrong cell clears the cut; every correct cell is below it and never its lattice's
+    # best, except one pattern's, which clears it and must stay.
+    frame.loc[~correct, ['M20', 'm20_at_prune']] = 4.0 + frame.loc[~correct, 'candidate_id']
+    frame.loc[correct, ['M20', 'm20_at_prune']] = 2.0
+    survivor = frame.index[correct][0]
+    frame.loc[survivor, ['M20', 'm20_at_prune']] = 5.0
+    entries = _write_pool(tmp_path, frame)
+    crystals = set(frame['entry_id'])
+
+    training, evaluation = ranker.export_bundle(
+        tmp_path, 'b0', entries, crystals, crystals, seeds=(1,), cut=3.5, n_top=20,
+        keep_all_depths=True, top_k=1000, negative_rate=1.0, n_negatives=10**6)
+    key = list(ranker.CANDIDATE_KEY)
+    rows = training[1].merge(evaluation, on=key, how='outer', indicator=True, suffixes=('', '_e'))
+    assert (rows['_merge'] == 'both').all(), rows.loc[rows['_merge'] != 'both', key]
+    assert training[1]['is_correct'].sum() == 1
+    assert (training[1]['M20'] >= 3.5).all()
+    # The group rides along for a prior to be looked up by; it is not an input.
+    assert set(training[1]['spacegroup']) == {'G e.g. G'} == set(evaluation['spacegroup'])
+    assert 'spacegroup' not in ranker.FEATURES
 
 
 def test_split_crystals_is_disjoint_stratified_and_seeded():
@@ -159,7 +217,8 @@ def test_split_crystals_is_disjoint_stratified_and_seeded():
 
 
 def test_the_leakage_guard_refuses_labels_and_generator_columns():
-    for name in ('is_correct', 'sampling_weight', 'm20_at_prune', 'volume_true'):
+    for name in ('is_correct', 'sampling_weight', 'm20_at_prune', 'volume_true',
+                 'n_peaks_available'):
         with pytest.raises(ValueError):
             ranker.FomCombiner('onehot', features=ranker.FEATURES + (name,))
     ranker.check_no_leakage(ranker.FEATURES)
@@ -169,26 +228,32 @@ def test_the_lattice_encodings_shape_the_design_matrix():
     frame = _pool(n_entries=1, n_per_lattice=3)
     widths = {encoding: ranker.FomCombiner(encoding).design_matrix(frame).shape[1]
               for encoding in ranker.LATTICE_ENCODINGS}
-    assert widths == {'onehot': 31 + 13, 'ordinal': 31, 'native': 31}
+    assert widths == {'onehot': 30 + 13, 'ordinal': 30, 'native': 30}
     with pytest.raises(ValueError):
         ranker.FomCombiner('ordinal').design_matrix(frame.assign(bravais_lattice='xX'))
 
 
-def _fitted(encoding, seed=12345):
+def _fitted(encoding, seed=12345, features=ranker.FEATURES):
     frame = _pool(n_entries=12, n_per_lattice=30, lattices=('cF', 'tI', 'oC', 'mP', 'aP'))
     # A lattice dependence only a split on a set of lattices captures exactly.
     member = frame['bravais_lattice'].isin(['cF', 'oC', 'aP']).to_numpy()
     rng = np.random.default_rng(seed)
     frame['is_correct'] = rng.random(frame.shape[0]) < np.where(member, 0.6, 0.1)
     frame = frame.assign(sampling_weight=1.0)
-    combiner = ranker.FomCombiner.fit(frame, encoding=encoding, seed=seed,
+    combiner = ranker.FomCombiner.fit(frame, encoding=encoding, seed=seed, features=features,
                                       params=dict(max_iter=40, max_leaf_nodes=15))
     return combiner.fit_calibrators(frame, minimum=20), frame
 
 
+# A model on fewer inputs, as a feature ablation fits: the lattice and a context gap removed, so
+# the design matrix's columns shift past both.
+REDUCED = ranker.features_without(('n_entering', 'bravais_lattice', 'ctx_M20_gap_to_best'))
+
+
+@pytest.mark.parametrize('features', (ranker.FEATURES, REDUCED), ids=('all', 'reduced'))
 @pytest.mark.parametrize('encoding', ranker.EXPORTABLE_ENCODINGS)
-def test_an_exportable_model_scores_the_same_through_onnx(tmp_path, encoding):
-    combiner, frame = _fitted(encoding)
+def test_an_exportable_model_scores_the_same_through_onnx(tmp_path, encoding, features):
+    combiner, frame = _fitted(encoding, features=features)
     combiner.save(tmp_path / 'model')
     onnx = ranker.onnx_probability(tmp_path / 'model' / 'model.onnx',
                                    combiner.design_matrix(frame))
@@ -252,3 +317,37 @@ def test_only_the_per_lattice_calibration_can_reorder_two_lattices():
     assert list(np.argsort(arms['pooled'])) == list(np.argsort(raw))
     # aP's map lifts its candidates above cF's, which the raw score ranked higher.
     assert arms['per_lattice'][1] > arms['per_lattice'][2] and raw[1] < raw[2]
+
+
+def test_removing_inputs_keeps_the_others_in_order_and_refuses_a_name_that_is_not_one():
+    kept = ranker.features_without(('M_wu', 'n_entering'))
+    assert len(kept) == len(ranker.FEATURES) - 2
+    assert 'M_wu' not in kept and 'n_entering' not in kept
+    assert list(kept) == [name for name in ranker.FEATURES if name in kept]
+    assert ranker.features_without(()) == ranker.FEATURES
+    with pytest.raises(ValueError, match='M_wuu'):
+        ranker.features_without(('M_wuu',))
+    with pytest.raises(ValueError):
+        ranker.features_without(ranker.FEATURES)
+
+
+def test_a_model_without_an_input_never_reads_its_column(tmp_path):
+    combiner, frame = _fitted('ordinal', features=REDUCED)
+    stripped = frame.drop(columns=['n_entering', 'ctx_M20_gap_to_best'])
+    np.testing.assert_array_equal(combiner.score(stripped), combiner.score(frame))
+    assert combiner.design_matrix(frame).shape[1] == len(ranker.FEATURES) - 3
+    combiner.save(tmp_path / 'model')
+    assert ranker.FomCombiner.load(tmp_path / 'model').features == REDUCED
+    with pytest.raises(KeyError):
+        _fitted('ordinal')[0].design_matrix(stripped)
+
+
+def test_a_fit_without_inputs_is_named_for_the_set_not_the_order():
+    from mlindex.scripts.run_ranker import fit_name
+
+    base = fit_name('ordinal', 0.04, 63, 1100, 12345)
+    assert base == 'ordinal_lr0.04_leaves63_iter1100_seed12345'
+    one = fit_name('ordinal', 0.04, 63, 1100, 12345, ('M_1', 'M_wu'))
+    assert one == fit_name('ordinal', 0.04, 63, 1100, 12345, ('M_wu', 'M_1', 'M_wu'))
+    assert one.startswith(base + '_drop2_')
+    assert one != fit_name('ordinal', 0.04, 63, 1100, 12345, ('M_1', 'F_N_q'))

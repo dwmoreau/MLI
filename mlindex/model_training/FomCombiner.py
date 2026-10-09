@@ -1,8 +1,8 @@
 """The learned ranker: a calibrated probability that a candidate unit cell is correct.
 
 One gradient-boosted classifier scores every candidate of a pattern, across all fourteen Bravais
-lattices, from 31 inputs: seven merits, four systematic-absence counts, three further merits,
-twelve structural quantities, the candidate's Bravais lattice, and four pool-context gaps (how far
+lattices, from 30 inputs: seven merits, four systematic-absence counts, three further merits,
+eleven structural quantities, the candidate's Bravais lattice, and four pool-context gaps (how far
 the candidate sits below the pattern's best value of a merit). Its output is mapped to a
 probability by an isotonic regression fitted separately for each Bravais lattice, on crystals the
 classifier was not fitted on, using the rows it will score: the pool as a run at the cut leaves it.
@@ -49,8 +49,7 @@ ABSENCE_FEATURES = ('n_absent_extra', 'n_absent_extra_in_range', 'f_absent_extra
 PROBATION_MERITS = ('M_wu', 'M_1', 'F_N_q')
 STRUCTURAL_FEATURES = (
     'n_indexed', 'n_entering', 'final_rank', 'N_cal_full', 'zone_dominance', 'V_over_Vcrit',
-    'delta_dewolff61', 'n_dewolff61', 'M_werner_max', 'log_volume', 'n_peaks_available',
-    'pool_size_full',
+    'delta_dewolff61', 'n_dewolff61', 'M_werner_max', 'log_volume', 'pool_size_full',
     )
 LATTICE_FEATURE = 'bravais_lattice'
 # The merits whose gap to the pattern's best value is an input.
@@ -59,6 +58,17 @@ CONTEXT_FEATURES = tuple(f'ctx_{merit}_gap_to_best' for merit in CONTEXT_MERITS)
 
 FEATURES = (RAW_MERITS + ABSENCE_FEATURES + PROBATION_MERITS + STRUCTURAL_FEATURES
             + (LATTICE_FEATURE,) + CONTEXT_FEATURES)
+
+
+def features_without(names):
+    """`FEATURES` in their order, less `names`; refuses a name that is not one of them."""
+    unknown = sorted(set(names) - set(FEATURES))
+    if unknown:
+        raise ValueError(f'not ranker inputs: {unknown}; the inputs are {list(FEATURES)}')
+    if set(names) >= set(FEATURES):
+        raise ValueError('removing every input leaves nothing to fit on')
+    return tuple(name for name in FEATURES if name not in set(names))
+
 
 LATTICE_ENCODINGS = ('onehot', 'ordinal', 'native')
 # Only these encodings have an ONNX export that scores as the classifier does.
@@ -74,6 +84,9 @@ FORBIDDEN_COLUMNS = frozenset({
     'second_phase_partner', 'sampling_weight', 'm20_at_prune', 'merit_at_prune',
     'in_top_n', 'prune_threshold', 'downsample_radius', 'assignment_threshold', 'q2_digest',
     'ctx_pool_size',
+    # The peak count of the crystal's whole simulated pattern: set by its true cell and symmetry,
+    # and not available from a peak list.
+    'n_peaks_available',
     })
 FORBIDDEN_SUFFIX = '_true'
 
@@ -258,12 +271,15 @@ def split_crystals(entries, fractions, rng):
 # Exporting a pool, one condition bundle at a time
 # ---------------------------------------------------------------------------------------------
 # What is read from a pool's candidate shards, beside the key. The merit and feature sidecars are
-# read whole; the entry table supplies the two per-pattern inputs.
+# read whole; the entry table supplies `pool_size_full`, the one per-pattern input.
 SHARD_COLUMNS = ('M20', 'n_indexed', 'final_rank', 'n_entering', 'volume', 'm20_at_prune',
-                 'in_top_n', 'is_correct')
-ENTRY_FEATURES = ('n_peaks_available', 'pool_size_full')
-TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order')
-EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n')
+                 'in_top_n', 'is_correct', 'spacegroup')
+ENTRY_FEATURES = ('pool_size_full',)
+# `spacegroup`, the candidate's extinction group, rides along as a plain column: not an input,
+# but what a prior on the group is looked up by.
+TRAINING_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'sampling_weight', 'negative_order',
+                                           'spacegroup')
+EVALUATION_COLUMNS = tuple(CANDIDATE_KEY) + ('is_correct', 'in_top_n', 'spacegroup')
 
 
 def _read_lattice(pool, bundle, lattice, entry_ids, columns=SHARD_COLUMNS,
@@ -311,12 +327,14 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
     `pool_size_full` and the context gaps are recomputed over the restricted pool, the gaps over
     every lattice of the pattern.
 
-    Training rows, for the crystals in `training_ids`: every depth, and every correct cell kept
-    whatever the cut -- the search's own, and the bundle's true cells from `truth_dir` (a
-    `BenchmarkRuns.truth_pool`) where the search had none -- as candidates of their patterns, in
-    the ranks, the survivor counts and the gaps, so every training pattern has a correct cell. Then thinned by `thin_negatives` and to the first `n_negatives` wrong candidates
-    per pattern by `negative_order`, both draws keyed on the seed; a later `cap_negatives` at or
-    below `n_negatives` selects from these rows exactly as it would from the whole pool.
+    Training rows, for the crystals in `training_ids`: every depth, restricted at the cut by the
+    same rule as the evaluation rows, so no row is kept for being correct. The bundle's true
+    cells from `truth_dir` (a `BenchmarkRuns.truth_pool`), added where the search found none, are
+    candidates of their patterns under that rule too: one that refines to an M20 below the cut
+    is a cell the run would not have kept, and is not a row. Then thinned by `thin_negatives` and
+    to the first `n_negatives` wrong candidates per pattern by `negative_order`, both draws keyed
+    on the seed; a later `cap_negatives` at or below `n_negatives` selects from these rows exactly
+    as it would from the whole pool.
 
     Evaluation rows, for the crystals in `evaluation_ids`: as the search left them, the `n_top`
     per lattice unless `keep_all_depths`.
@@ -333,12 +351,11 @@ def export_bundle(pool, bundle, entries, training_ids, evaluation_ids, seeds, cu
     context_columns = {Benchmark.MERIT_SIDECAR: ['M_sym', 'n_over', 'max_gap']}
 
     def restricted(frame):
-        """(training rows, evaluation rows) of one lattice, each restricted to the cut."""
+        """(training rows, evaluation rows) of one lattice, each restricted to the cut by the
+        one rule; the added true cells are training rows only."""
         added = frame['candidate_id'].to_numpy() == TRUTH_CANDIDATE_ID
-        in_training = frame['entry_id'].isin(training_ids).to_numpy()
-        # A training pattern keeps its correct cells below the cut, as it keeps an added one.
-        training = restrict_at_cut(frame.loc[in_training], cut, n_top=n_top,
-                                   always_keep=as_bool(frame['is_correct'])[in_training])
+        training = restrict_at_cut(frame.loc[frame['entry_id'].isin(training_ids)], cut,
+                                   n_top=n_top)
         evaluation = restrict_at_cut(
             frame.loc[frame['entry_id'].isin(evaluation_ids) & ~added], cut, n_top=n_top)
         return training, evaluation
