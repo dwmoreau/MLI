@@ -31,7 +31,7 @@ _CCTBX_HOSTILE_CELL = {
     'volume': 3061.6961360816513,
     'a': 6.040842733459646, 'b': 18.908296254985537, 'c': 53.46502669011422,
     'alpha': 90.0, 'beta': 149.9105411673058, 'gamma': 90.0,
-    'spacegroup': 'I 1 2 1',
+    'spacegroup': 'I 1 2 1', 'score': 0.2,
 }
 
 
@@ -65,7 +65,7 @@ def test_conventional_cell_still_promotes_and_survives_a_mixed_pool():
     cubic_metric = {
         'M20': 40.0, 'n_indexed': 20, 'bravais_lattice': 'aP', 'volume': 512.0,
         'a': 8.0, 'b': 8.0, 'c': 8.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0,
-        'spacegroup': 'P 1',
+        'spacegroup': 'P 1', 'score': 0.9,
     }
     kept = _conventional_cell([dict(_CCTBX_HOSTILE_CELL), cubic_metric])
 
@@ -74,6 +74,18 @@ def test_conventional_cell_still_promotes_and_survives_a_mixed_pool():
     assert promoted['bravais_lattice'] != 'aP', 'cubic-metric cell should have been promoted'
     survivor = [e for e in kept if e['M20'] != 40.0][0]
     assert survivor['bravais_lattice'] == 'mC'
+
+
+def test_of_two_copies_of_a_cell_the_higher_scored_is_kept_not_the_higher_m20():
+    from mlindex.command_line.run import _conventional_cell
+
+    cell = {'n_indexed': 18, 'bravais_lattice': 'oP', 'volume': 600.0, 'a': 6.0, 'b': 10.0,
+            'c': 10.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0, 'spacegroup': 'P 2 2 2'}
+    high_m20 = dict(cell, M20=30.0, score=0.1)
+    high_score = dict(cell, M20=12.0, score=0.8, c=10.001)
+    kept = _conventional_cell([high_m20, high_score])
+    assert len(kept) == 1
+    assert kept[0]['score'] == 0.8
 
 
 def _compare_json(result_path, expected_path):
@@ -202,3 +214,72 @@ def test_the_answer_is_repeatable_at_a_fixed_process_count(
     assert digests[0] == digests[1], (
         "two runs of the same command disagree: "
         f"{digests[0][:16]} then {digests[1][:16]}")
+
+
+def _models_tree_without_the_ranker(models_dir, directory):
+    """A model tree holding every lattice directory of `models_dir` and no ranker, as links."""
+    from mlindex.paths import LATTICE_DIR_GLOB
+    from mlindex.utilities.Ranker import RANKER_DIRECTORY
+
+    directory.mkdir()
+    for lattice_dir in models_dir.glob(LATTICE_DIR_GLOB):
+        if lattice_dir.name != RANKER_DIRECTORY:
+            try:
+                os.symlink(lattice_dir, directory / lattice_dir.name, target_is_directory=True)
+            except OSError:
+                pytest.skip('this system cannot create directory links')
+    return directory
+
+
+def test_without_ranker_files_the_ranking_falls_back_to_m_sym_and_says_so(tmp_path, monkeypatch):
+    from mlindex.utilities.Ranker import load_ranker
+
+    (tmp_path / 'cubic_1' / 'abnn').mkdir(parents=True)
+    monkeypatch.setenv('MLINDEX_MODELS_DIR', str(tmp_path))
+    ranker, ranked_by = load_ranker()
+    assert ranker is None
+    assert ranked_by.startswith('M_sym (fallback)') and 'download_models' in ranked_by
+
+
+@pytest.mark.slow
+def test_run_ml_without_ranker_files_ranks_by_m_sym_and_says_so(test_metadata, tmp_path,
+                                                                models_available, models_dir):
+    if not models_available:
+        pytest.skip("ML models not available")
+    tree = _models_tree_without_the_ranker(models_dir, tmp_path / 'models')
+    peak_file = tmp_path / "aP_q2.npy"
+    np.save(peak_file, _aP_q2(test_metadata))
+    output_file = tmp_path / "indexing_results.json"
+    cmd = [sys.executable, "-m", "mlindex.command_line.run", "--peak-file", str(peak_file),
+           "--peak-units", "q2", "--bravais-lattices", "aP", "--nproc", "1", "--seed", "12345",
+           "--output-file", str(output_file)]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            env={**os.environ, "MLINDEX_MODELS_DIR": str(tree)})
+    assert result.returncode == 0, result.stderr
+    assert "Ranked by: M_sym (fallback)" in result.stdout
+    output = pd.read_json(output_file)
+    assert set(output['ranked_by']) == {output['ranked_by'].iloc[0]}
+    assert output['ranked_by'].iloc[0].startswith('M_sym (fallback)')
+    assert (np.diff(output['score'].to_numpy()) <= 0).all()
+
+
+@pytest.mark.slow
+def test_run_ml_with_zero_error_ranks_its_candidates(test_metadata, tmp_path, models_available,
+                                                     models_dir):
+    """The zero-point travels with each candidate to the ranking inputs."""
+    if not models_available:
+        pytest.skip("ML models not available")
+    row = test_metadata[test_metadata["bravais lattice"] == "aP"].iloc[0]
+    peak_file = tmp_path / "aP_q2.npy"
+    np.save(peak_file, _aP_q2(test_metadata))
+    output_file = tmp_path / "indexing_results.json"
+    cmd = [sys.executable, "-m", "mlindex.command_line.run", "--peak-file", str(peak_file),
+           "--peak-units", "q2", "--bravais-lattices", "aP", "--nproc", "1", "--seed", "12345",
+           "--zero-error", "--wavelength", str(row["wavelength"]),
+           "--output-file", str(output_file)]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            env={**os.environ, "MLINDEX_MODELS_DIR": str(models_dir)})
+    assert result.returncode == 0, result.stderr
+    output = pd.read_json(output_file)
+    assert len(output) and np.isfinite(output['score']).all()
+    assert output['ranked_by'].iloc[0].startswith('learned ranker')
