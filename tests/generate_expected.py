@@ -367,6 +367,58 @@ def generate_cli_expected(test_metadata):
             print("  Done.")
 
 
+def generate_ranker_expected(pool, fit_dir, group_frequency, bundle="b1_error1_cont1",
+                             cut=3.5):
+    """tests/expected/ranker_agreement.npz: one pattern per true lattice of a stored benchmark
+    pool, every candidate the pool keeps at `cut`, as the research export computes its inputs.
+
+    Holds what the indexer has for each candidate (cell, extinction group, M20, n_indexed, the
+    pattern's peaks) beside the export's sixteen inputs and the fit's raw and calibrated scores,
+    so the shipped feature builder and scorer can be checked against both.
+    """
+    from mlindex.model_training import Benchmark
+    from mlindex.model_training.FomCombiner import FEATURES, FomCombiner, export_bundle
+    from mlindex.utilities.Ranker import read_group_frequency
+
+    entries = Benchmark.load_entries(pool, columns=["entry_id", "condition_bundle",
+                                                    "bravais_lattice_true", "q2_obs"])
+    entries = entries.loc[entries["condition_bundle"] == bundle]
+    chosen = entries.sort_values("entry_id").drop_duplicates("bravais_lattice_true")
+    ids = set(chosen["entry_id"])
+    _, evaluation = export_bundle(
+        pool, bundle, set(), ids, seeds=(), cut=cut, n_top=20, keep_all_depths=True, top_k=200,
+        negative_rate=0.05, n_negatives=40, group_frequency=read_group_frequency(group_frequency))
+    key = list(Benchmark.CANDIDATE_KEY)
+    shards = pd.concat([
+        pd.read_parquet(path, columns=key + ["lattice_system", "xnn", "n_peaks"])
+        for _, path in Benchmark.candidate_shards(pool, bundle)])
+    rows = evaluation.merge(shards, on=key, how="left", validate="1:1").sort_values(key)
+    rows = rows.reset_index(drop=True)
+    combiner = FomCombiner.load(fit_dir)
+    pattern = rows["entry_id"].map({e: i for i, e in enumerate(chosen["entry_id"])}).to_numpy()
+    q2_obs = np.full((len(chosen), 20), np.nan)
+    for i, q2 in enumerate(chosen["q2_obs"]):
+        q2_obs[i, :len(q2)] = q2
+    np.savez_compressed(
+        EXPECTED_DIR / "ranker_agreement.npz",
+        pattern=pattern, q2_obs=q2_obs,
+        bravais_lattice=rows["bravais_lattice"].to_numpy(dtype=str),
+        lattice_system=rows["lattice_system"].to_numpy(dtype=str),
+        spacegroup=rows["spacegroup"].to_numpy(dtype=str),
+        # A lattice system's xnn has as many components as it has free parameters; padded.
+        xnn=np.stack([np.pad(np.asarray(x, dtype=np.float64), (0, 6 - len(x)),
+                             constant_values=np.nan) for x in rows["xnn"]]),
+        n_peaks=rows["n_peaks"].to_numpy(dtype=np.int64),
+        M20=rows["M20"].to_numpy(dtype=np.float64),
+        n_indexed=rows["n_indexed"].to_numpy(dtype=np.float64),
+        features=np.array(FEATURES),
+        inputs=np.stack([rows[name].to_numpy(dtype=np.float32) if name != "bravais_lattice"
+                         else np.full(rows.shape[0], np.nan, dtype=np.float32)
+                         for name in FEATURES], axis=1),
+        raw=combiner.raw_score(rows), calibrated=combiner.score(rows))
+    print(f"  ranker_agreement.npz: {rows.shape[0]} candidates, {len(chosen)} patterns")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -383,7 +435,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Also generate CLI expected files (implies --models)",
     )
+    parser.add_argument(
+        "--ranker",
+        nargs=3,
+        metavar=("POOL", "FIT_DIR", "GROUP_FREQUENCY_CSV"),
+        help="Generate only the ranker agreement fixture, from a benchmark pool and a ranker fit",
+    )
     args = parser.parse_args()
+
+    if args.ranker:
+        generate_ranker_expected(*args.ranker)
+        sys.exit(0)
 
     test_metadata_all = pd.read_csv(TEST_DATA_DIR / "gsasII_tutorials.csv")
     # Use one row per BL for expected files (avoid name collisions from duplicate BL)

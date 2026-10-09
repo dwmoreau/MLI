@@ -9,6 +9,8 @@ absence counts the lattice's full list, because they count the lines the group r
     values = structural_inputs(q2_obs, xnn, q2_ref_calc, 'monoclinic', 'mP')
 """
 import csv
+import json
+from pathlib import Path
 
 import numpy as np
 
@@ -35,6 +37,9 @@ FORBIDDEN_SUFFIX = '_true'
 
 # The calibrator a lattice without its own falls back to.
 POOLED = '__pooled__'
+
+# The packaged ranker's directory inside a models tree.
+RANKER_DIRECTORY = 'ranker_1'
 
 # The precision floor in Werner's critical volume. It scales `V_over_Vcrit` by the same factor
 # for every candidate.
@@ -190,3 +195,49 @@ def read_calibrators(path):
     with np.load(path) as arrays:
         names = {key.rsplit('__', 1)[0] for key in arrays.files}
         return {name: (arrays[f'{name}__x'], arrays[f'{name}__y']) for name in names}
+
+
+class LearnedRanker:
+    """The packaged ranker: an ONNX classifier, its per-lattice calibrators and the
+    extinction-group frequency table, as `mlindex.scripts.package_ranker` writes them.
+
+    Load it once and score a whole pool per call: the classifier has a fixed cost per call.
+    """
+
+    def __init__(self, features, encoding, classifier, calibrators, group_frequency,
+                 specification):
+        check_no_leakage(features)
+        self.features = tuple(features)
+        self.encoding = encoding
+        self.classifier = classifier
+        self.calibrators = calibrators
+        self.group_frequency = group_frequency
+        self.specification = specification
+
+    @classmethod
+    def load(cls, directory):
+        from mlindex.utilities.IOManagers import SKLearnManager
+
+        directory = Path(directory)
+        with open(directory / 'specification.json', encoding='utf-8') as handle:
+            specification = json.load(handle)
+        classifier = SKLearnManager(
+            filename=str(directory / Path(specification['onnx']).stem), model_type='onnx')
+        classifier.load()
+        return cls(specification['features'], specification['encoding'], classifier,
+                   read_calibrators(directory / 'calibrators.npz'),
+                   read_group_frequency(directory / specification['group_frequency']),
+                   specification)
+
+    def design_matrix(self, columns):
+        """The float32 matrix of the inputs, in the order the classifier reads them."""
+        return design_matrix(columns, self.features, self.encoding)
+
+    def predict_batch(self, matrix):
+        """The classifier's probability for each row of a design matrix, before calibration."""
+        return np.asarray(self.classifier.predict_proba(matrix), dtype=np.float64)[:, 1]
+
+    def score(self, columns):
+        """The calibrated probability that each candidate is correct."""
+        return apply_calibration(self.predict_batch(self.design_matrix(columns)),
+                                 columns[LATTICE_FEATURE], self.calibrators)
