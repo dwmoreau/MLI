@@ -11,31 +11,6 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
-# How each figure of merit treats the measurement error sigma, which this project never assumes is
-# known (PLAN 2.5, F-008). Every function added to the zoo registers here, and compute_all reports
-# the labels alongside the values so that a sigma-dependent number can never be read as if it were
-# sigma-free.
-#
-#   free       the normalisation comes from the calculated-line density, a property of the
-#              candidate rather than of the instrument. The whole classical family is of this type.
-#   in-sample  sigma is estimated from the data being scored, by an estimator that must itself be
-#              validated before the number is trusted.
-#   assumed    sigma is taken from an external model. Reference points only, never a deliverable.
-SIGMA_TREATMENT = {
-    "M20": "free",
-    "M20_likelihood": "free",
-    "delta_dewolff61": "free",
-    "n_dewolff61": "free",
-    "nll_exponential": "free",
-    "null_tail_nll": "free",
-    "N_cal": "free",
-    "M_tilde": "free",
-    "M_rev": "free",
-    "M_sym": "free",
-    "X_N": "free",
-}
-
-
 # Which way each ranking merit points. The de Wolff family grows with agreement; X_N, n_over and
 # max_gap count what the candidate gets wrong, so a smaller value is the better candidate. Anything
 # that ranks or takes a best value over these orients them by this table first.
@@ -74,7 +49,6 @@ HIGHER_IS_BETTER = {
 #        Enumeration over |h|,|k|,|l| <= 140 gives 0.83347, 0.45847 and 0.33347. Note that the
 #        halve-for-I, quarter-for-F rule does *not* hold here (11/24 is not half of 5/6), because
 #        the collapse onto integers, not the point density, is what sets the count.
-#        A consequence worth knowing: with C0 = 0, Delta(Q) is constant in Q for cubic.
 DEWOLFF61_COEFFICIENTS = {
     "aP": (2.095, 0.0, 0.0, 0.0),
     "mP": (1.047, 0.0, 0.786, 0.0),
@@ -135,7 +109,7 @@ def get_dewolff61_axes(xnn, lattice_system, bravais_lattice):
 
 
 def get_dewolff61_terms(xnn, lattice_system, bravais_lattice):
-    """The two Q-independent groupings that N(Q) and Delta(Q) are both built from.
+    """The two Q-independent groupings that N(Q) is built from.
 
     Returns (leading, surface, reciprocal_volume) where leading = C0 and
     surface = C1 a* + C2 b* + C3 c*, each of shape (n_candidates,).
@@ -174,222 +148,6 @@ def get_n_dewolff61(q2, xnn, lattice_system, bravais_lattice):
     )
 
 
-def get_delta_dewolff61(q2, xnn, lattice_system, bravais_lattice):
-    """de Wolff (1961) eq. (4): the expected discrepancy at Q for an *arbitrary* (wrong) cell.
-
-    Delta(Q) = (1/2) V* / ((3/2) C0 sqrt(Q) + C1 a* + C2 b* + C3 c*)
-
-    2 Delta = dQ/dN is the mean interval between successive calculated lines at Q; the factor of
-    two is the inspection paradox, which de Wolff spells out in his footnote -- an observed line
-    cannot be distinguished from the calculated lines around it, so each of the two sub-intervals
-    it creates is itself an arbitrary interval.
-
-    This is *local in Q*, where de Wolff 1968's M20 uses the single global number Q20/(2 N20). It
-    is the analytic form of Shirley's per-line epsilon, it carries no free parameters and no sigma,
-    and it supersedes the 4 pi q^2 V / mu density in get_M20_likelihood.
-
-    Careful: de Wolff's section 5 prints this formula for his worked example *without* the leading
-    one half -- as written there it gives 2 Delta, not Delta. His own tabulated Delta values in
-    Table 4 follow the expression above (F-024).
-    """
-    leading, surface, reciprocal_volume = get_dewolff61_terms(
-        xnn, lattice_system, bravais_lattice
-    )
-    q2 = np.atleast_2d(q2)
-    denominator = (
-        1.5 * leading[:, np.newaxis] * np.sqrt(q2) + surface[:, np.newaxis]
-    )
-    return 0.5 * reciprocal_volume[:, np.newaxis] / denominator
-
-
-def get_nll_exponential(q2_obs, q2_calc, xnn, lattice_system, bravais_lattice):
-    """The analytic null log-density: how these discrepancies score under "this candidate is wrong".
-
-    de Wolff (1961) section 3: if the intervals between calculated lines are exponentially
-    distributed -- free-path statistics -- then so are the discrepancies, and a discrepancy larger
-    than x occurs with frequency exp(-x/Delta). Hence
-
-        -log L_null = sum_i [ |dQ_i| / Delta(Q_i) + log Delta(Q_i) ]
-
-    Closed form, no free parameters, no sigma.
-
-    **This is not a figure of merit and must not be ranked on.** The S01 handoff describes it as
-    "a FOM in its own right"; it is not, and the reason is elementary once written down: the
-    exponential density peaks at zero, so a perfect fit is the *most* likely outcome under the
-    null and -log L_null is minimised, not maximised, by a good candidate. It is also dominated by
-    the log Delta term, which is a function of the candidate's volume and symmetry rather than of
-    its agreement with the data. Measured on a real pool it ranks essentially by volume (F-025).
-
-    What it *is* good for is the null itself -- it is the correct per-line null density, and S07
-    needs exactly that to standardise other merits against. For ranking, use get_null_tail_nll,
-    which is built from the same distribution and does discriminate.
-
-    de Wolff validates the exponential assumption on 214 intervals of a two-dimensional anorthic
-    net (his Table 3) and finds the real distribution slightly narrower -- real Q values are a
-    little more regular than random -- so this null is mildly conservative, and more so for high
-    symmetry, where he notes g can fall to Delta/2 in the equidistant limit.
-
-    Returns (n_candidates,).
-    """
-    delta = get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)
-    discrepancy = np.abs(np.atleast_2d(q2_obs) - q2_calc)
-    return np.sum(discrepancy/delta + np.log(delta), axis=1)
-
-
-def get_null_tail_nll(
-    q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=0.0
-):
-    """The discriminating form of the same exponential null: how improbably good the fit is.
-
-        -log P(null) = -sum_i log[ 1 - exp(-|dQ_i| / Delta(Q_i)) ]
-
-    Under "this candidate is wrong" the chance of a discrepancy at least as small as the one
-    observed is 1 - exp(-|dQ|/Delta), so this is the negative log probability that an arbitrary
-    cell would fit this well at every peak. Large means the agreement is too good to be chance,
-    which is the direction a figure of merit should run.
-
-    This is the analytic backbone S07 needs, and it is closed form, parameter-free and sigma-free.
-    Structurally it is Taupin's information merit with de Wolff 1961's Delta(Q) in place of
-    Taupin's 4 pi q^2 V / mu density -- the substitution that S01_density_model.md measured as
-    worth 30-58% in the line count.
-
-    **`min_discrepancy` matters here for the same reason it does in get_M_info_clipped.** The
-    per-line term diverges as the discrepancy goes to zero, so one line landing exactly on a
-    calculated position can swamp the other nineteen (F-026). Pass the resolution of the observed
-    data as a floor. On de Wolff's Li6B4O9 table the effect is stark and purely an artefact of the
-    printing: his incorrect indexing's Q_calc column is rounded to whole units where the correct
-    one is rounded to tenths, producing three exact zeros and a merit sixteen times larger for the
-    *wrong* cell.
-
-    Two caveats it inherits. It is a *per-candidate* tail probability, so it is not yet a
-    look-elsewhere-corrected significance: we generate thousands of candidates and report the best,
-    and de Wolff himself notes that makes a good-looking false cell "fairly certain" (F-016). The
-    extreme-value correction is S07's job. And because real Q sequences are more regular than
-    exponential, especially at high symmetry, the null is optimistic in a symmetry-dependent way
-    (F-015); measuring that is Q11.
-
-    Returns (n_candidates,), larger being better.
-    """
-    delta = get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)
-    discrepancy = np.maximum(np.abs(np.atleast_2d(q2_obs) - q2_calc), min_discrepancy)
-    return -np.sum(np.log(1 - np.exp(-discrepancy/delta) + 1e-100), axis=1)
-
-
-# Generators of the Laue group per crystal system, as integer matrices acting on hkl. The full
-# group is closed from these; get_hkl_multiplicity asserts the resulting order. Oishi-Tomiyasu
-# (2013) section 2 defines her peak multiplicity as the orbit size under exactly these groups:
-# Ci (triclinic), C2h (monoclinic), D2h (orthogonal), D4h (tetragonal), D3d (rhombohedral),
-# D6h (hexagonal) and Oh (cubic).
-INVERSION = -np.eye(3, dtype=int)
-LAUE_GENERATORS = {
-    # Ci, order 2.
-    "triclinic": ([INVERSION], 2),
-    # C2h with unique axis b, matching the repo's monoclinic convention, order 4.
-    "monoclinic": ([INVERSION, np.diag([-1, 1, -1])], 4),
-    # D2h, order 8.
-    "orthorhombic": ([INVERSION, np.diag([1, -1, -1]), np.diag([-1, 1, -1])], 8),
-    # D4h: four-fold about c, plus a two-fold about a, order 16.
-    "tetragonal": (
-        [INVERSION, np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]), np.diag([1, -1, -1])],
-        16,
-    ),
-    # D3d on rhombohedral axes: the three-fold is the cyclic permutation of hkl and the two-fold
-    # swaps a pair, so the rotation part is the full symmetric group on three letters. Order 12.
-    "rhombohedral": (
-        [
-            INVERSION,
-            np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]]),
-            np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]]),
-        ],
-        12,
-    ),
-    # D6h: the six-fold acts on (h, k) as (h, k) -> (-k, h + k), which is what leaves
-    # h^2 + hk + k^2 invariant. Order 24.
-    "hexagonal": (
-        [
-            INVERSION,
-            np.array([[0, -1, 0], [1, 1, 0], [0, 0, 1]]),
-            np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]]),
-        ],
-        24,
-    ),
-    # Oh: all signed permutations, order 48.
-    "cubic": (
-        [
-            INVERSION,
-            np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]]),
-            np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]]),
-            np.diag([1, -1, -1]),
-        ],
-        48,
-    ),
-}
-
-
-def get_laue_operations(lattice_system):
-    """Every operation of the Laue group, closed from the generators above."""
-    generators, order = LAUE_GENERATORS[lattice_system]
-    operations = {np.eye(3, dtype=int).tobytes(): np.eye(3, dtype=int)}
-    frontier = [np.eye(3, dtype=int)]
-    while frontier:
-        current = frontier.pop()
-        for generator in generators:
-            product = generator @ current
-            key = product.tobytes()
-            if key not in operations:
-                operations[key] = product
-                frontier.append(product)
-    if len(operations) != order:
-        raise AssertionError(
-            f"{lattice_system} Laue group closed to {len(operations)}, expected {order}"
-        )
-    return np.stack(list(operations.values()), axis=0)
-
-
-def get_hkl_multiplicity(hkl, lattice_system):
-    """Oishi-Tomiyasu 2013 Table 1: the number of Miller indices equivalent to each [hkl].
-
-    Computed as the orbit size under the Laue group rather than by matching index patterns, which
-    is both shorter and harder to get wrong. Validated against her printed Table 1 in
-    tests/test_fom_literature.py.
-
-    hkl is (n, 3); returns (n,) integers.
-    """
-    operations = get_laue_operations(lattice_system)
-    hkl = np.asarray(hkl, dtype=int)
-    # (n_operations, n, 3) -> the orbit of every hkl at once.
-    orbits = np.einsum("sij,nj->nsi", operations, hkl)
-    multiplicity = np.empty(len(hkl), dtype=int)
-    for index, orbit in enumerate(orbits):
-        multiplicity[index] = len(np.unique(orbit, axis=0))
-    return multiplicity
-
-
-def get_N_cal(q2_ref_calc, q_min, q_max, weights=None):
-    """Oishi-Tomiyasu 2013 eq. (4): the multiplicity-weighted count of computed lines in a range.
-
-        N_cal([q_min, q_max]) = sum_j 1 / m([h_j k_j l_j])
-
-    summed over *every* Miller index whose computed line falls in the range, so a complete orbit
-    contributes exactly 1 and the count is stable against the round-off that makes the raw count N
-    jump (her Table 2 has cases where N exceeds N_cal by nearly a factor of two).
-
-    **This repo's reference lists already carry one representative per orbit** -- Audit B measured
-    `frac_duplicate_q2 = 0.000` for all fourteen Bravais lattices -- so the correct weight here is
-    1 per entry, and N_cal reduces to a plain count of reference lines in range. That is what
-    `weights=None` gives, and it means get_M20's existing N is already Oishi-Tomiyasu's N_cal
-    rather than de Wolff's raw N: her fix (i) is in place, and the instability she documents does
-    not apply to us. Pass explicit weights only when handing this a full, unreduced hkl list.
-
-    q2_ref_calc is (n_candidates, n_ref); q_min and q_max are (n_candidates,).
-    Returns (n_candidates,).
-    """
-    in_range = (q2_ref_calc >= q_min[:, np.newaxis]) & (q2_ref_calc <= q_max[:, np.newaxis])
-    if weights is None:
-        return in_range.sum(axis=1).astype(float)
-    return (in_range*weights[np.newaxis, :]).sum(axis=1)
-
-
 def _reversed_line_terms(q2_obs, q_max, q2_ref_calc):
     """The five row-wise quantities get_M_rev_sym builds out of the reference list.
 
@@ -397,7 +155,7 @@ def _reversed_line_terms(q2_obs, q_max, q2_ref_calc):
 
       q_min      q_I, the reference line closest to the first observed peak;
       in_range   whether each reference line lies in [q_min, q_max];
-      counts     how many do -- N_cal when the weights are all 1 (see get_N_cal);
+      counts     how many do -- N_cal when the weights are all 1;
       q_n        the largest reference line in range, -inf if none is;
       scored     min_j |q2_ref_calc - q2_obs[j]| where in range and 0.0 where not.
 
@@ -440,7 +198,7 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10,
 
     Arguments follow get_M20: q2_obs is (n_peaks,), q2_calc (n_candidates, n_peaks) the computed
     positions of the assigned lines, q2_ref_calc (n_candidates, n_ref) every reference line.
-    `weights` is 1/m per reference entry and defaults to 1; see get_N_cal. Returns
+    `weights` is 1/m per reference entry and defaults to 1. Returns
     (M_tilde, M_rev, M_sym), each (n_candidates,), or those plus N_cal with `return_n_cal`.
 
     `min_n_cal` is the support floor below which M_rev is undefined, signalled as 0.0 -- the same
@@ -650,7 +408,7 @@ def get_multiplicity_taupin88(bravais_lattice):
 # from its own residuals. Its MAP estimate is the nearest-line rule, so `fast_assign` is this
 # model's point estimate.
 #
-# Distances here are in q^2, matching get_M20 and get_M_info_clipped. The classical null family
+# Distances here are in q^2, matching get_M20. The classical null family
 # (de Wolff's Delta, Taupin's P, and the value get_M20_likelihood returns) works in q, so a
 # threshold does not carry between the two.
 # ---------------------------------------------------------------------------------------------
@@ -858,87 +616,12 @@ def get_assignment_distribution(q2_obs, q2_ref_calc, lattice_system, sigma=None,
 
 
 # ---------------------------------------------------------------------------------------------
-# THE MERIT ZOO -- NOT ON THE SHIPPED PATH, AND MOST OF IT IS SCHEDULED FOR DELETION AT P15.
-#
-# The indexer itself computes only get_M20 and get_assignment_posterior. Everything from here to
-# the end of the file is reachable only through `compute_all`, and exists because sessions P12 to
-# P14 of the fom_production campaign fit a learned figure of merit whose inputs are these merits.
-# `M_sym` additionally ships at P15 as the fallback ranker.
-#
-# P15 is where this stops being a holding area: whatever P14's ablation drops is deleted then,
-# along with the merit behind it. Anything still here after that with no consumer is dead.
+# Merits the learned ranker reads besides M20 and M_sym (`utilities/Ranker.py`).
 #
 # Conventions below follow get_M20: q2_obs is (n_peaks,), q2_calc is (n_candidates, n_peaks)
 # holding the computed position of the line assigned to each observed peak, q2_ref_calc is
 # (n_candidates, n_ref) holding every reference line. Nothing below modifies its arguments.
 # ---------------------------------------------------------------------------------------------
-
-
-# Wu 1988 Table 2: the symmetry factor S in M* = S / (V^(2/3) delta), and S' = S divided by the
-# mean M20/M'20 ratio of his Table 1. S' is the version corrected for the uniform-spacing
-# approximation, and is the one to use when comparing across crystal systems.
-WU88_SYMMETRY_FACTOR = {
-    "triclinic": 0.107,
-    "monoclinic": 0.160,
-    "orthorhombic": 0.176,
-    "tetragonal": 0.264,
-    "hexagonal": 0.328,
-    "rhombohedral": 0.328,
-    "cubic": 0.580,
-}
-WU88_SYMMETRY_FACTOR_CORRECTED = {
-    "triclinic": 0.107,
-    "monoclinic": 0.129,
-    "orthorhombic": 0.129,
-    "tetragonal": 0.182,
-    "hexagonal": 0.233,
-    "rhombohedral": 0.233,
-    "cubic": 0.319,
-}
-
-# Wu 1988 Table 1: the mean M20/M'20 ratio per crystal system. This is the cross-lattice bias that
-# run.py inherits when it pools all fourteen Bravais lattices and sorts on raw M20 (F-002).
-WU88_M20_RATIO = {
-    "triclinic": 1.00,
-    "monoclinic": 1.24,
-    "orthorhombic": 1.37,
-    "tetragonal": 1.43,
-    "hexagonal": 1.41,
-    "rhombohedral": 1.41,
-    "cubic": 1.82,
-}
-
-# Number of free cell parameters per crystal system: Taupin's nu, used for degrees of freedom.
-N_CELL_PARAMETERS = {
-    "cubic": 1,
-    "tetragonal": 2,
-    "hexagonal": 2,
-    "rhombohedral": 2,
-    "orthorhombic": 3,
-    "monoclinic": 4,
-    "triclinic": 6,
-}
-
-SIGMA_TREATMENT.update(
-    {
-        "M_wu": "free",
-        "M_star": "free",
-        "M_info_clipped": "free",
-        "M_1": "free",
-        "n_over": "free",
-        "max_gap": "free",
-        "zone_dominance": "free",
-        "M_nn": "free",
-        "F_N": "free",
-        "F_N_q": "free",
-        "V_over_Vcrit": "free",
-        "M_werner_frac": "free",
-        "chi2_taupin": "in-sample",
-        "chi2_entrywise": "in-sample",
-        "bic": "in-sample",
-        "chi2_fixed": "assumed",
-    }
-)
 
 
 def _sorted_lines_in_range(q2_ref_calc, cutoff, floor=None):
@@ -971,8 +654,8 @@ def get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
     Oishi-Tomiyasu found it a worse *ranker* than M_tilde precisely because that continuity lets
     lower-symmetry cells reach the highest values; both properties are worth having measured.
 
-    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
-    compute_all already built avoids re-sorting the same array. See its note there.
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing one
+    already built avoids re-sorting the same array.
 
     Returns (n_candidates,).
     """
@@ -997,117 +680,6 @@ def get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
     return merit
 
 
-def get_M_star(q2_obs, q2_calc, volume, lattice_system, corrected=False):
-    """Wu 1988 eq (9): M* = S / (V^(2/3) delta), the cheapest FOM in the literature.
-
-    Uses Smith & Snyder's V ~ K_n d_n^3 to replace Q_N/(2N) by a closed form in the cell volume,
-    so no line counting happens at all. Wu proposes it specifically as an intermediate testing
-    criterion inside trial-and-error indexing, which is exactly this project's inner-loop slot.
-
-    `volume` is the direct-space cell volume in A^3, shape (n_candidates,). With corrected=True the
-    S' column of his Table 2 is used instead of S, which divides out the mean M20/M'20 ratio and so
-    puts the crystal systems on a common footing.
-
-    Returns (n_candidates,).
-    """
-    table = WU88_SYMMETRY_FACTOR_CORRECTED if corrected else WU88_SYMMETRY_FACTOR
-    discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
-    merit = np.zeros(q2_calc.shape[0])
-    good = (discrepancy > 0) & (volume > 0) & (q2_calc.sum(axis=1) != 0)
-    merit[good] = table[lattice_system]/(volume[good]**(2/3)*discrepancy[good])
-    return merit
-
-
-def get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
-    """Shirley 1980 section 2.2: the de Wolff family with a *per-line local* epsilon.
-
-        delta_i = |Q_obs_i - nearest calculated line|
-        epsilon_i = half the separation between the two calculated lines bracketing Q_obs_i
-        M_1 = <epsilon> / <delta>
-
-    This is arguably the most natural member of the family and, as far as we can tell, has never
-    been benchmarked at scale. Shirley's argument is that because epsilon_i is derived from the
-    data rather than from an external error estimate, the ratio "resists spurious improvement with
-    increasing volume" -- which is the literature's own answer to the sigma question (F-008).
-
-    It is the empirical counterpart of get_delta_dewolff61, which gives the same local quantity
-    analytically. Where both are computable they should agree, and they can be cross-plotted.
-
-    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
-    compute_all already built avoids re-sorting the same array. See its note there.
-
-    Returns (n_candidates,).
-    """
-    cutoff = q2_calc[:, -1]
-    lines, count = (_sorted_lines_in_range(q2_ref_calc, cutoff) if sorted_lines is None
-                    else sorted_lines)
-
-    # For each observed peak, the bracketing pair of calculated lines. searchsorted on a row-sorted
-    # array with the out-of-range entries at +inf gives the insertion point directly.
-    n_candidates, n_peaks = q2_calc.shape
-    upper_index = np.stack(
-        [np.searchsorted(lines[row], q2_obs) for row in range(n_candidates)], axis=0
-    )
-    n_lines = lines.shape[1]
-    upper_index = np.clip(upper_index, 1, n_lines - 1)
-    upper = np.take_along_axis(lines, upper_index, axis=1)
-    lower = np.take_along_axis(lines, upper_index - 1, axis=1)
-    # A peak beyond the last in-range line has no upper bracket; fall back to the local gap below.
-    upper = np.where(np.isfinite(upper), upper, lower)
-    epsilon = np.abs(upper - lower)/2
-
-    delta = np.abs(q2_obs[np.newaxis] - q2_calc)
-    merit = np.zeros(n_candidates)
-    mean_delta = np.mean(delta, axis=1)
-    good = (count > 1) & (mean_delta > 0) & (q2_calc.sum(axis=1) != 0)
-    merit[good] = np.mean(epsilon, axis=1)[good]/mean_delta[good]
-    return merit
-
-
-def get_M_info_clipped(
-    q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=0.0
-):
-    """Taupin 1988 eqs (20), (25): the information merit with neighbour clipping.
-
-    The unclipped form (get_M20_likelihood) lets a single calculated line take credit for two close
-    observed lines, which over-rewards crowded patterns -- the hard stratum. Taupin's fix replaces
-    the interval 2*epsilon by dQ_minus + dQ_plus, each capped at half the spacing to the adjacent
-    observed line.
-
-    Two deliberate departures from Taupin, both of which keep this sigma-free (PLAN 2.5):
-
-      - Taupin caps against chi_r * E_i, an a priori error estimate. We do not have one and are not
-        allowed to assume one, so the half-width used here is the observed |dQ| itself, matching
-        what the repo's existing unclipped form already does.
-      - the line density is de Wolff 1961's Delta(Q) rather than Taupin's 4 pi q^2 V / mu, which
-        was measured to under-count by 30-58% (S01_density_model.md).
-
-    **`min_discrepancy` is not optional in practice.** The per-line term -log(1 - exp(-x)) diverges
-    as x -> 0, so a single observation that happens to land exactly on a calculated line carries
-    unbounded weight and can dominate the whole merit (F-026). Pass a floor on |dQ| expressing the
-    resolution of the observed data -- how finely the peak positions are actually known. That is
-    knowable, unlike sigma: it is the quantisation of the input, in the same spirit as Werner's
-    g_min, not an error model. Defaults to 0.0, which reproduces the unclipped formula.
-
-    Returns the merit in bits, (n_candidates,), larger being better.
-    """
-    delta = get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)
-    discrepancy = np.maximum(np.abs(q2_obs[np.newaxis] - q2_calc), min_discrepancy)
-
-    # Half the spacing to the observed neighbour on each side; the outermost peaks are capped on
-    # one side only, so their gap is reused.
-    spacing = np.diff(q2_obs)/2
-    lower_cap = np.concatenate([spacing[:1], spacing])
-    upper_cap = np.concatenate([spacing, spacing[-1:]])
-    width = np.minimum(discrepancy, lower_cap[np.newaxis]) + np.minimum(
-        discrepancy, upper_cap[np.newaxis]
-    )
-
-    # Taupin's argument is (interval)/(mean interval between calculated lines) = width/(2 Delta).
-    argument = width/(2*delta)
-    return -1/np.log(2)*np.sum(np.log(1 - np.exp(-argument) + 1e-100), axis=1)
-
-
 def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5, sorted_lines=None):
     """Calculated lines in range that no observation accounts for, and the longest such run.
 
@@ -1119,8 +691,8 @@ def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5, sorted_lines=
     calculated line counts as unaccounted for when the nearest observed peak is further away than
     tolerance_factor times the local gap between calculated lines. Sigma-free by construction.
 
-    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing the one
-    compute_all already built avoids re-sorting the same array. See its note there.
+    `sorted_lines` is the (lines, count) pair `_sorted_lines_in_range` returns; passing one
+    already built avoids re-sorting the same array.
 
     Returns (n_over, max_gap), each (n_candidates,).
     """
@@ -1135,42 +707,6 @@ def get_n_over(q2_obs, q2_calc, q2_ref_calc, tolerance_factor=0.5, sorted_lines=
     over_prediction_runs(lines, count, np.sort(q2_obs), float(tolerance_factor),
                          n_over, max_gap)
     return n_over, max_gap
-
-
-def get_M_nn(q2_obs, q2_calc, q2_ref_calc, dimension=1):
-    """Oishi-Tomiyasu, Tanaka & Nakagawa 2021: the recipe that generates the whole FOM family.
-
-    A de Wolff-type FOM is epsilon/delta where epsilon is the expected distance from a random point
-    to the nearest of N computed points in whatever space the data occupy. For s dimensions in a
-    convex body of volume V,
-
-        epsilon = Gamma(s/2 + 1)^(1/s) Gamma(1/s) / (sqrt(pi) s) * (V/N)^(1/s)
-
-    For s = 1 this is exactly (1/2)(V/N), so with V = Q_N it reduces to de Wolff's Q_N/(2N) -- the
-    test suite asserts that identity. The construction is explicitly scale free, which is the
-    structural reason the whole family needs no sigma (F-013).
-
-    Its real use here is as the correct normalisation for FOMs built on *derived* point processes
-    -- the s != 1 cases. The repo's triplet FOM, which worked on differences of q2 values and was
-    the original motivation for checking this, was removed in 2026-08-11 (F-033).
-
-    Returns (n_candidates,).
-    """
-    from math import gamma
-
-    s = dimension
-    coefficient = gamma(s/2 + 1)**(1/s)*gamma(1/s)/(np.sqrt(np.pi)*s)
-    discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
-    cutoff = q2_calc[:, -1]
-    in_range = q2_ref_calc < cutoff[:, np.newaxis]
-    count = in_range.sum(axis=1)
-    q_n = np.max(np.where(in_range, q2_ref_calc, 0.0), axis=1)
-
-    merit = np.zeros(q2_calc.shape[0])
-    good = (count > 0) & (discrepancy > 0) & (q2_calc.sum(axis=1) != 0)
-    epsilon = coefficient*(q_n[good]/count[good])**(1/s)
-    merit[good] = epsilon/discrepancy[good]
-    return merit
 
 
 def get_zone_dominance(xnn, lattice_system):
@@ -1225,23 +761,6 @@ def get_zone_dominance(xnn, lattice_system):
     return np.min(areas, axis=1)/reciprocal_volume**(2/3)
 
 
-def get_g_min_werner(d_values, decimals):
-    """Werner 1976's precision floor on the mean discrepancy, from decimal quantisation.
-
-    If d values are reported to `decimals` places, a line at d cannot be located better than
-    Delta = 0.25 * 10^(-decimals), so epsilon_i = |1/d^2 - 1/(d + Delta)^2| and g_min is their mean.
-
-    Our q2 are full precision, so Werner's own floor does not bind for us; this exists to reproduce
-    his Tables 1 and 2 and to document the construction. **The operational floor for this project's
-    data is not yet chosen** -- the candidates are the peak-picking precision and the empirical
-    reproducibility floor measured in S06 -- so get_V_over_Vcrit takes g_min as an argument rather
-    than defaulting to anything.
-    """
-    step = 0.25*10.0**(-decimals)
-    d_values = np.asarray(d_values, dtype=float)
-    return float(np.mean(np.abs(1/d_values**2 - 1/(d_values + step)**2)))
-
-
 def get_V_over_Vcrit(volume, d_n, g_min, multiplicity, threshold=10.0):
     """Werner 1976: is this comparison capable of discriminating at all?
 
@@ -1265,16 +784,6 @@ def get_V_over_Vcrit(volume, d_n, g_min, multiplicity, threshold=10.0):
     v_crit = 3*multiplicity*d_n/(8*np.pi*g_min*threshold)
     m_max = 3*multiplicity*d_n/(8*np.pi*g_min*volume)
     return volume/v_crit, m_max
-
-
-def get_M_werner_frac(merit, volume, d_n, g_min, multiplicity):
-    """M_N / M_N,max: the FOM as a fraction of what the data precision allows.
-
-    Precision-normalised and still sigma-free, because g_min is a floor on the *achievable*
-    discrepancy rather than an error model for the measurement.
-    """
-    _, m_max = get_V_over_Vcrit(volume, d_n, g_min, multiplicity)
-    return np.where(m_max > 0, merit/m_max, 0.0)
 
 
 def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
@@ -1317,225 +826,6 @@ def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
         mean_d2theta = np.mean(np.abs(two_theta_obs[np.newaxis] - two_theta_calc), axis=1)
         merit_2theta = np.where(mean_d2theta > 0, n_peaks/(mean_d2theta*n_possible), 0.0)
     return merit_2theta, merit_q
-
-
-def estimate_sigma_entrywise(q2_obs, q2_calc_pool, quantile=0.1):
-    """A per-entry, label-free estimate of the residual scale, from the best-fitting candidates.
-
-    The idea (PLAN 2.5 treatment 2): whatever the instrument's error actually is, the candidates
-    that fit this entry best cannot do better than it, so the residual scale of the leading tail of
-    the candidate pool is an upper-bounded estimate of sigma that uses no external model and no
-    labels. `quantile` selects how much of the pool counts as "best fitting".
-
-    **This estimator is not yet validated.** PLAN 2.5 requires a calibration study before any
-    sigma-hat is trusted, and Q7 is open. Anything built on it is labelled 'in-sample' and must be
-    reported with a sigma-sensitivity curve.
-
-    q2_calc_pool is (n_candidates, n_peaks) for one entry. Returns a scalar.
-    """
-    residual_scale = np.sqrt(np.mean((q2_obs[np.newaxis] - q2_calc_pool)**2, axis=1))
-    cutoff = np.quantile(residual_scale, quantile)
-    best = residual_scale[residual_scale <= cutoff]
-    return float(np.mean(best)) if best.size else float(np.mean(residual_scale))
-
-
-def get_chi2(q2_obs, q2_calc, lattice_system, sigma=None, variant="entrywise"):
-    """Reduced chi-squared and its upper-tail p-value, in three explicitly labelled variants.
-
-    dof = n - nu with nu the number of free cell parameters. Read PLAN 2.5 before using any of
-    these: sigma is never known here, and each variant states what it does instead.
-
-      'taupin'     Taupin's in-sample chi_r rescaling. With no a priori per-line error estimates
-                   E_i to rescale, fitting the scale to the residuals makes the reduced chi-squared
-                   identically 1 for every candidate, so it cannot rank. The informative output is
-                   the fitted scale itself, which is returned as sigma_hat. Recorded as a negative
-                   result rather than quietly dropped.
-      'entrywise'  sigma from estimate_sigma_entrywise, a per-entry label-free estimator. Pass it
-                   in via `sigma`. This is the variant with a chance of being useful, and it is the
-                   one whose estimator needs validating (Q7).
-      'fixed'      the repo's global model sigma(q2) = 0.00010 + 0.00058 q2. Included **only** as a
-                   reference point to quantify what assuming sigma buys or costs. It is a median
-                   over one instrument population fitted for *generating* data, and it is the most
-                   insidious leakage path in the project (F-008), because the synthetic generator
-                   uses this exact model. Never a deliverable on its own.
-
-    Returns (chi2_reduced, p_value, sigma_hat), each (n_candidates,).
-    """
-    from scipy import stats
-
-    n_peaks = q2_obs.shape[0]
-    dof = max(n_peaks - N_CELL_PARAMETERS[lattice_system], 1)
-    residual = q2_obs[np.newaxis] - q2_calc
-
-    if variant == "fixed":
-        scale = 0.00010 + 0.00058*q2_obs
-        sigma_hat = np.full(q2_calc.shape[0], float(np.mean(scale)))
-        chi2 = np.sum((residual/scale[np.newaxis])**2, axis=1)/dof
-    elif variant == "taupin":
-        sigma_hat = np.sqrt(np.sum(residual**2, axis=1)/dof)
-        chi2 = np.ones(q2_calc.shape[0])
-    elif variant == "entrywise":
-        if sigma is None:
-            raise ValueError("variant='entrywise' needs sigma from estimate_sigma_entrywise")
-        sigma_hat = np.full(q2_calc.shape[0], float(sigma))
-        chi2 = np.sum(residual**2, axis=1)/(sigma**2*dof)
-    else:
-        raise ValueError(f"unknown chi2 variant {variant!r}")
-    return chi2, stats.chi2.sf(chi2*dof, dof), sigma_hat
-
-
-def get_bic(q2_obs, q2_calc, xnn, lattice_system, bravais_lattice):
-    """Bayesian information criterion with an explicit assignment-multiplicity penalty.
-
-        BIC = -2 ln L + nu ln n + sum_i log(2 |dQ_i| dN_calc(q2_i))
-
-    The last term is the log number of hkl assignments consistent with the data at each peak: a
-    candidate that puts many calculated lines near an observation has many ways to fit it and
-    should be charged for all of them. That is the complexity penalty M20 only implies, and it is
-    the per-candidate counterpart of de Wolff's look-elsewhere argument (F-016).
-
-    The line density dN_calc comes from get_delta_dewolff61 rather than from 4 pi q^2 V / mu, which
-    was measured to under-count badly (S01_density_model.md). The likelihood uses an in-sample
-    residual scale, so this is labelled 'in-sample' and not sigma-free; lower is better.
-
-    Returns (n_candidates,).
-    """
-    n_peaks = q2_obs.shape[0]
-    residual = q2_obs[np.newaxis] - q2_calc
-    variance = np.maximum(np.mean(residual**2, axis=1), 1e-300)
-    log_likelihood = -0.5*n_peaks*(np.log(2*np.pi*variance) + 1)
-
-    delta = get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice)
-    # dN/dQ = 1/(2 Delta), so the number of assignments within |dQ| of the observation is
-    # 2 |dQ| / (2 Delta). Floored at one: a peak always has at least the assignment it was given.
-    assignments = np.maximum(np.abs(residual)/delta, 1.0)
-    complexity = np.sum(np.log(assignments), axis=1)
-
-    return -2*log_likelihood + N_CELL_PARAMETERS[lattice_system]*np.log(n_peaks) + complexity
-
-
-def compute_all(
-    q2_obs,
-    q2_calc,
-    q2_ref_calc,
-    xnn,
-    lattice_system,
-    bravais_lattice,
-    wavelength=None,
-    sigma_entrywise=None,
-    g_min=None,
-    min_discrepancy=0.0,
-):
-    """Every figure of merit in the zoo for one entry's candidate pool, as a tidy dict of arrays.
-
-    S06 through S08 all want the whole vector at once, so this is the single entry point. Each key
-    maps to an array of shape (n_candidates,); `sigma_treatment` maps each key to 'free',
-    'in-sample' or 'assumed' so that a sigma-dependent column can never be read as sigma-free.
-
-    **Evaluation order no longer matters.** get_M20 used to write zeros into q2_ref_calc in
-    place as part of its own arithmetic, which would have silently corrupted every other FOM in
-    this frame, so it was ordered last and handed a copy. It no longer touches its argument, and
-    no merit here does. M20 stays in last position only so that the key order of the returned
-    frame does not move; tests/test_fom_literature.py asserts both that the frame is invariant
-    to evaluation order and that nothing modifies its arguments.
-
-    Optional arguments degrade gracefully: without `wavelength` the published-units F_N is omitted,
-    without `sigma_entrywise` the entrywise chi-squared is omitted, and without `g_min` the Werner
-    quantities are omitted, since this project has not yet chosen an operational precision floor.
-
-    `min_discrepancy` floors |dQ| for the two information-type merits, which diverge when an
-    observation lands exactly on a calculated line (F-026). Set it to the resolution of the peak
-    positions being scored.
-    """
-    reciprocal_unit_cell = get_reciprocal_unit_cell_from_xnn(
-        xnn, partial_unit_cell=True, lattice_system=lattice_system
-    )
-    reciprocal_volume = get_unit_cell_volume(
-        reciprocal_unit_cell, partial_unit_cell=True, lattice_system=lattice_system
-    )
-    volume = 1/np.maximum(reciprocal_volume, 1e-300)
-
-    # get_M_wu, get_M_1 and get_n_over each need the calculated lines sorted within the cut-off.
-    # Sorting once here and passing it down replaces three identical sorts of the same array; each
-    # still sorts for itself when called directly.
-    sorted_lines = _sorted_lines_in_range(q2_ref_calc, q2_calc[:, -1])
-
-    features = {}
-    M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc)
-    features["M_tilde"] = M_tilde
-    features["M_rev"] = M_rev
-    features["M_sym"] = M_sym
-    features["X_N"] = get_X_N(q2_obs, q2_calc, q2_ref_calc).astype(float)
-    features["M_wu"] = get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
-    features["M_star"] = get_M_star(q2_obs, q2_calc, volume, lattice_system)
-    features["M_star_corrected"] = get_M_star(
-        q2_obs, q2_calc, volume, lattice_system, corrected=True
-    )
-    features["M_1"] = get_M_1(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
-    features["M_nn"] = get_M_nn(q2_obs, q2_calc, q2_ref_calc)
-    features["M_info_clipped"] = get_M_info_clipped(
-        q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=min_discrepancy
-    )
-    features["nll_exponential"] = get_nll_exponential(
-        q2_obs, q2_calc, xnn, lattice_system, bravais_lattice
-    )
-    features["null_tail_nll"] = get_null_tail_nll(
-        q2_obs, q2_calc, xnn, lattice_system, bravais_lattice, min_discrepancy=min_discrepancy
-    )
-    features["bic"] = get_bic(q2_obs, q2_calc, xnn, lattice_system, bravais_lattice)
-    n_over, max_gap = get_n_over(q2_obs, q2_calc, q2_ref_calc, sorted_lines=sorted_lines)
-    features["n_over"] = n_over.astype(float)
-    features["max_gap"] = max_gap.astype(float)
-    features["zone_dominance"] = get_zone_dominance(xnn, lattice_system)
-    features["N_cal"] = get_N_cal(
-        q2_ref_calc, np.zeros(q2_calc.shape[0]), q2_calc[:, -1]
-    )
-    features["delta_dewolff61"] = np.mean(
-        get_delta_dewolff61(q2_obs, xnn, lattice_system, bravais_lattice), axis=1
-    )
-    features["n_dewolff61"] = get_n_dewolff61(
-        q2_obs, xnn, lattice_system, bravais_lattice
-    )[:, -1]
-
-    merit_2theta, merit_q = get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=wavelength)
-    features["F_N_q"] = merit_q
-    if merit_2theta is not None:
-        features["F_N"] = merit_2theta
-
-    chi2_taupin, p_taupin, sigma_taupin = get_chi2(
-        q2_obs, q2_calc, lattice_system, variant="taupin"
-    )
-    features["chi2_taupin_scale"] = sigma_taupin
-    chi2_fixed, p_fixed, _ = get_chi2(q2_obs, q2_calc, lattice_system, variant="fixed")
-    features["chi2_fixed"] = chi2_fixed
-    features["chi2_fixed_pvalue"] = p_fixed
-    if sigma_entrywise is not None:
-        chi2_entry, p_entry, _ = get_chi2(
-            q2_obs, q2_calc, lattice_system, sigma=sigma_entrywise, variant="entrywise"
-        )
-        features["chi2_entrywise"] = chi2_entry
-        features["chi2_entrywise_pvalue"] = p_entry
-
-    if g_min is not None:
-        d_n = 1/np.sqrt(np.maximum(q2_calc[:, -1], 1e-300))
-        multiplicity = get_multiplicity_taupin88(bravais_lattice)[0]
-        over_critical, m_max = get_V_over_Vcrit(volume, d_n, g_min, multiplicity)
-        features["V_over_Vcrit"] = over_critical
-        features["M_werner_max"] = m_max
-
-    features["M20"] = get_M20(q2_obs, q2_calc, q2_ref_calc)
-    if g_min is not None:
-        features["M_werner_frac"] = np.where(
-            features["M_werner_max"] > 0, features["M20"]/features["M_werner_max"], 0.0
-        )
-
-    return {
-        "features": features,
-        "sigma_treatment": {
-            name: SIGMA_TREATMENT.get(name.split("_pvalue")[0].split("_scale")[0], "free")
-            for name in features
-        },
-    }
 
 
 def merit_set(q2_obs, q2_ref_calc):

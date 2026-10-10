@@ -27,7 +27,8 @@ def _pool(n_entries=3, n_per_lattice=60, lattices=('cP', 'mP', 'aP'), seed=0):
                 frame = pd.DataFrame({
                     'entry_id': f'E{entry}', 'condition_bundle': bundle,
                     'bravais_lattice': lattice, 'candidate_id': np.arange(n)})
-                for name in ranker.FEATURES:
+                for name in dict.fromkeys(ranker.FEATURES + ranker.RAW_MERITS + (
+                        'n_absent_extra_in_range',)):
                     if name != ranker.LATTICE_FEATURE:
                         frame[name] = rng.normal(size=n)
                 frame['M20'] = rng.gamma(2.0, 3.0, size=n)
@@ -147,13 +148,11 @@ def _write_pool(directory, frame):
     frame['unit_cell'] = [
         get_partial_unit_cell(true_cell if correct else wrong_cell, lattice_system=system)
         for correct, system in zip(frame['is_correct'], frame['lattice_system'])]
-    frame['volume'] = np.exp(frame['log_volume'].to_numpy())
     frame['n_indexed'] = 20
-    frame['n_entering'] = 1000
     frame['n_ref_in_range'] = 50
-    frame['spacegroup'] = 'G e.g. G'
+    frame['spacegroup'] = np.where(frame['bravais_lattice'] == 'cP', 'G e.g. G', 'H e.g. H')
     shard = list(ranker.CANDIDATE_KEY) + ['lattice_system', 'unit_cell'] + list(ranker.SHARD_COLUMNS)
-    derived = ('log_volume', 'f_absent_extra', 'pool_size_full', ranker.LATTICE_FEATURE)
+    derived = ('f_absent_extra', 'group_frequency', ranker.LATTICE_FEATURE)
     features = [name for name in ranker.FEATURES
                 if name not in shard and name not in derived
                 and name not in ranker.RAW_MERITS and name not in ranker.CONTEXT_FEATURES]
@@ -163,14 +162,13 @@ def _write_pool(directory, frame):
             rows[list(ranker.CANDIDATE_KEY) + list(ranker.RAW_MERITS)],
             directory / Benchmark.MERIT_SIDECAR, bundle, lattice)
         Benchmark.write_candidate_shard(
-            rows[list(ranker.CANDIDATE_KEY) + features + ['n_ref_in_range']],
+            rows[list(ranker.CANDIDATE_KEY) + features
+                 + ['n_absent_extra_in_range', 'n_ref_in_range']],
             directory / Benchmark.FEATURE_SIDECAR, bundle, lattice)
     entries = frame[list(ranker.ENTRY_KEY)].drop_duplicates().reset_index(drop=True)
     entries['bravais_lattice_true'] = 'cP'
     entries['unit_cell_true'] = [true_cell] * entries.shape[0]
-    entries['pool_size_full'] = float(frame.shape[0])
     Benchmark.write_entry_table(entries, directory)
-    return entries
 
 
 def test_training_rows_are_chosen_without_the_label(tmp_path):
@@ -187,20 +185,25 @@ def test_training_rows_are_chosen_without_the_label(tmp_path):
     frame.loc[correct, ['M20', 'm20_at_prune']] = 2.0
     survivor = frame.index[correct][0]
     frame.loc[survivor, ['M20', 'm20_at_prune']] = 5.0
-    entries = _write_pool(tmp_path, frame)
+    _write_pool(tmp_path, frame)
     crystals = set(frame['entry_id'])
 
     training, evaluation = ranker.export_bundle(
-        tmp_path, 'b0', entries, crystals, crystals, seeds=(1,), cut=3.5, n_top=20,
-        keep_all_depths=True, top_k=1000, negative_rate=1.0, n_negatives=10**6)
+        tmp_path, 'b0', crystals, crystals, seeds=(1,), cut=3.5, n_top=20,
+        keep_all_depths=True, top_k=1000, negative_rate=1.0, n_negatives=10**6,
+        group_frequency={('cP', 'G e.g. G'): 0.25})
     key = list(ranker.CANDIDATE_KEY)
     rows = training[1].merge(evaluation, on=key, how='outer', indicator=True, suffixes=('', '_e'))
     assert (rows['_merge'] == 'both').all(), rows.loc[rows['_merge'] != 'both', key]
     assert training[1]['is_correct'].sum() == 1
     assert (training[1]['M20'] >= 3.5).all()
-    # The group rides along for a prior to be looked up by; it is not an input.
-    assert set(training[1]['spacegroup']) == {'G e.g. G'} == set(evaluation['spacegroup'])
+    # The group rides along for its frequency to be looked up by; it is not an input. A group the
+    # table does not list has frequency 0.
+    assert set(training[1]['spacegroup']) == {'G e.g. G', 'H e.g. H'} == set(evaluation['spacegroup'])
     assert 'spacegroup' not in ranker.FEATURES
+    for rows in (training[1], evaluation):
+        expected = np.where(rows['spacegroup'] == 'G e.g. G', 0.25, 0.0)
+        np.testing.assert_array_equal(rows['group_frequency'].to_numpy(), expected)
 
 
 def test_split_crystals_is_disjoint_stratified_and_seeded():
@@ -228,7 +231,7 @@ def test_the_lattice_encodings_shape_the_design_matrix():
     frame = _pool(n_entries=1, n_per_lattice=3)
     widths = {encoding: ranker.FomCombiner(encoding).design_matrix(frame).shape[1]
               for encoding in ranker.LATTICE_ENCODINGS}
-    assert widths == {'onehot': 30 + 13, 'ordinal': 30, 'native': 30}
+    assert widths == {'onehot': 16 + 13, 'ordinal': 16, 'native': 16}
     with pytest.raises(ValueError):
         ranker.FomCombiner('ordinal').design_matrix(frame.assign(bravais_lattice='xX'))
 
@@ -247,7 +250,7 @@ def _fitted(encoding, seed=12345, features=ranker.FEATURES):
 
 # A model on fewer inputs, as a feature ablation fits: the lattice and a context gap removed, so
 # the design matrix's columns shift past both.
-REDUCED = ranker.features_without(('n_entering', 'bravais_lattice', 'ctx_M20_gap_to_best'))
+REDUCED = ranker.features_without(('group_frequency', 'bravais_lattice', 'ctx_M20_gap_to_best'))
 
 
 @pytest.mark.parametrize('features', (ranker.FEATURES, REDUCED), ids=('all', 'reduced'))
@@ -257,20 +260,42 @@ def test_an_exportable_model_scores_the_same_through_onnx(tmp_path, encoding, fe
     combiner.save(tmp_path / 'model')
     onnx = ranker.onnx_probability(tmp_path / 'model' / 'model.onnx',
                                    combiner.design_matrix(frame))
-    np.testing.assert_allclose(onnx, combiner.raw_score(frame), atol=1e-6)
+    np.testing.assert_allclose(onnx, combiner.raw_score(frame), rtol=0, atol=1e-12)
 
 
-def test_a_native_categorical_model_does_not_survive_onnx_conversion(tmp_path):
-    """Why `native` is never exported: skl2onnx writes a categorical split as a threshold split,
-    converts without complaint, and scores differently. This is the case the test above exists to
-    catch, so it must fail it."""
+def _threshold_edges(model, n_rows, seed=0):
+    """Inputs on the classifier's split thresholds: each the float32 nearest a threshold or
+    one float32 step either side of it, with 2 % missing. A float32 threshold that rounds up
+    sends the rows equal to the float32 value down the other branch."""
+    rng = np.random.default_rng(seed)
+    columns = []
+    for thresholds in model._bin_mapper.bin_thresholds_:
+        value = np.asarray(thresholds)[rng.integers(0, len(thresholds), n_rows)].astype(np.float32)
+        step = rng.integers(-1, 2, n_rows)
+        value = np.where(step < 0, np.nextafter(value, np.float32(-np.inf)),
+                         np.where(step > 0, np.nextafter(value, np.float32(np.inf)), value))
+        value[rng.random(n_rows) < 0.02] = np.nan
+        columns.append(value)
+    return np.stack(columns, axis=1).astype(np.float32)
+
+
+def test_the_onnx_export_takes_every_branch_the_classifier_takes(tmp_path):
+    combiner, _ = _fitted('ordinal')
+    combiner.save(tmp_path / 'model')
+    matrix = _threshold_edges(combiner.model, 20_000)
+    onnx = ranker.onnx_probability(tmp_path / 'model' / 'model.onnx', matrix)
+    np.testing.assert_allclose(onnx, combiner.model.predict_proba(matrix)[:, 1], rtol=0,
+                               atol=1e-12)
+
+
+def test_a_native_categorical_model_refuses_to_convert(tmp_path):
+    """Why `native` is never exported: a categorical split has no threshold form."""
     from mlindex.utilities.IOManagers import SKLearnManager
 
-    combiner, frame = _fitted('native')
-    SKLearnManager(filename=str(tmp_path / 'native'), model_type='onnx').save(
-        model=combiner.model, n_features=len(combiner.matrix_names))
-    onnx = ranker.onnx_probability(tmp_path / 'native.onnx', combiner.design_matrix(frame))
-    assert np.max(np.abs(onnx - combiner.raw_score(frame))) > 1e-2
+    combiner, _ = _fitted('native')
+    with pytest.raises(ValueError, match='categorical'):
+        SKLearnManager(filename=str(tmp_path / 'native'), model_type='onnx').save(
+            model=combiner.model, n_features=len(combiner.matrix_names))
 
 
 def test_a_saved_model_loads_identically_and_is_never_overwritten(tmp_path):
@@ -320,9 +345,9 @@ def test_only_the_per_lattice_calibration_can_reorder_two_lattices():
 
 
 def test_removing_inputs_keeps_the_others_in_order_and_refuses_a_name_that_is_not_one():
-    kept = ranker.features_without(('M_wu', 'n_entering'))
+    kept = ranker.features_without(('M_wu', 'group_frequency'))
     assert len(kept) == len(ranker.FEATURES) - 2
-    assert 'M_wu' not in kept and 'n_entering' not in kept
+    assert 'M_wu' not in kept and 'group_frequency' not in kept
     assert list(kept) == [name for name in ranker.FEATURES if name in kept]
     assert ranker.features_without(()) == ranker.FEATURES
     with pytest.raises(ValueError, match='M_wuu'):
@@ -333,7 +358,7 @@ def test_removing_inputs_keeps_the_others_in_order_and_refuses_a_name_that_is_no
 
 def test_a_model_without_an_input_never_reads_its_column(tmp_path):
     combiner, frame = _fitted('ordinal', features=REDUCED)
-    stripped = frame.drop(columns=['n_entering', 'ctx_M20_gap_to_best'])
+    stripped = frame.drop(columns=['group_frequency', 'ctx_M20_gap_to_best'])
     np.testing.assert_array_equal(combiner.score(stripped), combiner.score(frame))
     assert combiner.design_matrix(frame).shape[1] == len(ranker.FEATURES) - 3
     combiner.save(tmp_path / 'model')

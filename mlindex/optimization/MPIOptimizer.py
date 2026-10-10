@@ -432,7 +432,7 @@ class OptimizerManager(OptimizerBase):
 
     def _downsample_computation(self, best_M20_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
-                                n_top_candidates, at_prune=None):
+                                n_top_candidates, at_prune=None, inputs=None):
         best_M20_all = np.concatenate(best_M20_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
@@ -533,6 +533,15 @@ class OptimizerManager(OptimizerBase):
             order, n_entering, n_top_candidates,
             )
 
+        # Every survivor, best M20 first, so the candidates kept below are its first rows.
+        # `inputs` are indexed like the concatenated payloads, as `at_prune` is.
+        survivor_rows = np.asarray(survivor_positions, dtype=int)[order]
+        self.pool = dict(
+            {name: values[survivor_rows] for name, values in (inputs or {}).items()},
+            M20=M20_downsampled[order], n_indexed=n_indexed_downsampled[order],
+            spacegroup=np.asarray([spacegroup_downsampled[i] for i in order], dtype=str),
+            )
+
         sort_indices = order[:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
         self.top_M20 = M20_downsampled[sort_indices]
@@ -543,6 +552,13 @@ class OptimizerManager(OptimizerBase):
             partial_unit_cell=True,
             lattice_system=self.lattice_system,
             )
+
+    def result(self):
+        """What the final ranking needs from this lattice, ready to pickle: its `pool`, every
+        candidate that came through deduplication, best M20 first, with its
+        `Ranker.candidate_inputs`; and `top_unit_cell`, the unit cells of the candidates it
+        reports, which are the pool's first rows."""
+        return {'pool': self.pool, 'top_unit_cell': self.top_unit_cell}
 
     def _on_downsample(self, survivors, order, n_entering, n_top_candidates):
         """Observation point for a benchmark run. Does nothing on the shipped path.
@@ -567,11 +583,13 @@ class OptimizerManager(OptimizerBase):
                     name: np.concatenate([p['merit_at_prune'][name] for p in payloads])
                     for name in payloads[0]['merit_at_prune']},
                 }
+        inputs = {name: np.concatenate([p['inputs'][name] for p in payloads])
+                  for name in payloads[0]['inputs']}
         self._downsample_computation(
             [p['M20'] for p in payloads], [p['xnn'] for p in payloads],
             [p['n_indexed'] for p in payloads],
             [spacegroup for p in payloads for spacegroup in p['spacegroup']],
-            n_top_candidates, at_prune=at_prune)
+            n_top_candidates, at_prune=at_prune, inputs=inputs)
 
     def downsample_candidates(self, candidates, n_top_candidates):
         payloads = []

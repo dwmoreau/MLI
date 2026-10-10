@@ -4,9 +4,9 @@ Three stages, each a separate job on a cluster:
 
     # 1. export: a pool as ranker frames, one condition bundle per call (or all of them)
     python -m mlindex.scripts.run_ranker --stage export --pool pools/train_general \
-        --out-dir ranker/export --bundle b0_error0p5_cont0
+        --out-dir ranker/export --group-frequency group_frequency.csv --bundle b0_error0p5_cont0
     python -m mlindex.scripts.run_ranker --stage export --pool pools/dev_general \
-        --out-dir ranker/export
+        --out-dir ranker/export --group-frequency group_frequency.csv
 
     # 2. fit: one model, with its learning curve on the held-out selection crystals
     python -m mlindex.scripts.run_ranker --stage fit \
@@ -18,7 +18,7 @@ Three stages, each a separate job on a cluster:
     python -m mlindex.scripts.run_ranker --stage fit \
         --export-dir ranker/export/<commit>/train_general_cut3.5_depth20 \
         --out-dir ranker/fits --encoding ordinal --max-iter 1100 --seed 12345 \
-        --drop-features n_entering,final_rank
+        --drop-features group_frequency,zone_dominance
 
     # 3. evaluate: saved models on a reporting pool, beside M20 and M_sym
     python -m mlindex.scripts.run_ranker --stage evaluate \
@@ -28,7 +28,8 @@ Three stages, each a separate job on a cluster:
 
 What each stage does:
 
-* **export** reads a pool written by `run_benchmark --stage generate`. From a `fom-train` pool it
+* **export** reads a pool written by `run_benchmark --stage generate`, and the extinction-group
+  frequencies `make_group_frequency` writes. From a `fom-train` pool it
   holds out a fixed share of crystals (`--selection-fraction`, drawn once with `--split-seed`)
   for choosing settings, and writes the rest as training rows: the pool restricted to `--cut`
   as a run at that cut would leave it, every correct candidate and a thinned, seed-keyed sample
@@ -72,6 +73,7 @@ from mlindex.model_training.BenchmarkMetrics import derive_flags
 from mlindex.model_training.BenchmarkMetrics import reduce_many
 from mlindex.model_training.BenchmarkRuns import POPULATIONS
 from mlindex.model_training.BenchmarkRuns import committed_checkout
+from mlindex.utilities.Ranker import read_group_frequency
 
 SEEDS = (12345, 777, 20260826)
 CRYSTALS_NAME = 'crystals.parquet'
@@ -120,6 +122,8 @@ def build_parser():
                         help='Sampling rate for the other wrong candidates.')
     export.add_argument('--n-negatives', type=int, default=40, metavar='N',
                         help='Wrong candidates kept per pattern; the most any fit may use.')
+    export.add_argument('--group-frequency', metavar='CSV',
+                        help='The extinction-group frequency table from make_group_frequency.')
 
     fit = parser.add_argument_group('fit')
     fit.add_argument('--export-dir', metavar='DIR', help='An export directory.')
@@ -151,6 +155,9 @@ def _depth(text):
 
 
 def run_export(args, commit):
+    if not args.group_frequency:
+        raise SystemExit('--group-frequency is required for the export')
+    group_frequency = read_group_frequency(args.group_frequency)
     pool = Path(args.pool)
     Benchmark.check_complete(pool)
     manifest = Benchmark.load_manifest(pool)
@@ -191,12 +198,12 @@ def run_export(args, commit):
         # Every crystal gets evaluation rows: the selection crystals' choose the settings, and
         # the training crystals' are where each fit's calibration crystals are read.
         training, evaluation = Ranker.export_bundle(
-            pool, bundle, entries, parts['training'], parts['selection'] | parts['training'],
+            pool, bundle, parts['training'], parts['selection'] | parts['training'],
             args.seeds,
             cut=args.cut, n_top=depth or Benchmark.N_TOP_CANDIDATES,
             keep_all_depths=depth is None, top_k=args.top_k,
             negative_rate=args.negative_rate, n_negatives=args.n_negatives,
-            truth_dir=truth_dir)
+            group_frequency=group_frequency, truth_dir=truth_dir)
         for seed, frame in training.items():
             frame.to_parquet(target / f'training_{bundle}_seed{seed}.parquet', index=False)
         if evaluation is not None:
@@ -204,7 +211,9 @@ def run_export(args, commit):
         record = dict(commit=commit, bundle=bundle, pool=str(pool),
                       pool_commit=manifest['commit'], split=split, cut=args.cut,
                       depth=args.depth, top_k=args.top_k, negative_rate=args.negative_rate,
-                      n_negatives=args.n_negatives, seeds=sorted(training),
+                      n_negatives=args.n_negatives,
+                      group_frequency=str(Path(args.group_frequency).resolve()),
+                      seeds=sorted(training),
                       n_training_rows={str(seed): int(frame.shape[0])
                                        for seed, frame in training.items()},
                       n_evaluation_rows=0 if evaluation is None else int(evaluation.shape[0]),

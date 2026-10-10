@@ -270,3 +270,5 @@ mlindex/data/test_data/**/*.npy filter=lfs diff=lfs merge=lfs -text
 mlindex/data/test_data/**/*.pkslst filter=lfs diff=lfs merge=lfs -text
 mlindex/data/test_data/**/*.csv filter=lfs diff=lfs merge=lfs -text
 mlindex/data/test_data/*.csv filter=lfs diff=lfs merge=lfs -text
+mlindex/models/ranker_1/** filter=lfs diff=lfs merge=lfs -text
+tests/expected/*.npz filter=lfs diff=lfs merge=lfs -text

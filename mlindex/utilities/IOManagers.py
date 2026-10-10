@@ -25,6 +25,101 @@ def _traverse_forest(X, children_left, children_right, features,
                     node_id = children_right[tree_idx, node_id]
 
 
+def hist_gradient_boosting_to_onnx(model, n_features):
+    """A binary `HistGradientBoostingClassifier` as one ai.onnx.ml `TreeEnsemble` node.
+
+    The graph casts its float32 input to float64 and holds every threshold and leaf value in
+    float64, so each comparison is the classifier's own `x <= threshold` and the leaves add in the
+    precision the classifier adds them in. Its outputs match a skl2onnx classifier's with
+    `zipmap=False`: `label`, then `probabilities` as (n_samples, 2).
+
+    The baseline enters as one more tree that sends every row to a leaf holding it, written as a
+    split on +inf with two leaves of the same value: a root whose two branches name one leaf would
+    be read by onnxruntime as a leaf itself.
+    """
+    from onnx import TensorProto, helper, numpy_helper
+
+    if len(model.classes_) != 2:
+        raise ValueError(f'only a binary classifier converts; this one has {len(model.classes_)} '
+                         'classes')
+    featureids, splits, true_ids, true_leafs, false_ids, false_leafs, missing_true = (
+        [] for _ in range(7))
+    roots, leaf_weights = [], []
+
+    def add_node(feature, split, true_id, false_id, missing):
+        featureids.append(feature)
+        splits.append(split)
+        true_ids.append(true_id[0])
+        true_leafs.append(true_id[1])
+        false_ids.append(false_id[0])
+        false_leafs.append(false_id[1])
+        missing_true.append(missing)
+
+    for (predictor,) in model._predictors:
+        nodes = predictor.nodes
+        if nodes['is_categorical'].any():
+            raise ValueError('a categorical split has no threshold form; fit with an encoding')
+        is_leaf = nodes['is_leaf'].astype(bool)
+        if is_leaf[0]:
+            raise ValueError('a tree with no split; the classifier stopped growing trees')
+        # Leaves are numbered in `leaf_weights`, split nodes in the `nodes_*` lists.
+        position = np.empty(nodes.shape[0], dtype=np.int64)
+        leaves = np.flatnonzero(is_leaf)
+        splits_at = np.flatnonzero(~is_leaf)
+        position[splits_at] = len(featureids) + np.arange(splits_at.size)
+        position[leaves] = len(leaf_weights) + np.arange(leaves.size)
+        if position[nodes['left'][0]] == position[nodes['right'][0]]:
+            # onnxruntime reads a root whose two children carry the same number as a leaf, without
+            # looking at which of them is a leaf. One unused leaf renumbers this tree's leaves.
+            leaf_weights.append(0.0)
+            position[leaves] += 1
+        leaf_weights.extend(nodes['value'][leaves].tolist())
+        roots.append(int(position[0]))
+
+        def child(index):
+            return int(position[index]), int(is_leaf[index])
+
+        for index in splits_at:
+            add_node(int(nodes['feature_idx'][index]), float(nodes['num_threshold'][index]),
+                     child(nodes['left'][index]), child(nodes['right'][index]),
+                     int(nodes['missing_go_to_left'][index]))
+
+    roots.append(len(featureids))
+    baseline = float(np.ravel(model._baseline_prediction)[0])
+    add_node(0, np.inf, (len(leaf_weights), 1), (len(leaf_weights) + 1, 1), 0)
+    leaf_weights.extend([baseline, baseline])
+
+    graph = helper.make_graph(
+        [helper.make_node('Cast', ['float_input'], ['input_double'], to=TensorProto.DOUBLE),
+         helper.make_node(
+             'TreeEnsemble', ['input_double'], ['raw'], domain='ai.onnx.ml', n_targets=1,
+             aggregate_function=1, post_transform=0, tree_roots=roots,
+             nodes_featureids=featureids,
+             nodes_splits=numpy_helper.from_array(np.asarray(splits, dtype=np.float64)),
+             # 0 is BRANCH_LEQ: the true branch is taken when x <= threshold.
+             nodes_modes=numpy_helper.from_array(np.zeros(len(featureids), dtype=np.uint8)),
+             nodes_truenodeids=true_ids, nodes_trueleafs=true_leafs,
+             nodes_falsenodeids=false_ids, nodes_falseleafs=false_leafs,
+             nodes_missing_value_tracks_true=missing_true,
+             leaf_targetids=[0]*len(leaf_weights),
+             leaf_weights=numpy_helper.from_array(np.asarray(leaf_weights, dtype=np.float64))),
+         helper.make_node('Sigmoid', ['raw'], ['positive']),
+         helper.make_node('Sub', ['one', 'positive'], ['negative']),
+         helper.make_node('Concat', ['negative', 'positive'], ['probabilities'], axis=1),
+         helper.make_node('ArgMax', ['probabilities'], ['label_index'], axis=1, keepdims=0),
+         helper.make_node('Gather', ['classes', 'label_index'], ['label'])],
+        'hist_gradient_boosting_classifier',
+        [helper.make_tensor_value_info('float_input', TensorProto.FLOAT, [None, n_features])],
+        [helper.make_tensor_value_info('label', TensorProto.INT64, [None]),
+         helper.make_tensor_value_info('probabilities', TensorProto.DOUBLE, [None, 2])],
+        initializer=[numpy_helper.from_array(np.ones((1, 1), dtype=np.float64), 'one'),
+                     numpy_helper.from_array(np.asarray(model.classes_, dtype=np.int64),
+                                             'classes')])
+    # The onnx package writes a newer IR version than onnxruntime 1.23 reads (11 at most).
+    return helper.make_model(graph, ir_version=10, opset_imports=[
+        helper.make_opsetid('', 17), helper.make_opsetid('ai.onnx.ml', 5)])
+
+
 class SKLearnManager:
     """
     Comprehensive model manager that handles saving, loading, and inference for
@@ -160,6 +255,14 @@ class SKLearnManager:
     
     def _save_onnx(self, model, n_features):
         """Save model in ONNX format"""
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        if isinstance(model, HistGradientBoostingClassifier):
+            import onnx
+
+            onnx.save(hist_gradient_boosting_to_onnx(model, n_features), f"{self.filename}.onnx")
+            return
+
         from skl2onnx import convert_sklearn
         from skl2onnx.common import tree_ensemble
         from skl2onnx.common.data_types import FloatTensorType

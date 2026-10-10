@@ -21,20 +21,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import fixtures_fom_literature as fixtures  # noqa: E402
 from mlindex.utilities.FigureOfMerits import DEWOLFF61_COEFFICIENTS  # noqa: E402
-from mlindex.utilities.FigureOfMerits import WU88_M20_RATIO  # noqa: E402
-from mlindex.utilities.FigureOfMerits import WU88_SYMMETRY_FACTOR  # noqa: E402
-from mlindex.utilities.FigureOfMerits import WU88_SYMMETRY_FACTOR_CORRECTED  # noqa: E402
-from mlindex.utilities.FigureOfMerits import compute_all  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M20  # noqa: E402
-from mlindex.utilities.FigureOfMerits import get_M_nn  # noqa: E402
+from mlindex.utilities.FigureOfMerits import get_M_wu  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_M_rev_sym  # noqa: E402
-from mlindex.utilities.FigureOfMerits import get_delta_dewolff61  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_F_N  # noqa: E402
-from mlindex.utilities.FigureOfMerits import get_g_min_werner  # noqa: E402
-from mlindex.utilities.FigureOfMerits import get_hkl_multiplicity  # noqa: E402
-from mlindex.utilities.FigureOfMerits import get_laue_operations  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_n_dewolff61  # noqa: E402
 from mlindex.utilities.FigureOfMerits import get_V_over_Vcrit  # noqa: E402
+from mlindex.utilities.FigureOfMerits import get_X_N  # noqa: E402
+from mlindex.utilities.FigureOfMerits import get_n_over  # noqa: E402
 from mlindex.utilities.UnitCellTools import get_hkl_matrix  # noqa: E402
 
 
@@ -119,47 +113,6 @@ def test_dewolff61_sharan_line_count():
     assert (c1*reciprocal_axes[0] + c2*reciprocal_axes[1] + c3*reciprocal_axes[2])/(
         reciprocal_volume
     ) == pytest.approx(surface, rel=0.01)
-
-
-def test_dewolff61_sharan_expected_discrepancy():
-    """Table 4's five Delta values, which pin down the factor of two (F-024).
-
-    Section 5 prints Delta = 1/(0.00138 sqrt(Q) + 0.0173). That expression yields exactly twice
-    each tabulated value -- it is the mean interval 2*Delta. Both are asserted so that a future
-    change in either direction fails loudly.
-    """
-    q2 = np.array([q for q, _ in fixtures.DEWOLFF61_SHARAN_DELTA])
-    expected = np.array([d for _, d in fixtures.DEWOLFF61_SHARAN_DELTA])
-    got = get_delta_dewolff61(q2, fixtures.DEWOLFF61_SHARAN_XNN, "orthorhombic", "oP")[0]
-    # The table rounds to two significant figures; 2% covers it.
-    assert got == pytest.approx(expected, rel=0.02)
-
-    printed_section5 = 1/(0.00138*np.sqrt(q2) + 0.0173)
-    assert printed_section5 == pytest.approx(2*expected, rel=0.02)
-
-
-def test_dewolff61_exponential_interval_assumption():
-    """Table 3: 214 intervals of a 2-D anorthic net against 214 exp[-(x - 1/2)/18.8].
-
-    de Wolff's own validation of the exponential null, and it also quantifies its known slight
-    narrowing: real Q values are a little more regular than random, so the exponential is
-    conservative. Assert the prediction reproduces his printed column, then check the direction of
-    the residual over the body of the distribution.
-    """
-    two_delta = fixtures.DEWOLFF61_TABLE3_TWO_DELTA
-    # Restricted to x <= 60. The two rows beyond that are not reliable: at x = 75 the extracted
-    # prediction column reads 1 where the formula gives 4.1, while every row up to x = 60 agrees
-    # within one count. A single mis-read digit in the tail of a 1961 table is far likelier than a
-    # breakdown of the formula that its neighbours all satisfy, so those rows are not asserted on.
-    for x, actual, printed in fixtures.DEWOLFF61_TABLE3:
-        if x > 60:
-            continue
-        predicted = 214*np.exp(-(x - 0.5)/two_delta)
-        assert predicted == pytest.approx(printed, abs=2.0), x
-    # Over the body of the distribution the actual counts sit at or below the exponential -- the
-    # narrowing de Wolff describes, and the reason the exponential null is mildly conservative.
-    body = [(a, p) for x, a, p in fixtures.DEWOLFF61_TABLE3 if 30 <= x <= 60]
-    assert sum(a for a, _ in body) <= sum(p for _, p in body)
 
 
 # ================================================================================================
@@ -317,80 +270,22 @@ def test_get_M20_counts_unmatched_calculated_lines():
 # ================================================================================================
 
 
-def test_wu88_tables_transcribed():
-    for system, value in fixtures.WU88_TABLE2_S.items():
-        assert WU88_SYMMETRY_FACTOR[system] == pytest.approx(value)
-    for system, value in fixtures.WU88_TABLE2_S_CORRECTED.items():
-        assert WU88_SYMMETRY_FACTOR_CORRECTED[system] == pytest.approx(value)
-    for system, ratios in fixtures.WU88_TABLE1_RATIO.items():
-        assert WU88_M20_RATIO[system] == pytest.approx(np.mean(ratios), abs=0.03)
-    # Rhombohedral is not a separate row in Wu's tables; we reuse hexagonal and say so.
-    assert WU88_SYMMETRY_FACTOR["rhombohedral"] == WU88_SYMMETRY_FACTOR["hexagonal"]
-
-
-def test_wu88_corrected_factor_is_S_over_ratio():
-    """S' = S / (M20/M'20) -- the internal relation between his two tables."""
-    for system in ("triclinic", "monoclinic", "orthorhombic", "tetragonal", "hexagonal", "cubic"):
-        implied = fixtures.WU88_TABLE2_S[system]/np.mean(fixtures.WU88_TABLE1_RATIO[system])
-        assert fixtures.WU88_TABLE2_S_CORRECTED[system] == pytest.approx(implied, rel=0.05)
-
-
 # ================================================================================================
 # Oishi-Tomiyasu 2013 and 2021
 # ================================================================================================
 
 
-@pytest.mark.parametrize("lattice_system", sorted(fixtures.LAUE_GROUP_ORDER))
-def test_ot13_laue_group_orders(lattice_system):
-    assert len(get_laue_operations(lattice_system)) == fixtures.LAUE_GROUP_ORDER[lattice_system]
-
-
-@pytest.mark.parametrize("lattice_system", sorted(fixtures.OT13_TABLE1_MULTIPLICITY))
-def test_ot13_table1_multiplicities(lattice_system):
-    """Every multiplicity class printed in her Table 1, computed as a Laue-group orbit size."""
-    cases = fixtures.OT13_TABLE1_MULTIPLICITY[lattice_system]
-    hkl = np.array([case[0] for case in cases])
-    expected = np.array([case[1] for case in cases])
-    assert np.array_equal(get_hkl_multiplicity(hkl, lattice_system), expected)
-
-
-def test_ot13_table2_documents_the_roundoff_instability():
-    """N can exceed N_cal -- the instability her multiplicity weighting removes.
-
-    Her cells are not published so the numbers cannot be recomputed; this asserts the property the
-    table exists to demonstrate, and pins the worst case (tetragonal I, 109 against 61.1).
-    """
-    exceeds = [
-        row for row in fixtures.OT13_TABLE2 if row[3] or row[6]
-    ]
-    assert len(exceeds) >= 6
-    worst = max(
-        max(row[1]/row[2], row[4]/row[5]) for row in fixtures.OT13_TABLE2
-    )
-    assert worst > 1.7
-
-
-def test_ot21_nearest_neighbour_reduces_to_dewolff():
-    """Equation (20) at s = 1 must be exactly de Wolff's epsilon = Q_n/(2N).
-
-    The identity that ties the whole family together, and the reason it needs no sigma.
-    """
-    q2_obs = np.linspace(0.1, 2.0, 20)
-    q2_calc = q2_obs[np.newaxis] + 3e-4
-    q2_ref = np.linspace(0.01, 2.0, 137)[np.newaxis]
-    assert get_M_nn(q2_obs, q2_calc, q2_ref, dimension=1) == pytest.approx(
-        get_M20(q2_obs, q2_calc, q2_ref.copy()), rel=1e-12
-    )
-
-    from math import gamma
-    for s, expected in fixtures.OT21_NEAREST_NEIGHBOUR_COEFFICIENT.items():
-        coefficient = gamma(s/2 + 1)**(1/s)*gamma(1/s)/(np.sqrt(np.pi)*s)
-        assert coefficient == pytest.approx(expected, rel=1e-6)
-
-
 # ================================================================================================
 # Werner 1976 -- the critical volume
 # ================================================================================================
+
+
+def _werner_g_min(d_values, decimals):
+    """Werner's precision floor: d reported to `decimals` places locates a line no better than
+    Delta = 0.25 x 10^-decimals, so epsilon_i = |1/d^2 - 1/(d + Delta)^2|, and g_min is their mean."""
+    step = 0.25*10.0**(-decimals)
+    d_values = np.asarray(d_values, dtype=float)
+    return float(np.mean(np.abs(1/d_values**2 - 1/(d_values + step)**2)))
 
 
 def test_werner76_g_min_from_decimal_quantisation():
@@ -420,7 +315,7 @@ def test_werner76_critical_volume():
         (3, 1, fixtures.WERNER76_V_CRIT_3DP),
     ):
         d_values = [row[d_index] for row in fixtures.WERNER76_TABLE1]
-        g_min = get_g_min_werner(d_values, decimals)
+        g_min = _werner_g_min(d_values, decimals)
         d_n = np.array([min(d_values)])
         ratio, _ = get_V_over_Vcrit(volume, d_n, g_min, multiplicity)
         v_crit = volume[0]/ratio[0]
@@ -430,7 +325,7 @@ def test_werner76_critical_volume():
 def test_werner76_threshold_six_recovers_377():
     """Lowering the acceptance threshold from M20 = 10 to 6 must give V_crit = 377 A^3."""
     d_values = [row[3] for row in fixtures.WERNER76_TABLE1]
-    g_min = get_g_min_werner(d_values, 2)
+    g_min = _werner_g_min(d_values, 2)
     volume = np.array([fixtures.WERNER76_VOLUME])
     ratio, _ = get_V_over_Vcrit(volume, np.array([min(d_values)]), g_min, 4, threshold=6.0)
     assert volume[0]/ratio[0] == pytest.approx(fixtures.WERNER76_V_CRIT_2DP_AT_M6, rel=0.02)
@@ -443,7 +338,7 @@ def test_werner76_case_sits_above_its_critical_volume():
     dominated by high-volume low-symmetry cells at M20 5-10 is a list sitting above V_crit.
     """
     d_values = [row[3] for row in fixtures.WERNER76_TABLE1]
-    g_min = get_g_min_werner(d_values, 2)
+    g_min = _werner_g_min(d_values, 2)
     volume = np.array([fixtures.WERNER76_VOLUME])
     ratio, m_max = get_V_over_Vcrit(volume, np.array([min(d_values)]), g_min, 4)
     assert ratio[0] > 3.0
@@ -480,52 +375,12 @@ def _synthetic_pool(seed=0, n_candidates=40):
 
 
 def test_get_M20_leaves_the_reference_array_untouched():
-    """The guarantee that replaced compute_all's defensive copy.
-
-    get_M20 used to take its count and its maximum by zeroing the excluded reference lines in
-    place, so the array came back destroyed. That made evaluation order load-bearing: any merit
-    run after it saw a zeroed reference list and every count collapsed. It now masks into a
-    temporary and the array survives the call byte for byte.
-
-    Asserted directly on get_M20 rather than only through compute_all, because compute_all could
-    hide a returning mutation behind a copy and this is the property the callers rely on.
-    """
+    """get_M20 counts and takes its maximum without writing to the reference array, so a merit
+    computed after it on the same array sees the lines it was given."""
     q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
     before = q2_ref.copy()
     get_M20(q2_obs, q2_calc, q2_ref)
     assert np.array_equal(q2_ref, before)
-
-
-def test_compute_all_does_not_modify_its_arguments():
-    """No merit in the frame may write to the arrays it is handed."""
-    q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
-    before = q2_ref.copy()
-    compute_all(q2_obs, q2_calc, q2_ref, xnn, "orthorhombic", "oP")
-    assert np.array_equal(q2_ref, before)
-
-
-def test_compute_all_is_order_invariant():
-    """Running it twice on the same arrays must give identical results.
-
-    The failure this guards against is silent: if any FOM corrupted q2_ref_calc, the second call
-    would see a zeroed reference list and every count would collapse.
-    """
-    q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
-    first = compute_all(q2_obs, q2_calc, q2_ref, xnn, "orthorhombic", "oP")["features"]
-    second = compute_all(q2_obs, q2_calc, q2_ref, xnn, "orthorhombic", "oP")["features"]
-    for name in first:
-        assert np.allclose(first[name], second[name], equal_nan=True), name
-
-
-def test_every_feature_declares_a_sigma_treatment():
-    """PLAN 2.5: a sigma-dependent column must never be readable as sigma-free."""
-    q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
-    result = compute_all(q2_obs, q2_calc, q2_ref, xnn, "orthorhombic", "oP")
-    assert set(result["features"]) == set(result["sigma_treatment"])
-    assert set(result["sigma_treatment"].values()) <= {"free", "in-sample", "assumed"}
-    # The only 'assumed' entries may be the deliberate chi2 reference point.
-    assumed = {k for k, v in result["sigma_treatment"].items() if v == "assumed"}
-    assert all(name.startswith("chi2_fixed") for name in assumed), assumed
 
 
 def test_get_M20_degenerate_guard_preserved():
@@ -610,34 +465,23 @@ def test_M_rev_support_floor_spares_a_well_supported_candidate():
 
 
 def test_the_correct_candidate_wins_on_the_position_only_merits():
-    """A sanity floor: every ranking merit in the zoo must put the true cell first.
+    """A sanity floor: every ranking merit the ranker reads must put the true cell first.
 
-    This does not say a merit is *good* -- that is S06's job on real candidate pools -- but a merit
+    This does not say a merit is *good* -- that is measured on real candidate pools -- but a merit
     that cannot do this is broken.
     """
-    q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
-    features = compute_all(q2_obs, q2_calc, q2_ref, xnn, "orthorhombic", "oP")["features"]
-    higher_is_better = [
-        "M20", "M_tilde", "M_rev", "M_sym", "M_wu", "M_star", "M_1", "M_nn",
-        "M_info_clipped", "null_tail_nll", "F_N_q",
-    ]
-    for name in higher_is_better:
-        assert np.argmax(features[name]) == 0, f"{name} did not rank the true cell first"
-    lower_is_better = ["X_N", "n_over", "bic", "chi2_fixed"]
-    for name in lower_is_better:
-        assert np.argmin(features[name]) == 0, f"{name} did not rank the true cell first"
-
-
-def test_nll_exponential_is_not_a_ranking_merit():
-    """F-025: the exponential null *density* is minimised by a perfect fit, so it ranks backwards.
-
-    The S01 handoff calls it "a FOM in its own right". It is not, and this test pins the reason so
-    that nobody reintroduces it as one. get_null_tail_nll is the form that discriminates.
-    """
-    q2_obs, q2_calc, q2_ref, xnn = _synthetic_pool()
-    features = compute_all(q2_obs, q2_calc, q2_ref, xnn, "orthorhombic", "oP")["features"]
-    assert np.argmax(features["nll_exponential"]) != 0
-    assert np.argmax(features["null_tail_nll"]) == 0
+    q2_obs, q2_calc, q2_ref, _ = _synthetic_pool()
+    m_tilde, m_rev, m_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref)
+    higher_is_better = {
+        "M20": get_M20(q2_obs, q2_calc, q2_ref), "M_tilde": m_tilde, "M_rev": m_rev,
+        "M_sym": m_sym, "M_wu": get_M_wu(q2_obs, q2_calc, q2_ref),
+        "F_N_q": get_F_N(q2_obs, q2_calc, q2_ref)[1],
+    }
+    for name, values in higher_is_better.items():
+        assert np.argmax(values) == 0, f"{name} did not rank the true cell first"
+    lower_is_better = {"X_N": get_X_N(q2_obs, q2_calc, q2_ref), "n_over": get_n_over(q2_obs, q2_calc, q2_ref)[0]}
+    for name, values in lower_is_better.items():
+        assert np.argmin(values) == 0, f"{name} did not rank the true cell first"
 
 
 # ================================================================================================

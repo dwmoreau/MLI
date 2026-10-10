@@ -146,17 +146,19 @@ def test_a_run_without_the_at_prune_values_is_refused():
         recorder._downsample_computation(M20, xnn, n_indexed, spacegroup, n_top_candidates=20)
 
 
-def test_the_at_prune_values_stay_with_their_candidate_across_ranks_and_collapses():
+def test_the_at_prune_values_and_ranking_inputs_stay_with_their_candidate():
     """The values arrive concatenated in rank order and are selected by the positions
     deduplication returns. A row collapsed away, a NaN cell dropped, or a second rank must not
-    shift a survivor onto its neighbour's values."""
+    shift a survivor onto its neighbour's values. The ranking inputs ride the same way."""
     recorder = _recorder()
     recorder.opt_params['downsample_radius'] = 1e-3
     payloads = [
         {'M20': np.array([10.0, 20.0, 30.0]), 'xnn': np.array([[1.0], [1.0000001], [np.nan]]),
-         'n_indexed': np.array([1, 2, 3]), 'spacegroup': ['A', 'B', 'C']},
+         'n_indexed': np.array([1, 2, 3]), 'spacegroup': ['A', 'B', 'C'],
+         'inputs': {'M_sym': np.array([30.0, 60.0, 90.0])}},
         {'M20': np.array([40.0, 50.0]), 'xnn': np.array([[5.0], [9.0]]),
-         'n_indexed': np.array([4, 5]), 'spacegroup': ['D', 'E']},
+         'n_indexed': np.array([4, 5]), 'spacegroup': ['D', 'E'],
+         'inputs': {'M_sym': np.array([120.0, 150.0])}},
         ]
     at_prune = _at_prune([p['M20'] for p in payloads])
     for payload, rows in zip(payloads, (slice(0, 3), slice(3, 5))):
@@ -172,6 +174,8 @@ def test_the_at_prune_values_stay_with_their_candidate_across_ranks_and_collapse
     assert np.array_equal(record['m20_at_prune'], record['M20'] - 0.5)
     for k in range(len(PRUNE_CAPTURE_MERITS)):
         assert np.array_equal(record['merit_at_prune'][:, k], record['M20']*(k + 1))
+    assert recorder.pool['spacegroup'].tolist() == ['E', 'D', 'B']
+    assert np.array_equal(recorder.pool['M_sym'], recorder.pool['M20']*3)
 
 
 def test_merit_at_prune_positions_are_the_names_the_manifest_writes(tmp_path):

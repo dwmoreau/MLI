@@ -63,31 +63,6 @@ DEWOLFF61_SHARAN_N_COEFFICIENTS = (0.00092, 0.0173)   # (C0/V*, sum C_i x_i / V*
 DEWOLFF61_SHARAN_N = [(2000.0, 117.0), (6850.0, 638.0)]
 DEWOLFF61_SHARAN_N_ACTUAL_COUNT_AT_2000 = 115
 
-# Table 4, the tabulated average expected discrepancy Delta at five Q values.
-#
-# **Factor-of-two trap.** Section 5 prints "Delta = 1/(0.00138 sqrt(Q) + 0.0173)", and that
-# expression reproduces none of the values below -- it gives exactly twice each of them, because it
-# is the mean interval 2*Delta rather than Delta. The correct form is equation (4) halved,
-# Delta = (1/2) V* / ((3/2) C0 sqrt(Q) + sum C_i x_i), which reproduces all five. LITERATURE.md and
-# the S01 handoff both quote the section 5 form next to these values; see F-024.
-DEWOLFF61_SHARAN_DELTA = [
-    (197.0, 13.5),
-    (999.0, 8.2),
-    (2023.0, 6.3),
-    (3057.0, 5.4),
-    (6309.0, 4.0),
-]
-
-# Table 3: cumulative distribution of 214 intervals of a two-dimensional anorthic net with
-# Q = 23h^2 + 38k^2 + 4hk, against 214 exp[-(x - 1/2)/18.8], i.e. 2*Delta = 18.8. Validates the
-# exponential-interval assumption and quantifies its known slight narrowing.
-DEWOLFF61_TABLE3_TWO_DELTA = 18.8
-DEWOLFF61_TABLE3 = [
-    # (x, actual number of intervals > x - 1/2, exponential prediction)
-    (5, 180, 170), (10, 141, 129), (15, 107, 99), (20, 77, 76), (25, 59, 58),
-    (30, 42, 44), (35, 29, 34), (40, 22, 26), (45, 19, 20), (50, 13, 15),
-    (60, 9, 9), (75, 2, 1), (100, 1, 1),
-]
 
 # ------------------------------------------------------------------------------------------------
 # de Wolff, P. M. (1968). J. Appl. Cryst. 1, 108-113. DeWolff_1968.pdf
@@ -183,109 +158,8 @@ DEWOLFF72_KHAWAS = {
 # ------------------------------------------------------------------------------------------------
 # Wu, E. (1988). J. Appl. Cryst. 21, 530-535.
 # ------------------------------------------------------------------------------------------------
-
-# Table 1: the average M20/M'20 ratio for primitive cells. This is the cross-lattice inflation that
-# run.py inherits by pooling all fourteen Bravais lattices and sorting on raw M20 (F-002). The
-# paper lists four tetragonal rows over different parameter ranges; all are kept.
-WU88_TABLE1_RATIO = {
-    "cubic": [1.82],
-    "tetragonal": [1.47, 1.43, 1.42, 1.45],
-    "hexagonal": [1.41],
-    "orthorhombic": [1.37],
-    "monoclinic": [1.24],
-    "triclinic": [1.00],
-}
-
-# Table 2: the symmetry factor S in M* = S/(V^(2/3) delta), and S' = S / (M20/M'20).
-WU88_TABLE2_S = {
-    "triclinic": 0.107, "monoclinic": 0.160, "orthorhombic": 0.176,
-    "hexagonal": 0.328, "tetragonal": 0.264, "cubic": 0.580,
-}
-WU88_TABLE2_S_CORRECTED = {
-    "triclinic": 0.107, "monoclinic": 0.129, "orthorhombic": 0.129,
-    "hexagonal": 0.233, "tetragonal": 0.182, "cubic": 0.319,
-}
-
 # Wu's result on the Li6B4O9 pair: his accurate expression separates what M20 cannot.
 WU88_LI6B4O9_M_PRIME = {"correct": 7.7, "incorrect": 3.8}
-
-# ------------------------------------------------------------------------------------------------
-# Oishi-Tomiyasu, R. (2013). J. Appl. Cryst. 46, 1277-1282.
-# ------------------------------------------------------------------------------------------------
-
-# Table 1: peak multiplicity of [hkl], the orbit size under Ci, C2h, D2h, D4h, D3d, D6h and Oh.
-# One representative index triple per printed multiplicity class. The rhombohedral row assumes
-# rhombohedral axes, which is also this repo's setting.
-OT13_TABLE1_MULTIPLICITY = {
-    "triclinic": [((1, 2, 3), 2)],
-    "monoclinic": [((1, 0, 1), 2), ((0, 1, 0), 2), ((1, 2, 3), 4)],
-    "orthorhombic": [
-        ((1, 0, 0), 2), ((0, 1, 0), 2), ((0, 0, 1), 2),
-        ((1, 1, 0), 4), ((1, 0, 1), 4), ((0, 1, 1), 4),
-        ((1, 2, 3), 8),
-    ],
-    "tetragonal": [
-        ((0, 0, 1), 2),
-        ((1, 0, 0), 4), ((0, 1, 0), 4), ((1, 1, 0), 4), ((1, -1, 0), 4),
-        ((1, 2, 0), 8), ((1, 0, 1), 8), ((0, 1, 1), 8), ((1, 1, 1), 8), ((1, -1, 1), 8),
-        ((1, 2, 3), 16),
-    ],
-    "rhombohedral": [
-        ((1, 1, 1), 2),
-        ((1, 1, 2), 6), ((1, 2, 1), 6), ((1, 2, 2), 6),
-        ((1, 1, 0), 6), ((1, 0, 1), 6), ((0, 1, 1), 6),
-        ((1, 2, 3), 12),
-    ],
-    "hexagonal": [
-        ((0, 0, 1), 2),
-        ((1, 0, 0), 6), ((0, 1, 0), 6), ((1, 1, 0), 6), ((1, -1, 0), 6), ((1, -2, 0), 6),
-        ((1, 2, 0), 12), ((0, 1, 1), 12), ((1, 0, 1), 12), ((1, 1, 1), 12),
-        ((1, -1, 1), 12), ((1, -2, 1), 12),
-        ((1, 2, 3), 24),
-    ],
-    "cubic": [
-        ((1, 0, 0), 6), ((0, 0, 1), 6),
-        ((1, 1, 1), 8),
-        ((0, 1, 1), 12), ((1, 0, 1), 12),
-        ((1, 1, 2), 24), ((1, -1, 2), 24), ((1, 2, 0), 24), ((1, 0, 2), 24), ((0, 1, 2), 24),
-        ((1, 2, 3), 48),
-    ],
-}
-LAUE_GROUP_ORDER = {
-    "triclinic": 2, "monoclinic": 4, "orthorhombic": 8, "tetragonal": 16,
-    "rhombohedral": 12, "hexagonal": 24, "cubic": 48,
-}
-
-# Table 2: N against N_cal([0, q_N]) for fourteen Bravais types, two cells each. The unit-cell
-# parameters are **not published**, so these cannot be recomputed; they are kept as a qualitative
-# fixture for the property the table exists to demonstrate -- that the raw count N can exceed the
-# multiplicity-weighted N_cal, by up to 109 against 61.1 for tetragonal I, which is the round-off
-# instability her equation (4) removes.
-OT13_TABLE2 = [
-    # (crystal system, N_A, N_cal_A, N_exceeds_A, N_B, N_cal_B, N_exceeds_B)
-    ("cubic_F", 19, 13.0, True, 31, 40.0, False),
-    ("cubic_I", 11, 13.0, False, 49, 26.1, True),
-    ("cubic_P", 11, 13.0, False, 22, 24.0, False),
-    ("hexagonal", 25, 26.0, False, 58, 59.0, False),
-    ("rhombohedral", 56, 53.0, False, 61, 67.3, False),
-    ("tetragonal_I", 27, 28.0, False, 109, 61.1, True),
-    ("tetragonal_P", 49, 50.0, False, 38, 38.3, False),
-    ("orthorhombic_F", 40, 41.0, False, 63, 58.0, True),
-    ("orthorhombic_I", 37, 31.5, True, 146, 106.3, True),
-    ("orthorhombic_C", 39, 40.0, False, 75, 70.0, True),
-    ("orthorhombic_P", 34, 35.0, False, 87, 87.3, False),
-    ("monoclinic_B", 42, 39.0, True, 98, 91.0, True),
-    ("monoclinic_P", 59, 55.0, True, 98, 99.0, False),
-    ("triclinic", 77, 78.0, False, 107, 108.0, False),
-]
-
-# ------------------------------------------------------------------------------------------------
-# Oishi-Tomiyasu, Tanaka & Nakagawa (2021). J. Appl. Cryst. 54, 624-635.
-# ------------------------------------------------------------------------------------------------
-# Equation (20): the expected distance from a random point to the nearest of N computed points in
-# s dimensions, epsilon = Gamma(s/2+1)^(1/s) Gamma(1/s) / (sqrt(pi) s) * (V/N)^(1/s).
-# For s = 1 the coefficient must be exactly 1/2, recovering de Wolff's epsilon = Q_n/(2N).
-OT21_NEAREST_NEIGHBOUR_COEFFICIENT = {1: 0.5, 2: 0.5, 3: 2.6789385347/ (36*np.pi)**(1/3)}
 
 # ------------------------------------------------------------------------------------------------
 # Werner, P.-E. (1976). J. Appl. Cryst. 9, 216-219.

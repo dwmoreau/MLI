@@ -5,6 +5,8 @@ The script mirrors ``mlindex.command_line.run`` but uses the lightweight
 ``AnalyticOptimizer`` which implements a guess‑and‑check candidate generation.
 It operates serially (MPI ``COMM_SELF``) and loops over the bravais lattices
 ``cF``, ``cI``, ``cP``, ``hP``, ``hR``, ``tI`` and ``tP``.
+
+It needs no ML model, and so ranks its candidates by M_sym rather than by the learned ranker.
 """
 
 import os
@@ -13,26 +15,23 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
-from pathlib import Path
 import numpy as np
 
 from mlindex.optimization.AnalyticOptimizer import AnalyticOptimizer
 from mlindex.optimization.MPIOptimizer import OptimizerWorker
 from mlindex.command_line.run import (
-    _load_peaks, _collect_results, _write_results, _conventional_cell,
-    build_base_parser, BRAVAIS_LATTICES,
+    _load_peaks, _write_output, build_base_parser, parse_args,
 )
+from mlindex.utilities.Ranker import MSymRanker
+
+RANKER = MSymRanker('the analytical indexer uses no ML model')
 
 
 def main() -> None:
     parser = build_base_parser(description="Analytical high-symmetry indexing")
     parser.set_defaults(output_file="analytic_results.json")
-    args = parser.parse_args()
-
-    bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
-    invalid = [bl for bl in bravais_lattices if bl not in BRAVAIS_LATTICES]
-    if invalid:
-        parser.error(f"Unknown Bravais lattices: {', '.join(invalid)}")
+    args = parse_args(parser)
+    bravais_lattices = args.bravais_lattices
 
     q2_obs = _load_peaks(args)
 
@@ -50,7 +49,7 @@ def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed
     from mlindex.optimization.MPOptimizer import LocalComm
     comm = LocalComm(n_ranks=1)
 
-    all_results = []
+    results = {}
     for bl in bravais_lattices:
         optimizer = AnalyticOptimizer(
             bravais_lattice=bl,
@@ -60,11 +59,9 @@ def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed
             seed=seed,
         )
         optimizer.run(q2=q2_obs, zero_error=args.zero_error, wavelength=args.wavelength)
-        all_results = _collect_results(optimizer, bl, all_results)
+        results[bl] = optimizer.result()
 
-    all_results = _conventional_cell(all_results)
-    output_file_base = str(Path(args.output_file).with_suffix(''))
-    _write_results(all_results, output_file_base=output_file_base)
+    _write_output(args.output_file, results, RANKER)
 
 
 def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
@@ -75,7 +72,7 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=123
         args.nproc, q2_obs.size, n_ref_hkl_guess, bravais_lattices, seed=seed
     )
 
-    all_results = []
+    results = {}
     try:
         for bl in bravais_lattices:
             run_mp_bl(
@@ -84,12 +81,10 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=123
                 zero_error=args.zero_error, wavelength=args.wavelength,
                 n_top=20,
             )
-            all_results = _collect_results(optimizers[bl], bl, all_results)
+            results[bl] = optimizers[bl].result()
     finally:
         shutdown_mp_workers(processes, task_queues)
-    all_results = _conventional_cell(all_results)
-    output_file_base = str(Path(args.output_file).with_suffix(''))
-    _write_results(all_results, output_file_base=output_file_base)
+    _write_output(args.output_file, results, RANKER)
 
 
 def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
@@ -97,7 +92,7 @@ def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
 
-    all_results = []
+    results = {}
     for bl in bravais_lattices:
         comm.barrier()
         if rank == 0:
@@ -115,12 +110,10 @@ def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12
         comm.barrier()
 
         if rank == 0:
-            all_results = _collect_results(optimizer, bl, all_results)
+            results[bl] = optimizer.result()
 
     if rank == 0:
-        all_results = _conventional_cell(all_results)
-        output_file_base = str(Path(args.output_file).with_suffix(''))
-        _write_results(all_results, output_file_base=output_file_base)
+        _write_output(args.output_file, results, RANKER)
 
 
 if __name__ == "__main__":
