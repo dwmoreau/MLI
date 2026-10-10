@@ -152,8 +152,7 @@ class CandidateOptLoss:
         zeropoint = np.sum(weights * prefactor * residuals, axis=1) / np.sum(weights, axis=1)
         return zeropoint
 
-    @staticmethod
-    def apply_zeropoint(zeropoint, wavelength, q2):
+    def apply_zeropoint(self, zeropoint, wavelength, q2):
         theta2 = 2 * np.arcsin(np.clip(wavelength/2 * np.sqrt(np.abs(q2)), -1.0, 1.0))
         return q2 + 4*np.sin(theta2)/wavelength**2 * zeropoint[:, np.newaxis]
 

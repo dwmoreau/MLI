@@ -190,9 +190,14 @@ def build_base_parser(description="Start the display application"):
     return parser
 
 
-def _parse_args():
-    parser = build_base_parser()
-    return parser.parse_args()
+def parse_args(parser):
+    """The parsed arguments, with `bravais_lattices` as a list of known lattices."""
+    args = parser.parse_args()
+    args.bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
+    invalid = [bl for bl in args.bravais_lattices if bl not in BRAVAIS_LATTICES]
+    if invalid:
+        parser.error(f"Unknown Bravais lattices: {', '.join(invalid)}")
+    return args
 
 
 def _convert_to_q2(peaks, units, wavelength):
@@ -232,10 +237,10 @@ def _load_peaks(args):
     return peak_list
 
 
-def _collect_results(result, bl, all_results, scores, ranked_by, with_spacegroup=True):
+def _collect_results(result, bl, all_results, scores):
     """One entry per candidate a lattice reports (`OptimizerBase.result()`), with its score."""
-    for i in range(result['top_M20'].size):
-        partial = result['top_unit_cell'][i]
+    pool = result['pool']
+    for i, partial in enumerate(result['top_unit_cell']):
         if bl in ['cF', 'cI', 'cP']:
             unit_cell = np.array([partial[0], partial[0], partial[0], np.pi/2, np.pi/2, np.pi/2])
         elif bl == 'hP':
@@ -252,40 +257,35 @@ def _collect_results(result, bl, all_results, scores, ranked_by, with_spacegroup
         else:
             unit_cell = partial
         entry = {
-            'M20': result['top_M20'][i],
-            'n_indexed': int(result['top_n_indexed'][i]),
+            'score': scores[i],
+            'M20': pool['M20'][i],
+            'M_sym': pool['M_sym'][i],
+            'n_indexed': int(pool['n_indexed'][i]),
             'bravais_lattice': bl,
             'volume': get_unit_cell_volume(unit_cell[np.newaxis])[0],
             'a': unit_cell[0], 'b': unit_cell[1], 'c': unit_cell[2],
             'alpha': 180/np.pi * unit_cell[3],
             'beta':  180/np.pi * unit_cell[4],
             'gamma': 180/np.pi * unit_cell[5],
+            'spacegroup': pool['spacegroup'][i],
         }
-        if with_spacegroup:
-            entry['spacegroup'] = result['top_spacegroup'][i]
-        entry['score'] = scores[i]
-        entry['ranked_by'] = ranked_by
         all_results.append(entry)
     return all_results
 
 
-# Results are ranked by score, and candidates with equal scores by M20: the learned ranker's
-# calibrated probability is often exactly 1.0 for several candidates of a clean pattern.
-RANKING_ORDER = ['score', 'M20']
-
-
-def _write_results(output_data, ranked_by, output_file_base='indexing_results'):
+def _write_results(output_data, ranker_name, output_file_base='indexing_results'):
+    """Write the entries, in the order given, to `<base>.json` and `<base>.txt`, and print the
+    first 20."""
     # Imported here rather than at module scope: this is its only use, and every
     # lattice group's manager re-imports this module when it is spawned.
     import pandas as pd
 
     output_df = pd.DataFrame(output_data)
-    output_df.sort_values(by=RANKING_ORDER, ascending=False, inplace=True, ignore_index=True)
     output_df.to_json(output_file_base + '.json')
-    txt_cols = [c for c in ['bravais_lattice', 'score', 'M20', 'n_indexed', 'a', 'b', 'c',
-                             'alpha', 'beta', 'gamma', 'volume', 'spacegroup'] if c in output_df.columns]
+    txt_cols = ['bravais_lattice', 'score', 'M20', 'M_sym', 'n_indexed', 'a', 'b', 'c',
+                'alpha', 'beta', 'gamma', 'volume', 'spacegroup']
     txt_headers = {
-        'bravais_lattice': 'Bravais Lattice', 'score': 'Score', 'M20': 'M20',
+        'bravais_lattice': 'Bravais Lattice', 'score': 'Score', 'M20': 'M20', 'M_sym': 'M_sym',
         'n_indexed': '# Indexed peaks',
         'a': 'A (Å)', 'b': 'B (Å)', 'c': 'C (Å)',
         'alpha': 'Alpha (°)', 'beta': 'Beta (°)', 'gamma': 'Gamma (°)',
@@ -300,6 +300,7 @@ def _write_results(output_data, ranked_by, output_file_base='indexing_results'):
         header=[txt_headers[c] for c in txt_cols],
         formatters={
             'score': lambda x: f'{x:0.4f}',
+            'M_sym': lambda x: f'{x:0.2f}',
             'volume': lambda x: f'{x:0.1f}',
             'a': lambda x: f'{x:0.4f}',
             'b': lambda x: f'{x:0.4f}',
@@ -310,9 +311,9 @@ def _write_results(output_data, ranked_by, output_file_base='indexing_results'):
         }
     )
     with open(output_file_base + '.txt', 'w', encoding='utf-8') as handle:
-        handle.write(f'Ranked by: {ranked_by}\n{table}\n')
-    print(f'Ranked by: {ranked_by}')
-    print(output_df.drop(columns='ranked_by')[:20].to_string())
+        handle.write(f'Ranked by: {ranker_name}\n{table}\n')
+    print(f'Ranked by: {ranker_name}')
+    print(output_df[:20].to_string())
 
 
 _CS_CENTRING_TO_BL = {
@@ -367,7 +368,7 @@ def promote_entries(output_data, delta=0.1):
         best_bl = entry['bravais_lattice']
         best_uc = uc_params
         best_volume = entry['volume']
-        best_sg = entry.get('spacegroup')
+        best_sg = entry['spacegroup']
 
         # Promotion is an optional improvement to one candidate, so a candidate cctbx cannot
         # analyse must not take the run down. metric_subgroups raises on cells it cannot reduce
@@ -409,8 +410,7 @@ def promote_entries(output_data, delta=0.1):
         new_entry['a'], new_entry['b'], new_entry['c'] = best_uc[0], best_uc[1], best_uc[2]
         new_entry['alpha'], new_entry['beta'], new_entry['gamma'] = best_uc[3], best_uc[4], best_uc[5]
         new_entry['volume'] = best_volume
-        if 'spacegroup' in new_entry:
-            new_entry['spacegroup'] = best_sg
+        new_entry['spacegroup'] = best_sg
         updated.append(new_entry)
 
     return updated
@@ -418,7 +418,9 @@ def promote_entries(output_data, delta=0.1):
 
 def _conventional_cell(output_data, delta=0.1, promote=None):
     """Promote entries, then deduplicate near-identical cells within the same
-    Bravais lattice, keeping the one ranked higher.
+    Bravais lattice, keeping the one ranked higher. Returns them in ranked order: by score, and
+    by M_sym where scores are equal -- the learned ranker's calibrated probability is often
+    exactly 1.0 for several candidates of a clean pattern.
 
     `promote` defaults to running `promote_entries` here, in this process. The
     multiprocessing path passes one that fans the entries out over the lattice
@@ -430,7 +432,7 @@ def _conventional_cell(output_data, delta=0.1, promote=None):
     else:
         updated = promote(output_data, delta)
 
-    updated.sort(key=lambda e: tuple(e[name] for name in RANKING_ORDER), reverse=True)
+    updated.sort(key=lambda e: (e['score'], e['M_sym']), reverse=True)
     kept = []
     for entry in updated:
         is_dup = any(
@@ -443,22 +445,21 @@ def _conventional_cell(output_data, delta=0.1, promote=None):
     return kept
 
 
-def _write_output(output_file, results, ranker, ranked_by, promote=None, with_spacegroup=True):
+def _write_output(output_file, results, ranker, promote=None):
     """Rank and write every lattice's reported candidates.
 
     `results` is {Bravais lattice: `OptimizerBase.result()`}. Every survivor of every lattice is
     scored in one batch -- the ranker's context inputs compare a candidate with all of them --
     and each lattice's reported candidates, the first rows of its pool, carry their scores into
-    the output. `ranker` None ranks by M_sym; `ranked_by` says which, in the output.
+    the output. `ranker` is a `Ranker.LearnedRanker` or `Ranker.MSymRanker`; the output names it.
     """
     scores = score_pool({bl: result['pool'] for bl, result in results.items()}, ranker)
     output_data = []
     for bl, result in results.items():
-        _collect_results(result, bl, output_data, scores[bl][:result['top_M20'].size],
-                         ranked_by, with_spacegroup=with_spacegroup)
+        _collect_results(result, bl, output_data, scores[bl])
     output_data = _conventional_cell(output_data, promote=promote)
     output_file_base = str(Path(output_file).with_suffix(''))
-    _write_results(output_data, ranked_by, output_file_base=output_file_base)
+    _write_results(output_data, ranker.name, output_file_base=output_file_base)
 
 
 def _run_mpi(args, peak_list, seed=12345):
@@ -523,8 +524,7 @@ def _run_mpi(args, peak_list, seed=12345):
                 comm.send(optimizer[bravais_lattice].result(), dest=0)
 
     if rank == 0:
-        ranker, ranked_by = load_ranker()
-        _write_output(args.output_file, results, ranker, ranked_by)
+        _write_output(args.output_file, results, load_ranker())
     logger.info('Finished gathering optimization results')
 
 
@@ -557,23 +557,18 @@ def _run_mp(args, peak_list, n_procs, seed=12345):
     )
 
     # Loaded once, here, after the search: the lattice groups never hold the ranker.
-    ranker, ranked_by = load_ranker()
+    ranker = load_ranker()
     # Before the shutdown, not after: promotion is 6.5 ms of cctbx per candidate
     # over roughly 280 of them, and the groups are idle by this point.
     _write_output(args.output_file,
-                  {bl: results[bl] for bl in args.bravais_lattices}, ranker, ranked_by,
+                  {bl: results[bl] for bl in args.bravais_lattices}, ranker,
                   promote=lambda entries, delta: promote_over_groups(
                       groups, entries, delta))
     shutdown_lattice_groups(groups, processes)
 
 
 def main():
-    args = _parse_args()
-    selected = [bl.strip() for bl in args.bravais_lattices.split(',')]
-    invalid = [bl for bl in selected if bl not in BRAVAIS_LATTICES]
-    if invalid:
-        raise SystemExit(f"Unknown Bravais lattices: {', '.join(invalid)}")
-    args.bravais_lattices = selected
+    args = parse_args(build_base_parser())
     peak_list = _load_peaks(args)
     if args.mpi:
         _run_mpi(args, peak_list, seed=args.seed)

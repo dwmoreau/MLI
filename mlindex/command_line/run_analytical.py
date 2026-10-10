@@ -20,21 +20,18 @@ import numpy as np
 from mlindex.optimization.AnalyticOptimizer import AnalyticOptimizer
 from mlindex.optimization.MPIOptimizer import OptimizerWorker
 from mlindex.command_line.run import (
-    _load_peaks, _write_output, build_base_parser, BRAVAIS_LATTICES,
+    _load_peaks, _write_output, build_base_parser, parse_args,
 )
+from mlindex.utilities.Ranker import MSymRanker
 
-RANKED_BY = 'M_sym (the analytical indexer uses no ML model)'
+RANKER = MSymRanker('the analytical indexer uses no ML model')
 
 
 def main() -> None:
     parser = build_base_parser(description="Analytical high-symmetry indexing")
     parser.set_defaults(output_file="analytic_results.json")
-    args = parser.parse_args()
-
-    bravais_lattices = [bl.strip() for bl in args.bravais_lattices.split(',')]
-    invalid = [bl for bl in bravais_lattices if bl not in BRAVAIS_LATTICES]
-    if invalid:
-        parser.error(f"Unknown Bravais lattices: {', '.join(invalid)}")
+    args = parse_args(parser)
+    bravais_lattices = args.bravais_lattices
 
     q2_obs = _load_peaks(args)
 
@@ -64,7 +61,7 @@ def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed
         optimizer.run(q2=q2_obs, zero_error=args.zero_error, wavelength=args.wavelength)
         results[bl] = optimizer.result()
 
-    _write_output(args.output_file, results, None, RANKED_BY, with_spacegroup=False)
+    _write_output(args.output_file, results, RANKER)
 
 
 def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
@@ -87,7 +84,7 @@ def _run_mp_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=123
             results[bl] = optimizers[bl].result()
     finally:
         shutdown_mp_workers(processes, task_queues)
-    _write_output(args.output_file, results, None, RANKED_BY, with_spacegroup=False)
+    _write_output(args.output_file, results, RANKER)
 
 
 def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
@@ -116,7 +113,7 @@ def _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12
             results[bl] = optimizer.result()
 
     if rank == 0:
-        _write_output(args.output_file, results, None, RANKED_BY, with_spacegroup=False)
+        _write_output(args.output_file, results, RANKER)
 
 
 if __name__ == "__main__":

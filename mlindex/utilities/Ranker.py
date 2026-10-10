@@ -145,12 +145,12 @@ def candidate_inputs(q2_obs, xnn, q2_ref_calc_full, spacegroups, keep_masks, lat
     zero-point where there is one); `keep_masks` is `SpaceGroups.get_spacegroup_keep_masks` of
     that list, keyed as `spacegroups` is. Each candidate is scored against its own extinction
     group's lines, and its absences counted against the full list. Returns {name: array} for
-    `CANDIDATE_INPUTS`, and the M20 those lines give, under `M20_recomputed`.
+    `CANDIDATE_INPUTS`.
     """
     from mlindex.utilities.FigureOfMerits import merit_set
 
     spacegroups = np.asarray(spacegroups)
-    values = {name: np.empty(spacegroups.size) for name in CANDIDATE_INPUTS + ('M20_recomputed',)}
+    values = {name: np.empty(spacegroups.size) for name in CANDIDATE_INPUTS}
     absences = absence_inputs(q2_obs, q2_ref_calc_full, spacegroups, keep_masks)
     values['f_absent_extra'] = absent_fraction(absences['n_absent_extra_in_range'],
                                                absences['n_ref_in_range'])
@@ -160,7 +160,6 @@ def candidate_inputs(q2_obs, xnn, q2_ref_calc_full, spacegroups, keep_masks, lat
         merits = merit_set(q2_obs, q2_ref_calc)
         structural = structural_inputs(q2_obs, xnn[local], q2_ref_calc, lattice_system,
                                        bravais_lattice)
-        values['M20_recomputed'][local] = structural['M20']
         for name in CANDIDATE_INPUTS:
             if name in merits:
                 values[name][local] = merits[name]
@@ -247,6 +246,18 @@ def read_calibrators(path):
         return {name: (arrays[f'{name}__x'], arrays[f'{name}__y']) for name in names}
 
 
+class MSymRanker:
+    """Ranks by M_sym. What the output is ranked by when there is no learned ranker; `reason` says
+    why, in the name the output prints."""
+
+    def __init__(self, reason):
+        self.name = f'M_sym ({reason})'
+
+    def score_pattern(self, columns):
+        """Each candidate's M_sym."""
+        return np.asarray(columns['M_sym'], dtype=np.float64)
+
+
 class LearnedRanker:
     """The packaged ranker: an ONNX classifier, its per-lattice calibrators and the
     extinction-group frequency table, as `mlindex.scripts.package_ranker` writes them.
@@ -263,6 +274,7 @@ class LearnedRanker:
         self.calibrators = calibrators
         self.group_frequency = group_frequency
         self.specification = specification
+        self.name = f'learned ranker ({RANKER_DIRECTORY}, seed {specification["seed"]})'
 
     @classmethod
     def load(cls, directory):
@@ -288,14 +300,23 @@ class LearnedRanker:
         return np.asarray(self.classifier.predict_proba(matrix), dtype=np.float64)[:, 1]
 
     def score(self, columns):
-        """The calibrated probability that each candidate is correct."""
+        """The calibrated probability that each candidate is correct, from all its inputs."""
         return apply_calibration(self.predict_batch(self.design_matrix(columns)),
                                  columns[LATTICE_FEATURE], self.calibrators)
 
+    def score_pattern(self, columns):
+        """`score` for one pattern's candidates, adding the inputs read from the whole pattern:
+        the context gaps and the group frequencies."""
+        columns = dict(columns)
+        columns.update(context_gaps(columns))
+        columns['group_frequency'] = group_frequency(
+            columns[LATTICE_FEATURE], columns['spacegroup'], self.group_frequency)
+        return self.score(columns)
+
 
 def load_ranker():
-    """(the packaged ranker, a line saying what ranks the output). The ranker is None, and the
-    line says why, when the model tree holds no `ranker_1`: the output is then ranked by M_sym."""
+    """The packaged ranker, or an `MSymRanker` saying why when the model tree holds no
+    `ranker_1`."""
     from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 
     try:
@@ -303,18 +324,16 @@ def load_ranker():
     except FileNotFoundError:
         directory = None
     if directory is None or not (directory / 'specification.json').is_file():
-        return None, (f'M_sym (fallback): no learned ranker found at {directory}; run '
-                      'python -m mlindex.download_models to fetch it')
-    ranker = LearnedRanker.load(directory)
-    return ranker, f'learned ranker ({RANKER_DIRECTORY}, seed {ranker.specification["seed"]})'
+        return MSymRanker(f'fallback: no learned ranker found at {directory}; run '
+                          'python -m mlindex.download_models to fetch it')
+    return LearnedRanker.load(directory)
 
 
 def score_pool(pools, ranker):
     """Score every candidate of one pattern in one batch.
 
     `pools` maps each Bravais lattice to its candidates' `candidate_inputs` beside `M20`,
-    `n_indexed` and `spacegroup`. The context gaps are taken over all of them together. With
-    `ranker` None the score is M_sym. Returns {lattice: score array}, in each pool's order.
+    `n_indexed` and `spacegroup`. Returns {lattice: score array}, in each pool's order.
     """
     lattices = [lattice for lattice in pools if len(pools[lattice]['M20'])]
     if not lattices:
@@ -323,13 +342,7 @@ def score_pool(pools, ranker):
                for name in pools[lattices[0]]}
     columns[LATTICE_FEATURE] = np.concatenate(
         [np.full(len(pools[lattice]['M20']), lattice) for lattice in lattices])
-    if ranker is None:
-        score = np.asarray(columns['M_sym'], dtype=np.float64)
-    else:
-        columns.update(context_gaps(columns))
-        columns['group_frequency'] = group_frequency(
-            columns[LATTICE_FEATURE], columns['spacegroup'], ranker.group_frequency)
-        score = ranker.score(columns)
+    score = ranker.score_pattern(columns)
     ends = np.cumsum([len(pools[lattice]['M20']) for lattice in lattices])
     scores = dict(zip(lattices, np.split(score, ends[:-1])))
     return {lattice: scores.get(lattice, np.zeros(0)) for lattice in pools}

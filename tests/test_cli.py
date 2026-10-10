@@ -31,7 +31,7 @@ _CCTBX_HOSTILE_CELL = {
     'volume': 3061.6961360816513,
     'a': 6.040842733459646, 'b': 18.908296254985537, 'c': 53.46502669011422,
     'alpha': 90.0, 'beta': 149.9105411673058, 'gamma': 90.0,
-    'spacegroup': 'I 1 2 1', 'score': 0.2,
+    'spacegroup': 'I 1 2 1', 'score': 0.2, 'M_sym': 10.0,
 }
 
 
@@ -65,7 +65,7 @@ def test_conventional_cell_still_promotes_and_survives_a_mixed_pool():
     cubic_metric = {
         'M20': 40.0, 'n_indexed': 20, 'bravais_lattice': 'aP', 'volume': 512.0,
         'a': 8.0, 'b': 8.0, 'c': 8.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0,
-        'spacegroup': 'P 1', 'score': 0.9,
+        'spacegroup': 'P 1', 'score': 0.9, 'M_sym': 30.0,
     }
     kept = _conventional_cell([dict(_CCTBX_HOSTILE_CELL), cubic_metric])
 
@@ -81,11 +81,23 @@ def test_of_two_copies_of_a_cell_the_higher_scored_is_kept_not_the_higher_m20():
 
     cell = {'n_indexed': 18, 'bravais_lattice': 'oP', 'volume': 600.0, 'a': 6.0, 'b': 10.0,
             'c': 10.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0, 'spacegroup': 'P 2 2 2'}
-    high_m20 = dict(cell, M20=30.0, score=0.1)
-    high_score = dict(cell, M20=12.0, score=0.8, c=10.001)
+    high_m20 = dict(cell, M20=30.0, M_sym=30.0, score=0.1)
+    high_score = dict(cell, M20=12.0, M_sym=12.0, score=0.8, c=10.001)
     kept = _conventional_cell([high_m20, high_score])
     assert len(kept) == 1
     assert kept[0]['score'] == 0.8
+
+
+def test_candidates_with_equal_scores_are_ordered_by_m_sym():
+    from mlindex.command_line.run import _conventional_cell
+
+    cell = {'n_indexed': 18, 'bravais_lattice': 'oP', 'volume': 600.0, 'a': 6.0, 'b': 10.0,
+            'c': 10.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0, 'spacegroup': 'P 2 2 2',
+            'score': 1.0}
+    higher_m20 = dict(cell, M20=40.0, M_sym=20.0)
+    higher_m_sym = dict(cell, M20=30.0, M_sym=25.0, a=7.0)
+    kept = _conventional_cell([higher_m20, higher_m_sym])
+    assert [entry['M_sym'] for entry in kept] == [25.0, 20.0]
 
 
 def _compare_json(result_path, expected_path):
@@ -236,9 +248,8 @@ def test_without_ranker_files_the_ranking_falls_back_to_m_sym_and_says_so(tmp_pa
 
     (tmp_path / 'cubic_1' / 'abnn').mkdir(parents=True)
     monkeypatch.setenv('MLINDEX_MODELS_DIR', str(tmp_path))
-    ranker, ranked_by = load_ranker()
-    assert ranker is None
-    assert ranked_by.startswith('M_sym (fallback)') and 'download_models' in ranked_by
+    ranker = load_ranker()
+    assert ranker.name.startswith('M_sym (fallback') and 'download_models' in ranker.name
 
 
 @pytest.mark.slow
@@ -256,17 +267,16 @@ def test_run_ml_without_ranker_files_ranks_by_m_sym_and_says_so(test_metadata, t
     result = subprocess.run(cmd, capture_output=True, text=True,
                             env={**os.environ, "MLINDEX_MODELS_DIR": str(tree)})
     assert result.returncode == 0, result.stderr
-    assert "Ranked by: M_sym (fallback)" in result.stdout
+    assert "Ranked by: M_sym (fallback" in result.stdout
     output = pd.read_json(output_file)
-    assert set(output['ranked_by']) == {output['ranked_by'].iloc[0]}
-    assert output['ranked_by'].iloc[0].startswith('M_sym (fallback)')
+    np.testing.assert_array_equal(output['score'], output['M_sym'])
     assert (np.diff(output['score'].to_numpy()) <= 0).all()
 
 
 @pytest.mark.slow
 def test_run_ml_with_zero_error_ranks_its_candidates(test_metadata, tmp_path, models_available,
                                                      models_dir):
-    """The zero-point travels with each candidate to the ranking inputs."""
+    """The ranking inputs are computed with each candidate's zero-point."""
     if not models_available:
         pytest.skip("ML models not available")
     row = test_metadata[test_metadata["bravais lattice"] == "aP"].iloc[0]
@@ -282,4 +292,4 @@ def test_run_ml_with_zero_error_ranks_its_candidates(test_metadata, tmp_path, mo
     assert result.returncode == 0, result.stderr
     output = pd.read_json(output_file)
     assert len(output) and np.isfinite(output['score']).all()
-    assert output['ranked_by'].iloc[0].startswith('learned ranker')
+    assert "Ranked by: learned ranker" in result.stdout

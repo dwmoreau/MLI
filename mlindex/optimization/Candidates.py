@@ -8,12 +8,14 @@ from mlindex.utilities.FigureOfMerits import merit_set
 from mlindex.utilities.MillerIndexAssignment import vectorized_subsampling
 from mlindex.utilities.numba_functions import fast_assign
 from mlindex.utilities.Q2Calculator import Q2Calculator
+from mlindex.utilities.Ranker import candidate_inputs
 from mlindex.utilities.UnitCellTools import n_axis_factors
 from mlindex.utilities.UnitCellTools import xnn_axis_multipliers
 from mlindex.utilities.Reindexing import monoclinic_standardization
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.Reindexing import selling_reduction
 from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
+from mlindex.utilities.SpaceGroups import get_spacegroup_keep_masks
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
@@ -377,15 +379,21 @@ class Candidates:
 
     def downsample_payload(self):
         """What a rank hands to its manager for deduplication: one object, so the arrays and the
-        spacegroup list cannot disagree about how many candidates there are."""
+        spacegroup list cannot disagree about how many candidates there are. `inputs` are the
+        final ranking's `Ranker.candidate_inputs`, computed here so the ranks share the work."""
         payload = {
             'M20': self.best_M20,
             'xnn': self.best_xnn,
             'n_indexed': self.n_indexed,
             'spacegroup': list(self.best_spacegroup),
+            'inputs': candidate_inputs(
+                self.q2_obs, self.best_xnn,
+                self._q2_ref_calc(self.best_xnn,
+                                  self.best_zeropoint if self.zero_error else None),
+                self.best_spacegroup,
+                get_spacegroup_keep_masks(self.hkl_ref, self.bravais_lattice),
+                self.lattice_system, self.bravais_lattice),
             }
-        if self.zero_error:
-            payload['zeropoint'] = self.best_zeropoint
         # RESEARCH CODE THAT NEEDS TO BE DELETED -- see PRUNE_CAPTURE_MERITS.
         if self.m20_at_prune is not None:
             payload['m20_at_prune'] = self.m20_at_prune

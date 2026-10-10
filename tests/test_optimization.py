@@ -474,7 +474,7 @@ def test_the_downsample_hook_is_inert_and_sees_the_pool_before_truncation():
     assert OptimizerManager._on_downsample(manager, {}, None, 0, 0) is None
 
 
-def _triclinic_candidates(xnn_values, seed=7):
+def _triclinic_candidates(xnn_values, seed=7, wavelength=None):
     """A triclinic Candidates over a synthetic peak list, built straight from given cells.
 
     Triclinic because it is the only lattice system whose repair actually fires here:
@@ -508,8 +508,8 @@ def _triclinic_candidates(xnn_values, seed=7):
         opt_params=opt_params,
         rng=np.random.default_rng(seed),
         fom=None,
-        zero_error=False,
-        wavelength=None,
+        zero_error=wavelength is not None,
+        wavelength=wavelength,
     )
 
 
@@ -545,6 +545,40 @@ def test_best_cell_and_best_score_describe_the_same_candidate_after_repair():
     differing = int(np.sum(~((np.isnan(recomputed) & np.isnan(candidates.best_M20))
                              | (recomputed == candidates.best_M20))))
     assert differing == 0, f"{differing} candidates whose stored cell does not give their score"
+
+
+def test_the_ranking_inputs_use_each_candidate_s_zero_point():
+    """With `--zero-error` a candidate's lines are shifted by its own zero-point, and the inputs
+    the final ranking reads must describe those lines: the M20 they give is the search's, and
+    leaving the shift out gives different inputs."""
+    import numpy as np
+    from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+    from mlindex.utilities.Ranker import candidate_inputs, structural_inputs
+    from mlindex.utilities.SpaceGroups import get_spacegroup_keep_masks
+
+    xnn = np.array([[0.02, 0.015, 0.01, 0.001, 0.002, 0.0015],
+                    [0.0201, 0.0149, 0.0101, 0.001, 0.002, 0.0015]])
+    q2_obs, candidates = _triclinic_candidates(xnn, wavelength=1.5406)
+    candidates.best_zeropoint = np.array([0.01, -0.02])
+    candidates.assign_extinction_group()
+    candidates.calculate_peaks_indexed()
+    inputs = candidates.downsample_payload()['inputs']
+
+    lines = candidates.q2_calculator.get_q2(candidates.best_xnn)
+    shifted = CandidateOptLoss(np.repeat(q2_obs[np.newaxis], 2, axis=0),
+                               lattice_system='triclinic').apply_zeropoint(
+        candidates.best_zeropoint, 1.5406, lines)
+    keep_masks = get_spacegroup_keep_masks(candidates.hkl_ref, 'aP')
+    mask = keep_masks[candidates.best_spacegroup[0]]
+    assert set(candidates.best_spacegroup) == {candidates.best_spacegroup[0]}
+    np.testing.assert_array_equal(
+        structural_inputs(q2_obs, candidates.best_xnn, shifted[:, mask], 'triclinic', 'aP')['M20'],
+        candidates.best_M20)
+    for lines_used, same in ((shifted, True), (lines, False)):
+        expected = candidate_inputs(q2_obs, candidates.best_xnn, lines_used,
+                                    candidates.best_spacegroup, keep_masks, 'triclinic', 'aP')
+        assert all(np.array_equal(inputs[name], expected[name], equal_nan=True)
+                   for name in expected) == same
 
 
 def _allocation_lattices():

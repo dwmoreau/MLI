@@ -4,7 +4,6 @@ import numpy as np
 import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
-from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
 from mlindex.optimization.Candidates import Candidates
 from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
 from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL
@@ -13,10 +12,7 @@ from mlindex.optimization.UtilitiesOptimizer import lattice_budget
 from mlindex.utilities.Allocation import generator_info_from_fractions
 from mlindex.utilities.Digests import peak_list_bytes
 from mlindex.utilities.ErrorAdder import perturb_xnn
-from mlindex.utilities.Q2Calculator import Q2Calculator
-from mlindex.utilities.Ranker import candidate_inputs
 from mlindex.utilities.Reindexing import reindex_entry_basic
-from mlindex.utilities.SpaceGroups import get_spacegroup_keep_masks
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
@@ -436,7 +432,7 @@ class OptimizerManager(OptimizerBase):
 
     def _downsample_computation(self, best_M20_all, best_xnn_all,
                                 best_n_indexed_all, best_spacegroup_all,
-                                n_top_candidates, at_prune=None, zeropoint=None):
+                                n_top_candidates, at_prune=None, inputs=None):
         best_M20_all = np.concatenate(best_M20_all, axis=0)
         best_xnn_all = np.concatenate(best_xnn_all, axis=0)
         best_n_indexed_all = np.concatenate(best_n_indexed_all, axis=0)
@@ -537,15 +533,14 @@ class OptimizerManager(OptimizerBase):
             order, n_entering, n_top_candidates,
             )
 
-        # Every survivor, best M20 first, so the candidates kept below are its first rows. The
-        # zero-points are indexed like the concatenated inputs, as `at_prune` is.
-        self.survivors = {
-            'xnn': xnn_downsampled[order], 'M20': M20_downsampled[order],
-            'n_indexed': n_indexed_downsampled[order],
-            'spacegroup': [spacegroup_downsampled[i] for i in order],
-            'zeropoint': (None if zeropoint is None
-                          else zeropoint[np.asarray(survivor_positions, dtype=int)][order]),
-            }
+        # Every survivor, best M20 first, so the candidates kept below are its first rows.
+        # `inputs` are indexed like the concatenated payloads, as `at_prune` is.
+        survivor_rows = np.asarray(survivor_positions, dtype=int)[order]
+        self.pool = dict(
+            {name: values[survivor_rows] for name, values in (inputs or {}).items()},
+            M20=M20_downsampled[order], n_indexed=n_indexed_downsampled[order],
+            spacegroup=np.asarray([spacegroup_downsampled[i] for i in order], dtype=str),
+            )
 
         sort_indices = order[:n_top_candidates]
         self.top_xnn = xnn_downsampled[sort_indices]
@@ -559,44 +554,11 @@ class OptimizerManager(OptimizerBase):
             )
 
     def result(self):
-        """What the final ranking needs from this lattice, ready to pickle: the candidates it
-        reports, best M20 first, and its `pool`."""
-        return {
-            'top_unit_cell': self.top_unit_cell,
-            'top_M20': self.top_M20,
-            'top_spacegroup': self.top_spacegroup,
-            'top_n_indexed': self.top_n_indexed,
-            'pool': self._ranking_pool(),
-            }
-
-    def _ranking_pool(self):
-        """Every candidate that came through deduplication, best M20 first -- so the first rows
-        are the ones `result` reports -- with what the final ranking reads of each: the
-        `Ranker.candidate_inputs`, M20, n_indexed and the extinction group."""
-        survivors = self.survivors
-        xnn = survivors['xnn']
-        q2_ref_calc_full = Q2Calculator(
-            lattice_system=self.lattice_system, hkl=self.hkl_ref, tensorflow=False,
-            representation='xnn').get_q2(xnn)
-        if survivors['zeropoint'] is not None:
-            q2_ref_calc_full = CandidateOptLoss.apply_zeropoint(
-                survivors['zeropoint'], self.wavelength, q2_ref_calc_full)
-        if getattr(self, '_keep_masks', None) is None:
-            self._keep_masks = get_spacegroup_keep_masks(self.hkl_ref, self.bravais_lattice)
-        spacegroups = np.asarray(survivors['spacegroup'], dtype=str)
-        inputs = candidate_inputs(self.q2_obs, xnn, q2_ref_calc_full, spacegroups,
-                                  self._keep_masks, self.lattice_system, self.bravais_lattice)
-        # The inputs must describe the fit the search scored. M20 is computed on both sides, so
-        # a different peak list, reference list or zero-point shows up as a different M20.
-        difference = np.abs(inputs.pop('M20_recomputed') - survivors['M20'])
-        if difference.size and np.nanmax(difference) > 1e-6:
-            raise ValueError(
-                f'{self.bravais_lattice}: the ranking inputs recompute a different M20 for '
-                f'{int(np.count_nonzero(difference > 1e-6))} of {difference.size} candidates, '
-                f'worst {np.nanmax(difference):.3g}; they would rank cells other than the ones '
-                'the search fitted')
-        return dict(inputs, M20=survivors['M20'], n_indexed=survivors['n_indexed'],
-                    spacegroup=spacegroups)
+        """What the final ranking needs from this lattice, ready to pickle: its `pool`, every
+        candidate that came through deduplication, best M20 first, with its
+        `Ranker.candidate_inputs`; and `top_unit_cell`, the unit cells of the candidates it
+        reports, which are the pool's first rows."""
+        return {'pool': self.pool, 'top_unit_cell': self.top_unit_cell}
 
     def _on_downsample(self, survivors, order, n_entering, n_top_candidates):
         """Observation point for a benchmark run. Does nothing on the shipped path.
@@ -621,13 +583,13 @@ class OptimizerManager(OptimizerBase):
                     name: np.concatenate([p['merit_at_prune'][name] for p in payloads])
                     for name in payloads[0]['merit_at_prune']},
                 }
-        zeropoint = (np.concatenate([p['zeropoint'] for p in payloads])
-                     if 'zeropoint' in payloads[0] else None)
+        inputs = {name: np.concatenate([p['inputs'][name] for p in payloads])
+                  for name in payloads[0]['inputs']}
         self._downsample_computation(
             [p['M20'] for p in payloads], [p['xnn'] for p in payloads],
             [p['n_indexed'] for p in payloads],
             [spacegroup for p in payloads for spacegroup in p['spacegroup']],
-            n_top_candidates, at_prune=at_prune, zeropoint=zeropoint)
+            n_top_candidates, at_prune=at_prune, inputs=inputs)
 
     def downsample_candidates(self, candidates, n_top_candidates):
         payloads = []
