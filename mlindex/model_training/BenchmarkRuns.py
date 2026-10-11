@@ -1060,12 +1060,13 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
     which needs the true Bravais lattice), the true cell is finished by `refine_true_cell` and
     written as one candidate of the true lattice, in the pool's schema: `candidate_id`
     `TRUTH_CANDIDATE_ID`, `final_rank` where its M20 ranks among that lattice's survivors,
-    `n_entering` that lattice's, and the run settings the pool recorded. Both sidecars are then
+    `n_entering` that lattice's, and the run settings the pool recorded. Its at-prune values are
+    those of the refined cell, as its `m20_at_prune` is its refined M20, so a cut on any captured
+    merit treats it as the search would have. Both sidecars are then
     computed on it by the functions that compute the pool's own. `bundles` limits it to some
     condition bundles. Returns the stamp it writes.
     """
     from mlindex.model_training.BenchmarkOptimizer import candidate_record
-    from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
     from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL, MINIMUM_UNIT_CELL
     from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 
@@ -1132,7 +1133,7 @@ def truth_pool(pool_dir, out_dir, seed, bundles=None):
                     candidates.n_indexed,
                     [0 if pool is None else int((pool['M20'].to_numpy() > m20).sum())],
                     Benchmark.N_TOP_CANDIDATES, [m20],
-                    np.full((1, len(PRUNE_CAPTURE_MERITS)), np.nan),
+                    np.column_stack(list(candidates._capture_merits_at_prune().values())),
                     candidate_id=[TRUTH_CANDIDATE_ID]))
             added = Benchmark.label_frame(Benchmark.records_to_frame(records), entries)
             counts['added'] += int(added.shape[0])
