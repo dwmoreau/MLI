@@ -153,11 +153,29 @@ def _reduce_subset(entry_code, values, lattice, lattice_order, candidate_id, cor
     return columns
 
 
-def restrict_at_cut(frame, cut, n_top=20, column='m20_at_prune'):
-    """The candidates a run at a higher M20 cut would have kept, from a pool generated lower.
+def at_prune(frame, criterion):
+    """Each candidate's value of the merit `criterion` when the search's cut was applied.
 
-    Keeps every row whose at-prune value reaches `cut`, and where a (pattern, condition, lattice)
-    pool has none, its best row -- the run keeps one candidate per lattice whatever the cut. Then
+    M20 is the `m20_at_prune` column; every other merit is read from its position in the
+    `merit_at_prune` list (`PRUNE_CAPTURE_MERITS`).
+    """
+    from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
+
+    if criterion == 'M20':
+        return frame['m20_at_prune'].to_numpy(dtype=np.float64)
+    if criterion not in PRUNE_CAPTURE_MERITS:
+        raise ValueError(f'no at-prune value for {criterion!r}; the pool holds '
+                         f'{list(PRUNE_CAPTURE_MERITS)}')
+    values = np.stack(frame['merit_at_prune'].to_numpy()) if frame.shape[0] else np.empty((0, 1))
+    return values[:, PRUNE_CAPTURE_MERITS.index(criterion)].astype(np.float64)
+
+
+def restrict_at_cut(frame, cut, n_top=20, criterion='M20'):
+    """The candidates a run at a higher cut would have kept, from a pool generated lower.
+
+    Keeps every row whose at-prune value of `criterion` reaches `cut`, and where a (pattern,
+    condition, lattice) pool has none, its best row by that merit -- the run keeps one candidate
+    per lattice whatever the cut. Then
     recomputes what the cut moves: `final_rank` (by M20 within the lattice), `in_top_n`, and
     `pool_size_full` (the survivors of the pattern). `n_entering` is left as the generating run's,
     so this gives the candidates a higher cut admits, not the cells it would have refined.
@@ -167,12 +185,13 @@ def restrict_at_cut(frame, cut, n_top=20, column='m20_at_prune'):
     produces never carry.
     """
     lattice_key = ['entry_id', 'condition_bundle', 'bravais_lattice']
-    at_prune = frame[column].to_numpy(dtype=np.float64)
-    best = frame.groupby(lattice_key, sort=False)[column].transform('max').to_numpy(
+    value = at_prune(frame, criterion)
+    best = pd.Series(value, index=frame.index).groupby(
+        [frame[name] for name in lattice_key], sort=False).transform('max').to_numpy(
         dtype=np.float64)
     # A pool whose best row is below the cut (`best < cut` is False for an all-NaN pool, and no
     # NaN row equals its best, so such a pool keeps nothing).
-    keep = (at_prune >= cut) | ((best < cut) & (at_prune == best))
+    keep = (value >= cut) | ((best < cut) & (value == best))
     out = frame.loc[keep].copy()
     out['final_rank'] = out.groupby(lattice_key, sort=False)['M20'].rank(
         method='first', ascending=False).to_numpy(dtype=np.int64) - 1
@@ -180,6 +199,35 @@ def restrict_at_cut(frame, cut, n_top=20, column='m20_at_prune'):
     out['pool_size_full'] = out.groupby(['entry_id', 'condition_bundle'], sort=False)[
         'M20'].transform('size').to_numpy(dtype=np.float64)
     return out.reset_index(drop=True)
+
+
+def shortlist(frame, values, depth):
+    """`frame` with `in_top_n` marking each (pattern, condition, lattice)'s `depth` best rows by
+    `values`, higher first, ties by candidate id.
+
+    `depth` is a number, a {lattice: number} map (a lattice it omits keeps every row), or None
+    for every row. `reduce_pool`'s `in_top_n` depth then reports the shortlist.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if values.shape[0] != frame.shape[0]:
+        raise ValueError(f'{values.shape[0]} values for {frame.shape[0]} candidates')
+    lattice = frame['bravais_lattice'].to_numpy()
+    entry_code, _ = _group_codes(frame['entry_id'], frame['condition_bundle'])
+    group = entry_code*len(BRAVAIS_LATTICES) + lattice_order_of(lattice)
+    order = np.lexsort((frame['candidate_id'].to_numpy(dtype=np.int64), -values, group))
+    position = np.arange(values.shape[0])
+    first = np.r_[True, np.diff(group[order]) != 0]
+    rank = np.empty(values.shape[0], dtype=np.int64)
+    rank[order] = position - np.maximum.accumulate(np.where(first, position, 0))
+    if depth is None:
+        limit = np.full(values.shape[0], np.inf)
+    elif isinstance(depth, dict):
+        limit = np.array([depth.get(name, np.inf) for name in lattice], dtype=np.float64)
+    else:
+        limit = np.full(values.shape[0], float(depth))
+    out = frame.copy()
+    out['in_top_n'] = rank < limit
+    return out
 
 
 def reduce_pool(frame, values, depths=('all', 'in_top_n')):

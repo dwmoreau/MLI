@@ -133,6 +133,69 @@ def test_restricting_at_a_cut_keeps_each_lattices_best_and_reranks():
     assert set(out['pool_size_full']) == {3.0}
 
 
+def test_a_cut_on_m_sym_reads_m_sym_at_prune_and_keeps_other_rows_than_m20():
+    """The cut reads the named merit's at-prune value, from its position in `merit_at_prune`.
+    The two merits order these rows oppositely, so an M_sym cut keeps exactly the rows an M20 cut
+    at the same value drops, apart from each lattice's best, which both keep."""
+    from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
+
+    m20 = np.array([9.0, 4.0, 2.0, 1.0])
+    m_sym = np.array([1.0, 2.0, 4.0, 9.0])
+    merits = np.zeros((4, len(PRUNE_CAPTURE_MERITS)))
+    merits[:, PRUNE_CAPTURE_MERITS.index('M20')] = m20
+    merits[:, PRUNE_CAPTURE_MERITS.index('M_sym')] = m_sym
+    frame = pd.DataFrame({
+        'entry_id': 'E', 'condition_bundle': 'b0', 'bravais_lattice': 'cP',
+        'candidate_id': [0, 1, 2, 3], 'M20': m20, 'm20_at_prune': m20,
+        'merit_at_prune': list(merits)})
+    by_m20 = metrics.restrict_at_cut(frame, 3.5)
+    by_m_sym = metrics.restrict_at_cut(frame, 3.5, criterion='M_sym')
+    assert by_m20['candidate_id'].tolist() == [0, 1]
+    assert by_m_sym['candidate_id'].tolist() == [2, 3]
+    # Ranks within the lattice stay by M20, whatever the cut was on.
+    assert by_m_sym['final_rank'].tolist() == [0, 1]
+    # Below the cut on M_sym everywhere: the lattice keeps its best by M_sym, not by M20.
+    assert metrics.restrict_at_cut(frame, 20.0, criterion='M_sym')['candidate_id'].tolist() == [3]
+    with pytest.raises(ValueError):
+        metrics.restrict_at_cut(frame, 3.5, criterion='M_1')
+
+
+def test_a_shortlist_keeps_each_lattices_best_by_the_score_given():
+    frame = pd.DataFrame({
+        'entry_id': ['E']*5 + ['F']*2, 'condition_bundle': 'b0',
+        'bravais_lattice': ['cP', 'cP', 'cP', 'mP', 'mP', 'cP', 'cP'],
+        'candidate_id': [0, 1, 2, 0, 1, 0, 1]})
+    values = np.array([1.0, 3.0, 2.0, 5.0, 5.0, 0.0, 1.0])
+    assert metrics.shortlist(frame, values, 2)['in_top_n'].tolist() == [
+        False, True, True, True, True, True, True]
+    # A lattice the map omits keeps every row; equal scores go by candidate id.
+    assert metrics.shortlist(frame, values, {'cP': 1, 'mP': 1})['in_top_n'].tolist() == [
+        False, True, False, True, False, False, True]
+    assert metrics.shortlist(frame, values, {'cP': 1})['in_top_n'].tolist() == [
+        False, True, False, True, True, False, True]
+    assert metrics.shortlist(frame, values, None)['in_top_n'].all()
+
+
+def test_a_shortlist_by_the_ranking_score_cannot_change_the_pooled_top_ten():
+    """A candidate in the pooled top ten by a score has at most nine better candidates in its own
+    lattice, so shortlisting every lattice by that same score to ten or more rows reports the
+    same top ten as the whole pool. Shortlisting by another score (M20) does not: the check can
+    fail, and does on this pool."""
+    frame = _pool(n_entries=6, n_per_lattice=60, seed=3)
+    rng = np.random.default_rng(7)
+    score = rng.normal(size=frame.shape[0]) + 3.0*frame['is_correct'].to_numpy()
+
+    def top10(depth, by):
+        listed = metrics.shortlist(frame, by, depth)
+        reduced = metrics.reduce_many(listed, {'score': score})['score']
+        return metrics.derive_flags(reduced, depth='in_top_n')['top10'].to_numpy()
+
+    whole = top10(None, score)
+    for depth in (10, 20, 40, {'aP': 40, 'mP': 40, 'cP': 10}):
+        np.testing.assert_array_equal(top10(depth, score), whole)
+    assert not np.array_equal(top10(10, frame['M20'].to_numpy()), whole)
+
+
 def _write_pool(directory, frame):
     """`frame`, a `_pool()`, written as a benchmark pool `export_bundle` reads: candidate shards
     carrying the cells the labeller needs, both sidecars, and the entry table. Every pattern's
