@@ -290,8 +290,12 @@ def _read_export(directory):
 
 
 def _evaluation_frame(directory, crystals):
+    """The export's evaluation rows of the crystals in `crystals`, read a bundle at a time so
+    that no other crystal's rows are held: a depth-`all` export of fom-train is ~200 M rows."""
     paths = sorted(Path(directory).glob('evaluation_*.parquet'))
-    frames = [pd.read_parquet(path) for path in paths]
+    wanted = crystals['entry_id']
+    frames = [frame.loc[frame['entry_id'].isin(wanted)]
+              for frame in (pd.read_parquet(path) for path in paths)]
     frame = pd.concat(frames, ignore_index=True)
     frame = frame.merge(crystals[['entry_id', 'bravais_lattice_true']], on='entry_id',
                         how='left', validate='m:1')
@@ -390,7 +394,8 @@ def run_fit(args, commit):
     del training, frames
     # The calibration and selection crystals are both read as the deployed indexer leaves them:
     # the export's evaluation rows.
-    evaluation = _evaluation_frame(export_dir, crystals)
+    evaluation = _evaluation_frame(export_dir, crystals.loc[
+        crystals['entry_id'].isin(parts['calibration']) | (crystals['part'] == 'selection')])
     calibration_rows = evaluation.loc[evaluation['entry_id'].isin(parts['calibration'])]
     selection = evaluation.loc[evaluation['entry_id'].isin(
         crystals.loc[crystals['part'] == 'selection', 'entry_id'])].reset_index(drop=True)
