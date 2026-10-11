@@ -293,10 +293,11 @@ def _float32(frame):
 
 def export_bundle(pool, bundle, training_ids, evaluation_ids, seeds, cut, n_top,
                   keep_all_depths, top_k, negative_rate, n_negatives, group_frequency,
-                  truth_dir=None):
+                  truth_dir=None, criterion='M20'):
     """One condition bundle of a pool as ranker frames: training rows per seed, evaluation rows.
 
-    Both are the pool as a run at `cut` would leave it (`restrict_at_cut`), with the context gaps
+    Both are the pool as a run cutting at `criterion` >= `cut` would leave it (`restrict_at_cut`),
+    with the context gaps
     recomputed over the restricted pool, every lattice of the pattern. `group_frequency` is the
     table `Ranker.read_group_frequency` reads.
 
@@ -322,20 +323,23 @@ def export_bundle(pool, bundle, training_ids, evaluation_ids, seeds, cut, n_top,
     lattices = [lattice for lattice, _ in Benchmark.candidate_shards(pool, bundle)]
     wanted = set(training_ids) | set(evaluation_ids)
     context_columns = {Benchmark.MERIT_SIDECAR: ['M_sym', 'n_over']}
+    # The at-prune column the cut reads; M20's is its own column, the others are in a list.
+    cut_column = ('m20_at_prune',) if criterion == 'M20' else ('merit_at_prune',)
 
     def restricted(frame):
         """(training rows, evaluation rows) of one lattice, each restricted to the cut by the
         one rule; the added true cells are training rows only."""
         added = frame['candidate_id'].to_numpy() == TRUTH_CANDIDATE_ID
         training = restrict_at_cut(frame.loc[frame['entry_id'].isin(training_ids)], cut,
-                                   n_top=n_top)
+                                   n_top=n_top, criterion=criterion)
         evaluation = restrict_at_cut(
-            frame.loc[frame['entry_id'].isin(evaluation_ids) & ~added], cut, n_top=n_top)
+            frame.loc[frame['entry_id'].isin(evaluation_ids) & ~added], cut, n_top=n_top,
+            criterion=criterion)
         return training, evaluation
 
     best = {'training': [], 'evaluation': []}
     for lattice in lattices:
-        frame = _read_lattice(pool, bundle, lattice, wanted, columns=('M20', 'm20_at_prune'),
+        frame = _read_lattice(pool, bundle, lattice, wanted, columns=('M20',) + cut_column,
                               sidecar_columns=context_columns, truth_dir=truth_dir,
                               truth_ids=training_ids)
         for name, rows in zip(('training', 'evaluation'), restricted(frame)):
@@ -347,8 +351,10 @@ def export_bundle(pool, bundle, training_ids, evaluation_ids, seeds, cut, n_top,
     kept = {seed: [] for seed in seeds}
     evaluation_parts = []
     for lattice in lattices:
-        frame = add_derived(_read_lattice(pool, bundle, lattice, wanted, truth_dir=truth_dir,
-                                          truth_ids=training_ids), group_frequency)
+        frame = add_derived(_read_lattice(pool, bundle, lattice, wanted,
+                                          columns=SHARD_COLUMNS + cut_column,
+                                          truth_dir=truth_dir, truth_ids=training_ids),
+                            group_frequency)
         training, evaluation = restricted(frame)
         if training.shape[0]:
             training = add_context(training, best['training']).reset_index(drop=True)

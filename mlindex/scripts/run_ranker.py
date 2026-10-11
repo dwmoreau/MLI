@@ -32,7 +32,8 @@ What each stage does:
   frequencies `make_group_frequency` writes. From a `fom-train` pool it
   holds out a fixed share of crystals (`--selection-fraction`, drawn once with `--split-seed`)
   for choosing settings, and writes the rest as training rows: the pool restricted to `--cut`
-  as a run at that cut would leave it, every correct candidate and a thinned, seed-keyed sample
+  on `--cut-criterion` (M20, or M_sym, read at the point the search cuts) as a run at that cut
+  would leave it, every correct candidate and a thinned, seed-keyed sample
   of the wrong ones, for each of `--seeds`. A training pattern whose search found no correct cell
   gets the true cell, refined as the search finishes a candidate (`BenchmarkRuns.truth_pool`,
   written under `truth/`), so every training pattern has one. Every crystal, of either split, is
@@ -71,6 +72,7 @@ from mlindex.model_training import BenchmarkRuns
 from mlindex.model_training import FomCombiner as Ranker
 from mlindex.model_training.BenchmarkMetrics import derive_flags
 from mlindex.model_training.BenchmarkMetrics import reduce_many
+from mlindex.model_training.BenchmarkMetrics import shortlist
 from mlindex.model_training.BenchmarkRuns import POPULATIONS
 from mlindex.model_training.BenchmarkRuns import committed_checkout
 from mlindex.utilities.Ranker import read_group_frequency
@@ -112,8 +114,11 @@ def build_parser():
     export.add_argument('--split-seed', type=int, default=12345, metavar='S',
                         help='Draws the selection crystals, and seeds the refinement of added '
                              'true cells; fixed across fits.')
-    export.add_argument('--cut', type=float, default=3.5, metavar='M20',
-                        help='The M20 cut the evaluation rows are restricted to.')
+    export.add_argument('--cut', type=float, default=3.5, metavar='VALUE',
+                        help='The cut the rows are restricted to (default %(default)s).')
+    export.add_argument('--cut-criterion', default='M20', choices=('M20', 'M_sym'),
+                        help='The merit the cut is applied to, at the point the search applies '
+                             'it (default %(default)s).')
     export.add_argument('--depth', default='20', metavar='N|all',
                         help='Evaluation rows kept per lattice: a number, or all.')
     export.add_argument('--top-k', type=int, default=200, metavar='K',
@@ -140,6 +145,11 @@ def build_parser():
                      help='Share of training crystals the calibrators are fitted on.')
     fit.add_argument('--drop-features', type=_names, default=(), metavar='NAME,...',
                      help='Ranker inputs to leave out of the fit (default: none).')
+    fit.add_argument('--calibration-shortlist', choices=('export', 'M20', 'score'),
+                     default='export',
+                     help='The calibration crystals\' rows the calibrators are fitted on: '
+                          'every row the export kept, or each lattice\'s top 20 by M20 or by '
+                          'the classifier\'s score (default %(default)s).')
 
     evaluate = parser.add_argument_group('evaluate')
     evaluate.add_argument('--model-dir', action='append', default=[], metavar='DIR',
@@ -163,8 +173,10 @@ def run_export(args, commit):
     manifest = Benchmark.load_manifest(pool)
     split = manifest['split']
     depth = _depth(args.depth)
+    # An M20 cut keeps the name it always had; another merit's cut is named after it.
+    criterion = '' if args.cut_criterion == 'M20' else args.cut_criterion
     target = (Path(args.out_dir) / commit[:7]
-              / f'{pool.name}_cut{args.cut:g}_depth{args.depth}')
+              / f'{pool.name}_cut{criterion}{args.cut:g}_depth{args.depth}')
     target.mkdir(parents=True, exist_ok=True)
 
     entries = Benchmark.load_entries(pool)
@@ -203,14 +215,15 @@ def run_export(args, commit):
             cut=args.cut, n_top=depth or Benchmark.N_TOP_CANDIDATES,
             keep_all_depths=depth is None, top_k=args.top_k,
             negative_rate=args.negative_rate, n_negatives=args.n_negatives,
-            group_frequency=group_frequency, truth_dir=truth_dir)
+            group_frequency=group_frequency, truth_dir=truth_dir,
+            criterion=args.cut_criterion)
         for seed, frame in training.items():
             frame.to_parquet(target / f'training_{bundle}_seed{seed}.parquet', index=False)
         if evaluation is not None:
             evaluation.to_parquet(target / f'evaluation_{bundle}.parquet', index=False)
         record = dict(commit=commit, bundle=bundle, pool=str(pool),
                       pool_commit=manifest['commit'], split=split, cut=args.cut,
-                      depth=args.depth, top_k=args.top_k, negative_rate=args.negative_rate,
+                      cut_criterion=args.cut_criterion, depth=args.depth, top_k=args.top_k, negative_rate=args.negative_rate,
                       n_negatives=args.n_negatives,
                       group_frequency=str(Path(args.group_frequency).resolve()),
                       seeds=sorted(training),
@@ -266,9 +279,12 @@ def _read_export(directory):
     found = sorted(stamp['bundle'] for stamp in stamps)
     if expected is not None and found != sorted(expected):
         raise SystemExit(f'{directory} has bundles {found}; its pool has {sorted(expected)}')
-    for field in ('pool_commit', 'cut', 'depth', 'top_k', 'negative_rate', 'n_negatives',
-                  'seeds'):
-        if len({json.dumps(stamp[field]) for stamp in stamps}) != 1:
+    for field in ('pool_commit', 'cut', 'cut_criterion', 'depth', 'top_k', 'negative_rate',
+                  'n_negatives', 'seeds'):
+        # Exports written before the cut could be on another merit were all cut on M20.
+        values = {json.dumps(stamp.get(field, 'M20' if field == 'cut_criterion' else None))
+                  for stamp in stamps}
+        if len(values) != 1:
             raise SystemExit(f'{directory}: the bundles were exported with different {field}')
     return crystals, stamps
 
@@ -325,11 +341,15 @@ def population_means(flags, by='score'):
 # ---------------------------------------------------------------------------------------------
 # fit
 # ---------------------------------------------------------------------------------------------
-def fit_name(encoding, learning_rate, max_leaf_nodes, max_iter, seed, drop_features=()):
-    """A fit's directory name. Without some inputs it ends in how many were left out and a
-    digest of their names, whatever order they were given in."""
+def fit_name(encoding, learning_rate, max_leaf_nodes, max_iter, seed, drop_features=(),
+             calibration_shortlist='export'):
+    """A fit's directory name. Calibrated on a shortlist of the exported rows, it ends in
+    `_cal<M20|score>`; without some inputs it then ends in how many were left out and a digest
+    of their names, whatever order they were given in."""
     name = (f'{encoding}_lr{learning_rate:g}_leaves{max_leaf_nodes}_iter{max_iter}'
             f'_seed{seed}')
+    if calibration_shortlist != 'export':
+        name += f'_cal{calibration_shortlist}'
     if drop_features:
         dropped = sorted(set(drop_features))
         digest = hashlib.sha1(','.join(dropped).encode('utf-8')).hexdigest()[:8]
@@ -348,7 +368,7 @@ def run_fit(args, commit):
                          f'pattern; {args.fit_negatives} cannot be drawn from it')
     features = Ranker.features_without(args.drop_features)
     name = fit_name(args.encoding, args.learning_rate, args.max_leaf_nodes, args.max_iter,
-                    args.seed, args.drop_features)
+                    args.seed, args.drop_features, args.calibration_shortlist)
     target = Path(args.out_dir) / commit[:7] / name
     if target.exists():
         raise SystemExit(f'{target} exists; every fit writes its own directory')
@@ -386,9 +406,12 @@ def run_fit(args, commit):
         fit_rows, encoding=args.encoding, seed=args.seed, features=features,
         params=dict(max_iter=args.max_iter, learning_rate=args.learning_rate,
                     max_leaf_nodes=args.max_leaf_nodes))
-    curve = learning_curve(combiner, calibration_rows, selection, args.checkpoint_every)
-    combiner.fit_calibrators(calibration_rows)
+    curve = learning_curve(combiner, calibration_rows, selection, args.checkpoint_every,
+                           args.calibration_shortlist)
+    combiner.fit_calibrators(calibration_rows.loc[calibration_shortlist(
+        calibration_rows, combiner.raw_score(calibration_rows), args.calibration_shortlist)])
     combiner.meta.update(commit=commit, export_dir=str(export_dir),
+                         calibration_shortlist=args.calibration_shortlist,
                          fit_negatives=args.fit_negatives,
                          dropped_features=sorted(set(args.drop_features)),
                          n_fit_crystals=len(parts['fit']),
@@ -402,8 +425,18 @@ def run_fit(args, commit):
     return 0
 
 
-def learning_curve(combiner, calibration, selection, every):
-    """Selection outcomes at every `every` trees, calibrating on `calibration` at each stage.
+def calibration_shortlist(rows, raw, by):
+    """Which calibration rows the calibrators are fitted on: all of them (`'export'`), or each
+    lattice's `Benchmark.N_TOP_CANDIDATES` best by M20 or by the raw score `raw`."""
+    if by == 'export':
+        return np.ones(rows.shape[0], dtype=bool)
+    values = rows['M20'].to_numpy() if by == 'M20' else raw
+    return shortlist(rows, values, Benchmark.N_TOP_CANDIDATES)['in_top_n'].to_numpy(dtype=bool)
+
+
+def learning_curve(combiner, calibration, selection, every, shortlist_by='export'):
+    """Selection outcomes at every `every` trees, calibrating on `calibration` at each stage,
+    on the rows `calibration_shortlist` picks by that stage's score.
 
     Each checkpoint is ranked three ways (`FomCombiner.CALIBRATION_ARMS`): `ranker@T` through
     the per-lattice maps, `ranker_pooled@T` through the pooled map, `ranker_raw@T` by the raw
@@ -422,8 +455,9 @@ def learning_curve(combiner, calibration, selection, every):
     for n_trees, (raw_calibration, raw_selection) in enumerate(stages, start=1):
         if n_trees not in checkpoints:
             continue
-        calibrators = Ranker.fit_calibration(raw_calibration[:, 1], target,
-                                             calibration['bravais_lattice'])
+        kept = calibration_shortlist(calibration, raw_calibration[:, 1], shortlist_by)
+        calibrators = Ranker.fit_calibration(raw_calibration[kept, 1], target[kept],
+                                             calibration['bravais_lattice'].to_numpy()[kept])
         arms = Ranker.calibration_arms(raw_selection[:, 1], selection['bravais_lattice'],
                                        calibrators)
         flags = outcomes(selection, {CURVE_NAMES[arm]: score for arm, score in arms.items()})
