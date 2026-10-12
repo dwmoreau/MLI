@@ -156,6 +156,9 @@ def test_a_cut_on_m_sym_reads_m_sym_at_prune_and_keeps_other_rows_than_m20():
     assert by_m_sym['final_rank'].tolist() == [0, 1]
     # Below the cut on M_sym everywhere: the lattice keeps its best by M_sym, not by M20.
     assert metrics.restrict_at_cut(frame, 20.0, criterion='M_sym')['candidate_id'].tolist() == [3]
+    # No rows, as a fom-dev export's training rows always are: nothing kept, on either merit.
+    for criterion in ('M20', 'M_sym'):
+        assert metrics.restrict_at_cut(frame.iloc[:0], 3.5, criterion=criterion).shape[0] == 0
     with pytest.raises(ValueError):
         metrics.restrict_at_cut(frame, 3.5, criterion='M_1')
 

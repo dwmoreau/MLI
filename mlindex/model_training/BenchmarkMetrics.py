@@ -166,7 +166,9 @@ def at_prune(frame, criterion):
     if criterion not in PRUNE_CAPTURE_MERITS:
         raise ValueError(f'no at-prune value for {criterion!r}; the pool holds '
                          f'{list(PRUNE_CAPTURE_MERITS)}')
-    values = np.stack(frame['merit_at_prune'].to_numpy()) if frame.shape[0] else np.empty((0, 1))
+    if not frame.shape[0]:
+        return np.empty(0, dtype=np.float64)
+    values = np.stack(frame['merit_at_prune'].to_numpy())
     return values[:, PRUNE_CAPTURE_MERITS.index(criterion)].astype(np.float64)
 
 
