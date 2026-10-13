@@ -704,3 +704,24 @@ def test_the_cost_table_measurement_script_names_real_patterns():
     for name in DEFAULT_PATTERNS:
         path = _test_data_dir().joinpath(name, f"{name}_peak_list.npy")
         assert path.is_file(), f"default pattern {name} is missing at {path}"
+
+
+def test_the_pool_carries_every_survivor_s_full_cell_in_pool_order():
+    """The output reports whichever survivors the ranking picks, not the first twenty by M20, so
+    every survivor's cell travels with the pool: the full cell, angles in radians, rows in the
+    pool's best-M20-first order. Hexagonal, because its 120 degrees once landed in alpha."""
+    from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
+
+    manager = _downsample_manager()
+    manager.lattice_system = 'hexagonal'
+    xnn = [np.array([[0.10, 0.04], [0.20, 0.05], [0.30, 0.06]])]
+    M20 = [np.array([10.0, 30.0, 20.0])]
+    manager._downsample_computation(M20, xnn, [np.array([5, 6, 7])], ['A', 'B', 'C'],
+                                    n_top_candidates=1)
+
+    partial = get_unit_cell_from_xnn(xnn[0][[1, 2, 0]], partial_unit_cell=True,
+                                     lattice_system='hexagonal')
+    cell = manager.pool['unit_cell']
+    assert manager.pool['M20'].tolist() == [30.0, 20.0, 10.0]
+    np.testing.assert_allclose(cell[:, [0, 1, 2]], partial[:, [0, 0, 1]])
+    np.testing.assert_allclose(cell[:, 3:], np.tile([np.pi/2, np.pi/2, 2*np.pi/3], (3, 1)))

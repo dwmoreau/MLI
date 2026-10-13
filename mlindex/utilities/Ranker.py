@@ -257,6 +257,12 @@ class MSymRanker:
         """Each candidate's M_sym."""
         return np.asarray(columns['M_sym'], dtype=np.float64)
 
+    def shortlist(self, pool, scores, depth):
+        """The lattice's first `depth` candidates by M20, which is the pool's own order. Ranked by
+        M_sym, a shortlist by M_sym instead loses 2-3 points of orthorhombic and monoclinic first
+        place for a gain on triclinic (P16, `artifacts/P16_deployment.md`)."""
+        return np.arange(min(depth, len(scores)))
+
 
 class LearnedRanker:
     """The packaged ranker: an ONNX classifier, its per-lattice calibrators and the
@@ -303,6 +309,12 @@ class LearnedRanker:
         """The calibrated probability that each candidate is correct, from all its inputs."""
         return apply_calibration(self.predict_batch(self.design_matrix(columns)),
                                  columns[LATTICE_FEATURE], self.calibrators)
+
+    def shortlist(self, pool, scores, depth):
+        """The lattice's `depth` best candidates by `scores`, ties by M_sym as the pooled list breaks
+        them, then by the pool's order. With the shortlist and the pooled list ranked by one key,
+        any depth of ten or more prints the same top ten (P16, P-F-196)."""
+        return np.lexsort((-np.asarray(pool['M_sym']), -np.asarray(scores)))[:depth]
 
     def score_pattern(self, columns):
         """`score` for one pattern's candidates, adding the inputs read from the whole pattern:

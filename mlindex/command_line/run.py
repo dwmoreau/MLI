@@ -16,8 +16,6 @@ from mlindex.optimization.CandidateValidation import validate_candidate
 from mlindex.utilities.gsas import load_pkslst
 from mlindex.utilities.Ranker import load_ranker
 from mlindex.utilities.Ranker import score_pool
-from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
-from mlindex.utilities.UnitCellTools import get_full_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 from mlindex.utilities.Reindexing import rhombohedral_to_hexagonal
@@ -239,12 +237,20 @@ def _load_peaks(args):
     return peak_list
 
 
-def _collect_results(result, bl, all_results, scores):
-    """One entry per candidate a lattice reports (`OptimizerBase.result()`), with its score."""
+# How many candidates each Bravais lattice hands the final ranking (the ranker chooses which:
+# `shortlist`). Twenty is the depth the packaged ranker was fitted at
+# (`ranker_1/specification.json`, "depth").
+SHORTLIST_DEPTH = 20
+
+
+def _collect_results(result, bl, all_results, scores, rows):
+    """One entry for each of `rows` of the lattice's pool, with its score.
+
+    `result` is the lattice's `OptimizerBase.result()`; `scores` scores its pool, row for row.
+    """
     pool = result['pool']
-    lattice_system = BL_TO_LATTICE_SYSTEM[bl]
-    for i, partial in enumerate(result['top_unit_cell']):
-        unit_cell = get_full_unit_cell(partial, lattice_system)
+    for i in rows:
+        unit_cell = pool['unit_cell'][i]
         if bl == 'hR':
             unit_cell = rhombohedral_to_hexagonal(unit_cell)
         entry = {
@@ -441,13 +447,13 @@ def _write_output(output_file, results, ranker, promote=None):
 
     `results` is {Bravais lattice: `OptimizerBase.result()`}. Every survivor of every lattice is
     scored in one batch -- the ranker's context inputs compare a candidate with all of them --
-    and each lattice's reported candidates, the first rows of its pool, carry their scores into
-    the output. `ranker` is a `Ranker.LearnedRanker` or `Ranker.MSymRanker`; the output names it.
+    and each lattice reports the `SHORTLIST_DEPTH` the ranker's `shortlist` picks. `ranker` is a `Ranker.LearnedRanker` or `Ranker.MSymRanker`; the output names it.
     """
     scores = score_pool({bl: result['pool'] for bl, result in results.items()}, ranker)
     output_data = []
     for bl, result in results.items():
-        _collect_results(result, bl, output_data, scores[bl])
+        rows = ranker.shortlist(result['pool'], scores[bl], SHORTLIST_DEPTH)
+        _collect_results(result, bl, output_data, scores[bl], rows)
     output_data = _conventional_cell(output_data, promote=promote)
     output_file_base = str(Path(output_file).with_suffix(''))
     _write_results(output_data, ranker.name, output_file_base=output_file_base)

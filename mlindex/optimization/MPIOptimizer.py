@@ -16,6 +16,7 @@ from mlindex.utilities.ErrorAdder import perturb_xnn
 from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
+from mlindex.utilities.UnitCellTools import get_full_unit_cell
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
@@ -531,13 +532,17 @@ class OptimizerManager(OptimizerBase):
             order, n_entering, n_top_candidates,
             )
 
-        # Every survivor, best M20 first, so the candidates kept below are its first rows.
-        # `inputs` are indexed like the concatenated payloads, as `at_prune` is.
+        # Every survivor, best M20 first, with its full cell: the output reports whichever
+        # survivors the final ranking picks. `inputs` are indexed like the concatenated payloads,
+        # as `at_prune` is.
         survivor_rows = np.asarray(survivor_positions, dtype=int)[order]
         self.pool = dict(
             {name: values[survivor_rows] for name, values in (inputs or {}).items()},
             M20=M20_downsampled[order], n_indexed=n_indexed_downsampled[order],
             spacegroup=np.asarray([spacegroup_downsampled[i] for i in order], dtype=str),
+            unit_cell=get_full_unit_cell(get_unit_cell_from_xnn(
+                xnn_downsampled[order], partial_unit_cell=True,
+                lattice_system=self.lattice_system), self.lattice_system),
             )
 
         sort_indices = order[:n_top_candidates]
@@ -553,10 +558,9 @@ class OptimizerManager(OptimizerBase):
 
     def result(self):
         """What the final ranking needs from this lattice, ready to pickle: its `pool`, every
-        candidate that came through deduplication, best M20 first, with its
-        `Ranker.candidate_inputs`; and `top_unit_cell`, the unit cells of the candidates it
-        reports, which are the pool's first rows."""
-        return {'pool': self.pool, 'top_unit_cell': self.top_unit_cell}
+        candidate that came through deduplication, best M20 first, with its full `unit_cell`
+        and its `Ranker.candidate_inputs`."""
+        return {'pool': self.pool}
 
     def _on_downsample(self, survivors, order, n_entering, n_top_candidates):
         """Observation point for a benchmark run. Does nothing on the shipped path.

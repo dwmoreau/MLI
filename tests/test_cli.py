@@ -100,25 +100,62 @@ def test_candidates_with_equal_scores_are_ordered_by_m_sym():
     assert [entry['M_sym'] for entry in kept] == [25.0, 20.0]
 
 
-@pytest.mark.parametrize('bravais_lattice, partial, expected', [
-    ('cP', [4.0], (4.0, 4.0, 4.0, 90.0, 90.0, 90.0)),
-    ('tI', [4.0, 7.0], (4.0, 4.0, 7.0, 90.0, 90.0, 90.0)),
-    ('hP', [3.0, 5.0], (3.0, 3.0, 5.0, 90.0, 90.0, 120.0)),
-    ('oP', [4.0, 5.0, 6.0], (4.0, 5.0, 6.0, 90.0, 90.0, 90.0)),
-    ('mP', [4.0, 5.0, 6.0, np.radians(100.0)], (4.0, 5.0, 6.0, 90.0, 100.0, 90.0)),
-])
-def test_a_reported_cell_has_its_lattice_angles_in_their_places(bravais_lattice, partial,
-                                                                expected):
-    """The printed cell is the full cell of the lattice's free parameters: hexagonal's 120 degrees
-    is gamma, between the two equal axes. Written as alpha, the cell is only monoclinic."""
-    from mlindex.command_line.run import _collect_results
+def _cubic_pool(M20, M_sym):
+    """A cP pool as `OptimizerBase.result()` hands it over: best M20 first, a full cell a row."""
+    M20 = np.asarray(M20, dtype=float)
+    a = 3.0 + np.arange(M20.shape[0])
+    right = np.full(M20.shape[0], np.pi/2)
+    return {'pool': {'M20': M20, 'M_sym': np.asarray(M_sym, dtype=float),
+                     'n_indexed': np.full(M20.shape[0], 20),
+                     'spacegroup': np.full(M20.shape[0], 'P m -3 m'),
+                     'unit_cell': np.stack([a, a, a, right, right, right], axis=1)}}
 
-    pool = {'M20': np.array([30.0]), 'M_sym': np.array([20.0]), 'n_indexed': np.array([20]),
-            'spacegroup': np.array(['P 1'])}
-    entry, = _collect_results({'pool': pool, 'top_unit_cell': np.array([partial])},
-                              bravais_lattice, [], np.array([0.9]))
-    reported = tuple(entry[key] for key in ('a', 'b', 'c', 'alpha', 'beta', 'gamma'))
-    np.testing.assert_allclose(reported, expected)
+
+def test_the_learned_ranker_shortlists_a_lattice_by_its_score_not_by_m20():
+    """A candidate M20 puts 25th still reaches the output when it scores best. P16: by M20, a
+    correct cell M20 ranked below twentieth in its lattice was scored and then thrown away."""
+    from mlindex.command_line.run import SHORTLIST_DEPTH, _collect_results
+    from mlindex.utilities.Ranker import LearnedRanker
+
+    n = SHORTLIST_DEPTH + 5
+    result = _cubic_pool(M20=np.linspace(30.0, 10.0, n), M_sym=np.full(n, 10.0))
+    scores = np.linspace(0.0, 1.0, n)
+    rows = LearnedRanker.__new__(LearnedRanker).shortlist(result['pool'], scores,
+                                                          SHORTLIST_DEPTH)
+    entries = _collect_results(result, 'cP', [], scores, rows)
+
+    assert [entry['score'] for entry in entries] == sorted(scores)[::-1][:SHORTLIST_DEPTH]
+    assert entries[0]['a'] == 3.0 + n - 1
+    assert entries[0]['M20'] == 10.0
+
+
+def test_the_learned_ranker_s_shortlist_breaks_equal_scores_by_m_sym():
+    """As the pooled list does (`_conventional_cell`), so the shortlist keeps what it would rank
+    first: the learned ranker's calibrated probability is often exactly 1.0 for several cells."""
+    from mlindex.command_line.run import SHORTLIST_DEPTH
+    from mlindex.utilities.Ranker import LearnedRanker
+
+    n = SHORTLIST_DEPTH + 1
+    M_sym = np.full(n, 10.0)
+    M_sym[-1] = 50.0
+    pool = _cubic_pool(M20=np.linspace(30.0, 10.0, n), M_sym=M_sym)['pool']
+    rows = LearnedRanker.__new__(LearnedRanker).shortlist(pool, np.ones(n), SHORTLIST_DEPTH)
+
+    assert len(rows) == SHORTLIST_DEPTH
+    assert rows[0] == n - 1
+
+
+def test_ranking_by_m_sym_shortlists_a_lattice_by_m20():
+    """Ranked by M_sym, a shortlist by M_sym costs orthorhombic and monoclinic 2-3 points of
+    first place (P16), so the fallback and `run_analytical` keep the twenty best by M20: the
+    pool's first rows."""
+    from mlindex.utilities.Ranker import MSymRanker
+
+    n = 25
+    pool = _cubic_pool(M20=np.linspace(30.0, 10.0, n), M_sym=np.linspace(0.0, 50.0, n))['pool']
+    rows = MSymRanker('test').shortlist(pool, pool['M_sym'], 20)
+
+    assert rows.tolist() == list(range(20))
 
 
 def _compare_json(result_path, expected_path):
