@@ -6,7 +6,9 @@ from mlindex.utilities.Reindexing import monoclinic_cell_matrix
 from mlindex.utilities.Reindexing import monoclinic_settings
 from mlindex.utilities.Reindexing import rhombohedral_cell_matrix
 from mlindex.utilities.Reindexing import rhombohedral_settings
-from mlindex.utilities.Reindexing import same_cell_in_some_setting
+from mlindex.utilities.Reindexing import niggli_cell
+from mlindex.utilities.Reindexing import same_lattice
+from mlindex.utilities.UnitCellTools import BL_TO_CENTRING
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 from mlindex.utilities.UnitCellTools import get_full_unit_cell
 from mlindex.utilities.UnitCellTools import get_partial_unit_cell
@@ -126,13 +128,13 @@ def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_
                         mf = np.array([mf0, mf1, mf2, 1])
                         if np.all(np.isclose(mf * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
                             off_by_two = True
-        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, 'monoclinic',
-                                               rtol=rtol)[0])
+        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred,
+                                               bravais_lattice_pred, rtol=rtol)[0])
         return found, off_by_two
     elif lattice_system_pred == 'triclinic':
         reindexed_unit_cell, _ = reindex_entry_triclinic(unit_cell_pred)
-        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, 'triclinic',
-                                               rtol=rtol)[0])
+        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred,
+                                               bravais_lattice_pred, rtol=rtol)[0])
         off_by_two = False
         for mf0 in MULTIPLIERS_UNIT:
             for mf1 in MULTIPLIERS_UNIT:
@@ -150,17 +152,53 @@ def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_
 _EARLY_RETURN_SYSTEMS = frozenset({'cubic', 'tetragonal', 'hexagonal', 'orthorhombic'})
 
 
-def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rtol=1e-2):
-    """`validate_candidate_known_bl(...)[0]` for a batch sharing one truth and one lattice system.
+def _lattice_system_of(bravais_lattice, function):
+    """The lattice system of `bravais_lattice`, raising for one the labeller does not know.
 
-    `unit_cell_true` is the truth already sliced to that system's free parameters, by
-    `UnitCellTools.get_partial_unit_cell`, and `unit_cell_pred` is (n, k) of partial cells.
-    Returns a boolean array.
-
-    An unimplemented lattice system raises rather than returning False, because a quiet False here
-    reads as "no correct candidate in the pool", which is a generation failure and must stay
-    distinguishable from a ranking one.
+    A quiet False for an unknown lattice reads as "no correct candidate in the pool", which is a
+    generation failure and must stay distinguishable from a ranking one.
     """
+    if bravais_lattice not in BL_TO_LATTICE_SYSTEM:
+        raise ValueError(f'{function} does not implement {bravais_lattice!r}. '
+                         'Use validate_candidate_known_bl for it.')
+    return BL_TO_LATTICE_SYSTEM[bravais_lattice]
+
+
+# The angle tolerance of the monoclinic and triclinic comparison, which is made between reduced
+# cells. 1 degree is what the relative tolerance of 1 % gave the old comparison at the angles near
+# 100 degrees that reduced cells have; an absolute tolerance does not change when the reduction writes
+# an angle as its supplement.
+ANGLE_TOLERANCE_DEG = 1.0
+
+
+def _same_reduced_lattice(unit_cell_true, unit_cell_pred, centring, rtol):
+    """Is each full cell of `unit_cell_pred` (n, 6, radians) the lattice of `unit_cell_true`?
+
+    Both are reduced to the Niggli cell of their primitive lattice (`Reindexing.niggli_cell`) and
+    compared by `Reindexing.same_lattice`, `rtol` in the lengths and `ANGLE_TOLERANCE_DEG` in the
+    angles. A cell cctbx refuses outright (non-finite or impossible parameters) is not the true
+    cell, and must not stop a pool's labels.
+    """
+    degrees = lambda cell: np.concatenate([cell[:3], np.degrees(cell[3:])])
+    truth = niggli_cell(degrees(unit_cell_true), centring)
+    correct = np.zeros(unit_cell_pred.shape[0], dtype=bool)
+    for index, cell in enumerate(unit_cell_pred):
+        try:
+            correct[index] = same_lattice(niggli_cell(degrees(cell), centring), truth, rtol=rtol,
+                                          atol_deg=ANGLE_TOLERANCE_DEG)
+        except (RuntimeError, ValueError):
+            continue
+    return correct
+
+
+def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, rtol=1e-2):
+    """`validate_candidate_known_bl(...)[0]` for a batch sharing one truth and one Bravais lattice.
+
+    `unit_cell_true` is the truth already sliced to the lattice system's free parameters, by
+    `UnitCellTools.get_partial_unit_cell`, and `unit_cell_pred` is (n, k) of partial cells; both
+    are in `bravais_lattice`'s setting (`UnitCellTools.BL_TO_CENTRING`). Returns a boolean array.
+    """
+    lattice_system = _lattice_system_of(bravais_lattice, 'is_correct_known_bl_batch')
     unit_cell_true = np.asarray(unit_cell_true, dtype=np.float64)
     unit_cell_pred = np.atleast_2d(np.asarray(unit_cell_pred, dtype=np.float64))
     if unit_cell_pred.shape[0] == 0:
@@ -171,10 +209,16 @@ def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
         return np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol), axis=1)
 
     if lattice_system in ('monoclinic', 'triclinic'):
-        # The true cell in any setting: every small basis change of the prediction is tried.
-        return same_cell_in_some_setting(
-            get_full_unit_cell(unit_cell_pred, lattice_system),
-            get_full_unit_cell(unit_cell_true, lattice_system), rtol=rtol)
+        # Compared as lattices, not as cells: both reduced, each as the primitive cell of its
+        # centred lattice. Walking small basis changes from the cells as given missed a correct
+        # cell whenever the two settings were more than one shear apart (beta 151 against 156
+        # degrees needs c + 2a), passed a cell whose basis change moved the centring point to
+        # another face -- another lattice -- and let 1 % of a long sheared axis pass a cell several
+        # percent off in its shortest ones (P17, STATUS P-F-207, P-F-209).
+        return _same_reduced_lattice(
+            get_full_unit_cell(unit_cell_true[np.newaxis], lattice_system)[0],
+            get_full_unit_cell(unit_cell_pred, lattice_system), BL_TO_CENTRING[bravais_lattice],
+            rtol)
 
     if lattice_system == 'orthorhombic':
         # Both sides are sorted before comparing, so an axis permutation is correct rather than
@@ -182,20 +226,15 @@ def is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
         return np.all(np.isclose(np.sort(unit_cell_pred, axis=1), np.sort(unit_cell_true),
                                  rtol=rtol), axis=1)
 
-    if lattice_system == 'rhombohedral':
-        reindexed = rhombohedral_settings(unit_cell_pred)
-    else:
-        raise ValueError(
-            f'is_correct_known_bl_batch does not implement {lattice_system!r}. '
-            'Use validate_candidate_known_bl for it.')
+    reindexed = rhombohedral_settings(unit_cell_pred)
 
     with np.errstate(invalid='ignore'):
         matches = np.all(np.isclose(reindexed, unit_cell_true, rtol=rtol), axis=2)
     return np.any(matches, axis=0)
 
 
-def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rtol=1e-2):
-    """`validate_candidate_known_bl(...)[1]` for a batch sharing one truth and one lattice system.
+def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, rtol=1e-2):
+    """`validate_candidate_known_bl(...)[1]` for a batch sharing one truth and one Bravais lattice.
 
     The multiplier loop runs over the grid and vectorises over candidates and bases, rather than
     the other way round: the transposed form materialises a (grid, bases, n, k) array for no gain.
@@ -203,8 +242,9 @@ def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
     Two asymmetries of the scalar routine are reproduced rather than tidied. The grids differ per
     system, and the ones containing 1 therefore re-test the correctness comparison -- which is why
     `label_known_bl_batch` masks the early-return systems afterwards. And triclinic compares the
-    Selling-reduced cell here while the correctness arm compares the unreduced one.
+    Selling-reduced cell here while the correctness arm compares the Niggli-reduced one.
     """
+    lattice_system = _lattice_system_of(bravais_lattice, 'off_by_two_known_bl_batch')
     unit_cell_true = np.asarray(unit_cell_true, dtype=np.float64)
     unit_cell_pred = np.atleast_2d(np.asarray(unit_cell_pred, dtype=np.float64))
     if unit_cell_pred.shape[0] == 0:
@@ -255,28 +295,23 @@ def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rt
         return any_multiple(monoclinic_settings(unit_cell_pred),
                             grid_of(MULTIPLIERS_UNIT, 3, pad=1), unit_cell_true)
 
-    if lattice_system == 'triclinic':
-        from mlindex.utilities.Reindexing import reindex_entry_triclinic
-        reindexed, _ = reindex_entry_triclinic(unit_cell_pred)
-        return any_multiple(reindexed, grid_of(MULTIPLIERS_UNIT, 3, pad=3), unit_cell_true)
-
-    raise ValueError(
-        f'off_by_two_known_bl_batch does not implement {lattice_system!r}. '
-        'Use validate_candidate_known_bl for it.')
+    from mlindex.utilities.Reindexing import reindex_entry_triclinic
+    reindexed, _ = reindex_entry_triclinic(unit_cell_pred)
+    return any_multiple(reindexed, grid_of(MULTIPLIERS_UNIT, 3, pad=3), unit_cell_true)
 
 
-def label_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rtol=1e-2):
-    """`validate_candidate_known_bl` for a whole (entry, lattice system) block.
+def label_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, rtol=1e-2):
+    """`validate_candidate_known_bl` for a whole (entry, Bravais lattice) block.
 
     Returns `(is_correct, is_off_by_two)` as boolean arrays. `unit_cell_true` is the truth
     sliced by `UnitCellTools.get_partial_unit_cell`, the same call the scalar routine makes on
     its own argument. This is what a benchmark labels with: over a pool of millions of
     candidates the scalar routine is not an option.
     """
-    correct = is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system, rtol=rtol)
-    off_by_two = off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, lattice_system,
+    correct = is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, rtol=rtol)
+    off_by_two = off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice,
                                            rtol=rtol)
-    if lattice_system in _EARLY_RETURN_SYSTEMS:
+    if BL_TO_LATTICE_SYSTEM[bravais_lattice] in _EARLY_RETURN_SYSTEMS:
         # The scalar routine returns before it reaches the grid, and every one of those grids
         # contains the identity, so without this a correct candidate comes back flagged as its
         # own sub-cell.

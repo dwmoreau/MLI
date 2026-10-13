@@ -317,13 +317,15 @@ def label_frame(candidates, entries, rtol=1e-2):
     orthorhombic truth on `a` alone; the lattice test is the one `validate_candidate` applies.
     `is_off_by_two` marks a sub- or super-cell of the truth, in any lattice, as it does there.
 
-    Batched per (pattern, lattice system). The scalar `validate_candidate_known_bl` costs
+    Batched per (pattern, Bravais lattice): the lattice's centring is part of the comparison
+    (`UnitCellTools.BL_TO_CENTRING`), so mP and mC are labelled apart. The scalar
+    `validate_candidate_known_bl` costs
     milliseconds a candidate against pools of millions, so it is not an option here; the batch
     form is gated against it on all seven lattice systems in
     `tests/test_candidate_validation_batch.py`.
     """
     from mlindex.optimization.CandidateValidation import label_known_bl_batch
-    from mlindex.utilities.UnitCellTools import get_partial_unit_cell
+    from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM, get_partial_unit_cell
 
     result = candidates.copy()
     n_rows = result.shape[0]
@@ -337,8 +339,9 @@ def label_frame(candidates, entries, rtol=1e-2):
                 f'{len(missing)} candidate entry_id(s) have no row in the entry table, first '
                 f'{missing[:3]}. Labelling them would leave the correctness column false for a '
                 'reason that has nothing to do with the cells.')
-        for (entry_id, lattice_system), group in result.groupby(
-                ['entry_id', 'lattice_system'], sort=False):
+        for (entry_id, bravais_lattice), group in result.groupby(
+                ['entry_id', 'bravais_lattice'], sort=False):
+            lattice_system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
             positions = result.index.get_indexer(group.index)
             unit_cell_true = np.asarray(truth.loc[entry_id, 'unit_cell_true'], dtype=np.float64)
             partial_true = get_partial_unit_cell(unit_cell_true, lattice_system=lattice_system)
@@ -353,7 +356,7 @@ def label_frame(candidates, entries, rtol=1e-2):
                     f'against {len(partial_true)} in the sliced truth; the labeller would '
                     'compare different quantities.')
             correct, off_by_two = label_known_bl_batch(
-                partial_true, predicted, lattice_system, rtol=rtol)
+                partial_true, predicted, bravais_lattice, rtol=rtol)
             is_correct[positions] = correct
             is_off_by_two[positions] = off_by_two
     result['is_correct'] = is_correct & in_true_lattice(result, entries)
@@ -535,7 +538,7 @@ def relabelled(candidates, entries, rtol=1e-2):
     predate it.
 
     Only candidates in their pattern's true lattice can be correct, so `label_frame` is rerun on
-    those alone; every other candidate is not. Needs `unit_cell` and `lattice_system`.
+    those alone; every other candidate is not. Needs `unit_cell` and `bravais_lattice`.
     """
     correct = np.zeros(candidates.shape[0], dtype=bool)
     mask = in_true_lattice(candidates, entries)

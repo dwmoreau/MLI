@@ -17,9 +17,7 @@ from mlindex.optimization.CandidateValidation import validate_candidate_known_bl
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 from mlindex.utilities.UnitCellTools import get_partial_unit_cell
 
-LATTICE_SYSTEMS = sorted(set(BL_TO_LATTICE_SYSTEM.values()))
-BL_FOR_SYSTEM = {'cubic': 'cP', 'tetragonal': 'tP', 'hexagonal': 'hP', 'rhombohedral': 'hR',
-                 'orthorhombic': 'oP', 'monoclinic': 'mP', 'triclinic': 'aP'}
+BRAVAIS_LATTICES = sorted(BL_TO_LATTICE_SYSTEM)
 
 
 def _sliced(unit_cell, lattice_system):
@@ -74,10 +72,10 @@ def _candidates(true_partial, system, rng, n_random=6):
     return np.array(block)
 
 
-@pytest.mark.parametrize('system', LATTICE_SYSTEMS)
-def test_the_batched_labeller_agrees_with_the_scalar_one(system):
-    rng = np.random.default_rng(abs(hash(system)) % (2**32))
-    bravais_lattice = BL_FOR_SYSTEM[system]
+@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
+def test_the_batched_labeller_agrees_with_the_scalar_one(bravais_lattice):
+    system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
+    rng = np.random.default_rng(BRAVAIS_LATTICES.index(bravais_lattice))
     n_compared = 0
     seen = set()
 
@@ -86,7 +84,7 @@ def test_the_batched_labeller_agrees_with_the_scalar_one(system):
         true_partial = _sliced(true_full, system)
         block = _candidates(true_partial, system, rng)
 
-        correct, off_by_two = label_known_bl_batch(true_partial, block, system)
+        correct, off_by_two = label_known_bl_batch(true_partial, block, bravais_lattice)
 
         for index in range(block.shape[0]):
             expected = validate_candidate_known_bl(true_full.copy(), block[index].copy(),
@@ -103,29 +101,32 @@ def test_the_batched_labeller_agrees_with_the_scalar_one(system):
     assert len(seen) >= 2, f'{system}: only outcome(s) {seen} were exercised'
 
 
-@pytest.mark.parametrize('system', LATTICE_SYSTEMS)
-def test_the_two_arms_are_the_two_halves_of_the_scalar_return(system):
+@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
+def test_the_two_arms_are_the_two_halves_of_the_scalar_return(bravais_lattice):
     """`is_correct_known_bl_batch` and `off_by_two_known_bl_batch` are usable separately, and must
     mean the same thing they do inside `label_known_bl_batch` -- apart from the early-return mask,
     which is the one documented difference."""
+    system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
     rng = np.random.default_rng(11)
     true_full = _random_true_cell(system, rng)
     true_partial = _sliced(true_full, system)
     block = _candidates(true_partial, system, rng)
 
-    correct, off_by_two = label_known_bl_batch(true_partial, block, system)
+    correct, off_by_two = label_known_bl_batch(true_partial, block, bravais_lattice)
     np.testing.assert_array_equal(
-        correct, is_correct_known_bl_batch(true_partial, block, system))
-    raw = off_by_two_known_bl_batch(true_partial, block, system)
+        correct, is_correct_known_bl_batch(true_partial, block, bravais_lattice))
+    raw = off_by_two_known_bl_batch(true_partial, block, bravais_lattice)
     assert np.all(off_by_two <= raw), 'the mask may only remove off-by-two flags, never add them'
 
 
-@pytest.mark.parametrize('system', LATTICE_SYSTEMS)
-def test_an_empty_block_returns_empty_arrays(system):
+@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
+def test_an_empty_block_returns_empty_arrays(bravais_lattice):
     """A Bravais lattice can contribute no candidates to a pattern, and that must not raise."""
+    system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
     true_partial = _sliced(_random_true_cell(system, np.random.default_rng(0)), system)
     width = true_partial.size
-    correct, off_by_two = label_known_bl_batch(true_partial, np.empty((0, width)), system)
+    correct, off_by_two = label_known_bl_batch(true_partial, np.empty((0, width)),
+                                               bravais_lattice)
     assert correct.shape == (0,) and off_by_two.shape == (0,)
     assert correct.dtype == bool and off_by_two.dtype == bool
 
@@ -167,7 +168,7 @@ def test_a_triclinic_cell_in_another_reduced_setting_is_the_true_cell():
     other = _in_setting(truth, np.array([[1, 0, -1], [0, 1, -1], [0, 0, -1]]))
     assert not np.allclose(other, truth, rtol=1e-2)
     distorted = other*np.array([1, 1, 1.05, 1, 1, 1])
-    correct = is_correct_known_bl_batch(truth, np.stack([other, distorted]), 'triclinic')
+    correct = is_correct_known_bl_batch(truth, np.stack([other, distorted]), 'aP')
     assert correct.tolist() == [True, False]
 
 
@@ -184,6 +185,53 @@ def test_a_monoclinic_cell_in_a_setting_outside_the_twenty_is_the_true_cell():
     candidate = other[[0, 1, 2, 4]]
     walked = monoclinic_settings(candidate[np.newaxis])[:, 0]
     assert not np.all(np.isclose(walked, truth, rtol=1e-2), axis=1).any()
-    assert is_correct_known_bl_batch(truth, candidate[np.newaxis], 'monoclinic').tolist() == [True]
+    assert is_correct_known_bl_batch(truth, candidate[np.newaxis], 'mP').tolist() == [True]
     assert is_correct_known_bl_batch(truth, (candidate*[1, 1.05, 1, 1])[np.newaxis],
-                                     'monoclinic').tolist() == [False]
+                                     'mP').tolist() == [False]
+
+
+def _monoclinic_in_setting(partial, transformation):
+    """A monoclinic partial cell (a, b, c, beta) re-expressed in another basis, as a partial cell."""
+    full = np.array([partial[0], partial[1], partial[2], np.pi/2, partial[3], np.pi/2])
+    other = _in_setting(full, transformation)
+    assert np.allclose(other[[3, 5]], np.pi/2), 'the basis change must keep b unique'
+    return other[[0, 1, 2, 4]]
+
+
+def test_a_monoclinic_cell_two_shears_from_the_stored_truth_is_the_true_cell():
+    """P17 (STATUS P-F-207): a third of the stored monoclinic truths are oblique, and the search
+    prints oblique cells too. DUWTAR's truth has beta 151 degrees; its printed copy (-a, -b, 2a + c)
+    has beta 156, and no basis change with entries in {-1, 0, 1} joins them, so
+    walking from the cells as given called the right answer wrong."""
+    truth = np.array([19.133, 14.349, 19.564, np.radians(151.04)])
+    two_shears = _monoclinic_in_setting(truth, np.array([[-1, 0, 2], [0, -1, 0], [0, 0, 1]]))
+    assert np.degrees(two_shears[3]) > 150 and not np.isclose(two_shears[2], truth[2], rtol=0.05)
+    for lattice in ('mP', 'mC'):
+        correct = is_correct_known_bl_batch(truth, np.stack([two_shears,
+                                                             two_shears*[1, 1.03, 1, 1]]), lattice)
+        assert correct.tolist() == [True, False], lattice
+
+
+def test_an_mc_cell_whose_basis_change_moves_the_centring_point_is_another_lattice():
+    """In the I setting the centring point is (a + b + c)/2. With c + a in place of c it lands on
+    the A face, so the same six numbers labelled mC describe another lattice. The walk from the
+    cells as given ignores centring and accepted it (STATUS P-F-209); as mP, where there is no
+    centring point, it is the same lattice."""
+    truth = np.array([14.988, 13.371, 17.384, np.radians(100.42)])
+    moved = _monoclinic_in_setting(truth, np.array([[1, 0, 1], [0, 1, 0], [0, 0, 1]]))
+    assert is_correct_known_bl_batch(truth, moved[np.newaxis], 'mC').tolist() == [False]
+    assert is_correct_known_bl_batch(truth, moved[np.newaxis], 'mP').tolist() == [True]
+    assert is_correct_known_bl_batch(truth, truth[np.newaxis], 'mC').tolist() == [True]
+
+
+def test_one_percent_on_a_sheared_cell_is_not_one_percent_on_the_lattice():
+    """A truth stored with beta 155 degrees, and a candidate 0.9 % off in beta alone: within the
+    1 % tolerance as given, which is what the walk from the cells as given tested, but several
+    percent off in the reduced cell, whose short axis is the difference of two long ones."""
+    from mlindex.utilities.Reindexing import niggli_cell
+    truth = np.array([10.0, 12.0, 25.0, np.radians(155.0)])
+    candidate = truth*np.array([1, 1, 1, 1.009])
+    reduced = [np.array(niggli_cell([cell[0], cell[1], cell[2], 90, np.degrees(cell[3]), 90],
+                                    'P').parameters()[:3]) for cell in (truth, candidate)]
+    assert np.max(np.abs(reduced[1] - reduced[0])/reduced[0]) > 0.02
+    assert is_correct_known_bl_batch(truth, candidate[np.newaxis], 'mP').tolist() == [False]

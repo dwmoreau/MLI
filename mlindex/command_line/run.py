@@ -329,11 +329,13 @@ def _remove_duplicates(output_data):
     moved neither first place nor top ten, at ~5 ms a candidate.
     """
     from mlindex.utilities.Reindexing import niggli_cell, same_lattice
+    from mlindex.utilities.UnitCellTools import BL_TO_CENTRING
 
     ranked = sorted(output_data, key=lambda e: (e['score'], e['M_sym']), reverse=True)
     kept, kept_cells = [], []
     for entry in ranked:
-        cell = niggli_cell([entry[key] for key in ('a', 'b', 'c', 'alpha', 'beta', 'gamma')])
+        cell = niggli_cell([entry[key] for key in ('a', 'b', 'c', 'alpha', 'beta', 'gamma')],
+                           BL_TO_CENTRING[entry['bravais_lattice']])
         if not any(ref['bravais_lattice'] == entry['bravais_lattice']
                    and same_lattice(cell, ref_cell, rtol=0.005, atol_deg=0.5)
                    for ref, ref_cell in zip(kept, kept_cells)):

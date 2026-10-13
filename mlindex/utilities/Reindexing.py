@@ -1,5 +1,4 @@
 import copy
-import itertools
 
 import numpy as np
 
@@ -54,21 +53,6 @@ MONOCLINIC_BASIS_CHANGES = np.stack([
     for ac in (np.eye(3), AC_SWAP)
     for obtuse in (np.eye(3), OBTUSE_FLIP)
     ])
-
-def _unimodular_transformations():
-    entries = np.array(list(itertools.product((-1, 0, 1), repeat=9))).reshape(-1, 3, 3)
-    return entries[np.abs(np.rint(np.linalg.det(entries))) == 1].astype(np.float64)
-
-
-# Every basis change with entries in {-1, 0, 1} and determinant +-1, 6 960 of them: the settings
-# `same_cell_in_some_setting` walks. Each re-expresses a cell of the same lattice, and the twenty
-# MONOCLINIC_BASIS_CHANGES and the identity are among them.
-UNIMODULAR_TRANSFORMATIONS = _unimodular_transformations()
-
-# The thirteen lattice vectors, up to sign, that a column of such a basis change can make.
-AXIS_COMBINATIONS = np.array(
-    [v for v in itertools.product((-1, 0, 1), repeat=3)
-     if any(v) and next(x for x in v if x) > 0], dtype=np.float64)
 
 # The rhombohedral sub- and super-cell relations the validator tests a candidate against.
 # Stacked, like MONOCLINIC_BASIS_CHANGES: iterating it yields the individual matrices, and a
@@ -784,59 +768,33 @@ def unit_cell_from_matrix(matrix):
                           axis=-1)
 
 
-def same_cell_in_some_setting(unit_cell_pred, unit_cell_true, rtol,
-                              transformations=None):
-    """Is each predicted cell the true cell in some setting? (n,) bool.
+def niggli_cell(unit_cell, centring):
+    """The Niggli-reduced primitive cctbx cell of one full cell, angles in degrees.
 
-    Both are full cells, angles in radians: `unit_cell_pred` (n, 6), `unit_cell_true` (6,).
-    Each prediction is re-expressed under every basis change in `transformations` (default
-    `UNIMODULAR_TRANSFORMATIONS`) and matches when one setting agrees with the truth to `rtol` in
-    every parameter. Every axis of such a setting is one of the thirteen combinations of the
-    prediction's axes with coefficients in {-1, 0, 1}, so only predictions where each true axis
-    length is one of those lengths, to `rtol`, are walked.
+    `centring` is the cell's lattice centring ('P', 'C', 'I', 'F' or 'R'; for a printed or stored
+    cell, `UnitCellTools.BL_TO_CENTRING` of its Bravais lattice). It is required: a centred cell
+    reduced as if it were primitive is a different lattice, and comparing two of them can join
+    cells whose centring points differ. A cell cctbx cannot reduce comes back primitive but
+    unreduced, so it can still be compared, only not across bases.
     """
-    if transformations is None:
-        transformations = UNIMODULAR_TRANSFORMATIONS
-    unit_cell_pred = np.atleast_2d(np.asarray(unit_cell_pred, dtype=np.float64))
-    unit_cell_true = np.asarray(unit_cell_true, dtype=np.float64)
-    matches = np.zeros(unit_cell_pred.shape[0], dtype=bool)
-    basis = cell_matrix(unit_cell_pred)
-    lengths = np.linalg.norm(np.einsum('nij,kj->nki', basis, AXIS_COMBINATIONS), axis=2)
-    with np.errstate(invalid='ignore'):
-        found = np.isclose(lengths[:, :, np.newaxis], unit_cell_true[:3], rtol=rtol).any(axis=1)
-    near = np.flatnonzero(found.all(axis=1))
-    # Blocks of candidates x every setting at once; a block of 64 is ~450 000 cells.
-    for start in range(0, near.size, 64):
-        block = near[start:start + 64]
-        settings = unit_cell_from_matrix(
-            np.einsum('nij,kjl->nkil', basis[block], transformations))
-        matches[block] = np.any(np.all(np.isclose(settings, unit_cell_true, rtol=rtol), axis=2),
-                                axis=1)
-    return matches
-
-
-def niggli_cell(unit_cell):
-    """The Niggli-reduced cctbx cell of one full cell, angles in degrees.
-
-    A cell cctbx cannot reduce comes back as given, so it can still be compared with
-    `same_lattice`, only not across bases.
-    """
-    from cctbx import uctbx
+    from cctbx import crystal, sgtbx, uctbx
 
     cell = uctbx.unit_cell(tuple(float(value) for value in unit_cell))
+    primitive = crystal.symmetry(unit_cell=cell, space_group=sgtbx.space_group(f'{centring} 1')
+                                 ).primitive_setting().unit_cell()
     try:
-        return cell.niggli_cell()
+        return primitive.niggli_cell()
     except RuntimeError:
-        return cell
+        return primitive
 
 
 def same_lattice(niggli_cell_1, niggli_cell_2, rtol, atol_deg):
     """Do two `niggli_cell`s describe one lattice, in whatever basis each was written?
 
     True when some basis change maps one onto the other to `rtol` in the lengths and `atol_deg`
-    in the angles. Unlike `same_cell_in_some_setting`, the basis change is not limited to entries
-    in {-1, 0, 1} from the cells as given: both are reduced first, so a cell written in a very
-    oblique setting (monoclinic beta of 150 degrees) still meets its reduced copy. A basis change
+    in the angles. The basis change is not limited to small entries from the cells as given: both
+    are reduced first, so a cell written in a very oblique setting (monoclinic beta of 150 degrees)
+    still meets its reduced copy. A basis change
     keeps the volume, so cells whose volumes differ by more than three times `rtol` are rejected
     before the comparison, which costs ~0.8 ms a pair.
     """

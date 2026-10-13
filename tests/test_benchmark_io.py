@@ -896,6 +896,6 @@ def test_a_true_cell_is_finished_as_the_search_finishes_a_candidate_and_stays_co
     candidates = refine_true_cell(q2_obs, [a, a, a, np.pi/2, np.pi/2, np.pi/2], 'cP', 'cubic',
                                   hkl, opt_params, np.random.default_rng(1))
     cell = 1/np.sqrt(candidates.best_xnn[:, 0])
-    assert is_correct_known_bl_batch(np.array([a]), cell[:, np.newaxis], 'cubic').all()
+    assert is_correct_known_bl_batch(np.array([a]), cell[:, np.newaxis], 'cP').all()
     assert candidates.best_M20[0] > 10 and candidates.n_indexed[0] >= 8
     assert len(candidates.best_spacegroup) == 1

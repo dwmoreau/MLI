@@ -88,6 +88,20 @@ def test_one_metric_in_two_bravais_lattices_is_two_answers():
     assert [e['bravais_lattice'] for e in kept] == ['oP', 'mP']
 
 
+def test_two_mc_cells_whose_basis_change_moves_the_centring_point_are_two_answers():
+    """mC cells are printed in the I setting, centring point (a + b + c)/2. With a + c in place of
+    c the same point lands on the A face, so the two cells are one primitive lattice only if the
+    centring is ignored; compared as the lattices they are, both rows stay (STATUS P-F-209)."""
+    from mlindex.command_line.run import _remove_duplicates
+
+    entry, moved = _monoclinic(14.988, 13.371, 17.384, 100.42)
+    entry = dict(entry, bravais_lattice='mC', spacegroup='I 1 2/m 1', score=0.6)
+    other = dict(moved, bravais_lattice='mC', spacegroup='I 1 2/m 1', score=0.4)
+    assert len(_remove_duplicates([entry, other])) == 2
+    as_primitive = [dict(e, bravais_lattice='mP') for e in (entry, other)]
+    assert len(_remove_duplicates(as_primitive)) == 1
+
+
 def test_a_cell_is_printed_in_the_lattice_it_was_found_in():
     """P17 dropped metric_subgroups promotion: a triclinic cell with a cubic metric stays aP."""
     from mlindex.command_line.run import _remove_duplicates

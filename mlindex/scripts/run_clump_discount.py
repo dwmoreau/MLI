@@ -187,7 +187,7 @@ def _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice
                         f'{optimizer.top_unit_cell.shape[0]} candidates back against {total} '
                         f'generated; the row order is the measurement')
                 is_correct, _ = label_known_bl_batch(
-                    truth, optimizer.top_unit_cell, lattice_system)
+                    truth, optimizer.top_unit_cell, bravais_lattice)
                 block = (args.n_groups, args.group_size)
                 correct[ratio_index, entry_index, shell] = is_correct.reshape(block)
                 distance[ratio_index, entry_index, shell] = \

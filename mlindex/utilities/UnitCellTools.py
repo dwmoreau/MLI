@@ -17,6 +17,19 @@ BL_TO_LATTICE_SYSTEM = {
     'aP': 'triclinic',
     }
 
+# The lattice centring of each Bravais lattice in the settings this package stores and prints. mC is
+# body-centred: `Reindexing.reindex_entry_monoclinic` puts every centred monoclinic cell, true or
+# searched, in the I setting. hR is printed in its hexagonal setting, which is R-centred.
+BL_TO_CENTRING = {
+    'cF': 'F', 'cI': 'I', 'cP': 'P',
+    'hP': 'P',
+    'hR': 'R',
+    'tI': 'I', 'tP': 'P',
+    'oC': 'C', 'oF': 'F', 'oI': 'I', 'oP': 'P',
+    'mC': 'I', 'mP': 'P',
+    'aP': 'P',
+    }
+
 # Position of each Bravais lattice in `BRAVAIS_LATTICES`, which is what breaks a score tie and what
 # the learned ranker reads as its ordinal lattice input.
 _LATTICE_POSITION = {lattice: position for position, lattice in enumerate(BRAVAIS_LATTICES)}
