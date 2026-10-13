@@ -19,6 +19,7 @@ produces several thousand survivors and a pool holds hundreds of patterns.
 import numpy as np
 
 from mlindex.optimization.Candidates import PRUNE_CAPTURE_MERITS
+from mlindex.optimization.Candidates import prune_threshold
 from mlindex.optimization.MPOptimizer import MPOptimizerManager
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
@@ -127,7 +128,7 @@ def candidate_record(context, bravais_lattice, lattice_system, n_peaks, hkl_ref_
         'n_entering': int(n_entering),
         'assignment_threshold': float(opt_params['assignment_threshold']),
         'downsample_radius': float(opt_params['downsample_radius']),
-        'prune_threshold': float(opt_params.get('prune_m20_threshold', 5.0)),
+        'prune_threshold': float(prune_threshold(opt_params)),
         # Position in this shard, which is the order deduplication returned them in. It is the
         # last tie-break the reduction falls back to, so it only has to be stable.
         'candidate_id': np.asarray(candidate_id, dtype=np.int64),

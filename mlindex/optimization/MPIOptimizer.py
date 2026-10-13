@@ -5,6 +5,7 @@ import scipy.spatial
 
 from mlindex.model_training.Wrapper import Wrapper
 from mlindex.optimization.Candidates import Candidates
+from mlindex.optimization.Candidates import prune_threshold
 from mlindex.optimization.UtilitiesOptimizer import ENSEMBLE
 from mlindex.optimization.UtilitiesOptimizer import MAXIMUM_UNIT_CELL
 from mlindex.optimization.UtilitiesOptimizer import MINIMUM_UNIT_CELL
@@ -180,10 +181,7 @@ class OptimizerBase:
         # measurement, so skip both rather than trying to track the permutation.
         convergence = self.opt_params['convergence_testing']
         if not convergence:
-            # Behaviour-preserving: 5.0 is prune_below_m20's own default. Reading it from
-            # opt_params is what lets a driver move the threshold via `options`.
-            candidates.prune_below_m20(
-                threshold=self.opt_params.get('prune_m20_threshold', 5.0))
+            candidates.prune_below_m20(threshold=prune_threshold(self.opt_params))
         candidates.refine_cell()
         candidates.standardize_cell()
         if not convergence:

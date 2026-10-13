@@ -24,6 +24,18 @@ from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 
 
+# The best M20 a candidate must reach during the search to be refined further
+# (`prune_below_m20`). The learned ranker ranks what this cut leaves, so it is the cut the ranker
+# was fitted at (`ranker_1/specification.json`, "cut"); `tests/test_ranker_inference.py` keeps the
+# two equal. A run's `prune_m20_threshold` option overrides it (`prune_threshold`).
+PRUNE_M20_THRESHOLD = 5.0
+
+
+def prune_threshold(opt_params):
+    """The cut a run applies: its `prune_m20_threshold` option, else `PRUNE_M20_THRESHOLD`."""
+    return opt_params.get('prune_m20_threshold', PRUNE_M20_THRESHOLD)
+
+
 # RESEARCH CODE THAT NEEDS TO BE DELETED. Required by sessions P04 and P12 of the
 # fom_production campaign, which restrict a generated pool to higher thresholds without
 # re-running it. Delete this constant, `prune_criterion_capture`, `_capture_merits_at_prune`
@@ -347,7 +359,7 @@ class Candidates:
         if self.zero_error:
             self.best_zeropoint[improved] = refined_zeropoint[improved]
 
-    def prune_below_m20(self, threshold=5.0):
+    def prune_below_m20(self, threshold):
         """Drop every candidate below the bar, keeping the best one if nothing clears it.
 
         `threshold` is a scalar, or a mapping keyed by Bravais lattice for a per-lattice cut.
