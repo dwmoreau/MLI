@@ -815,6 +815,42 @@ def same_cell_in_some_setting(unit_cell_pred, unit_cell_true, rtol,
     return matches
 
 
+def niggli_cell(unit_cell):
+    """The Niggli-reduced cctbx cell of one full cell, angles in degrees.
+
+    A cell cctbx cannot reduce comes back as given, so it can still be compared with
+    `same_lattice`, only not across bases.
+    """
+    from cctbx import uctbx
+
+    cell = uctbx.unit_cell(tuple(float(value) for value in unit_cell))
+    try:
+        return cell.niggli_cell()
+    except RuntimeError:
+        return cell
+
+
+def same_lattice(niggli_cell_1, niggli_cell_2, rtol, atol_deg):
+    """Do two `niggli_cell`s describe one lattice, in whatever basis each was written?
+
+    True when some basis change maps one onto the other to `rtol` in the lengths and `atol_deg`
+    in the angles. Unlike `same_cell_in_some_setting`, the basis change is not limited to entries
+    in {-1, 0, 1} from the cells as given: both are reduced first, so a cell written in a very
+    oblique setting (monoclinic beta of 150 degrees) still meets its reduced copy. A basis change
+    keeps the volume, so cells whose volumes differ by more than three times `rtol` are rejected
+    before the comparison, which costs ~0.8 ms a pair.
+    """
+    volume_1, volume_2 = niggli_cell_1.volume(), niggli_cell_2.volume()
+    if abs(volume_1 - volume_2) > 3*rtol*0.5*(volume_1 + volume_2):
+        return False
+    try:
+        return niggli_cell_1.similarity_transformations(
+            niggli_cell_2, relative_length_tolerance=rtol,
+            absolute_angle_tolerance=atol_deg).size() > 0
+    except RuntimeError:
+        return False
+
+
 def get_s6_from_unit_cell(unit_cell):
     om = cell_matrix(unit_cell)
     d = -np.sum(om, axis=2)

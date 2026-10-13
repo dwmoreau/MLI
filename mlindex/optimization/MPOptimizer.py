@@ -310,13 +310,6 @@ def _mp_group_manager_fn(bl_list, group_size, data_queues, result_queues, task_q
             msg = control_queue.get()
             if msg == 'shutdown':
                 break
-            if msg[0] == 'promote':
-                # Imported here, not at module scope: run.py imports this
-                # module, and cctbx costs a second to import in a process that
-                # may never be asked to promote anything.
-                from mlindex.command_line.run import promote_entries
-                output_queue.put(('promoted', promote_entries(msg[1], delta=msg[2])))
-                continue
             _, q2, zero_error, wavelength, n_top = msg
             payload = {}
             for bl in bl_list:
@@ -423,35 +416,6 @@ def run_lattice_groups(groups, q2, zero_error, wavelength, n_top):
             raise RuntimeError('Lattice group failed during optimization') from payload
         results.update(payload)
     return results
-
-
-def promote_over_groups(groups, entries, delta):
-    """Run `run.promote_entries` over `entries`, split across the lattice groups.
-
-    The groups are idle by this point and cctbx holds the GIL, so processes are the
-    only way to overlap this. Entries are dealt out round-robin and reassembled by
-    the same stride, so the promoted list keeps its input order whatever ran it.
-    """
-    n_groups = len(groups)
-    if n_groups < 2 or len(entries) < 2 * n_groups:
-        from mlindex.command_line.run import promote_entries
-        return promote_entries(entries, delta=delta)
-
-    for index, group in enumerate(groups[1:], start=1):
-        group['control_queue'].put(('promote', entries[index::n_groups], delta))
-
-    from mlindex.command_line.run import promote_entries
-    promoted = {0: promote_entries(entries[0::n_groups], delta=delta)}
-    for index, group in enumerate(groups[1:], start=1):
-        tag, payload = group['output_queue'].get()
-        if tag == 'error':
-            raise RuntimeError('Lattice group failed during promotion') from payload
-        promoted[index] = payload
-
-    out = [None] * len(entries)
-    for index in range(n_groups):
-        out[index::n_groups] = promoted[index]
-    return out
 
 
 def shutdown_lattice_groups(groups, processes):

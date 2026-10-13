@@ -313,136 +313,36 @@ def _write_results(output_data, ranker_name, output_file_base='indexing_results'
     print(output_df[:20].to_string())
 
 
-_CS_CENTRING_TO_BL = {
-    ('Cubic', 'P'): 'cP', ('Cubic', 'I'): 'cI', ('Cubic', 'F'): 'cF',
-    ('Hexagonal', 'P'): 'hP',
-    ('Trigonal', 'R'): 'hR', ('Trigonal', 'P'): 'hP',
-    ('Tetragonal', 'P'): 'tP', ('Tetragonal', 'I'): 'tI',
-    ('Orthorhombic', 'P'): 'oP', ('Orthorhombic', 'C'): 'oC',
-    ('Orthorhombic', 'F'): 'oF', ('Orthorhombic', 'I'): 'oI',
-    ('Monoclinic', 'P'): 'mP', ('Monoclinic', 'C'): 'mC',
-    ('Triclinic', 'P'): 'aP',
-}
+def _remove_duplicates(output_data):
+    """Rank the entries, and drop each that repeats a higher-ranked cell of the same Bravais
+    lattice in any basis (`Reindexing.same_lattice`, 0.5 % and 0.5 degrees).
 
-_BL_RANK = {
-    'aP': 0,
-    'mP': 1, 'mC': 1,
-    'oP': 2, 'oC': 2, 'oF': 2, 'oI': 2,
-    'tP': 3, 'tI': 3,
-    'hP': 4, 'hR': 4,
-    'cP': 5, 'cI': 5, 'cF': 5,
-}
+    Ranked by score, and by M_sym where scores are equal -- the learned ranker's calibrated
+    probability is often exactly 1.0 for several candidates of a clean pattern. The higher-ranked
+    copy is kept, so first place never changes. Within one lattice only: two cells of different
+    Bravais lattices are different answers even when they are one lattice metrically.
 
-
-def _is_same_cell(e1, e2, rtol, atol_deg):
-    for key in ('a', 'b', 'c'):
-        mean = 0.5 * (e1[key] + e2[key])
-        if abs(e1[key] - e2[key]) / mean > rtol:
-            return False
-    for key in ('alpha', 'beta', 'gamma'):
-        if abs(e1[key] - e2[key]) > atol_deg:
-            return False
-    return True
-
-
-def promote_entries(output_data, delta=0.1):
-    """Promote each entry to its highest-symmetry equivalent Bravais lattice.
-
-    Pure per-entry work with no shared state, which is what lets it be split
-    across processes. It is also the expensive half of `_conventional_cell`:
-    `metric_subgroups` costs 6.5 ms per candidate against 280 candidates, and a
-    thread pool cannot help because cctbx holds the GIL throughout -- measured
-    at 1.201 s on one thread and 1.190 s on eight.
+    P17 (fom-dev, cut 3.5): comparing parameters as printed missed the copies written in another
+    basis, which held 1.7 of the top ten rows on dev_general and 2.9 on dev_hard; collapsing them
+    puts the correct cell in the top ten 0.8 and 1.7 points more often. P17 also dropped
+    `metric_subgroups` promotion, which ran here first: it removed 0.03 repeated rows a list and
+    moved neither first place nor top ten, at ~5 ms a candidate.
     """
-    from cctbx import crystal as cctbx_crystal
-    from cctbx.sgtbx.lattice_symmetry import metric_subgroups
+    from mlindex.utilities.Reindexing import niggli_cell, same_lattice
 
-    updated = []
-    for entry in output_data:
-        uc_params = (entry['a'], entry['b'], entry['c'],
-                     entry['alpha'], entry['beta'], entry['gamma'])
-
-        best_bl = entry['bravais_lattice']
-        best_uc = uc_params
-        best_volume = entry['volume']
-        best_sg = entry['spacegroup']
-
-        # Promotion is an optional improvement to one candidate, so a candidate cctbx cannot
-        # analyse must not take the run down. metric_subgroups raises on cells it cannot reduce
-        # ("Unsuitable value for rational rotation matrix"), which happens readily once triclinic
-        # and monoclinic candidates from real data are in the pool -- 10 of 16 workers died this
-        # way before the guard. Keep the un-promoted candidate; it is still a valid result.
-        try:
-            sym = cctbx_crystal.symmetry(unit_cell=uc_params, space_group_symbol='P 1')
-            groups = metric_subgroups(sym, delta,
-                                      enforce_max_delta_for_generated_two_folds=True)
-            result_groups = groups.result_groups
-        except (RuntimeError, ValueError):
-            result_groups = []
-
-        for group in result_groups:
-            # Per group as well as per candidate, and the four fields are read before any is
-            # committed, so a group that raises part way through cannot leave a cell whose
-            # lattice, parameters and spacegroup disagree with each other.
-            try:
-                best_subsym = group['best_subsym']
-                sg = best_subsym.space_group()
-                candidate_bl = _CS_CENTRING_TO_BL.get(
-                    (sg.crystal_system(), sg.conventional_centring_type_symbol())
-                    )
-                if candidate_bl is None:
-                    continue
-                if _BL_RANK.get(candidate_bl, 0) <= _BL_RANK.get(best_bl, 0):
-                    continue
-                promoted = (candidate_bl,
-                            best_subsym.unit_cell().parameters(),
-                            best_subsym.unit_cell().volume(),
-                            best_subsym.space_group_info().type().lookup_symbol())
-            except (RuntimeError, ValueError):
-                continue
-            best_bl, best_uc, best_volume, best_sg = promoted
-
-        new_entry = dict(entry)
-        new_entry['bravais_lattice'] = best_bl
-        new_entry['a'], new_entry['b'], new_entry['c'] = best_uc[0], best_uc[1], best_uc[2]
-        new_entry['alpha'], new_entry['beta'], new_entry['gamma'] = best_uc[3], best_uc[4], best_uc[5]
-        new_entry['volume'] = best_volume
-        new_entry['spacegroup'] = best_sg
-        updated.append(new_entry)
-
-    return updated
-
-
-def _conventional_cell(output_data, delta=0.1, promote=None):
-    """Promote entries, then deduplicate near-identical cells within the same
-    Bravais lattice, keeping the one ranked higher. Returns them in ranked order: by score, and
-    by M_sym where scores are equal -- the learned ranker's calibrated probability is often
-    exactly 1.0 for several candidates of a clean pattern.
-
-    `promote` defaults to running `promote_entries` here, in this process. The
-    multiprocessing path passes one that fans the entries out over the lattice
-    groups, which are otherwise idle by this point. The deduplication stays
-    serial: it is O(n^2) over the promoted entries and cheap next to cctbx.
-    """
-    if promote is None:
-        updated = promote_entries(output_data, delta=delta)
-    else:
-        updated = promote(output_data, delta)
-
-    updated.sort(key=lambda e: (e['score'], e['M_sym']), reverse=True)
-    kept = []
-    for entry in updated:
-        is_dup = any(
-            ref['bravais_lattice'] == entry['bravais_lattice']
-            and _is_same_cell(entry, ref, rtol=0.005, atol_deg=0.5)
-            for ref in kept
-        )
-        if not is_dup:
+    ranked = sorted(output_data, key=lambda e: (e['score'], e['M_sym']), reverse=True)
+    kept, kept_cells = [], []
+    for entry in ranked:
+        cell = niggli_cell([entry[key] for key in ('a', 'b', 'c', 'alpha', 'beta', 'gamma')])
+        if not any(ref['bravais_lattice'] == entry['bravais_lattice']
+                   and same_lattice(cell, ref_cell, rtol=0.005, atol_deg=0.5)
+                   for ref, ref_cell in zip(kept, kept_cells)):
             kept.append(entry)
+            kept_cells.append(cell)
     return kept
 
 
-def _write_output(output_file, results, ranker, promote=None):
+def _write_output(output_file, results, ranker):
     """Rank and write every lattice's reported candidates.
 
     `results` is {Bravais lattice: `OptimizerBase.result()`}. Every survivor of every lattice is
@@ -454,7 +354,7 @@ def _write_output(output_file, results, ranker, promote=None):
     for bl, result in results.items():
         rows = ranker.shortlist(result['pool'], scores[bl], SHORTLIST_DEPTH)
         _collect_results(result, bl, output_data, scores[bl], rows)
-    output_data = _conventional_cell(output_data, promote=promote)
+    output_data = _remove_duplicates(output_data)
     output_file_base = str(Path(output_file).with_suffix(''))
     _write_results(output_data, ranker.name, output_file_base=output_file_base)
 
@@ -534,8 +434,7 @@ def _run_mp(args, peak_list, n_procs, seed=12345):
     process blocked waiting for it. Only the requested lattices are built.
     """
     from mlindex.optimization.MPOptimizer import (
-        setup_lattice_groups, run_lattice_groups, shutdown_lattice_groups,
-        promote_over_groups)
+        setup_lattice_groups, run_lattice_groups, shutdown_lattice_groups)
 
     broadening_tag = '1'
     n_top_candidates = 20
@@ -555,13 +454,9 @@ def _run_mp(args, peak_list, n_procs, seed=12345):
 
     # Loaded once, here, after the search: the lattice groups never hold the ranker.
     ranker = load_ranker()
-    # Before the shutdown, not after: promotion is 6.5 ms of cctbx per candidate
-    # over roughly 280 of them, and the groups are idle by this point.
-    _write_output(args.output_file,
-                  {bl: results[bl] for bl in args.bravais_lattices}, ranker,
-                  promote=lambda entries, delta: promote_over_groups(
-                      groups, entries, delta))
     shutdown_lattice_groups(groups, processes)
+    _write_output(args.output_file,
+                  {bl: results[bl] for bl in args.bravais_lattices}, ranker)
 
 
 def main():

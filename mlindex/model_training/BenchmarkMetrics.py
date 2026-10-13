@@ -238,7 +238,8 @@ def reduce_pool(frame, values, depths=('all', 'in_top_n')):
     `values` is the score to rank by, one per row of `frame`. Both reporting depths come from the
     same pass: `all` is the whole retained pool a re-ranker would see, and `in_top_n` is the top
     twenty per lattice that production hands to its final sort -- a strict superset of the printed
-    list, because promotion and deduplication across lattices can only raise a correct cell's rank.
+    list, because removing duplicates (`run._remove_duplicates`) can only raise a correct cell's
+    rank.
     """
     entry_code, keys = _group_codes(frame['entry_id'], frame['condition_bundle'])
     lattice = frame['bravais_lattice'].to_numpy()

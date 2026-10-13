@@ -19,13 +19,10 @@ def _aP_q2(test_metadata):
     return q2_obs
 
 
-# A real candidate from the S02 grid that cctbx refuses: mC with beta = 149.9 degrees, badly
-# non-reduced, the shape the optimizer produces for wrong low-symmetry candidates.
-# metric_subgroups raises "Unsuitable value for rational rotation matrix" on it, and because
-# _conventional_cell sits on run.py's unconditional output path an unguarded call killed the whole
-# run after all the indexing work and before any output was written -- 10 of 16 workers died this
-# way on one condition bundle. 0.06% of pooled candidates trip it, which is ~5% of entries.
-# Its M20 of 13.2 is above the reporting threshold, so it is a candidate a user would have seen.
+# A real candidate from the S02 grid: mC with beta = 149.9 degrees, badly non-reduced, the shape the
+# optimizer produces for wrong low-symmetry candidates. cctbx's metric_subgroups refused it, and an
+# unguarded call on run.py's output path once killed the whole run after all the indexing work.
+# Duplicate removal reduces every printed cell with cctbx, so it must still survive.
 _CCTBX_HOSTILE_CELL = {
     'M20': 13.17996795388552, 'n_indexed': 18, 'bravais_lattice': 'mC',
     'volume': 3061.6961360816513,
@@ -35,68 +32,96 @@ _CCTBX_HOSTILE_CELL = {
 }
 
 
-def test_conventional_cell_survives_a_cell_cctbx_refuses():
-    from mlindex.command_line.run import _conventional_cell
+def _monoclinic(a, b, c, beta, **fields):
+    """A printed mP entry, and its cell in the basis (a, b, a + c): one lattice, another beta."""
+    entry = {'n_indexed': 18, 'bravais_lattice': 'mP', 'a': a, 'b': b, 'c': c, 'alpha': 90.0,
+             'beta': beta, 'gamma': 90.0, 'spacegroup': 'P 1 21/c 1', 'M20': 20.0, 'M_sym': 20.0,
+             'score': 0.5, **fields}
+    entry['volume'] = a*b*c*np.sin(np.radians(beta))
+    cosine = np.cos(np.radians(beta))
+    c_other = np.sqrt(a**2 + c**2 + 2*a*c*cosine)
+    beta_other = np.degrees(np.arccos((a**2 + a*c*cosine)/(a*c_other)))
+    return entry, dict(entry, c=c_other, beta=beta_other)
 
-    # Confirm the fixture still provokes cctbx, so this test cannot pass vacuously.
-    from cctbx import crystal as cctbx_crystal
-    from cctbx.sgtbx.lattice_symmetry import metric_subgroups
+
+def test_a_cell_cctbx_once_refused_is_still_reported():
+    from mlindex.command_line.run import _remove_duplicates
+
     entry = dict(_CCTBX_HOSTILE_CELL)
-    with pytest.raises(Exception):
-        metric_subgroups(
-            cctbx_crystal.symmetry(
-                unit_cell=(entry['a'], entry['b'], entry['c'],
-                           entry['alpha'], entry['beta'], entry['gamma']),
-                space_group_symbol='P 1'),
-            0.1, enforce_max_delta_for_generated_two_folds=True)
+    kept = _remove_duplicates([entry])
 
-    kept = _conventional_cell([entry])
-
-    assert len(kept) == 1, 'a candidate cctbx cannot analyse must still be reported'
+    assert len(kept) == 1, 'a candidate cctbx finds awkward must still be reported'
     for key in ('bravais_lattice', 'a', 'b', 'c', 'alpha', 'beta', 'gamma', 'M20'):
-        assert kept[0][key] == entry[key], f'{key} must survive un-promoted, not be mangled'
+        assert kept[0][key] == entry[key], f'{key} must be printed as found'
 
 
-def test_conventional_cell_still_promotes_and_survives_a_mixed_pool():
-    # The guard must not have disabled promotion: a cell with cubic metric labelled aP should still
-    # be promoted, and it must do so in the same pool as the hostile cell above.
-    from mlindex.command_line.run import _conventional_cell
+def test_a_cell_in_another_basis_is_a_duplicate_and_the_higher_scored_is_kept():
+    """P17: (a, b, c) and (a, b, a + c) are one monoclinic lattice with different printed
+    parameters; comparing the parameters as printed kept both, and each copy took a row."""
+    from mlindex.command_line.run import _remove_duplicates
+
+    reduced, oblique = _monoclinic(7.0, 9.0, 11.0, 105.0)
+    assert abs(oblique['beta'] - reduced['beta']) > 10, 'the fixture must differ as printed'
+    kept = _remove_duplicates([dict(reduced, score=0.3), dict(oblique, score=0.6)])
+    assert len(kept) == 1
+    assert kept[0]['score'] == 0.6
+
+
+def test_cells_half_a_percent_apart_are_one_cell_and_two_percent_apart_are_two():
+    from mlindex.command_line.run import _remove_duplicates
+
+    entry, _ = _monoclinic(7.0, 9.0, 11.0, 105.0)
+    near = dict(entry, b=9.0*1.002, score=0.4)
+    far = dict(entry, b=9.0*1.02, score=0.3)
+    kept = _remove_duplicates([entry, near, far])
+    assert [e['b'] for e in kept] == [9.0, 9.0*1.02]
+
+
+def test_one_metric_in_two_bravais_lattices_is_two_answers():
+    from mlindex.command_line.run import _remove_duplicates
+
+    orthorhombic = {'n_indexed': 18, 'bravais_lattice': 'oP', 'volume': 693.0, 'a': 7.0, 'b': 9.0,
+                    'c': 11.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0,
+                    'spacegroup': 'P 2 2 2', 'M20': 20.0, 'M_sym': 20.0, 'score': 0.9}
+    monoclinic = dict(orthorhombic, bravais_lattice='mP', spacegroup='P 1 2 1', score=0.5)
+    kept = _remove_duplicates([monoclinic, orthorhombic])
+    assert [e['bravais_lattice'] for e in kept] == ['oP', 'mP']
+
+
+def test_a_cell_is_printed_in_the_lattice_it_was_found_in():
+    """P17 dropped metric_subgroups promotion: a triclinic cell with a cubic metric stays aP."""
+    from mlindex.command_line.run import _remove_duplicates
 
     cubic_metric = {
         'M20': 40.0, 'n_indexed': 20, 'bravais_lattice': 'aP', 'volume': 512.0,
         'a': 8.0, 'b': 8.0, 'c': 8.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0,
         'spacegroup': 'P 1', 'score': 0.9, 'M_sym': 30.0,
     }
-    kept = _conventional_cell([dict(_CCTBX_HOSTILE_CELL), cubic_metric])
-
-    assert len(kept) == 2
-    promoted = [e for e in kept if e['M20'] == 40.0][0]
-    assert promoted['bravais_lattice'] != 'aP', 'cubic-metric cell should have been promoted'
-    survivor = [e for e in kept if e['M20'] != 40.0][0]
-    assert survivor['bravais_lattice'] == 'mC'
+    kept = _remove_duplicates([dict(cubic_metric)])
+    assert kept == [cubic_metric]
 
 
 def test_of_two_copies_of_a_cell_the_higher_scored_is_kept_not_the_higher_m20():
-    from mlindex.command_line.run import _conventional_cell
+    from mlindex.command_line.run import _remove_duplicates
 
     cell = {'n_indexed': 18, 'bravais_lattice': 'oP', 'volume': 600.0, 'a': 6.0, 'b': 10.0,
             'c': 10.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0, 'spacegroup': 'P 2 2 2'}
     high_m20 = dict(cell, M20=30.0, M_sym=30.0, score=0.1)
     high_score = dict(cell, M20=12.0, M_sym=12.0, score=0.8, c=10.001)
-    kept = _conventional_cell([high_m20, high_score])
+    kept = _remove_duplicates([high_m20, high_score])
     assert len(kept) == 1
     assert kept[0]['score'] == 0.8
 
 
 def test_candidates_with_equal_scores_are_ordered_by_m_sym():
-    from mlindex.command_line.run import _conventional_cell
+    from mlindex.command_line.run import _remove_duplicates
 
     cell = {'n_indexed': 18, 'bravais_lattice': 'oP', 'volume': 600.0, 'a': 6.0, 'b': 10.0,
             'c': 10.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0, 'spacegroup': 'P 2 2 2',
             'score': 1.0}
     higher_m20 = dict(cell, M20=40.0, M_sym=20.0)
     higher_m_sym = dict(cell, M20=30.0, M_sym=25.0, a=7.0)
-    kept = _conventional_cell([higher_m20, higher_m_sym])
+    kept = _remove_duplicates([higher_m20, higher_m_sym])
     assert [entry['M_sym'] for entry in kept] == [25.0, 20.0]
 
 
@@ -130,7 +155,7 @@ def test_the_learned_ranker_shortlists_a_lattice_by_its_score_not_by_m20():
 
 
 def test_the_learned_ranker_s_shortlist_breaks_equal_scores_by_m_sym():
-    """As the pooled list does (`_conventional_cell`), so the shortlist keeps what it would rank
+    """As the pooled list does (`_remove_duplicates`), so the shortlist keeps what it would rank
     first: the learned ranker's calibrated probability is often exactly 1.0 for several cells."""
     from mlindex.command_line.run import SHORTLIST_DEPTH
     from mlindex.utilities.Ranker import LearnedRanker
