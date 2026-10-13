@@ -28,7 +28,7 @@ from mlindex.utilities.UnitCellTools import reciprocal_uc_conversion
 # (`prune_below_m20`). The learned ranker ranks what this cut leaves, so it is the cut the ranker
 # was fitted at (`ranker_1/specification.json`, "cut"); `tests/test_ranker_inference.py` keeps the
 # two equal. A run's `prune_m20_threshold` option overrides it (`prune_threshold`).
-PRUNE_M20_THRESHOLD = 5.0
+PRUNE_M20_THRESHOLD = 3.5
 
 
 def prune_threshold(opt_params):

@@ -113,3 +113,14 @@ def test_the_indexer_scores_a_pattern_as_the_fit_does(ranker, models_dir, agreem
         for lattice, index in rows.items():
             np.testing.assert_allclose(scores[lattice], agreement['calibrated'][index], rtol=0,
                                        atol=1e-9, err_msg=f'{lattice}, pattern {pattern}')
+
+
+def test_the_search_cuts_where_the_packaged_ranker_was_fitted(ranker):
+    """The ranker learned to rank the candidates a cut at its `cut` leaves; at another cut it
+    ranks a pool it never saw (P16: the 5.0 the search had and the 3.5 `ranker_1` was fitted at
+    went unchecked). `ranker_1` predates a criterion in its specification, and every cut then was
+    on M20."""
+    from mlindex.optimization.Candidates import PRUNE_M20_THRESHOLD
+
+    assert ranker.specification.get('cut_criterion', 'M20') == 'M20'
+    assert ranker.specification['cut'] == PRUNE_M20_THRESHOLD
