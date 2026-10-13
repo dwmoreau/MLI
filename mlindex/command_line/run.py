@@ -16,6 +16,8 @@ from mlindex.optimization.CandidateValidation import validate_candidate
 from mlindex.utilities.gsas import load_pkslst
 from mlindex.utilities.Ranker import load_ranker
 from mlindex.utilities.Ranker import score_pool
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+from mlindex.utilities.UnitCellTools import get_full_unit_cell
 from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 from mlindex.utilities.UnitCellTools import BRAVAIS_LATTICES
 from mlindex.utilities.Reindexing import rhombohedral_to_hexagonal
@@ -240,22 +242,11 @@ def _load_peaks(args):
 def _collect_results(result, bl, all_results, scores):
     """One entry per candidate a lattice reports (`OptimizerBase.result()`), with its score."""
     pool = result['pool']
+    lattice_system = BL_TO_LATTICE_SYSTEM[bl]
     for i, partial in enumerate(result['top_unit_cell']):
-        if bl in ['cF', 'cI', 'cP']:
-            unit_cell = np.array([partial[0], partial[0], partial[0], np.pi/2, np.pi/2, np.pi/2])
-        elif bl == 'hP':
-            unit_cell = np.array([partial[0], partial[0], partial[1], 2*np.pi/3, np.pi/2, np.pi/2])
-        elif bl == 'hR':
-            unit_cell = rhombohedral_to_hexagonal(
-                np.array([partial[0], partial[0], partial[0], partial[1], partial[1], partial[1]]))
-        elif bl in ['tI', 'tP']:
-            unit_cell = np.array([partial[0], partial[0], partial[1], np.pi/2, np.pi/2, np.pi/2])
-        elif bl in ['oC', 'oF', 'oI', 'oP']:
-            unit_cell = np.array([partial[0], partial[1], partial[2], np.pi/2, np.pi/2, np.pi/2])
-        elif bl in ['mC', 'mP']:
-            unit_cell = np.array([partial[0], partial[1], partial[2], np.pi/2, partial[3], np.pi/2])
-        else:
-            unit_cell = partial
+        unit_cell = get_full_unit_cell(partial, lattice_system)
+        if bl == 'hR':
+            unit_cell = rhombohedral_to_hexagonal(unit_cell)
         entry = {
             'score': scores[i],
             'M20': pool['M20'][i],

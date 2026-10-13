@@ -100,6 +100,27 @@ def test_candidates_with_equal_scores_are_ordered_by_m_sym():
     assert [entry['M_sym'] for entry in kept] == [25.0, 20.0]
 
 
+@pytest.mark.parametrize('bravais_lattice, partial, expected', [
+    ('cP', [4.0], (4.0, 4.0, 4.0, 90.0, 90.0, 90.0)),
+    ('tI', [4.0, 7.0], (4.0, 4.0, 7.0, 90.0, 90.0, 90.0)),
+    ('hP', [3.0, 5.0], (3.0, 3.0, 5.0, 90.0, 90.0, 120.0)),
+    ('oP', [4.0, 5.0, 6.0], (4.0, 5.0, 6.0, 90.0, 90.0, 90.0)),
+    ('mP', [4.0, 5.0, 6.0, np.radians(100.0)], (4.0, 5.0, 6.0, 90.0, 100.0, 90.0)),
+])
+def test_a_reported_cell_has_its_lattice_angles_in_their_places(bravais_lattice, partial,
+                                                                expected):
+    """The printed cell is the full cell of the lattice's free parameters: hexagonal's 120 degrees
+    is gamma, between the two equal axes. Written as alpha, the cell is only monoclinic."""
+    from mlindex.command_line.run import _collect_results
+
+    pool = {'M20': np.array([30.0]), 'M_sym': np.array([20.0]), 'n_indexed': np.array([20]),
+            'spacegroup': np.array(['P 1'])}
+    entry, = _collect_results({'pool': pool, 'top_unit_cell': np.array([partial])},
+                              bravais_lattice, [], np.array([0.9]))
+    reported = tuple(entry[key] for key in ('a', 'b', 'c', 'alpha', 'beta', 'gamma'))
+    np.testing.assert_allclose(reported, expected)
+
+
 def _compare_json(result_path, expected_path):
     result = pd.read_json(result_path)
     expected = pd.read_json(expected_path)
