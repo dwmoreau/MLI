@@ -39,15 +39,9 @@ RETIRED = (
     "PairwiseDifferenceCalculator",
 )
 
-# An IPython session transcript rather than importable code -- it opens with three exclamation
-# marks and uses %lprun, so it cannot be imported or run, and the pasted profiler output quotes
-# code as it stood in April. Rewriting quoted output would falsify the record it is.
-NOT_CODE = {PACKAGE / "scripts" / "ProfileOptimizer.py"}
-
-
 def _shipped_sources():
     for path in sorted(PACKAGE.rglob("*.py")):
-        if path in NOT_CODE or "models" in path.relative_to(PACKAGE).parts:
+        if "models" in path.relative_to(PACKAGE).parts:
             continue
         yield path
 
