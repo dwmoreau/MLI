@@ -217,7 +217,6 @@ def test_factories_pass_models_dir_into_data_params(monkeypatch, fake_models_dir
     monkeypatch.setenv("MLINDEX_MODELS_DIR", str(fake_models_dir))
     uo.get_cubic_optimizer(
         "cP", "1", 1, comm=None,
-        project_path=None,
         optimizer_class=FakeManager,
         models_directory=uo._resolve_models_dir(),
     )
@@ -245,7 +244,7 @@ def test_options_reach_opt_params(monkeypatch, fake_models_dir):
     monkeypatch.setenv("MLINDEX_MODELS_DIR", str(fake_models_dir))
 
     uo.get_cubic_optimizer(
-        "cP", "1", 1, comm=None, project_path=None,
+        "cP", "1", 1, comm=None,
         options={"prune_m20_threshold": 1.5, "a_knob_nobody_has_added_yet": "x"},
         optimizer_class=FakeManager,
         models_directory=uo._resolve_models_dir(),
