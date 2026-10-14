@@ -3,7 +3,6 @@ import logging
 import numpy as np
 import os
 from pathlib import Path
-import warnings
 
 from mlindex import paths
 
@@ -98,22 +97,6 @@ def _resolve_models_dir():
             "containing model subdirectories (e.g. cubic_1/, hexagonal_1/, ...)."
         )
     return pkg_models
-
-
-def _resolve_project_path():
-    """Deprecated: use _resolve_models_dir().
-
-    Returns a base directory such that base_dir/mlindex/models/{tag} points at the
-    models. That round-trip only works when the models live in a directory ending in
-    'mlindex/models', which is why it is deprecated. Removed in 0.2.0.
-    """
-    warnings.warn(
-        "_resolve_project_path() is deprecated and will be removed in 0.2.0; "
-        "use _resolve_models_dir(), which returns the models directory itself.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return _resolve_models_dir().parent.parent
 
 
 def get_logger(comm, optimization_tag):
@@ -532,9 +515,6 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
     from mlindex.optimization.MPIOptimizer import OptimizerWorker
 
     models_dir = _resolve_models_dir()
-    # Legacy base_directory, kept populated for callers that still read it. It is inert
-    # on the inference path, where models_directory determines the model location.
-    project_path = models_dir.parent.parent
 
     fom = None
     bravais_lattices = mpi_organizers.keys()
@@ -548,7 +528,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    None,  # project_path: models_directory locates the models
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
@@ -561,7 +541,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    None,  # project_path: models_directory locates the models
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
@@ -574,7 +554,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    None,  # project_path: models_directory locates the models
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
@@ -587,7 +567,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    None,  # project_path: models_directory locates the models
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
@@ -600,7 +580,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    None,  # project_path: models_directory locates the models
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
@@ -613,7 +593,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    None,  # project_path: models_directory locates the models
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
@@ -626,7 +606,7 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    None,  # project_path: models_directory locates the models
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,

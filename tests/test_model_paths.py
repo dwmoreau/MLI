@@ -128,14 +128,6 @@ def test_env_var_beats_xdg(monkeypatch, tmp_path, fake_models_dir):
     assert _resolve() == fake_models_dir
 
 
-def test_resolve_project_path_is_deprecated(monkeypatch, fake_models_dir):
-    from mlindex.optimization.UtilitiesOptimizer import _resolve_project_path
-
-    monkeypatch.setenv("MLINDEX_MODELS_DIR", str(fake_models_dir))
-    with pytest.deprecated_call():
-        _resolve_project_path()
-
-
 # --- Wrapper round-trip ----------------------------------------------------------
 
 
