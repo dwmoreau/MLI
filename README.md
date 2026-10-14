@@ -145,7 +145,7 @@ The program prints the top 20 unit cell candidates and writes the full ranked li
 | **score** | The learned ranker's calibrated probability that the cell is correct (`mlindex.run`); `M_sym` when ranked by `M_sym` |
 | **M20** | de Wolff Figure of Merit (Wolff 1968) |
 | **M_sym** | de Wolff's construction over the observed range, times the same construction with observed and calculated lines exchanged |
-| **n_indexed** | Number of peaks assigned their nearest calculated line with posterior probability above 0.95 (0.90 in `mlindex.run_analytical`) |
+| **n_indexed** | Number of peaks assigned their nearest calculated line with posterior probability above 0.95 |
 | **bravais_lattice** | Assumed Bravais lattice for the unit cell optimization |
 | **spacegroup** | Spacegroup whose systematic absences best align with the observed peak list |
 | **volume** | Unit cell volume (Å³) |
