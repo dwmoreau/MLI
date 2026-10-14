@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-MLINDEX is a powder diffraction indexing program. Given a list of observed diffraction peaks, it returns candidate unit cells ranked by the de Wolff M20 figure of merit. ML models initialize candidate unit cells for each Bravais lattice; candidates are then refined by least-squares optimization.
+MLINDEX is a powder diffraction indexing program. Given a list of observed diffraction peaks, it returns candidate unit cells ranked by a learned ranker. ML models initialize candidate unit cells for each Bravais lattice; candidates are refined by least-squares optimization, cut at M20 3.5, and the survivors are scored by a gradient-boosted classifier (`mlindex/models/ranker_1`, ONNX) whose calibrated probability orders the printed list. Without the ranker the list is ordered by `M_sym`, and the output says so; the analytical indexer always ranks by `M_sym`.
 
 ## How to make changes (required for all edits)
 
@@ -40,7 +40,7 @@ itself when it drifts from the first.
 pip install .
 ```
 
-ML model files (~465 MB) are published on the Hugging Face Hub at
+ML model files (~472 MB, 741 files) are published on the Hugging Face Hub at
 [`dwmoreau/mlindex-models`](https://huggingface.co/dwmoreau/mlindex-models), and `mlindex.download_models`
 fetches them from there with `huggingface_hub` (no git or git-lfs needed). Each release pins a model
 revision via `model_revision` in `mlindex/model_metadata.json`.
@@ -62,14 +62,14 @@ why the "do we have models?" probe checks for `cubic_1/abnn/` rather than for `m
 ## Running the indexer
 
 ### ML-based indexer (primary)
-Accepts either a GSAS-II `.pkslst` file (requires wavelength) or a numpy `.npy` array of q² values (1/Å²):
+Accepts either a GSAS-II `.pkslst` file (requires wavelength) or a numpy `.npy` array of peak positions. **`--peak-units` defaults to d-spacing (Å)**; pass `--peak-units q2` for an array of q² values (1/Å²), or `q`, or `2theta` with a wavelength. A q² array read as d-spacings still runs, and prints cells of a few Å or less:
 
 ```bash
 # Serial (1 process, no workers spawned)
-python -m mlindex.command_line.run --peak-file peaks.npy
+python -m mlindex.command_line.run --peak-file peaks.npy --peak-units q2
 
 # Multiprocessing with N processes (recommended over MPI for local runs)
-python -m mlindex.command_line.run --peak-file peaks.npy --nproc 4
+python -m mlindex.command_line.run --peak-file peaks.npy --peak-units q2 --nproc 4
 
 # MPI mode (exactly 6 ranks — requires mpiexec, legacy parallel mode)
 mpiexec -n 6 python -m mlindex.command_line.run --peak-file peaks.pkslst --wavelength 0.413128 --mpi
@@ -78,29 +78,29 @@ mpiexec -n 6 python -m mlindex.command_line.run --peak-file peaks.pkslst --wavel
 python -m mlindex.command_line.run --peak-file peaks.pkslst --wavelength 0.413128 --zero-error
 ```
 
-Outputs `indexing_results.json` and prints top-20 candidates ranked by M20.
+Outputs `indexing_results.json` and `.txt`, and prints the top 20. Each lattice hands the ranker its 20 best candidates (by the ranker's score; by M20 under the `M_sym` fallback); a row that repeats a higher-ranked cell of the same lattice in another basis is dropped; each cell is printed in one standard setting (`Reindexing.printed_setting`: mP and mC reduced with beta >= 90, mC in the C setting, aP as its Niggli cell).
 
 ### Analytical indexer (lightweight alternative, no ML models needed)
 ```bash
-python -m mlindex.command_line.run_analytical --peak-file peaks.npy
+python -m mlindex.command_line.run_analytical --peak-file peaks.npy --peak-units q2
 ```
 Covers high-symmetry lattices (cF, cI, cP, hP, hR, tI, tP, oC, oF, oI, oP) serially.
 
 ## Key architectural concepts
 
 ### Internal representations
-- **q²**: The input unit. q² = (2 sin θ / λ)² = 1/d². Peak lists are always in q² (Å⁻²).
+- **q²**: The internal unit. q² = (2 sin θ / λ)² = 1/d². Peak lists are converted to q² (Å⁻²) on input (`run._convert_to_q2`).
 - **xnn**: The primary internal metric tensor representation (6-component vector). All optimization happens in xnn space. Converted to/from conventional unit cell parameters by `mlindex/utilities/UnitCellTools.py`.
 - **Bravais lattice split groups**: Each Bravais lattice is subdivided into "split groups" (e.g., `cF_0`, `mP_0_01`) based on unit-cell axis ordering and extinction groups. These are the granularity at which random forest regressors and ABNNs are trained.
 
 ### Execution flow (`mlindex/command_line/run.py`)
 1. Load peak list → `q2_obs` array (up to 20 peaks used)
-2. For each of 14 Bravais lattices, an `OptimizerManager` generates unit cell candidates using three ML components, then refines them with Gauss-Newton optimization and scores by M20/Minfo
-3. Rank 0 collects all results, sorts by M20, writes JSON
+2. For each of 14 Bravais lattices, an `OptimizerManager` generates unit cell candidates using three ML components, refines them with Gauss-Newton optimization, cuts them at M20 3.5 (`Candidates.PRUNE_M20_THRESHOLD`), reduces monoclinic and triclinic cells, assigns an extinction group by M20, and computes the ranker's inputs
+3. The collected pools are scored by the ranker (`utilities/Ranker.py`), shortlisted 20 per lattice, de-duplicated, put in their printed setting, and written
 
 ### Parallelism
 
-**Multiprocessing mode** (`--nproc N`): Worker processes are spawned once at startup and kept alive across all 14 Bravais lattices to avoid re-import overhead. The main process acts as manager for every lattice. Uses `multiprocessing.Queue` for communication; `mpi4py` is never imported. Supports arbitrary N; `--nproc 1` runs fully serially with no workers spawned.
+**Multiprocessing mode** (`--nproc N`): `run.allocate_lattice_groups` deals the lattices into groups by a measured cost table, and each group runs at the same time with its own manager and refinement workers (`MPOptimizer.setup_lattice_groups`, `run_lattice_groups`). The first group runs in the calling process. Uses `multiprocessing.Queue` for communication; `mpi4py` is never imported. Supports arbitrary N; `--nproc 1` runs fully serially with no workers spawned. The same `--nproc` always reproduces; a different `--nproc` may give a different list.
 
 **MPI mode** (`--mpi`): With 6 ranks, cubic (cF/cI/cP) and triclinic/monoclinic lattices run serially on dedicated ranks; orthorhombic lattices (oC/oF/oI/oP) run in parallel across all ranks. The mapping is hardcoded in `run.py`. With 1 rank, everything runs serially. Requires `--mpi` flag; `mpi4py` is only imported when this flag is passed.
 
@@ -127,9 +127,10 @@ All trained models are saved under `mlindex/models/{tag}/` (e.g., `mlindex/model
 - Output goes to `../data/generated_datasets/` relative to where the script is run
 
 ### Optimization (`mlindex/optimization/`)
-- `Candidates.py`: `Candidates` class — runs the refinement loop, computes M20/Minfo, handles reindexing and spacegroup assignment for a single rank's candidate set.
+- `Candidates.py`: `Candidates` class — runs the refinement loop, computes M20, handles reindexing and spacegroup assignment for a single rank's candidate set.
 - `MPIOptimizer.py`: `OptimizerBase`, `OptimizerWorker`, `OptimizerManager` — MPI-based parallel optimizer. Contains extracted helpers `_run_loop`, `_generate_candidates_xnn`, `_downsample_computation` that are reused by the MP subclasses.
-- `MPOptimizer.py`: `MPOptimizerManager`, `MPOptimizerWorker` — multiprocessing subclasses that override only the communication methods, replacing MPI calls with `multiprocessing.Queue`. Also contains `setup_mp_optimizers`, `run_mp_bl`, `shutdown_mp_workers`.
+- `MPOptimizer.py`: `MPOptimizerManager`, `MPOptimizerWorker` — multiprocessing subclasses that override only the communication methods, replacing MPI calls with `multiprocessing.Queue`. Also contains the lattice-group runner (`setup_lattice_groups`, `run_lattice_groups`, `shutdown_lattice_groups`) and `run_mp_bl`.
+- `GeneratorPools.py`, `GroupedStarts.py`: one pattern's candidates generated per generator, and starting clouds in groups -- the instruments behind the ensemble fractions; research, not the run path.
 - `Optimizer.py`: Backward-compatibility re-export shim — imports from `Candidates` and `MPIOptimizer`. Existing notebooks and scripts that import from `Optimizer` continue to work.
 - `UtilitiesOptimizer.py`: Factory functions (`get_cubic_optimizer`, etc.) and `get_optimizers`. All factory functions accept an `optimizer_class=None` parameter — pass `MPOptimizerManager` to use multiprocessing instead of MPI.
 - `CandidateOptLoss.py`: Gauss-Newton least-squares update for xnn given hkl assignments.
@@ -139,9 +140,13 @@ All trained models are saved under `mlindex/models/{tag}/` (e.g., `mlindex/model
 ### Key utilities (`mlindex/utilities/`)
 - `UnitCellTools.py`: Converts between xnn, unit cell (a,b,c,α,β,γ), and reciprocal-space forms. `fix_unphysical()` enforces physical constraints on xnn.
 - `Q2Calculator.py`: Computes q² for given hkl and metric tensor.
-- `FigureOfMerits.py`: M20 (de Wolff) and Minfo (Taupin) implementations.
+- `FigureOfMerits.py`: M20 (de Wolff), `M_sym` and the per-peak assignment posterior (`get_assignment_distribution`, `get_assignment_posterior`).
+- `Ranker.py`: the learned ranker's inputs, design matrix and calibration; `LearnedRanker` (ONNX) and the `MSymRanker` fallback; `load_ranker`, `score_pool`.
+- `MillerIndexAssignment.py`: Miller-index assignment of a cell's lines to the observed peaks.
 - `SpaceGroups.py`: Systematic absence rules and hkl reference sets per spacegroup.
-- `Reindexing.py`: Selling reduction, monoclinic standardization, and axis permutation for canonical unit-cell orientation.
+- `Reindexing.py`: Selling and Niggli reduction, the monoclinic a-c reduction (`reduce_monoclinic_mesh`, keeping P, I or C centring), the printed setting, axis permutation, and `same_lattice` (cctbx) for comparing cells in any basis.
+- `Allocation.py`, `Digests.py`: integer shares of a candidate budget; stable digests and seeds across processes.
+- `EnsembleObjective.py`, `ClumpDiscount.py`, `ConvergenceCurve.py`, `ErrorAdder.py`: research instruments for the generator ensemble and peak-error simulation; not on the run path.
 
 ## Cross-platform compatibility (required for all edits)
 
@@ -177,8 +182,8 @@ Rules, each of which corresponds to a bug this project has actually shipped or n
 - **Avoid symlinks.** `snapshot_download` is called with `local_dir=`, which copies files;
   the cache mode would create symlinks and require Developer Mode or admin rights on Windows.
 - **`shutil.rmtree` over a git clone fails on Windows** — git marks `.git/objects` read-only,
-  so cleanup raises `PermissionError`. This affects the legacy `--source github` path in
-  `download_models.py`, which is still unfixed and slated for removal in 0.2.0.
+  so cleanup raises `PermissionError`. The legacy `--source github` download did this; it was
+  removed in 0.2.0.
 
 Not currently supported on Windows: MPI mode (`--mpi`), model training, and dataset
 generation. `cctbx-base` ships a `win_amd64` wheel but no `win_arm64`, so Windows-on-ARM
@@ -186,9 +191,13 @@ cannot install at all.
 
 ## Optional dependencies
 
-Dataset generation requires: `pyarrow`, `openpyxl`, `cctbx`, `tqdm`
+Dataset generation requires: `gemmi`, `pyarrow`, `openpyxl`, `cctbx`, `tqdm`
 
-Model training additionally requires: `skl2onnx`, `keras`, `torch`, `torchvision`
+Model training additionally requires: `skl2onnx`, `onnx`, `tf2onnx`, `keras`, `torch`, `torchvision`
+
+The indexer itself needs `onnxruntime>=1.21`: 1.20 has no implementation of the ranker's
+`TreeEnsemble` (ai.onnx.ml opset 5) and fails to load it; 1.21.0 to 1.24.1 agree with the fit to
+3e-15 (P18, macOS arm64).
 
 ## The ML-FOM project — its record is untracked, and this is the only pointer to it
 

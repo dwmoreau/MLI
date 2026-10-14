@@ -345,7 +345,7 @@ class SKLearnManager:
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"Model file not found: {model_path}\n"
-                "Run 'mlindex-download-models' to fetch the ML models."
+                "Run 'mlindex.download_models' to fetch the ML models."
             )
         return joblib.load(model_path)
     
@@ -356,7 +356,7 @@ class SKLearnManager:
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"Model file not found: {model_path}\n"
-                "Run 'mlindex-download-models' to fetch the ML models."
+                "Run 'mlindex.download_models' to fetch the ML models."
             )
 
         sess_options = onnxruntime.SessionOptions()
@@ -371,7 +371,7 @@ class SKLearnManager:
         if not os.path.exists(npz_path):
             raise FileNotFoundError(
                 f"Model file not found: {npz_path}\n"
-                "Run 'mlindex-download-models' to fetch the ML models."
+                "Run 'mlindex.download_models' to fetch the ML models."
             )
         return self.VersionIndependentForestPredictor.from_npz(np.load(npz_path))
     
