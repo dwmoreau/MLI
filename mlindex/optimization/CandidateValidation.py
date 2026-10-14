@@ -12,6 +12,7 @@ from mlindex.utilities.UnitCellTools import BL_TO_CENTRING
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 from mlindex.utilities.UnitCellTools import get_full_unit_cell
 from mlindex.utilities.UnitCellTools import get_partial_unit_cell
+from mlindex.utilities.UnitCellTools import get_unit_cell_volume
 
 
 # The sub- and super-cell multipliers each lattice system is tested against. A candidate whose
@@ -178,11 +179,21 @@ def _same_reduced_lattice(unit_cell_true, unit_cell_pred, centring, rtol):
     compared by `Reindexing.same_lattice`, `rtol` in the lengths and `ANGLE_TOLERANCE_DEG` in the
     angles. A cell cctbx refuses outright (non-finite or impossible parameters) is not the true
     cell, and must not stop a pool's labels.
+
+    `same_lattice` rejects a pair whose volumes differ by more than three times `rtol` before
+    comparing; that test is made here first, on every row at once and with a hair of slack, so the
+    rows it would reject -- most of a pool -- are never reduced. Both cells have the same
+    centring, so their conventional volumes stand in the ratio their primitive ones do.
     """
     degrees = lambda cell: np.concatenate([cell[:3], np.degrees(cell[3:])])
     truth = niggli_cell(degrees(unit_cell_true), centring)
     correct = np.zeros(unit_cell_pred.shape[0], dtype=bool)
-    for index, cell in enumerate(unit_cell_pred):
+    volume_true = get_unit_cell_volume(unit_cell_true[np.newaxis])[0]
+    with np.errstate(invalid='ignore'):
+        volume = get_unit_cell_volume(unit_cell_pred)
+        near = np.abs(volume - volume_true) <= 3.01*rtol*0.5*(volume + volume_true)
+    for index in np.flatnonzero(near):
+        cell = unit_cell_pred[index]
         try:
             correct[index] = same_lattice(niggli_cell(degrees(cell), centring), truth, rtol=rtol,
                                           atol_deg=ANGLE_TOLERANCE_DEG)
