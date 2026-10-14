@@ -82,9 +82,6 @@ def test_shipped_metadata_has_hf_keys():
     meta = json.loads((Path(mlindex.__file__).parent / "model_metadata.json").read_text())
     assert meta["hf_repo_id"]
     assert meta["model_revision"]
-    # The GitHub fallback keys stay for one release; --source github depends on them.
-    assert meta["repo_url"]
-    assert meta["models_branch"]
 
 
 def test_metadata_unreadable_falls_back_to_defaults(monkeypatch, capsys):
@@ -269,4 +266,4 @@ def test_missing_huggingface_hub_message(monkeypatch, tmp_path, capsys):
         dm._download_hf("owner/repo", "v1", tmp_path / "models")
     err = capsys.readouterr().err
     assert "pip install" in err
-    assert "--source github" in err
+    assert "--source github" not in err

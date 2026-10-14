@@ -6,28 +6,22 @@ or a custom path specified via --models-dir or the MLINDEX_MODELS_DIR environmen
 The download requires no git and no git-lfs -- only the huggingface_hub package, which
 is installed as a normal dependency of mlindex.
 
-A legacy git-lfs download from the GitHub repository is still available via
---source github, for networks that block huggingface.co. It requires git and git-lfs,
-and will be removed in a future release.
+    mlindex.download_models                                # the installed command
+    python -m mlindex.command_line.download_models         # the same, from a checkout
 """
 
 import argparse
 import json
-import os
-import shutil
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from mlindex import paths
 
 DEFAULT_HF_REPO_ID = 'dwmoreau/mlindex-models'
-DEFAULT_GITHUB_REPO_URL = 'https://github.com/dwmoreau/MLI.git'
-DEFAULT_GITHUB_BRANCH = 'main'
 
-# Approximate download size, for the progress banner.
-DOWNLOAD_SIZE_HINT = '~465 MB, 739 files'
+# Approximate download size, for the progress banner: the model revision pinned in
+# model_metadata.json (v3: 741 model files, plus the repository's README and .gitattributes).
+DOWNLOAD_SIZE_HINT = '~472 MB, 743 files'
 
 
 def _hf_imports():
@@ -51,7 +45,7 @@ def _load_metadata():
     try:
         import mlindex
         meta_path = Path(mlindex.__file__).parent / 'model_metadata.json'
-        with open(meta_path) as f:
+        with open(meta_path, encoding='utf-8') as f:
             return json.load(f)
     except (OSError, ValueError, ImportError) as exc:
         print(
@@ -110,8 +104,7 @@ def _download_hf(repo_id, revision, models_dir, redownload=False):
         print(
             f"ERROR: huggingface_hub is required to download models ({exc}).\n"
             "Install it with:\n"
-            "    pip install 'huggingface_hub>=0.25'\n"
-            "or re-run with --source github to use the legacy git-lfs download.",
+            "    pip install 'huggingface_hub>=0.25'",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -147,7 +140,7 @@ def _download_hf(repo_id, revision, models_dir, redownload=False):
         print(
             "\nERROR: could not reach huggingface.co and no local copy is available.\n"
             "Check your network connection or proxy settings. If your network blocks\n"
-            "huggingface.co, set HF_ENDPOINT to a mirror, or re-run with --source github.",
+            "huggingface.co, set HF_ENDPOINT to a mirror.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -160,7 +153,7 @@ def _download_hf(repo_id, revision, models_dir, redownload=False):
         if _is_rate_limited(exc):
             print(
                 f"\nERROR: the Hugging Face Hub rate-limited this download ({exc}).\n"
-                "Anonymous downloads have a low rate limit and this repository has 739 files.\n"
+                "Anonymous downloads have a low rate limit and this repository has 743 files.\n"
                 "Re-run the same command to resume -- files already downloaded are kept and\n"
                 "will not be fetched again. To raise the limit, log in first ('hf auth login')\n"
                 "or set the HF_TOKEN environment variable.",
@@ -175,71 +168,10 @@ def _download_hf(repo_id, revision, models_dir, redownload=False):
         else:
             print(
                 f"\nERROR: could not write to {models_dir} ({exc}).\n"
-                "About 500 MB of free space is required.",
+                "About 550 MB of free space is required.",
                 file=sys.stderr,
             )
         sys.exit(1)
-
-    print(f"Models installed to: {models_dir}")
-
-
-def _check_git_lfs():
-    """Verify git and git-lfs are available; exit with instructions if not."""
-    for cmd in (['git', '--version'], ['git', 'lfs', 'version']):
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print(
-                f"ERROR: '{' '.join(cmd)}' failed.\n"
-                "git and git-lfs must be installed to use --source github.\n"
-                "Install git-lfs: https://git-lfs.com\n"
-                "Alternatively, use the default Hugging Face download, which needs neither.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-
-def _run(cmd, **kwargs):
-    """Run a subprocess command, streaming output to the terminal."""
-    print(f"  $ {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, **kwargs)
-    if result.returncode != 0:
-        print(f"ERROR: command failed with exit code {result.returncode}", file=sys.stderr)
-        sys.exit(result.returncode)
-
-
-def _download_git_lfs(repo_url, branch, models_dir):
-    """Legacy path: clone the repo sparsely and pull LFS model files into models_dir."""
-    _check_git_lfs()
-    with tempfile.TemporaryDirectory(prefix='mlindex_download_') as tmpdir:
-        tmpdir = Path(tmpdir)
-        print("\nCloning repository (sparse, no checkout) ...")
-        _run(
-            ['git', 'clone', '--no-checkout',
-             '--depth=1', '--branch', branch, repo_url, str(tmpdir / 'repo')]
-        )
-        repo = tmpdir / 'repo'
-
-        print("Configuring sparse checkout for mlindex/models/ ...")
-        _run(['git', '-C', str(repo), 'sparse-checkout', 'init', '--cone'])
-        _run(['git', '-C', str(repo), 'sparse-checkout', 'set', 'mlindex/models'])
-
-        print("\nChecking out model files ...")
-        _run(['git', '-C', str(repo), 'checkout', 'HEAD'])
-
-        print("Fetching LFS objects ...")
-        _run(['git', '-C', str(repo), 'lfs', 'pull', '--include', 'mlindex/models/**'])
-
-        src = repo / 'mlindex' / 'models'
-        if not src.exists():
-            print(f"ERROR: expected {src} after download", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"\nMoving models to {models_dir} ...")
-        models_dir.parent.mkdir(parents=True, exist_ok=True)
-        if models_dir.exists():
-            shutil.rmtree(models_dir)
-        shutil.move(str(src), str(models_dir))
 
     print(f"Models installed to: {models_dir}")
 
@@ -280,20 +212,11 @@ def main():
         default=None,
         help=f"Hugging Face repository to download from (default: {DEFAULT_HF_REPO_ID}).",
     )
-    parser.add_argument(
-        '--source',
-        choices=('hf', 'github'),
-        default='hf',
-        help="Where to download from. 'hf' (default) uses the Hugging Face Hub; "
-             "'github' uses the legacy git-lfs clone and requires git and git-lfs.",
-    )
     args = parser.parse_args()
 
     meta = _load_metadata()
     repo_id = args.repo_id or meta.get('hf_repo_id') or DEFAULT_HF_REPO_ID
     revision = args.revision or meta.get('model_revision')
-    repo_url = meta.get('repo_url', DEFAULT_GITHUB_REPO_URL)
-    branch = meta.get('models_branch', DEFAULT_GITHUB_BRANCH)
 
     models_dir = _resolve_target_dir(args.models_dir)
 
@@ -306,28 +229,23 @@ def main():
         )
         sys.exit(1)
 
-    if args.source == 'github':
-        print(f"Downloading mlindex models from {repo_url} (branch: {branch})")
-        print(f"Target directory: {models_dir}\n")
-        _download_git_lfs(repo_url, branch, models_dir)
-    else:
-        print(f"Downloading mlindex models from https://huggingface.co/{repo_id}")
-        print(f"Revision: {revision or 'main (unpinned)'}")
-        print(f"Target directory: {models_dir}")
-        print(f"Download size: {DOWNLOAD_SIZE_HINT}\n")
-        if state == 'previous_download':
-            print("Existing model directory found; verifying and completing download ...")
-            print("(Files already present and up to date are not re-downloaded. To start")
-            print(" completely fresh, delete the directory and re-run.)\n")
-        try:
-            _download_hf(repo_id, revision, models_dir, redownload=args.redownload)
-        except KeyboardInterrupt:
-            print(
-                "\nInterrupted. The partial download has been kept -- "
-                "re-run the same command to resume.",
-                file=sys.stderr,
-            )
-            sys.exit(130)
+    print(f"Downloading mlindex models from https://huggingface.co/{repo_id}")
+    print(f"Revision: {revision or 'main (unpinned)'}")
+    print(f"Target directory: {models_dir}")
+    print(f"Download size: {DOWNLOAD_SIZE_HINT}\n")
+    if state == 'previous_download':
+        print("Existing model directory found; verifying and completing download ...")
+        print("(Files already present and up to date are not re-downloaded. To start")
+        print(" completely fresh, delete the directory and re-run.)\n")
+    try:
+        _download_hf(repo_id, revision, models_dir, redownload=args.redownload)
+    except KeyboardInterrupt:
+        print(
+            "\nInterrupted. The partial download has been kept -- "
+            "re-run the same command to resume.",
+            file=sys.stderr,
+        )
+        sys.exit(130)
 
     print("\nDownload complete.")
     if models_dir != _default_models_dir():
