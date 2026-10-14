@@ -434,22 +434,17 @@ class Candidates:
         return captured
 
     def standardize_cell(self):
-        # These do a quick standardization of monoclinic and triclinic candidates. It is just a
-        # Selling reduction.
+        # These reduce monoclinic and triclinic candidates: a and c of a monoclinic cell, keeping
+        # its centring, and a Selling reduction of a triclinic one.
         # This is performed in this function because the Miller indices are reassigned at the
         # end. Miller index transformations are not tracked in monoclinic_standardization
-        # The Selling reduction treats a cell as primitive. An mC candidate is stored I-centred,
-        # and reducing it as primitive can move the centring point, giving another lattice, so
-        # only primitive cells are reduced here.
-        if self.lattice_system == 'triclinic' or (
-                self.lattice_system == 'monoclinic'
-                and BL_TO_CENTRING[self.bravais_lattice] == 'P'):
+        if self.lattice_system in ['monoclinic', 'triclinic']:
             best_unit_cell = get_unit_cell_from_xnn(
                 self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
                 )
             if self.lattice_system == 'monoclinic':
                 best_standardized_unit_cell = monoclinic_standardization(
-                    best_unit_cell, partial_unit_cell=True
+                    best_unit_cell, BL_TO_CENTRING[self.bravais_lattice], partial_unit_cell=True
                     )
             elif self.lattice_system == 'triclinic':
                 best_standardized_unit_cell, _, _ = selling_reduction(best_unit_cell)

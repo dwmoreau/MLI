@@ -691,44 +691,56 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, space="direct"):
     return reindexed_unit_cell, reindexed_spacegroup_symbol, hkl_reindexer
 
 
-def monoclinic_standardization(unit_cell, partial_unit_cell=False):
-    # This performs a very quick "standardization" of the monoclinic lattice.
-    # It performs a Selling reduction and then places the unique axis at b
-    if partial_unit_cell:
-        unit_cell_full = np.zeros((unit_cell.shape[0], 6))
-        unit_cell_full[:, :3] = unit_cell[:, :3]
-        unit_cell_full[:, 4] = unit_cell[:, 3]
-        unit_cell_full[:, 3] = np.pi / 2
-        unit_cell_full[:, 5] = np.pi / 2
-    else:
-        unit_cell_full = unit_cell
-    reduced_unit_cell_full, _, _ = selling_reduction(unit_cell_full)
-    right_angle = np.isclose(reduced_unit_cell_full[:, 3:], np.pi / 2)
+def monoclinic_standardization(unit_cell, centring, partial_unit_cell=False):
+    """Each monoclinic cell in its reduced setting: the shortest a and c, beta >= 90 degrees.
 
-    standardized_unit_cell_full = reduced_unit_cell_full.copy()
-    for i in range(unit_cell.shape[0]):
-        if right_angle[i, 0] and right_angle[i, 2]:
-            # a -> a, b -> b, c -> c
-            continue
-        elif right_angle[i, 0] and right_angle[i, 1]:
-            # a -> -a, b -> -c, c -> -b
-            standardized_unit_cell_full[i, 1] = reduced_unit_cell_full[i, 2]
-            standardized_unit_cell_full[i, 2] = reduced_unit_cell_full[i, 1]
-            standardized_unit_cell_full[i, 4] = reduced_unit_cell_full[i, 5]
-            standardized_unit_cell_full[i, 5] = np.pi / 2
-        elif right_angle[i, 1] and right_angle[i, 2]:
-            # a -> -b, b -> -b, c -> -c
-            standardized_unit_cell_full[i, 0] = reduced_unit_cell_full[i, 1]
-            standardized_unit_cell_full[i, 1] = reduced_unit_cell_full[i, 0]
-            standardized_unit_cell_full[i, 4] = reduced_unit_cell_full[i, 3]
-            standardized_unit_cell_full[i, 3] = np.pi / 2
-        else:
-            # This case should be fixed.
-            standardized_unit_cell_full[i] = unit_cell_full[i]
-    if partial_unit_cell:
-        return standardized_unit_cell_full[:, [0, 1, 2, 4]]
-    else:
-        return standardized_unit_cell_full
+    b is the unique axis and is left alone; a and c are reduced as a two-dimensional lattice in the
+    plane normal to it. The area of that mesh is fixed, so the shortest pair is also the pair with
+    beta closest to 90. `centring` is 'P' or 'I'. An I-centred cell is reduced only by basis
+    changes that keep its centring point at (a + c) / 2 -- c -> c - 2k a and (a, c) -> (c, -a) --
+    because a primitive reduction can move the point and so give another lattice.
+
+    `unit_cell` is (n, 6), or (n, 4) [a, b, c, beta] with `partial_unit_cell`; angles in radians.
+    """
+    if centring not in ('P', 'I'):
+        raise ValueError(f'monoclinic centring must be P or I, not {centring!r}')
+    step = 1 if centring == 'P' else 2
+    unit_cell = np.asarray(unit_cell, dtype=np.float64)
+    beta_index = 3 if partial_unit_cell else 4
+    beta = unit_cell[:, beta_index]
+
+    # a along x, c in the x-z plane.
+    a_vec = np.stack([unit_cell[:, 0], np.zeros(unit_cell.shape[0])], axis=1)
+    c_vec = np.stack([unit_cell[:, 2] * np.cos(beta), unit_cell[:, 2] * np.sin(beta)], axis=1)
+    finite = np.all(np.isfinite(a_vec), axis=1) & np.all(np.isfinite(c_vec), axis=1)
+    active = finite.copy()
+    # Each pass shortens c or swaps, so it ends; the cap only guards a degenerate cell.
+    for _ in range(100):
+        if not np.any(active):
+            break
+        swap = active & (np.sum(a_vec**2, axis=1) > np.sum(c_vec**2, axis=1))
+        a_vec[swap], c_vec[swap] = c_vec[swap], -a_vec[swap]
+        k = np.zeros(unit_cell.shape[0])
+        k[active] = np.round(
+            np.sum(a_vec[active] * c_vec[active], axis=1)
+            / (step * np.sum(a_vec[active]**2, axis=1))
+            )
+        c_vec -= (step * k)[:, np.newaxis] * a_vec
+        active = active & ((k != 0) | swap)
+
+    a_length = np.linalg.norm(a_vec, axis=1)
+    c_length = np.linalg.norm(c_vec, axis=1)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        reduced_beta = np.arccos(np.clip(
+            np.sum(a_vec * c_vec, axis=1) / (a_length * c_length), -1, 1))
+    # c -> -c takes beta to its supplement and keeps the lattice and the centring point.
+    reduced_beta = np.where(reduced_beta < np.pi / 2, np.pi - reduced_beta, reduced_beta)
+
+    standardized = unit_cell.copy()
+    standardized[finite, 0] = a_length[finite]
+    standardized[finite, 2] = c_length[finite]
+    standardized[finite, beta_index] = reduced_beta[finite]
+    return standardized
 
 
 def cell_matrix(unit_cell):

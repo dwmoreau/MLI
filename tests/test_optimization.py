@@ -227,8 +227,8 @@ def _standardization_fixture(lattice_system, unit_cells, bravais_lattice=None):
 @pytest.mark.parametrize(
     "lattice_system, bravais_lattice, unit_cells",
     [
-        # A long, very oblique c axis, which the Selling reduction inside
-        # monoclinic_standardization shortens: c 20 -> 10.09 and beta 150 -> 97.5 deg.
+        # A long, very oblique c axis, which monoclinic_standardization shortens:
+        # c 20 -> 10.09 and beta 150 -> 97.5 deg.
         ("monoclinic", "mP", [[8.0, 5.0, 20.0, 90.0, 150.0, 90.0]]),
         # An unreduced triclinic cell, so the Selling reduction has something to do.
         ("triclinic", "aP", [[9.0, 8.0, 7.0, 95.0, 100.0, 115.0],
