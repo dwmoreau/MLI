@@ -344,6 +344,17 @@ def _remove_duplicates(output_data):
     return kept
 
 
+def _in_printed_setting(entry):
+    """The entry with its cell and spacegroup in the setting it is printed in
+    (`Reindexing.printed_setting`). After duplicate removal, which compares cells as stored."""
+    from mlindex.utilities.Reindexing import printed_setting
+
+    keys = ('a', 'b', 'c', 'alpha', 'beta', 'gamma')
+    cell, spacegroup = printed_setting([entry[key] for key in keys], entry['bravais_lattice'],
+                                       entry['spacegroup'])
+    return {**entry, **dict(zip(keys, cell)), 'spacegroup': spacegroup}
+
+
 def _write_output(output_file, results, ranker):
     """Rank and write every lattice's reported candidates.
 
@@ -356,7 +367,7 @@ def _write_output(output_file, results, ranker):
     for bl, result in results.items():
         rows = ranker.shortlist(result['pool'], scores[bl], SHORTLIST_DEPTH)
         _collect_results(result, bl, output_data, scores[bl], rows)
-    output_data = _remove_duplicates(output_data)
+    output_data = [_in_printed_setting(entry) for entry in _remove_duplicates(output_data)]
     output_file_base = str(Path(output_file).with_suffix(''))
     _write_results(output_data, ranker.name, output_file_base=output_file_base)
 
