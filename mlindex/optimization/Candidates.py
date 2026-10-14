@@ -16,6 +16,7 @@ from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.Reindexing import selling_reduction
 from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 from mlindex.utilities.SpaceGroups import get_spacegroup_keep_masks
+from mlindex.utilities.UnitCellTools import BL_TO_CENTRING
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
@@ -437,7 +438,12 @@ class Candidates:
         # Selling reduction.
         # This is performed in this function because the Miller indices are reassigned at the
         # end. Miller index transformations are not tracked in monoclinic_standardization
-        if self.lattice_system in ['monoclinic', 'triclinic']:
+        # The Selling reduction treats a cell as primitive. An mC candidate is stored I-centred,
+        # and reducing it as primitive can move the centring point, giving another lattice, so
+        # only primitive cells are reduced here.
+        if self.lattice_system == 'triclinic' or (
+                self.lattice_system == 'monoclinic'
+                and BL_TO_CENTRING[self.bravais_lattice] == 'P'):
             best_unit_cell = get_unit_cell_from_xnn(
                 self.best_xnn, partial_unit_cell=True, lattice_system=self.lattice_system
                 )
