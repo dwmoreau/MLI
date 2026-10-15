@@ -303,7 +303,8 @@ def _write(out_dir, name, table):
 
 def end_to_end(pools, out_dir, n_processes, bootstrap_seed):
     """`--stage end-to-end`: each pool's printed lists replayed and reported
-    (`BenchmarkPrinted.end_to_end`), into `end_to_end_<pool>.csv` and `printed_<pool>.parquet`."""
+    (`BenchmarkPrinted.end_to_end`), into `end_to_end_<pool>.csv` and `.png`, and
+    `printed_<pool>.parquet`."""
     import numpy as np
 
     from mlindex.model_training import BenchmarkPrinted
@@ -316,6 +317,7 @@ def end_to_end(pools, out_dir, n_processes, bootstrap_seed):
             pool, np.random.default_rng(bootstrap_seed), n_processes=n_processes)
         _write(out_dir, f'end_to_end_{name}.csv', table)
         printed.to_parquet(Path(out_dir) / f'printed_{name}.parquet', index=False)
+        BenchmarkPrinted.end_to_end_figure(table, Path(out_dir) / f'end_to_end_{name}.png')
         headline = table.loc[(table['scope'] == 'all')
                              & table['metric'].isin(('top1', 'top10', 'found'))]
         print(headline[['metric', 'quantity', 'value', 'se']].to_string(index=False))

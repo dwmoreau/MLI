@@ -267,3 +267,59 @@ def end_to_end(pool_dir, rng, n_processes=1):
                 if lattice in set(entries['bravais_lattice_true'])]
     table = end_to_end_table(flags, pool_outcomes(pool_dir, entries), lattices, rng)
     return table.assign(**record), printed
+
+
+# The figure's colours: the three rankings in fixed categorical order, a distinct marker each so
+# that identity never rests on colour; the pool's ceiling and tie-break floor in neutral ink.
+FIGURE_STYLE = {'learned': ('#2a78d6', 'o'), 'M_sym': ('#eb6834', 's'), 'M20': ('#1baf7a', '^')}
+FIGURE_INK = {'primary': '#0b0b0b', 'secondary': '#52514e', 'muted': '#898781',
+              'grid': '#e1e0d9', 'surface': '#fcfcfb'}
+
+
+def end_to_end_figure(table, path):
+    """First place and top ten of each ranking, per lattice and over all lattices, with the
+    ceiling and the tie-break floor, written to `path` (PNG)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    scopes_shown = ['all'] + table.loc[table['scope_kind'] == 'lattice', 'scope'].unique().tolist()
+    panels = (('top1', 'First place'), ('top10', 'Top ten'))
+    figure, axes = plt.subplots(1, 2, figsize=(9, 0.42*len(scopes_shown) + 1.6), sharey=True,
+                                facecolor=FIGURE_INK['surface'])
+    y = np.arange(len(scopes_shown))[::-1]
+
+    def values(metric, quantity):
+        rows = table.loc[(table['metric'] == metric) & (table['quantity'] == quantity)]
+        return rows.set_index('scope').loc[scopes_shown, 'value'].to_numpy()
+
+    for axis, (metric, title) in zip(axes, panels):
+        axis.set_facecolor(FIGURE_INK['surface'])
+        axis.scatter(values('found', 'pool'), y, marker='|', s=420, linewidths=2,
+                     color=FIGURE_INK['secondary'], label='ceiling (found)', zorder=2)
+        axis.scatter(values(metric, 'constant'), y, marker='x', s=30, linewidths=1.2,
+                     color=FIGURE_INK['muted'], label='tie-break floor', zorder=2)
+        # Each ranking on its own line within the lattice's row, so equal values stay visible.
+        for offset, (name, (colour, marker)) in zip((0.22, 0.0, -0.22), FIGURE_STYLE.items()):
+            axis.scatter(values(metric, name), y + offset, marker=marker, s=64, color=colour,
+                         edgecolors=FIGURE_INK['surface'], linewidths=1.5, label=name, zorder=3)
+        axis.set_title(title, color=FIGURE_INK['primary'], fontsize=11, loc='left')
+        axis.set_xlim(-3, 103)
+        axis.set_xlabel('percent of patterns', color=FIGURE_INK['secondary'])
+        axis.grid(axis='x', color=FIGURE_INK['grid'], linewidth=0.8)
+        axis.axhline(y[0] - 0.5, color=FIGURE_INK['grid'], linewidth=0.8)
+        axis.tick_params(colors=FIGURE_INK['muted'], length=0)
+        for side in ('top', 'right', 'left'):
+            axis.spines[side].set_visible(False)
+        axis.spines['bottom'].set_color(FIGURE_INK['grid'])
+        axis.set_axisbelow(True)
+    axes[0].set_yticks(y, ['all lattices'] + scopes_shown[1:], color=FIGURE_INK['primary'])
+    handles, labels = axes[0].get_legend_handles_labels()
+    figure.legend(handles, labels, loc='lower center', ncol=5, frameon=False,
+                  labelcolor=FIGURE_INK['secondary'])
+    population = table['population'].iloc[0]
+    figure.suptitle(f'fom-dev {population}: the printed list under each ranking',
+                    color=FIGURE_INK['primary'], x=0.02, ha='left')
+    figure.tight_layout(rect=(0, 0.06, 1, 1))
+    figure.savefig(path, dpi=150, facecolor=FIGURE_INK['surface'])
+    plt.close(figure)
