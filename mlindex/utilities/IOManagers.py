@@ -345,7 +345,7 @@ class SKLearnManager:
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"Model file not found: {model_path}\n"
-                "Run 'mlindex-download-models' to fetch the ML models."
+                "Run 'mlindex.download_models' to fetch the ML models."
             )
         return joblib.load(model_path)
     
@@ -356,7 +356,7 @@ class SKLearnManager:
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"Model file not found: {model_path}\n"
-                "Run 'mlindex-download-models' to fetch the ML models."
+                "Run 'mlindex.download_models' to fetch the ML models."
             )
 
         sess_options = onnxruntime.SessionOptions()
@@ -371,7 +371,7 @@ class SKLearnManager:
         if not os.path.exists(npz_path):
             raise FileNotFoundError(
                 f"Model file not found: {npz_path}\n"
-                "Run 'mlindex-download-models' to fetch the ML models."
+                "Run 'mlindex.download_models' to fetch the ML models."
             )
         return self.VersionIndependentForestPredictor.from_npz(np.load(npz_path))
     
@@ -728,13 +728,13 @@ def save_standard_scaler(scaler, filename):
         'n_features_in': int(scaler.n_features_in_),
         'n_samples_seen': int(scaler.n_samples_seen_)
         }
-    with open(filename, 'w') as f:
+    with open(filename, 'w', encoding='utf-8') as f:
         json.dump(scaler_params, f)
 
 
 def load_standard_scaler(filename):
     from sklearn.preprocessing import StandardScaler
-    with open(filename, 'r') as f:
+    with open(filename, 'r', encoding='utf-8') as f:
         params = json.load(f)
     scaler = StandardScaler()
     scaler.mean_ = np.array(params['mean'])
@@ -745,14 +745,14 @@ def load_standard_scaler(filename):
 
 
 def write_params(params, filename):
-    with open(filename, 'w') as output_file:
+    with open(filename, 'w', encoding='utf-8', newline='') as output_file:
         writer = csv.DictWriter(output_file, fieldnames=params.keys())
         writer.writeheader()
         writer.writerow(params)
 
 
 def read_params(filename):
-    with open(filename, 'r') as params_file:
+    with open(filename, 'r', encoding='utf-8', newline='') as params_file:
         reader = csv.DictReader(params_file)
         for row in reader:
             params = row

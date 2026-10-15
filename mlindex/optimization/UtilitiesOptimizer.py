@@ -3,7 +3,6 @@ import logging
 import numpy as np
 import os
 from pathlib import Path
-import warnings
 
 from mlindex import paths
 
@@ -100,22 +99,6 @@ def _resolve_models_dir():
     return pkg_models
 
 
-def _resolve_project_path():
-    """Deprecated: use _resolve_models_dir().
-
-    Returns a base directory such that base_dir/mlindex/models/{tag} points at the
-    models. That round-trip only works when the models live in a directory ending in
-    'mlindex/models', which is why it is deprecated. Removed in 0.2.0.
-    """
-    warnings.warn(
-        "_resolve_project_path() is deprecated and will be removed in 0.2.0; "
-        "use _resolve_models_dir(), which returns the models directory itself.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return _resolve_models_dir().parent.parent
-
-
 def get_logger(comm, optimization_tag):
     from mlindex.utilities.MPIFileHandler import MPIFileHandler
     logger = logging.getLogger(f'rank[{comm.rank}]')
@@ -162,12 +145,11 @@ def get_mpi_organizer(comm, bravais_lattices, manager_rank, serial):
     return mpi_organizers
 
 
-def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path=None, fom=None, options=None, optimizer_class=None, seed=12345, models_directory=None):
+def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, models_directory, fom=None, options=None, optimizer_class=None, seed=12345):
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     _cls = optimizer_class or OptimizerManager
     data_params = {
         'tag': f'cubic_{broadening_tag}',
-        'base_directory': project_path,
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'cubic_{broadening_tag}'}}
@@ -213,12 +195,11 @@ def get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, com
     return optimizer
 
 
-def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path=None, fom=None, options=None, optimizer_class=None, seed=12345, models_directory=None):
+def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, models_directory, fom=None, options=None, optimizer_class=None, seed=12345):
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     _cls = optimizer_class or OptimizerManager
     data_params = {
         'tag': f'tetragonal_{broadening_tag}',
-        'base_directory': project_path,
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'tetragonal_{broadening_tag}'}}
@@ -264,12 +245,11 @@ def get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     return optimizer
 
 
-def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path=None, fom=None, options=None, optimizer_class=None, seed=12345, models_directory=None):
+def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, models_directory, fom=None, options=None, optimizer_class=None, seed=12345):
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     _cls = optimizer_class or OptimizerManager
     data_params = {
         'tag': f'hexagonal_{broadening_tag}',
-        'base_directory': project_path,
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'hexagonal_{broadening_tag}'}}
@@ -315,12 +295,11 @@ def get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale,
     return optimizer
 
 
-def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path=None, fom=None, options=None, optimizer_class=None, seed=12345, models_directory=None):
+def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, models_directory, fom=None, options=None, optimizer_class=None, seed=12345):
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     _cls = optimizer_class or OptimizerManager
     data_params = {
         'tag': f'rhombohedral_{broadening_tag}',
-        'base_directory': project_path,
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'rhombohedral_{broadening_tag}'}}
@@ -366,12 +345,11 @@ def get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     return optimizer
 
 
-def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path=None, fom=None, options=None, optimizer_class=None, seed=12345, models_directory=None):
+def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, models_directory, fom=None, options=None, optimizer_class=None, seed=12345):
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     _cls = optimizer_class or OptimizerManager
     data_params = {
         'tag': f'orthorhombic_{broadening_tag}',
-        'base_directory': project_path,
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'orthorhombic_{broadening_tag}'}}
@@ -417,12 +395,11 @@ def get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_sca
     return optimizer
 
 
-def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path=None, fom=None, options=None, optimizer_class=None, seed=12345, models_directory=None):
+def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, models_directory, fom=None, options=None, optimizer_class=None, seed=12345):
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     _cls = optimizer_class or OptimizerManager
     data_params = {
         'tag': f'monoclinic_{broadening_tag}',
-        'base_directory': project_path,
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'monoclinic_{broadening_tag}'}}
@@ -469,12 +446,11 @@ def get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale
     return optimizer
 
 
-def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, project_path=None, fom=None, options=None, optimizer_class=None, seed=12345, models_directory=None):
+def get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, comm, models_directory, fom=None, options=None, optimizer_class=None, seed=12345):
     from mlindex.optimization.MPIOptimizer import OptimizerManager
     _cls = optimizer_class or OptimizerManager
     data_params = {
         'tag': f'triclinic_{broadening_tag}',
-        'base_directory': project_path,
         'models_directory': models_directory,
         }
     template_params = {bravais_lattice: {'tag': f'triclinic_{broadening_tag}'}}
@@ -532,9 +508,6 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
     from mlindex.optimization.MPIOptimizer import OptimizerWorker
 
     models_dir = _resolve_models_dir()
-    # Legacy base_directory, kept populated for callers that still read it. It is inert
-    # on the inference path, where models_directory determines the model location.
-    project_path = models_dir.parent.parent
 
     fom = None
     bravais_lattices = mpi_organizers.keys()
@@ -548,12 +521,11 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    models_dir,
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
-                    models_directory=models_dir,
                     )
             elif bravais_lattice in ['hP']:
                 optimizer[bravais_lattice] = get_hexagonal_optimizer(
@@ -561,12 +533,11 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    models_dir,
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
-                    models_directory=models_dir,
                     )
             elif bravais_lattice in ['hR']:
                 optimizer[bravais_lattice] = get_rhombohedral_optimizer(
@@ -574,12 +545,11 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    models_dir,
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
-                    models_directory=models_dir,
                     )
             elif bravais_lattice in ['tI', 'tP']:
                 optimizer[bravais_lattice] = get_tetragonal_optimizer(
@@ -587,12 +557,11 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    models_dir,
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
-                    models_directory=models_dir,
                     )
             elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
                 optimizer[bravais_lattice] = get_orthorhombic_optimizer(
@@ -600,12 +569,11 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    models_dir,
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
-                    models_directory=models_dir,
                     )
             elif bravais_lattice in ['mC', 'mP']:
                 optimizer[bravais_lattice] = get_monoclinic_optimizer(
@@ -613,12 +581,11 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    models_dir,
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
-                    models_directory=models_dir,
                     )
             elif bravais_lattice in ['aP']:
                 optimizer[bravais_lattice] = get_triclinic_optimizer(
@@ -626,12 +593,11 @@ def get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale, log
                     broadening_tag,
                     n_candidates_scale,
                     mpi_organizers[bravais_lattice].split_comm,
-                    project_path,
+                    models_dir,
                     fom,
                     options=options,
                     optimizer_class=optimizer_class,
                     seed=seed,
-                    models_directory=models_dir,
                     )
             if not logger is None:
                 logger.info(f'Loaded manager optimizer for {bravais_lattice}')

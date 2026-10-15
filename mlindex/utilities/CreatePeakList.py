@@ -119,9 +119,9 @@ class PeakListCreator:
             print(f'Loading combined expt and refls for run {run_str}')
         else:
             print(f'Combining experiments in run {run_str}')
-            with open(log_file_name, 'w') as log_file:
+            with open(log_file_name, 'w', encoding='utf-8') as log_file:
                 subprocess.run(command, cwd=self.save_to_directory, stdout=log_file)
-        with open(log_file_name, 'r') as log_file:
+        with open(log_file_name, 'r', encoding='utf-8') as log_file:
             expt_counts = 0
             refl_counts = 0
             count = False

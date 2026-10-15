@@ -99,7 +99,6 @@ def measure(args):
                          'the rest is measured against')
     total = args.n_groups*args.group_size
     models_dir = Path(args.models_directory) if args.models_directory else _resolve_models_dir()
-    package_root = Path(UtilitiesOptimizer.__file__).parent.parent.parent
 
     # Built once and across every lattice: a partner phase is not lattice-matched, so which
     # lattices this run was asked for must not change which partners exist.
@@ -114,7 +113,7 @@ def measure(args):
         # written. Abort takes the whole job down with the traceback instead.
         try:
             _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice,
-                             ratios, total, models_dir, package_root, second_phase_pool)
+                             ratios, total, models_dir, second_phase_pool)
         except Exception:
             import traceback
             print(f'RANK {rank} FAILED on {bravais_lattice}:', flush=True)
@@ -127,7 +126,7 @@ def measure(args):
 
 
 def _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice,
-                     ratios, total, models_dir, package_root, second_phase_pool):
+                     ratios, total, models_dir, second_phase_pool):
     """One lattice: refine its grouped clouds at every separation, and write the raw run."""
     tag = ROC_TAG[bravais_lattice]
     n_peaks = N_PEAKS.get(bravais_lattice, DEFAULT_N_PEAKS)
@@ -145,7 +144,7 @@ def _measure_lattice(args, comm, rank, n_ranks, split_comm, out, bravais_lattice
         print(f'{bravais_lattice}: loading models', flush=True)
     factory = getattr(UtilitiesOptimizer, FACTORY_OF_SYSTEM[lattice_system])
     optimizer = factory(bravais_lattice, BROADENING_TAG, 1, split_comm,
-                        project_path=package_root, options=options,
+                        options=options,
                         optimizer_class=SeparatedStartManager, seed=args.seed,
                         models_directory=models_dir)
     optimizer.group_size = args.group_size

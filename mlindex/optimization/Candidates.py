@@ -16,6 +16,7 @@ from mlindex.utilities.Reindexing import reindex_entry_basic
 from mlindex.utilities.Reindexing import selling_reduction
 from mlindex.utilities.SpaceGroups import get_spacegroup_hkl_ref
 from mlindex.utilities.SpaceGroups import get_spacegroup_keep_masks
+from mlindex.utilities.UnitCellTools import BL_TO_CENTRING
 from mlindex.utilities.UnitCellTools import fix_unphysical
 from mlindex.utilities.UnitCellTools import get_reciprocal_unit_cell_from_xnn
 from mlindex.utilities.UnitCellTools import get_xnn_from_reciprocal_unit_cell
@@ -433,8 +434,8 @@ class Candidates:
         return captured
 
     def standardize_cell(self):
-        # These do a quick standardization of monoclinic and triclinic candidates. It is just a
-        # Selling reduction.
+        # These reduce monoclinic and triclinic candidates: a and c of a monoclinic cell, keeping
+        # its centring, and a Selling reduction of a triclinic one.
         # This is performed in this function because the Miller indices are reassigned at the
         # end. Miller index transformations are not tracked in monoclinic_standardization
         if self.lattice_system in ['monoclinic', 'triclinic']:
@@ -443,7 +444,7 @@ class Candidates:
                 )
             if self.lattice_system == 'monoclinic':
                 best_standardized_unit_cell = monoclinic_standardization(
-                    best_unit_cell, partial_unit_cell=True
+                    best_unit_cell, BL_TO_CENTRING[self.bravais_lattice], partial_unit_cell=True
                     )
             elif self.lattice_system == 'triclinic':
                 best_standardized_unit_cell, _, _ = selling_reduction(best_unit_cell)

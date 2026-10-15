@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77"]  # the PEP 639 license fields below
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -11,12 +11,12 @@ mlindex = ["model_metadata.json", "models/*/data/hkl_ref_*.npy"]
 
 [project]
 name = "mlindex"
-version = "0.1.3"
+version = "0.2.0"
 authors = [{name = "David Mittan-Moreau", email = "dwmoreau@lbl.gov"}]
 description = "A data driven approach to powder diffraction indexing"
 keywords = ["powder diffraction", "diffraction", "crystallography", "indexing", "machine learning"]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"  # onnxruntime 1.21, the oldest that loads the ranker, has no 3.9 wheels
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -39,7 +39,7 @@ dependencies = [
 [project.optional-dependencies]
 mpi = ["mpi4py"]
 dataset_generation = ["gemmi", "pyarrow", "openpyxl", "tqdm"]
-training = ["pyarrow", "openpyxl", "skl2onnx", "keras", "torch", "torchvision"]
+training = ["pyarrow", "openpyxl", "skl2onnx", "onnx", "tf2onnx", "keras", "torch", "torchvision"]
 dev = ["pytest"]
 
 [tool.pytest.ini_options]

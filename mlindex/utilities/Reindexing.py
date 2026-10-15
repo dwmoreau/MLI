@@ -691,44 +691,154 @@ def reindex_entry_monoclinic(unit_cell, spacegroup_symbol, space="direct"):
     return reindexed_unit_cell, reindexed_spacegroup_symbol, hkl_reindexer
 
 
-def monoclinic_standardization(unit_cell, partial_unit_cell=False):
-    # This performs a very quick "standardization" of the monoclinic lattice.
-    # It performs a Selling reduction and then places the unique axis at b
-    if partial_unit_cell:
-        unit_cell_full = np.zeros((unit_cell.shape[0], 6))
-        unit_cell_full[:, :3] = unit_cell[:, :3]
-        unit_cell_full[:, 4] = unit_cell[:, 3]
-        unit_cell_full[:, 3] = np.pi / 2
-        unit_cell_full[:, 5] = np.pi / 2
-    else:
-        unit_cell_full = unit_cell
-    reduced_unit_cell_full, _, _ = selling_reduction(unit_cell_full)
-    right_angle = np.isclose(reduced_unit_cell_full[:, 3:], np.pi / 2)
+def reduce_monoclinic_mesh(a_vec, c_vec, centring):
+    """The a and c axes of monoclinic cells reduced in the plane normal to b: (n, 2) vectors each.
 
-    standardized_unit_cell_full = reduced_unit_cell_full.copy()
-    for i in range(unit_cell.shape[0]):
-        if right_angle[i, 0] and right_angle[i, 2]:
-            # a -> a, b -> b, c -> c
+    The area of the mesh is fixed, so the shortest pair is also the pair with beta closest to 90.
+    `centring` limits the basis changes to those that keep the centring point:
+      'P'  any: c -> c - k a, and (a, c) -> (c, -a);
+      'I'  the point (a + c) / 2: c -> c - 2k a, and (a, c) -> (c, -a);
+      'C'  the point (a + b) / 2, which needs a kept modulo 2: c -> c - k a, and a -> a - 2k c.
+    Returns the reduced vectors, as integer combinations of the given ones, and in the same frame,
+    so a caller can recover the basis change; beta is left as it falls. A row that is not finite
+    is returned unchanged.
+    """
+    if centring not in ('P', 'I', 'C'):
+        raise ValueError(f'monoclinic centring must be P, I or C, not {centring!r}')
+    a_vec = np.array(a_vec, dtype=np.float64)
+    c_vec = np.array(c_vec, dtype=np.float64)
+    c_step = 2 if centring == 'I' else 1
+    active = np.all(np.isfinite(a_vec), axis=1) & np.all(np.isfinite(c_vec), axis=1)
+    # Each pass shortens an axis or swaps, so it ends; the cap only guards a degenerate cell.
+    for _ in range(100):
+        if not np.any(active):
+            break
+        changed = np.zeros(a_vec.shape[0], dtype=bool)
+        if centring != 'C':
+            swap = active & (np.sum(a_vec**2, axis=1) > np.sum(c_vec**2, axis=1))
+            a_vec[swap], c_vec[swap] = c_vec[swap], -a_vec[swap]
+            changed |= swap
+        k = np.zeros(a_vec.shape[0])
+        k[active] = np.round(np.sum(a_vec[active] * c_vec[active], axis=1)
+                             / (c_step * np.sum(a_vec[active]**2, axis=1)))
+        c_vec -= (c_step * k)[:, np.newaxis] * a_vec
+        changed |= k != 0
+        if centring == 'C':
+            k = np.zeros(a_vec.shape[0])
+            k[active] = np.round(np.sum(a_vec[active] * c_vec[active], axis=1)
+                                 / (2 * np.sum(c_vec[active]**2, axis=1)))
+            a_vec -= (2 * k)[:, np.newaxis] * c_vec
+            changed |= k != 0
+        active &= changed
+    return a_vec, c_vec
+
+
+def _monoclinic_mesh(unit_cell, beta_index):
+    """a along x and c in the x-z plane, (n, 2) each, from cells with beta at `beta_index`."""
+    beta = unit_cell[:, beta_index]
+    a_vec = np.stack([unit_cell[:, 0], np.zeros(unit_cell.shape[0])], axis=1)
+    c_vec = np.stack([unit_cell[:, 2] * np.cos(beta), unit_cell[:, 2] * np.sin(beta)], axis=1)
+    return a_vec, c_vec
+
+
+def monoclinic_standardization(unit_cell, centring, partial_unit_cell=False):
+    """Each monoclinic cell in its reduced setting: the shortest a and c, beta >= 90 degrees.
+
+    b is the unique axis and is left alone; a and c are reduced by `reduce_monoclinic_mesh`, only
+    by basis changes that keep the cell's `centring` ('P' or 'I', as cells are stored): a primitive
+    reduction of an I-centred cell can move its centring point and so give another lattice.
+
+    `unit_cell` is (n, 6), or (n, 4) [a, b, c, beta] with `partial_unit_cell`; angles in radians.
+    """
+    if centring not in ('P', 'I'):
+        raise ValueError(f'a stored monoclinic cell is P or I, not {centring!r}')
+    unit_cell = np.asarray(unit_cell, dtype=np.float64)
+    beta_index = 3 if partial_unit_cell else 4
+    a_vec, c_vec = reduce_monoclinic_mesh(*_monoclinic_mesh(unit_cell, beta_index), centring)
+
+    a_length = np.linalg.norm(a_vec, axis=1)
+    c_length = np.linalg.norm(c_vec, axis=1)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        reduced_beta = np.arccos(np.clip(
+            np.sum(a_vec * c_vec, axis=1) / (a_length * c_length), -1, 1))
+    # c -> -c takes beta to its supplement and keeps the lattice and the centring point.
+    reduced_beta = np.where(reduced_beta < np.pi / 2, np.pi - reduced_beta, reduced_beta)
+
+    finite = np.all(np.isfinite(unit_cell[:, [0, 2, beta_index]]), axis=1)
+    standardized = unit_cell.copy()
+    standardized[finite, 0] = a_length[finite]
+    standardized[finite, 2] = c_length[finite]
+    standardized[finite, beta_index] = reduced_beta[finite]
+    return standardized
+
+
+def _combination(first, second, coefficients):
+    """An axis as cctbx's change-of-basis notation reads it, e.g. (1, -2) -> 'a-2*c'."""
+    terms = ''
+    for name, coefficient in zip((first, second), coefficients):
+        if coefficient == 0:
             continue
-        elif right_angle[i, 0] and right_angle[i, 1]:
-            # a -> -a, b -> -c, c -> -b
-            standardized_unit_cell_full[i, 1] = reduced_unit_cell_full[i, 2]
-            standardized_unit_cell_full[i, 2] = reduced_unit_cell_full[i, 1]
-            standardized_unit_cell_full[i, 4] = reduced_unit_cell_full[i, 5]
-            standardized_unit_cell_full[i, 5] = np.pi / 2
-        elif right_angle[i, 1] and right_angle[i, 2]:
-            # a -> -b, b -> -b, c -> -c
-            standardized_unit_cell_full[i, 0] = reduced_unit_cell_full[i, 1]
-            standardized_unit_cell_full[i, 1] = reduced_unit_cell_full[i, 0]
-            standardized_unit_cell_full[i, 4] = reduced_unit_cell_full[i, 3]
-            standardized_unit_cell_full[i, 3] = np.pi / 2
-        else:
-            # This case should be fixed.
-            standardized_unit_cell_full[i] = unit_cell_full[i]
-    if partial_unit_cell:
-        return standardized_unit_cell_full[:, [0, 1, 2, 4]]
-    else:
-        return standardized_unit_cell_full
+        sign = '-' if coefficient < 0 else ('+' if terms else '')
+        size = abs(coefficient)
+        terms += f'{sign}{name}' if size == 1 else f'{sign}{size}*{name}'
+    return terms
+
+
+def _change_symbol(symbol, change_of_basis):
+    """A Hermann-Mauguin symbol in a new basis; a '-' (no glide or screw on that axis) is kept."""
+    from cctbx import sgtbx
+
+    tokens = symbol.split()
+    placeholder = [index for index, token in enumerate(tokens) if token == '-']
+    for index in placeholder:
+        tokens[index] = '2'
+    changed = str(sgtbx.space_group_info(' '.join(tokens)).change_basis(change_of_basis)).split()
+    for index in placeholder:
+        changed[index] = '-'
+    return ' '.join(changed)
+
+
+def printed_setting(unit_cell, bravais_lattice, spacegroup):
+    """A reported cell, and its spacegroup key, in the setting `mlindex.run` prints.
+
+    aP prints its Niggli cell. mP and mC print the shortest a and c with beta >= 90 degrees, mC in
+    the C setting (C 1 2 1, C 1 c 1), where the search and the reference reflections keep it
+    I-centred. Every other lattice is printed as stored. `unit_cell` is (a, b, c, alpha, beta,
+    gamma) in degrees; `spacegroup` is the key `"<extinction group> e.g. <space group>"`, whose
+    two symbols are moved to the new basis with the cell.
+    """
+    from cctbx import crystal, sgtbx, uctbx
+
+    unit_cell = tuple(float(value) for value in unit_cell)
+    if bravais_lattice == 'aP':
+        cell = uctbx.unit_cell(unit_cell)
+        change = crystal.symmetry(unit_cell=cell, space_group_symbol='P 1'
+                                  ).change_of_basis_op_to_niggli_cell()
+        return cell.change_basis(change).parameters(), spacegroup
+    if bravais_lattice not in ('mP', 'mC'):
+        return unit_cell, spacegroup
+
+    radians = np.array([[unit_cell[0], unit_cell[1], unit_cell[2], np.deg2rad(unit_cell[4])]])
+    a_vec, c_vec = _monoclinic_mesh(radians, 3)
+    start = np.stack([a_vec[0], c_vec[0]], axis=1)
+    if bravais_lattice == 'mC':
+        # I to C: a + c is an axis whose half, with b's, is the centring point (a + b + c) / 2.
+        a_vec = a_vec + c_vec
+    a_vec, c_vec = reduce_monoclinic_mesh(a_vec, c_vec, 'C' if bravais_lattice == 'mC' else 'P')
+    # The reduced axes as integer combinations of the stored ones: columns (a', c') in (a, c).
+    matrix = np.rint(np.linalg.solve(start, np.stack([a_vec[0], c_vec[0]], axis=1))).astype(int)
+    # beta >= 90, by c -> -c; b -> -b with it keeps the basis right-handed.
+    b_sign = 1
+    if np.dot(a_vec[0], c_vec[0]) > 0:
+        matrix[:, 1] *= -1
+        b_sign = -1
+    change = sgtbx.change_of_basis_op(
+        f"{_combination('a', 'c', matrix[:, 0])},{'b' if b_sign > 0 else '-b'},"
+        f"{_combination('a', 'c', matrix[:, 1])}")
+    cell = uctbx.unit_cell(unit_cell).change_basis(change).parameters()
+    extinction_group, _, example = spacegroup.partition(' e.g. ')
+    return cell, (f'{_change_symbol(extinction_group, change)} e.g. '
+                  f'{_change_symbol(example, change)}')
 
 
 def cell_matrix(unit_cell):

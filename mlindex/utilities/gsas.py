@@ -3,7 +3,7 @@ import numpy as np
 
 def load_pkslst(file_name, wavelength):
     q2_peaks = []
-    with open(file_name, 'r') as f:
+    with open(file_name, 'r', encoding='utf-8') as f:
         for line in f:
             if line.startswith('['):
                 if line.startswith('[np.float64('):

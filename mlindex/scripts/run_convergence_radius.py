@@ -18,6 +18,7 @@ import sys
 
 from mlindex.utilities.ErrorAdder import add_q2_error
 from mlindex.utilities.UnitCellTools import get_xnn_from_unit_cell
+from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_hexagonal_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_monoclinic_optimizer
@@ -33,6 +34,7 @@ if __name__ == '__main__':
     rank = comm.Get_rank()
     n_ranks = comm.Get_size()
     split_comm = comm.Split(color=rank, key=rank)
+    models_directory = _resolve_models_dir()
 
     load_data = True
     broadening_tag = '1'
@@ -175,19 +177,19 @@ if __name__ == '__main__':
         else:
             options['convergence_distances'] = np.logspace(-4, -2, 40)
         if bravais_lattice in ['cF', 'cI', 'cP']:
-            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer[bravais_lattice] = get_cubic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, models_directory, options=options)
         elif bravais_lattice in ['hP']:
-            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer[bravais_lattice] = get_hexagonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, models_directory, options=options)
         elif bravais_lattice in ['hR']:
-            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer[bravais_lattice] = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, 1, split_comm, models_directory, options=options)
         elif bravais_lattice in ['tI', 'tP']:
-            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer[bravais_lattice] = get_tetragonal_optimizer(bravais_lattice, broadening_tag, 1, split_comm, models_directory, options=options)
         elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer[bravais_lattice] = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, models_directory, options=options)
         elif bravais_lattice in ['mC', 'mP']:
-            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer[bravais_lattice] = get_monoclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, models_directory, options=options)
         elif bravais_lattice in ['aP']:
-            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, options=options)
+            optimizer[bravais_lattice] = get_triclinic_optimizer(bravais_lattice, broadening_tag, 1, split_comm, models_directory, options=options)
 
     if rank == 0:
         if load_data:

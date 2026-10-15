@@ -193,7 +193,7 @@ def test_zero_error_step_survives_an_unreachable_wavelength():
     assert not delta.any()
 
 
-def _standardization_fixture(lattice_system, unit_cells):
+def _standardization_fixture(lattice_system, unit_cells, bravais_lattice=None):
     """A Candidates carrying only what standardize_cell touches.
 
     The full constructor wants an hkl_ref, a Q2Calculator and a peak list, none of which the
@@ -204,6 +204,7 @@ def _standardization_fixture(lattice_system, unit_cells):
 
     candidates = object.__new__(Candidates)
     candidates.lattice_system = lattice_system
+    candidates.bravais_lattice = bravais_lattice
     candidates.rng = np.random.default_rng(0)
     candidates.minimum_unit_cell = 2.0
     candidates.maximum_unit_cell = 100.0
@@ -224,17 +225,18 @@ def _standardization_fixture(lattice_system, unit_cells):
 
 
 @pytest.mark.parametrize(
-    "lattice_system, unit_cells",
+    "lattice_system, bravais_lattice, unit_cells",
     [
-        # A long, very oblique c axis, which the Selling reduction inside
-        # monoclinic_standardization shortens: c 20 -> 10.09 and beta 150 -> 97.5 deg.
-        ("monoclinic", [[8.0, 5.0, 20.0, 90.0, 150.0, 90.0]]),
+        # A long, very oblique c axis, which monoclinic_standardization shortens:
+        # c 20 -> 10.09 and beta 150 -> 97.5 deg.
+        ("monoclinic", "mP", [[8.0, 5.0, 20.0, 90.0, 150.0, 90.0]]),
         # An unreduced triclinic cell, so the Selling reduction has something to do.
-        ("triclinic", [[9.0, 8.0, 7.0, 95.0, 100.0, 115.0],
-                       [11.0, 6.0, 10.0, 85.0, 78.0, 98.0]]),
+        ("triclinic", "aP", [[9.0, 8.0, 7.0, 95.0, 100.0, 115.0],
+                             [11.0, 6.0, 10.0, 85.0, 78.0, 98.0]]),
         ],
     )
-def test_standardize_cell_writes_back_when_nothing_fails(lattice_system, unit_cells):
+def test_standardize_cell_writes_back_when_nothing_fails(lattice_system, bravais_lattice,
+                                                         unit_cells):
     """The write-back used to sit inside `if np.sum(failed) > 0`.
 
     So on any run where no candidate NaN'd out of the final xnn conversion -- the common case --
@@ -242,7 +244,7 @@ def test_standardize_cell_writes_back_when_nothing_fails(lattice_system, unit_ce
     value. That silently disabled monoclinic standardization and the triclinic Selling reduction
     for {mP, mC, aP}, which is the hard stratum, on essentially every production run.
     """
-    candidates = _standardization_fixture(lattice_system, unit_cells)
+    candidates = _standardization_fixture(lattice_system, unit_cells, bravais_lattice)
     before = candidates.best_xnn.copy()
 
     candidates.standardize_cell()
@@ -253,9 +255,32 @@ def test_standardize_cell_writes_back_when_nothing_fails(lattice_system, unit_ce
         )
 
 
+def test_standardize_cell_keeps_an_mC_cell_on_its_lattice():
+    """An mC candidate is stored I-centred; reducing it as a primitive cell moves the centring.
+
+    The cell is a real candidate from the aP test pattern's mC search: it passed the M20 cut at
+    3.8, and a primitive reduction rewrote it as c 11.79, beta 126.9 -- another lattice, at M20 1.5.
+    Its digits are kept in full: rounded to four places, the primitive reduction no longer finds
+    two exact right angles and leaves the cell alone, so the test could not fail.
+    """
+    from mlindex.utilities.Reindexing import niggli_cell, same_lattice
+    from mlindex.utilities.UnitCellTools import get_unit_cell_from_xnn
+
+    cell = [10.615577266092652, 10.864253495912747, 10.075269424228258,
+            90.0, np.rad2deg(1.9305051267759314), 90.0]
+    candidates = _standardization_fixture('monoclinic', [cell], bravais_lattice='mC')
+    candidates.standardize_cell()
+
+    a, b, c, beta = get_unit_cell_from_xnn(
+        candidates.best_xnn, partial_unit_cell=True, lattice_system='monoclinic')[0]
+    after = [a, b, c, 90.0, np.rad2deg(beta), 90.0]
+    assert same_lattice(niggli_cell(cell, 'I'), niggli_cell(after, 'I'), 0.005, 0.5), (
+        f'standardize_cell moved an mC cell to another lattice: {cell} -> {np.round(after, 4)}')
+
+
 def test_standardize_cell_is_a_no_op_off_monoclinic_and_triclinic():
     candidates = _standardization_fixture(
-        'orthorhombic', [[8.0, 9.0, 10.0, 90.0, 90.0, 90.0]])
+        'orthorhombic', [[8.0, 9.0, 10.0, 90.0, 90.0, 90.0]], bravais_lattice='oP')
     before = candidates.best_xnn.copy()
     candidates.standardize_cell()
     assert np.array_equal(candidates.best_xnn, before)

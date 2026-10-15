@@ -1,6 +1,4 @@
 {
     "hf_repo_id": "dwmoreau/mlindex-models",
-    "model_revision": "v3",
-    "repo_url": "https://github.com/dwmoreau/MLI.git",
-    "models_branch": "main"
+    "model_revision": "v3"
 }

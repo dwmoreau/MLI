@@ -101,7 +101,7 @@ class AnalyticOptimizer(OptimizerManager):
             self.opt_params = {
                 'iteration_info': iteration_info,
                 'convergence_testing': False,
-                'assignment_threshold': 0.90,
+                'assignment_threshold': 0.95,
                 'figure_of_merit': 'M20',
                 'downsample_radius': 0.0001,
                 'minimum_uc': 1,

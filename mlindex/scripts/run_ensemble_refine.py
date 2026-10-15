@@ -54,7 +54,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import mlindex
 from mlindex.optimization import UtilitiesOptimizer
 from mlindex.optimization.GeneratorPools import generate_candidate_pools
 from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
@@ -345,7 +344,6 @@ def generate(args):
     comm.Barrier()
 
     models_directory = Path(args.models_directory) if args.models_directory else _resolve_models_dir()
-    package_root = Path(mlindex.__path__[0]).parent
     manifest = {
         'n_entries': args.n_entries, 'budget_scale': args.budget_scale, 'seed': args.seed,
         'broadening_tag': BROADENING_TAG, 'commit': commit(), 'n_ranks': n_ranks,
@@ -373,7 +371,7 @@ def generate(args):
         factory = getattr(
             UtilitiesOptimizer, FACTORY_OF_SYSTEM[BL_TO_LATTICE_SYSTEM[bravais_lattice]])
         optimizer = factory(bravais_lattice, BROADENING_TAG, 1, split_comm,
-                            project_path=package_root, seed=args.seed,
+                            seed=args.seed,
                             models_directory=models_directory)
         names, fractions, budget = shipped_mix_and_budget(optimizer)
         per_generator = int(round(args.budget_scale*budget))

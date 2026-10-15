@@ -128,14 +128,6 @@ def test_env_var_beats_xdg(monkeypatch, tmp_path, fake_models_dir):
     assert _resolve() == fake_models_dir
 
 
-def test_resolve_project_path_is_deprecated(monkeypatch, fake_models_dir):
-    from mlindex.optimization.UtilitiesOptimizer import _resolve_project_path
-
-    monkeypatch.setenv("MLINDEX_MODELS_DIR", str(fake_models_dir))
-    with pytest.deprecated_call():
-        _resolve_project_path()
-
-
 # --- Wrapper round-trip ----------------------------------------------------------
 
 
@@ -225,7 +217,6 @@ def test_factories_pass_models_dir_into_data_params(monkeypatch, fake_models_dir
     monkeypatch.setenv("MLINDEX_MODELS_DIR", str(fake_models_dir))
     uo.get_cubic_optimizer(
         "cP", "1", 1, comm=None,
-        project_path=None,
         optimizer_class=FakeManager,
         models_directory=uo._resolve_models_dir(),
     )
@@ -253,7 +244,7 @@ def test_options_reach_opt_params(monkeypatch, fake_models_dir):
     monkeypatch.setenv("MLINDEX_MODELS_DIR", str(fake_models_dir))
 
     uo.get_cubic_optimizer(
-        "cP", "1", 1, comm=None, project_path=None,
+        "cP", "1", 1, comm=None,
         options={"prune_m20_threshold": 1.5, "a_knob_nobody_has_added_yet": "x"},
         optimizer_class=FakeManager,
         models_directory=uo._resolve_models_dir(),
