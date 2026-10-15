@@ -430,3 +430,59 @@ def paired_delta_ci(a, b, clusters, n_bootstrap=1000, seed=12345):
     for index, draw in enumerate(replicates):
         deltas[index] = per_cluster_sum[draw].sum() / max(per_cluster_n[draw].sum(), 1.0)
     return float(np.percentile(deltas, 2.5)), float(np.percentile(deltas, 97.5))
+
+
+# ---------------------------------------------------------------------------------------------
+# The printed list, and means balanced over lattices
+# ---------------------------------------------------------------------------------------------
+
+def printed_flags(printed, entries):
+    """Per-pattern outcome flags of one ranking's printed lists (`BenchmarkPrinted`).
+
+    `entries` holds every pattern reported on, with `bravais_lattice_true` and `is_degenerate`; a
+    pattern with no correct row printed, or none printed at all, is a miss. `listed` is a correct
+    cell anywhere in the printed list. Returns one row per entry of `entries`.
+    """
+    key = ['entry_id', 'condition_bundle']
+    flagged = entries[key + ['bravais_lattice_true', 'is_degenerate']].copy()
+    correct = printed.loc[printed['is_correct'].to_numpy(dtype=bool)]
+    first = correct.groupby(key, as_index=False)['position'].min()
+    flagged = flagged.merge(first, on=key, how='left', validate='1:1')
+    position = flagged['position'].to_numpy(dtype=np.float64)
+    listed = np.isfinite(position) & ~flagged['is_degenerate'].to_numpy(dtype=bool)
+    flagged['listed'] = listed
+    flagged['top1'] = listed & (position < 1)
+    flagged['top5'] = listed & (position < 5)
+    flagged['top10'] = listed & (position < 10)
+    flagged['reciprocal_rank'] = np.where(listed, 1.0/(np.nan_to_num(position) + 1.0), 0.0)
+    return flagged.drop(columns='position')
+
+
+def balanced_mean(frame, column):
+    """Mean over Bravais lattices of each lattice's mean of `column`."""
+    return frame.groupby('bravais_lattice_true')[column].mean().mean()
+
+
+def balanced_delta_se(a, b, column, rng, n_bootstrap=1000):
+    """`balanced_mean(b) - balanced_mean(a)` and its bootstrap SE, paired by pattern.
+
+    `a` and `b` hold the same patterns. Source crystals are resampled within each lattice, so
+    every lattice keeps its weight; the SE is the width of the central 95 % interval over 3.92.
+    """
+    key = ['entry_id', 'condition_bundle']
+    joined = a[key + ['bravais_lattice_true', column]].merge(
+        b[key + [column]], on=key, suffixes=('_a', '_b'), validate='1:1')
+    if joined.shape[0] != a.shape[0] or joined.shape[0] != b.shape[0]:
+        raise ValueError(f'{column}: the two sides hold different patterns '
+                         f'({a.shape[0]}, {b.shape[0]}, {joined.shape[0]} shared)')
+    joined['d'] = joined[f'{column}_b'].astype(float) - joined[f'{column}_a'].astype(float)
+    per_crystal = joined.groupby(['bravais_lattice_true', 'entry_id'])['d'].agg(['sum', 'size'])
+    replicates = np.zeros(n_bootstrap)
+    groups = [group for _, group in per_crystal.groupby(level=0)]
+    for group in groups:
+        sums, sizes = group['sum'].to_numpy(), group['size'].to_numpy()
+        draw = rng.integers(0, sums.size, size=(n_bootstrap, sums.size))
+        replicates += sums[draw].sum(axis=1)/sizes[draw].sum(axis=1)
+    replicates /= len(groups)
+    low, high = np.percentile(replicates, [2.5, 97.5])
+    return float(balanced_mean(joined, 'd')), float((high - low)/3.92)

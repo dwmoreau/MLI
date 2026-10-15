@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 from pathlib import Path
 
-from conftest import load_test_case, _TEST_DATA_DIR
+from conftest import load_test_case, models_tree_without_the_ranker, _TEST_DATA_DIR
 
 EXPECTED_DIR = Path(__file__).parent / "expected"
 
@@ -341,21 +341,6 @@ def test_the_answer_is_repeatable_at_a_fixed_process_count(
         f"{digests[0][:16]} then {digests[1][:16]}")
 
 
-def _models_tree_without_the_ranker(models_dir, directory):
-    """A model tree holding every lattice directory of `models_dir` and no ranker, as links."""
-    from mlindex.paths import LATTICE_DIR_GLOB
-    from mlindex.utilities.Ranker import RANKER_DIRECTORY
-
-    directory.mkdir()
-    for lattice_dir in models_dir.glob(LATTICE_DIR_GLOB):
-        if lattice_dir.name != RANKER_DIRECTORY:
-            try:
-                os.symlink(lattice_dir, directory / lattice_dir.name, target_is_directory=True)
-            except OSError:
-                pytest.skip('this system cannot create directory links')
-    return directory
-
-
 def test_without_ranker_files_the_ranking_falls_back_to_m_sym_and_says_so(tmp_path, monkeypatch):
     from mlindex.utilities.Ranker import load_ranker
 
@@ -370,7 +355,7 @@ def test_run_ml_without_ranker_files_ranks_by_m_sym_and_says_so(test_metadata, t
                                                                 models_available, models_dir):
     if not models_available:
         pytest.skip("ML models not available")
-    tree = _models_tree_without_the_ranker(models_dir, tmp_path / 'models')
+    tree = models_tree_without_the_ranker(models_dir, tmp_path / 'models')
     peak_file = tmp_path / "aP_q2.npy"
     np.save(peak_file, _aP_q2(test_metadata))
     output_file = tmp_path / "indexing_results.json"

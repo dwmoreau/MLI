@@ -1,4 +1,5 @@
 import ast
+import os
 import numpy as np
 import pandas as pd
 import pytest
@@ -98,6 +99,21 @@ def resolve_models_dir():
         return _resolve_models_dir()
     except (FileNotFoundError, ImportError):
         return None
+
+
+def models_tree_without_the_ranker(models_dir, directory):
+    """A model tree holding every lattice directory of `models_dir` and no ranker, as links."""
+    from mlindex.paths import LATTICE_DIR_GLOB
+    from mlindex.utilities.Ranker import RANKER_DIRECTORY
+
+    directory.mkdir()
+    for lattice_dir in models_dir.glob(LATTICE_DIR_GLOB):
+        if lattice_dir.name != RANKER_DIRECTORY:
+            try:
+                os.symlink(lattice_dir, directory / lattice_dir.name, target_is_directory=True)
+            except OSError:
+                pytest.skip('this system cannot create directory links')
+    return directory
 
 
 @pytest.fixture(scope="session")
