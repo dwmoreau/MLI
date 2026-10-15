@@ -188,13 +188,29 @@ def test_ranking_by_m_sym_shortlists_a_lattice_by_m20():
     """Ranked by M_sym, a shortlist by M_sym costs orthorhombic and monoclinic 2-3 points of
     first place (P16), so the fallback and `run_analytical` keep the twenty best by M20: the
     pool's first rows."""
-    from mlindex.utilities.Ranker import MSymRanker
+    from mlindex.utilities.Ranker import MeritRanker
 
     n = 25
     pool = _cubic_pool(M20=np.linspace(30.0, 10.0, n), M_sym=np.linspace(0.0, 50.0, n))['pool']
-    rows = MSymRanker('test').shortlist(pool, pool['M_sym'], 20)
+    rows = MeritRanker('M_sym', 'test').shortlist(pool, pool['M_sym'], 20)
 
     assert rows.tolist() == list(range(20))
+
+
+def test_a_merit_ranker_scores_by_its_own_merit():
+    """`MeritRanker` reads the merit it was given, so ranked by M20 the printed order is the M20
+    order even where M_sym orders the candidates the other way."""
+    from mlindex.command_line.run import printed_rows
+    from mlindex.utilities.Ranker import MeritRanker
+
+    n = 5
+    result = _cubic_pool(M20=np.linspace(30.0, 10.0, n), M_sym=np.linspace(10.0, 50.0, n))
+    ranker = MeritRanker('M20', 'test')
+    rows = printed_rows({'cP': result}, ranker)
+
+    assert ranker.name == 'M20 (test)'
+    assert [entry['row'] for entry in rows] == list(range(n))
+    assert [entry['score'] for entry in rows] == list(np.linspace(30.0, 10.0, n))
 
 
 def _compare_json(result_path, expected_path):

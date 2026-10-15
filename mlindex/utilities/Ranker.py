@@ -246,16 +246,17 @@ def read_calibrators(path):
         return {name: (arrays[f'{name}__x'], arrays[f'{name}__y']) for name in names}
 
 
-class MSymRanker:
-    """Ranks by M_sym. What the output is ranked by when there is no learned ranker; `reason` says
-    why, in the name the output prints."""
+class MeritRanker:
+    """Ranks by one merit, `merit`, a column of the pool. With M_sym it is what the output is
+    ranked by when there is no learned ranker; `reason` says why, in the name the output prints."""
 
-    def __init__(self, reason):
-        self.name = f'M_sym ({reason})'
+    def __init__(self, merit, reason):
+        self.merit = merit
+        self.name = f'{merit} ({reason})'
 
     def score_pattern(self, columns):
-        """Each candidate's M_sym."""
-        return np.asarray(columns['M_sym'], dtype=np.float64)
+        """Each candidate's merit."""
+        return np.asarray(columns[self.merit], dtype=np.float64)
 
     def shortlist(self, pool, scores, depth):
         """The lattice's first `depth` candidates by M20, which is the pool's own order. Ranked by
@@ -327,7 +328,7 @@ class LearnedRanker:
 
 
 def load_ranker():
-    """The packaged ranker, or an `MSymRanker` saying why when the model tree holds no
+    """The packaged ranker, or a `MeritRanker` by M_sym saying why when the model tree holds no
     `ranker_1`."""
     from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 
@@ -336,7 +337,7 @@ def load_ranker():
     except FileNotFoundError:
         directory = None
     if directory is None or not (directory / 'specification.json').is_file():
-        return MSymRanker(f'fallback: no learned ranker found at {directory}; run '
+        return MeritRanker('M_sym', f'fallback: no learned ranker found at {directory}; run '
                           'python -m mlindex.download_models to fetch it')
     return LearnedRanker.load(directory)
 

@@ -141,7 +141,7 @@ All trained models are saved under `mlindex/models/{tag}/` (e.g., `mlindex/model
 - `UnitCellTools.py`: Converts between xnn, unit cell (a,b,c,α,β,γ), and reciprocal-space forms. `fix_unphysical()` enforces physical constraints on xnn.
 - `Q2Calculator.py`: Computes q² for given hkl and metric tensor.
 - `FigureOfMerits.py`: M20 (de Wolff), `M_sym` and the per-peak assignment posterior (`get_assignment_distribution`, `get_assignment_posterior`).
-- `Ranker.py`: the learned ranker's inputs, design matrix and calibration; `LearnedRanker` (ONNX) and the `MSymRanker` fallback; `load_ranker`, `score_pool`.
+- `Ranker.py`: the learned ranker's inputs, design matrix and calibration; `LearnedRanker` (ONNX) and the `MeritRanker` (M_sym) fallback; `load_ranker`, `score_pool`.
 - `MillerIndexAssignment.py`: Miller-index assignment of a cell's lines to the observed peaks.
 - `SpaceGroups.py`: Systematic absence rules and hkl reference sets per spacegroup.
 - `Reindexing.py`: Selling and Niggli reduction, the monoclinic a-c reduction (`reduce_monoclinic_mesh`, keeping P, I or C centring), the printed setting, axis permutation, and `same_lattice` (cctbx) for comparing cells in any basis.

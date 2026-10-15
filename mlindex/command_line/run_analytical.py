@@ -22,9 +22,9 @@ from mlindex.optimization.MPIOptimizer import OptimizerWorker
 from mlindex.command_line.run import (
     _load_peaks, _write_output, build_base_parser, parse_args,
 )
-from mlindex.utilities.Ranker import MSymRanker
+from mlindex.utilities.Ranker import MeritRanker
 
-RANKER = MSymRanker('the analytical indexer uses no ML model')
+RANKER = MeritRanker('M_sym', 'the analytical indexer uses no ML model')
 
 
 def main() -> None:

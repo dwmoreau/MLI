@@ -378,7 +378,7 @@ def printed_rows(results, ranker):
 
 def _write_output(output_file, results, ranker):
     """Rank and write every lattice's reported candidates (`printed_rows`), each in its printed
-    setting. `ranker` is a `Ranker.LearnedRanker` or `Ranker.MSymRanker`; the output names it.
+    setting. `ranker` is a `Ranker.LearnedRanker` or `Ranker.MeritRanker`; the output names it.
     """
     output_data = [_in_printed_setting(entry) for entry in printed_rows(results, ranker)]
     output_file_base = str(Path(output_file).with_suffix(''))
