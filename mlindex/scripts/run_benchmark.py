@@ -32,6 +32,11 @@ of the list. Two arms are compared paired, against the run-to-run noise of the s
     # cap the work to 40 source crystals, chosen reproducibly, for a laptop-sized check
     python -m mlindex.scripts.run_benchmark --pool mlindex/data/my_pool --limit-entries 40
 
+    # the list mlindex.run prints, replayed from a pool under the learned ranker, M_sym and M20:
+    # levels, paired contrasts, the tie-break floor and the ceiling, per lattice
+    python -m mlindex.scripts.run_benchmark --stage end-to-end \
+        --pool arms/dev_general --n-pools 10 --out-dir results/end_to_end
+
     # the run-to-run floor: several arms of the same patterns differing only in the search seed
     python -m mlindex.scripts.run_benchmark --stage floor \
         --arm benchmark=mlindex/data/floor/arm1 \
@@ -90,7 +95,7 @@ def build_parser():
                         help='Where to write the tables (default: print only).')
     parser.add_argument('--stage', default='all',
                         choices=('all', 'generate', 'finalize', 'sidecars', 'reduce', 'report',
-                                 'floor', 'contrast'),
+                                 'floor', 'contrast', 'end-to-end'),
                         help='Which part to run (default: all, which is the whole chain). The '
                              'stages exist because a cluster needs them as separate jobs with '
                              'different walltimes.')
@@ -126,6 +131,9 @@ def build_parser():
                         help='For --stage contrast: a floor.csv this harness wrote, so the '
                              'difference is reported in multiples of the measured run-to-run '
                              'floor rather than in percentage points.')
+    parser.add_argument('--bootstrap-seed', type=int, default=12345, metavar='N',
+                        help='For --stage end-to-end: seed of the crystal bootstrap behind each '
+                             'SE (default: 12345).')
     parser.add_argument('--allow-incomplete', action='store_true',
                         help='Read an arm with no completion stamp, and skip the check that the '
                              'arms of a floor differ only in the search seed. Off by default: a '
@@ -293,6 +301,27 @@ def _write(out_dir, name, table):
     return path
 
 
+def end_to_end(pools, out_dir, n_processes, bootstrap_seed):
+    """`--stage end-to-end`: each pool's printed lists replayed and reported
+    (`BenchmarkPrinted.end_to_end`), into `end_to_end_<pool>.csv` and `printed_<pool>.parquet`."""
+    import numpy as np
+
+    from mlindex.model_training import BenchmarkPrinted
+
+    if not pools or not out_dir:
+        raise SystemExit('--stage end-to-end needs --pool and --out-dir.')
+    for pool in pools:
+        name = Path(pool).name
+        table, printed = BenchmarkPrinted.end_to_end(
+            pool, np.random.default_rng(bootstrap_seed), n_processes=n_processes)
+        _write(out_dir, f'end_to_end_{name}.csv', table)
+        printed.to_parquet(Path(out_dir) / f'printed_{name}.parquet', index=False)
+        headline = table.loc[(table['scope'] == 'all')
+                             & table['metric'].isin(('top1', 'top10', 'found'))]
+        print(headline[['metric', 'quantity', 'value', 'se']].to_string(index=False))
+    return 0
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     scores = _split(args.scores)
@@ -337,6 +366,9 @@ def main(argv=None):
         print(f"finalized {metadata['n_shards']} shards of {metadata['n_source_entries']} "
               f"crystals x {len(metadata['bundles'])} bundles into {args.out_pool}")
         return 0
+
+    if args.stage == 'end-to-end':
+        return end_to_end(pools, args.out_dir, args.n_pools, args.bootstrap_seed)
 
     # A generated arm is scored as it is written; this re-scores a stored one, by name only.
     if args.stage == 'sidecars':
