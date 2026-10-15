@@ -241,10 +241,14 @@ def _load_peaks(args):
 # `shortlist`). Twenty is the depth the packaged ranker was fitted at
 # (`ranker_1/specification.json`, "depth").
 SHORTLIST_DEPTH = 20
+# What the output files hold for each entry, in order.
+OUTPUT_COLUMNS = ('score', 'M20', 'M_sym', 'n_indexed', 'bravais_lattice', 'volume',
+                  'a', 'b', 'c', 'alpha', 'beta', 'gamma', 'spacegroup')
 
 
 def _collect_results(result, bl, all_results, scores, rows):
-    """One entry for each of `rows` of the lattice's pool, with its score.
+    """One entry for each of `rows` of the lattice's pool, with its score and its `row` in the
+    pool.
 
     `result` is the lattice's `OptimizerBase.result()`; `scores` scores its pool, row for row.
     """
@@ -265,19 +269,20 @@ def _collect_results(result, bl, all_results, scores, rows):
             'beta':  180/np.pi * unit_cell[4],
             'gamma': 180/np.pi * unit_cell[5],
             'spacegroup': pool['spacegroup'][i],
+            'row': int(i),
         }
         all_results.append(entry)
     return all_results
 
 
 def _write_results(output_data, ranker_name, output_file_base='indexing_results'):
-    """Write the entries, in the order given, to `<base>.json` and `<base>.txt`, and print the
-    first 20."""
+    """Write the entries' `OUTPUT_COLUMNS`, in the order given, to `<base>.json` and
+    `<base>.txt`, and print the first 20."""
     # Imported here rather than at module scope: this is its only use, and every
     # lattice group's manager re-imports this module when it is spawned.
     import pandas as pd
 
-    output_df = pd.DataFrame(output_data)
+    output_df = pd.DataFrame(output_data, columns=list(OUTPUT_COLUMNS))
     output_df.to_json(output_file_base + '.json')
     txt_cols = ['bravais_lattice', 'score', 'M20', 'M_sym', 'n_indexed', 'a', 'b', 'c',
                 'alpha', 'beta', 'gamma', 'volume', 'spacegroup']
@@ -355,19 +360,27 @@ def _in_printed_setting(entry):
     return {**entry, **dict(zip(keys, cell)), 'spacegroup': spacegroup}
 
 
-def _write_output(output_file, results, ranker):
-    """Rank and write every lattice's reported candidates.
+def printed_rows(results, ranker):
+    """The ranked list the output reports, in the order printed and with cells as stored.
 
     `results` is {Bravais lattice: `OptimizerBase.result()`}. Every survivor of every lattice is
     scored in one batch -- the ranker's context inputs compare a candidate with all of them --
-    and each lattice reports the `SHORTLIST_DEPTH` the ranker's `shortlist` picks. `ranker` is a `Ranker.LearnedRanker` or `Ranker.MSymRanker`; the output names it.
+    each lattice contributes the `SHORTLIST_DEPTH` the ranker's `shortlist` picks, and repeats
+    are removed (`_remove_duplicates`). Each entry carries its `row` in its lattice's pool.
     """
     scores = score_pool({bl: result['pool'] for bl, result in results.items()}, ranker)
     output_data = []
     for bl, result in results.items():
         rows = ranker.shortlist(result['pool'], scores[bl], SHORTLIST_DEPTH)
         _collect_results(result, bl, output_data, scores[bl], rows)
-    output_data = [_in_printed_setting(entry) for entry in _remove_duplicates(output_data)]
+    return _remove_duplicates(output_data)
+
+
+def _write_output(output_file, results, ranker):
+    """Rank and write every lattice's reported candidates (`printed_rows`), each in its printed
+    setting. `ranker` is a `Ranker.LearnedRanker` or `Ranker.MSymRanker`; the output names it.
+    """
+    output_data = [_in_printed_setting(entry) for entry in printed_rows(results, ranker)]
     output_file_base = str(Path(output_file).with_suffix(''))
     _write_results(output_data, ranker.name, output_file_base=output_file_base)
 
