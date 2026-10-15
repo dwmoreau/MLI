@@ -223,10 +223,12 @@ def provenance(pool_dir):
     manifest = Benchmark.load_manifest(pool_dir)
     replay = _provenance()
     ranker_digest, _ = tree_digest(_resolve_models_dir(), [RANKER_DIRECTORY])
-    try:
-        blas = np.show_config(mode='dicts')['Build Dependencies']['blas']['name']
-    except (KeyError, TypeError):
-        blas = 'unknown'
+    from threadpoolctl import threadpool_info
+
+    # The library numpy loaded, which the list below first place depends on: on one machine and
+    # one commit, Accelerate and OpenBLAS print different lists.
+    blas = ', '.join(sorted({f"{info['internal_api']} {info.get('version')}"
+                             for info in threadpool_info() if info['user_api'] == 'blas'}))
     return {
         'pool': str(pool_dir), 'population': manifest['population'], 'split': manifest['split'],
         'search_commit': manifest['commit'], 'search_arch': manifest.get('arch'),
