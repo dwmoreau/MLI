@@ -18,13 +18,13 @@ from mlindex.optimization.Candidates import Candidates, PRUNE_CAPTURE_MERITS
 from mlindex.utilities.numba_functions import fast_assign
 
 
-def _candidates(capture=False, n=32, seed=7):
+def _candidates(capture=False, n=32, seed=7, wavelength=None):
     """A cubic Candidates over a synthetic peak list, small enough to reason about.
 
     Cubic because its xnn is one parameter, so a cell is a single number and the repair path
     `fix_unphysical` takes is easy to keep out of the way -- every starting cell here is well
     inside the allowed range, which matters because a repaired cell is exactly the case
-    describes.
+    describes. A `wavelength` turns on zero-point refinement at it.
     """
     rng = np.random.default_rng(seed)
     hkl_ref = np.load(os.path.join(BASE, 'mlindex', 'models', 'cubic_1', 'data',
@@ -42,8 +42,24 @@ def _candidates(capture=False, n=32, seed=7):
         opt_params['prune_criterion_capture'] = True
     return Candidates(q2_obs=q2_obs, xnn=xnn, hkl_ref=hkl_ref, lattice_system='cubic',
                       bravais_lattice='cF', opt_params=opt_params,
-                      rng=np.random.default_rng(seed), fom=None, zero_error=False,
-                      wavelength=None)
+                      rng=np.random.default_rng(seed), fom=None,
+                      zero_error=wavelength is not None, wavelength=wavelength)
+
+
+def test_under_zero_point_refinement_a_new_candidate_is_scored_on_the_cell_it_keeps():
+    """The first zero-point step moves every cell, and `best_M20` scores the moved cells; the
+    kept `best_xnn`, shifted by `best_zeropoint`, must be what it scores."""
+    from mlindex.optimization.CandidateOptLoss import CandidateOptLoss
+    from mlindex.utilities.FigureOfMerits import get_M20
+
+    candidates = _candidates(wavelength=1.5406)
+    lines = CandidateOptLoss(np.repeat(candidates.q2_obs[np.newaxis], candidates.n, axis=0),
+                             lattice_system='cubic').apply_zeropoint(
+        candidates.best_zeropoint, 1.5406, candidates.q2_calculator.get_q2(candidates.best_xnn))
+    assigned = np.take_along_axis(lines, fast_assign(candidates.q2_obs, lines), axis=1)
+
+    assert np.any(candidates.best_zeropoint != 0)
+    assert np.array_equal(get_M20(candidates.q2_obs, assigned, lines), candidates.best_M20)
 
 
 def test_capture_is_off_unless_asked_for():

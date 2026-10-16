@@ -32,6 +32,8 @@ def _cubic(zeropoint, n=8, seed=0):
                             lattice_system='cubic', bravais_lattice='cF', opt_params=opt_params,
                             rng=np.random.default_rng(seed), fom=None, zero_error=True,
                             wavelength=WAVELENGTH)
+    # The constructor's first zero-point step moves every cell; put them back on the truth.
+    candidates.best_xnn[:] = xnn_true
     candidates.best_zeropoint[:] = zeropoint
     return candidates
 
