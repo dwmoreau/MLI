@@ -55,7 +55,8 @@ for MLI_SEALED_INDEXER in ml analytical; do
     done
     wait
 done
-MLI_SEALED_WRITTEN=$(ls "$MLI_SEALED_OUT"/printed_*.parquet 2>/dev/null | wc -l)
+# `find`, not `ls`: with no part written `ls` fails, and under pipefail that ended the script silently.
+MLI_SEALED_WRITTEN=$(find "$MLI_SEALED_OUT" -maxdepth 1 -name 'printed_*.parquet' | wc -l)
 if [ "$MLI_SEALED_WRITTEN" -ne $(( 2 * MLI_SEALED_PARTS )) ]; then
     echo "FATAL: $MLI_SEALED_WRITTEN of $(( 2 * MLI_SEALED_PARTS )) parts wrote; see $MLI_SEALED_OUT/log_*.txt" >&2
     exit 1
