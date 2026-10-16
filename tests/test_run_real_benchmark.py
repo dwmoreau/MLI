@@ -32,6 +32,13 @@ def _pattern(lattice):
         'spacegroup': entry['reindexed_spacegroup_symbol_hm']}])
 
 
+def test_a_repeated_peak_is_dropped_and_the_next_one_taken():
+    """Twenty-one peaks, one stored twice: the twenty distinct ones are searched, as q2."""
+    q = np.linspace(0.1, 0.9, 21)
+    np.testing.assert_allclose(real.peak_list(np.insert(q, 5, q[5])), q[:20]**2)
+    np.testing.assert_allclose(real.peak_list(q), q[:20]**2)
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not (FROZEN_SPLIT.is_file() and DATASETS.is_dir()),
                     reason='frozen split or source datasets not on this machine')

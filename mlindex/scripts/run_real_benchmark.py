@@ -4,7 +4,7 @@ printed list.
 The search and the lists are the programs' own: the ML search of `mlindex.run --nproc 1` with the
 models loaded once, or `run_analytical.search_serial`, then `run.printed_rows` under each ranking.
 Each pattern's peaks are read as `--peak-units q --zero-error --wavelength <its wavelength>` reads
-them. The patterns are a CNRS/opXRD-format dataframe (`pandas.read_json`) with `file_name`,
+them, after a repeated peak value is dropped (`peak_list`). The patterns are a CNRS/opXRD-format dataframe (`pandas.read_json`) with `file_name`,
 `peak_positions` (q = 1/d), `primary_wavelength`, `unit_cell`, `bravais_lattice` and `spacegroup`.
 
     python -m mlindex.scripts.run_real_benchmark --patterns real.json --indexer ml \\
@@ -40,9 +40,16 @@ def rankers(indexer):
             'M20': MeritRanker('M20', 'benchmark')}
 
 
+def peak_list(peak_positions):
+    """The q2 searched for one pattern: its distinct peaks, the first 20 of them, as q2."""
+    from mlindex.command_line.run import _convert_to_q2
+
+    return _convert_to_q2(np.unique(np.asarray(peak_positions, dtype=np.float64))[:20], 'q', None)
+
+
 def search(patterns, indexer, part, n_parts):
     """Every printed row of part `part` of `n_parts` of `patterns`, as a frame."""
-    from mlindex.command_line.run import _convert_to_q2, allocate_lattice_groups, printed_rows
+    from mlindex.command_line.run import allocate_lattice_groups, printed_rows
     from mlindex.command_line.run_analytical import N_REF_HKL_GUESS, search_serial
     from mlindex.optimization.MPOptimizer import (
         run_lattice_groups, setup_lattice_groups, shutdown_lattice_groups)
@@ -54,7 +61,7 @@ def search(patterns, indexer, part, n_parts):
     rows = []
     try:
         for pattern in patterns.iloc[part::n_parts].itertuples():
-            q2 = np.sort(_convert_to_q2(np.asarray(pattern.peak_positions)[:20], 'q', None))
+            q2 = peak_list(pattern.peak_positions)
             wavelength = pattern.primary_wavelength
             if indexer == 'ml':
                 results = run_lattice_groups(groups, q2, True, wavelength, 20)
