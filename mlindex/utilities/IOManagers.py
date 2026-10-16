@@ -274,7 +274,8 @@ class SKLearnManager:
         # a split, the boolean False for a leaf -- and protobuf 7 refuses a boolean in an integer
         # list, so every gradient-boosted model fails to export. For the duration of the
         # conversion the flag is passed as 0 or 1, the encoding the ONNX tree operators define.
-        # Remove this once skl2onnx writes integers itself.
+        # skl2onnx's main branch writes integers itself, but no release does yet (1.20.0 is the
+        # latest); remove this once the minimum skl2onnx is the first release that does.
         add_node = tree_ensemble.add_node
 
         def add_node_with_integer_flag(*args, nodes_missing_value_tracks_true=False, **kwargs):
