@@ -25,6 +25,8 @@ from mlindex.command_line.run import (
 from mlindex.utilities.Ranker import MeritRanker
 
 RANKER = MeritRanker('M_sym', 'the analytical indexer uses no ML model')
+# How many low-angle reference lines each lattice's guess-and-check draws its Miller indices from.
+N_REF_HKL_GUESS = 10
 
 
 def main() -> None:
@@ -35,7 +37,7 @@ def main() -> None:
 
     q2_obs = _load_peaks(args)
 
-    n_ref_hkl_guess = {bl: 10 for bl in bravais_lattices}
+    n_ref_hkl_guess = {bl: N_REF_HKL_GUESS for bl in bravais_lattices}
 
     if args.mpi:
         _run_mpi_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=args.seed)
@@ -45,7 +47,8 @@ def main() -> None:
         _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=args.seed)
 
 
-def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
+def search_serial(q2_obs, bravais_lattices, n_ref_hkl_guess, zero_error, wavelength, seed):
+    """One pattern searched in one process: {Bravais lattice: `OptimizerBase.result()`}."""
     from mlindex.optimization.MPOptimizer import LocalComm
     comm = LocalComm(n_ranks=1)
 
@@ -58,9 +61,14 @@ def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed
             n_ref_hkl_guess=n_ref_hkl_guess[bl],
             seed=seed,
         )
-        optimizer.run(q2=q2_obs, zero_error=args.zero_error, wavelength=args.wavelength)
+        optimizer.run(q2=q2_obs, zero_error=zero_error, wavelength=wavelength)
         results[bl] = optimizer.result()
+    return results
 
+
+def _run_serial_analytical(args, q2_obs, bravais_lattices, n_ref_hkl_guess, seed=12345):
+    results = search_serial(q2_obs, bravais_lattices, n_ref_hkl_guess, args.zero_error,
+                            args.wavelength, seed)
     _write_output(args.output_file, results, RANKER)
 
 

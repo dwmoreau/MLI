@@ -210,34 +210,40 @@ def end_to_end_table(flags, pool, lattices, rng):
     return pd.DataFrame(rows)
 
 
-def provenance(pool_dir):
-    """What the table is attributable to: the search (from the pool's manifest) and the replay
-    (this checkout, its model tree, the ranker's files, the machine and its BLAS)."""
+def environment():
+    """What a replay or a search in this process is attributable to: this checkout (refused if a
+    tracked file is modified), its model tree, the ranker's files, the machine and its BLAS."""
     import platform
+
+    from threadpoolctl import threadpool_info
 
     from mlindex.model_training.BenchmarkRuns import _provenance
     from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
     from mlindex.utilities.Digests import tree_digest
     from mlindex.utilities.Ranker import RANKER_DIRECTORY
 
-    manifest = Benchmark.load_manifest(pool_dir)
     replay = _provenance()
     ranker_digest, _ = tree_digest(_resolve_models_dir(), [RANKER_DIRECTORY])
-    from threadpoolctl import threadpool_info
-
     # The library numpy loaded, which the list below first place depends on: on one machine and
     # one commit, Accelerate and OpenBLAS print different lists.
     blas = ', '.join(sorted({f"{info['internal_api']} {info.get('version')}"
                              for info in threadpool_info() if info['user_api'] == 'blas'}))
+    return {'replay_commit': replay['commit'], 'model_revision': replay['model_revision'],
+            'models_digest': replay['models_digest'], 'ranker_digest': ranker_digest,
+            'replay_arch': platform.machine(), 'replay_blas': blas}
+
+
+def provenance(pool_dir):
+    """What the table is attributable to: the search (from the pool's manifest) and the replay
+    (`environment`)."""
+    manifest = Benchmark.load_manifest(pool_dir)
     return {
         'pool': str(pool_dir), 'population': manifest['population'], 'split': manifest['split'],
         'search_commit': manifest['commit'], 'search_arch': manifest.get('arch'),
         'seed': manifest['seed'], 'search_seed': manifest['search_seed'],
         'cut': manifest['prune_threshold'], 'search_model_revision': manifest.get('model_revision'),
         'search_models_digest': manifest.get('models_digest'),
-        'replay_commit': replay['commit'], 'model_revision': replay['model_revision'],
-        'models_digest': replay['models_digest'], 'ranker_digest': ranker_digest,
-        'replay_arch': platform.machine(), 'replay_blas': blas,
+        **environment(),
         }
 
 
