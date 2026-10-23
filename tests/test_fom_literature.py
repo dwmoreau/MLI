@@ -409,8 +409,10 @@ def test_M_rev_blows_up_on_a_saturated_fit_when_the_floor_is_lifted():
 
     Three reference lines in a window that has to support a three-parameter orthorhombic cell:
     the refinement interpolates them exactly, M_rev's denominator goes to float rounding, and a
-    cell M20 scores at 1.85 comes out at 6.2e11. M_tilde is unharmed, which is what says the
-    defect is in the reversed term and not in the candidate.
+    cell M20 scores at 1.85 came out at 6.2e11 (`M_rev_raw`). DISCREPANCY_EPSILON now bounds the
+    denominator, which brings it to 4.5e8 -- still absurd for that cell, so the floor is still
+    needed. M_tilde is unharmed, which is what says the defect is in the reversed term and not in
+    the candidate.
 
     `min_n_cal=None` is what a caller asking for the unfloored value passes, and it is how every
     column stored before 2026-08-27 was computed.
@@ -419,9 +421,10 @@ def test_M_rev_blows_up_on_a_saturated_fit_when_the_floor_is_lifted():
     M_tilde, M_rev, M_sym = get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
                                           min_n_cal=None)
     assert case["n_cal"] == 3
-    assert M_rev[0] == pytest.approx(620579830241.0692, rel=1e-12)
-    assert M_rev[0] == case["M_rev_raw"]
-    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-12)
+    assert case["M_rev_raw"] == pytest.approx(620579830241.0692, rel=1e-12)
+    assert M_rev[0] == pytest.approx(449306995.3285806, rel=1e-12)
+    # The epsilon moves M_tilde, whose discrepancy is 1.5e-3, by 1e-12/1.5e-3 relative.
+    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-9)
     assert get_M20(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"].copy())[0] < 2.0
     # M_sym is the product, so it carries the blow-up into the leading classical merit.
     assert M_sym[0] == pytest.approx(M_tilde[0]*M_rev[0], rel=1e-12)
@@ -440,12 +443,13 @@ def test_M_rev_support_floor_is_on_by_default():
     assert M_rev[0] == 0.0
     assert M_sym[0] == 0.0
     # Only the reversed term is floored: M_tilde divides by the residual over all twenty assigned
-    # lines and is well conditioned however few reference lines the window holds.
-    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-12)
+    # lines and is well conditioned however few reference lines the window holds. The epsilon
+    # moves it by 1e-12/1.5e-3 relative.
+    assert M_tilde[0] == pytest.approx(1.4183056455229528, rel=1e-9)
     # And the default is ten, not merely "some floor" -- N_cal is 3 here, so a floor of 3 would
     # let it through and this test would pass for the wrong reason.
     assert get_M_rev_sym(case["q2_obs"], case["q2_calc"], case["q2_ref_calc"],
-                         min_n_cal=3)[1][0] > 1e11
+                         min_n_cal=3)[1][0] > 1e8
 
 
 def test_M_rev_support_floor_spares_a_well_supported_candidate():
@@ -640,19 +644,25 @@ def test_get_F_N_reproduces_published_F33():
     assert not np.isclose(merit_q[0], merit_2theta[0], rtol=0.5)
 
 
-def test_get_F_N_scores_a_perfect_fit_best_without_warning():
-    """A candidate whose lines match the peaks exactly scores inf, not 0, and raises no
-    divide-by-zero warning."""
+def test_a_perfect_fit_scores_large_and_finite_without_warning():
+    """A candidate whose lines match the peaks exactly scores a large finite value -- above an
+    imperfect one, never 0 or inf -- under F_N, M_wu, M_tilde and M_rev, with no warning.
+
+    Each candidate's reference lines are its own assigned lines plus two beyond the cut-off, so
+    the first candidate's forward and reversed discrepancies are both exactly zero.
+    """
     q2_obs = np.array([0.01, 0.02, 0.03])
     q2_calc = np.array([[0.01, 0.02, 0.03], [0.0101, 0.0198, 0.0303]])
-    q2_ref = np.repeat(np.linspace(0.005, 0.05, 20)[np.newaxis], 2, axis=0)
+    q2_ref = np.concatenate([q2_calc, np.full((2, 2), [0.04, 0.05])], axis=1)
 
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         merit_2theta, merit_q = get_F_N(q2_obs, q2_calc, q2_ref, wavelength=fixtures.CU_KALPHA1)
-    for merit in (merit_2theta, merit_q):
-        assert merit[0] == np.inf
-        assert np.isfinite(merit[1]) and merit[1] > 0
+        merit_wu = get_M_wu(q2_obs, q2_calc, q2_ref)
+        M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref, min_n_cal=None)
+    for merit in (merit_2theta, merit_q, merit_wu, M_tilde, M_rev, M_sym):
+        assert np.all(np.isfinite(merit))
+        assert merit[0] > merit[1] > 0
 
 
 def test_smith_snyder_table1_summary_is_consistent_with_the_rows():

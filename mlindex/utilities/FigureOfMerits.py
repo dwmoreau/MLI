@@ -24,6 +24,15 @@ HIGHER_IS_BETTER = {
     "max_gap": False,
 }
 
+# Added to the discrepancy wherever a merit divides by it, so a candidate whose lines match the
+# peaks exactly scores a large finite value rather than inf or 0. It is in the discrepancy's own
+# units (1/A^2, 1/A or degrees). It sits far below any measured discrepancy -- lab data run near
+# 1e-4 (Smith & Snyder 1979 Table 1), and the smallest in the ranker's fitting inputs near 1e-5 --
+# so the inputs ranker_1 was fitted on move by < 1e-7 relative, inside the 1e-6 agreement
+# test_ranker_inference holds them to (1e-10 moved them by 6.4e-6). It sits ~1e3 above the
+# rounding a saturated fit leaves in M_rev's denominator (~1e-15), so the quotient is not noise.
+DISCREPANCY_EPSILON = 1e-12
+
 
 # de Wolff (1961), Acta Cryst. 14, 579-582, Table 1: the coefficients in
 #
@@ -235,21 +244,21 @@ def get_M_rev_sym(q2_obs, q2_calc, q2_ref_calc, weights=None, min_n_cal=10,
         n_cal = (in_range*weights[np.newaxis, :]).sum(axis=1)
         reversed_sum = (scored*weights[np.newaxis, :]).sum(axis=1)
 
-    good = (n_cal > 0) & np.isfinite(q_n) & (discrepancy > 0) & (q2_calc.sum(axis=1) != 0)
+    good = (n_cal > 0) & np.isfinite(q_n) & (q2_calc.sum(axis=1) != 0)
     M_tilde = np.zeros(q2_calc.shape[0])
     M_rev = np.zeros(q2_calc.shape[0])
     with np.errstate(divide="ignore", invalid="ignore"):
         epsilon = (q_n - q_min)/(2*np.where(n_cal > 0, n_cal, 1))
-        M_tilde[good] = epsilon[good]/discrepancy[good]
+        M_tilde[good] = epsilon[good]/(discrepancy[good] + DISCREPANCY_EPSILON)
         discrepancy_reversed = reversed_sum/np.where(n_cal > 0, n_cal, 1)
         epsilon_reversed = (q2_obs[-1] - q2_obs[0])/(2*n_peaks)
-        usable = good & (discrepancy_reversed > 0)
+        usable = good.copy()
         if min_n_cal is not None:
             # Only M_rev is floored. M_tilde divides by the mean residual over all n_peaks
             # assigned lines, which is well conditioned however few reference lines the window
             # holds; M_sym inherits the floor through the product, which is the intent.
             usable &= n_cal >= min_n_cal
-        M_rev[usable] = epsilon_reversed/discrepancy_reversed[usable]
+        M_rev[usable] = epsilon_reversed/(discrepancy_reversed[usable] + DISCREPANCY_EPSILON)
     if return_n_cal:
         # The support the floor tested. M_rev = 0.0 means "floored", "N_cal was zero" and
         # "degenerate" alike, so a stored column without N_cal beside it cannot be asked
@@ -672,11 +681,11 @@ def get_M_wu(q2_obs, q2_calc, q2_ref_calc, sorted_lines=None):
     gaps = np.where(finite, np.where(finite, lines, 0.0) - previous, 0.0)
     q_n = np.max(np.where(np.isfinite(lines), lines, 0.0), axis=1)
 
-    good = (count > 0) & (discrepancy > 0) & (q2_calc.sum(axis=1) != 0)
+    good = (count > 0) & (q2_calc.sum(axis=1) != 0)
     merit = np.zeros(q2_calc.shape[0])
     with np.errstate(divide="ignore", invalid="ignore"):
         g_bar = np.sum(gaps**2/4, axis=1)/np.where(q_n > 0, q_n, 1)
-        merit[good] = g_bar[good]/discrepancy[good]
+        merit[good] = g_bar[good]/(discrepancy[good] + DISCREPANCY_EPSILON)
     return merit
 
 
@@ -806,8 +815,8 @@ def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
     Shirley argues independently that F_N's wavelength dependence is a defect and that it should be
     standardised to Cu K-alpha-1; pass wavelength=1.540598 for that variant.
 
-    A candidate whose lines match the peaks exactly scores inf, as it does under get_M20: the
-    merit grows without bound as the discrepancy shrinks, so a perfect fit is the best value.
+    A candidate whose lines match the peaks exactly scores n_peaks/(DISCREPANCY_EPSILON*N_poss),
+    the largest value the merit takes, rather than inf.
 
     Returns (F_N or None, F_N_q), each (n_candidates,).
     """
@@ -817,9 +826,7 @@ def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
 
     q_obs, q_calc = np.sqrt(q2_obs), np.sqrt(np.maximum(q2_calc, 0))
     mean_dq = np.mean(np.abs(q_obs[np.newaxis] - q_calc), axis=1)
-    merit_q = np.divide(
-        n_peaks, mean_dq*n_possible, out=np.full_like(mean_dq, np.inf), where=mean_dq > 0
-        )
+    merit_q = n_peaks/((mean_dq + DISCREPANCY_EPSILON)*n_possible)
 
     merit_2theta = None
     if wavelength is not None:
@@ -829,10 +836,7 @@ def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
         two_theta_obs = np.degrees(2*np.arcsin(argument_obs))
         two_theta_calc = np.degrees(2*np.arcsin(argument_calc))
         mean_d2theta = np.mean(np.abs(two_theta_obs[np.newaxis] - two_theta_calc), axis=1)
-        merit_2theta = np.divide(
-            n_peaks, mean_d2theta*n_possible, out=np.full_like(mean_d2theta, np.inf),
-            where=mean_d2theta > 0
-            )
+        merit_2theta = n_peaks/((mean_d2theta + DISCREPANCY_EPSILON)*n_possible)
     return merit_2theta, merit_q
 
 
