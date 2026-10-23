@@ -278,11 +278,14 @@ class OptimizerManager(OptimizerBase):
         for split_group in split_groups:
             self.rf_params[split_group] = dict(rf_group_params, load_from_tag=True)
             self.abnn_params[split_group] = dict(abnn_group_params, load_from_tag=True)
-        self.opt_params['generator_info'] = generator_info_from_fractions(
-            ENSEMBLE[self.bravais_lattice]['fractions'],
-            lattice_budget(self.bravais_lattice, self.opt_params['n_candidates_scale']),
-            split_groups,
-            )
+        # A research driver can pass its own generator mix through the factory's `options`, as
+        # the random-cell baseline of run_success_rate does; the indexer never does.
+        if 'generator_info' not in self.opt_params:
+            self.opt_params['generator_info'] = generator_info_from_fractions(
+                ENSEMBLE[self.bravais_lattice]['fractions'],
+                lattice_budget(self.bravais_lattice, self.opt_params['n_candidates_scale']),
+                split_groups,
+                )
         if self.opt_params['convergence_testing'] == False:
             load_random_forest = False
             load_abnn = False

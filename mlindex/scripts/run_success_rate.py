@@ -15,8 +15,11 @@ from mpi4py import MPI
 import json
 import sys
 
-from mlindex.utilities.ErrorAdder import add_q2_error
-from mlindex.utilities.ErrorAdder import add_contaminants
+from mlindex.model_training.BenchmarkConditions import Condition
+from mlindex.model_training.BenchmarkPatterns import prepare_peak_list
+from mlindex.utilities.ErrorAdder import ContaminantPlacementError
+from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
+from mlindex.utilities.UnitCellTools import get_partial_unit_cell
 from mlindex.optimization.UtilitiesOptimizer import _resolve_models_dir
 from mlindex.optimization.UtilitiesOptimizer import get_cubic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_hexagonal_optimizer
@@ -25,7 +28,17 @@ from mlindex.optimization.UtilitiesOptimizer import get_orthorhombic_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_rhombohedral_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_tetragonal_optimizer
 from mlindex.optimization.UtilitiesOptimizer import get_triclinic_optimizer
-from mlindex.optimization.CandidateValidation import validate_candidate_known_bl
+from mlindex.optimization.UtilitiesOptimizer import lattice_budget
+from mlindex.optimization.CandidateValidation import label_known_bl_batch
+
+
+def parse_bool(argument, name):
+    # bool() of any non-empty string is True, so 'False' used to select the training set.
+    if argument in ['True', '1']:
+        return True
+    elif argument in ['False', '0']:
+        return False
+    raise ValueError(f'{name} must be True, False, 1 or 0, not {argument!r}')
 
 
 if __name__ == '__main__':
@@ -42,50 +55,64 @@ if __name__ == '__main__':
     q2_error_multiplier = int(sys.argv[2])
     n_contaminants = int(sys.argv[3])
     n_candidates_scale = float(sys.argv[4])
-    use_train = bool(sys.argv[5])
+    use_train = parse_bool(sys.argv[5], 'use_train')
     n_iterations = int(sys.argv[6])
-    
+    # Optional. True replaces the ML generators with the random-cell generator alone, at the same
+    # candidate budget: the no-ML baseline.
+    if len(sys.argv) > 7:
+        random = parse_bool(sys.argv[7], 'random')
+    else:
+        random = False
+    if random:
+        options = {'generator_info': [{
+            'generator': 'random',
+            'n_unit_cells': lattice_budget(bravais_lattice, n_candidates_scale),
+            }]}
+    else:
+        options = None
+
     n_top_candidates = 20
-    rng = np.random.default_rng(0)
+    # Each entry's noise is seeded from its identifier and this seed, so it does not depend on
+    # which rank the entry lands on.
+    base_seed = 0
+    condition = Condition(
+        key='success_rate',
+        label='success_rate',
+        description='',
+        axis=None,
+        error_multiplier=q2_error_multiplier,
+        n_contaminants=n_contaminants,
+        )
     if bravais_lattice in ['cF', 'cI', 'cP']:
-        optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory)
+        optimizer = get_cubic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory, options=options)
     elif bravais_lattice in ['hP']:
-        optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory)
+        optimizer = get_hexagonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory, options=options)
     elif bravais_lattice in ['hR']:
-        optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory)
+        optimizer = get_rhombohedral_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory, options=options)
     elif bravais_lattice in ['tI', 'tP']:
-        optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory)
+        optimizer = get_tetragonal_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory, options=options)
     elif bravais_lattice in ['oC', 'oF', 'oI', 'oP']:
-        optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory)
+        optimizer = get_orthorhombic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory, options=options)
     elif bravais_lattice in ['mC', 'mP']:
-        optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory)
+        optimizer = get_monoclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory, options=options)
     elif bravais_lattice in ['aP']:
-        optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory)
+        optimizer = get_triclinic_optimizer(bravais_lattice, broadening_tag, n_candidates_scale, split_comm, models_directory, options=options)
     optimizer.opt_params['iteration_info'][1]['n_iterations'] = n_iterations
 
+    if bravais_lattice in ['cF', 'cI', 'cP']:
+        n_peaks = 10
+    else:
+        n_peaks = 20
     if rank == 0:
-        data = []
         read_columns = [
+            'identifier',
             'lattice_system',
             'bravais_lattice',
             'train',
             f'q2_{broadening_tag}',
-            f'reindexed_h_{broadening_tag}',
-            f'reindexed_k_{broadening_tag}',
-            f'reindexed_l_{broadening_tag}',
             'reindexed_spacegroup_symbol_hm',
             'reindexed_unit_cell',
             ]
-        drop_columns = [
-            f'q2_{broadening_tag}',
-            f'reindexed_h_{broadening_tag}',
-            f'reindexed_k_{broadening_tag}',
-            f'reindexed_l_{broadening_tag}',
-            ]
-        if bravais_lattice in ['cF', 'cI', 'cP']:
-            n_peaks = 10
-        else:
-            n_peaks = 20
         bravais_lattice_data = pd.read_parquet(
             f'/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/generated_datasets/dataset_{bravais_lattice}.parquet',
             columns=read_columns
@@ -98,20 +125,6 @@ if __name__ == '__main__':
         bravais_lattice_data = bravais_lattice_data.loc[peaks.apply(len) >= n_peaks]
         peaks = bravais_lattice_data[f'q2_{broadening_tag}']
         bravais_lattice_data = bravais_lattice_data.loc[peaks.apply(np.count_nonzero) >= n_peaks]
-        q2 = np.zeros((bravais_lattice_data.shape[0], n_peaks))
-        hkl = np.zeros((bravais_lattice_data.shape[0], n_peaks, 3))
-        for entry_index in range(bravais_lattice_data.shape[0]):
-            q2[entry_index, :n_peaks] = np.array(bravais_lattice_data[f'q2_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-            hkl[entry_index, :n_peaks, 0] = np.array(bravais_lattice_data[f'reindexed_h_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-            hkl[entry_index, :n_peaks, 1] = np.array(bravais_lattice_data[f'reindexed_k_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-            hkl[entry_index, :n_peaks, 2] = np.array(bravais_lattice_data[f'reindexed_l_{broadening_tag}'].iloc[entry_index])[:n_peaks]
-        
-        q2, hkl = add_q2_error(q2, hkl, q2_error_multiplier, rng)
-        q2, hkl = add_contaminants(q2, hkl, n_contaminants, rng)
-
-        bravais_lattice_data['q2'] = list(q2)
-        bravais_lattice_data['reindexed_hkl'] = list(hkl)
-        bravais_lattice_data.drop(columns=drop_columns, inplace=True)
         data = bravais_lattice_data
         if not n_entries is None and data.shape[0] > n_entries:
             data = data.iloc[:n_entries]
@@ -128,26 +141,27 @@ if __name__ == '__main__':
         'Off by two': 0,
         'Found explainers': 0,
         }
+    # Entries whose contaminants could not be placed; they are left out of the counts.
+    n_skipped = 0
     for entry_index in range(n_entries):
         entry = data.iloc[entry_index]
-        unit_cell_true = np.array(entry['reindexed_unit_cell'])
+        unit_cell_true = get_partial_unit_cell(
+            np.array(entry['reindexed_unit_cell']),
+            lattice_system=BL_TO_LATTICE_SYSTEM[bravais_lattice],
+            )
+        try:
+            q2 = prepare_peak_list(entry, condition, base_seed, n_peaks=n_peaks).q2_obs
+        except ContaminantPlacementError:
+            n_skipped += 1
+            continue
         start = time.time()
-        optimizer.run(entry=entry, n_top_candidates=n_top_candidates)
-        found = False
-        off_by_two = False
-        found_explainer = False
-        for candidate_index in range(optimizer.top_unit_cell.shape[0]):
-            correct, candidate_off_by_two = validate_candidate_known_bl(
-                unit_cell_true=unit_cell_true,
-                unit_cell_pred=optimizer.top_unit_cell[candidate_index],
-                bravais_lattice_pred=bravais_lattice,
-                )
-            if correct:
-                found = True
-            if candidate_off_by_two:
-                off_by_two = True
-            if np.any(optimizer.top_M20 > 1000):
-                found_explainer = True
+        optimizer.run(q2=q2, n_top_candidates=n_top_candidates)
+        correct, candidate_off_by_two = label_known_bl_batch(
+            unit_cell_true, optimizer.top_unit_cell, bravais_lattice
+            )
+        found = np.any(correct)
+        off_by_two = np.any(candidate_off_by_two)
+        found_explainer = np.any(optimizer.top_M20 > 1000)
         if found:
             report_counts['Found'] += 1
         elif off_by_two:
@@ -169,6 +183,7 @@ if __name__ == '__main__':
         #print(report_counts, rank, stop - start)
         #print()
     report_counts_gathered = comm.gather(report_counts, root=0)
+    n_skipped_gathered = comm.gather(n_skipped, root=0)
 
     if rank == 0:
         report_counts_all = {
@@ -181,9 +196,11 @@ if __name__ == '__main__':
             for key in report_counts_gathered[rank_index].keys():
                 report_counts_all[key] += report_counts_gathered[rank_index][key]
         print(report_counts_all)
+        print(f'Skipped (contaminants could not be placed): {sum(n_skipped_gathered)}')
+        suffix = '_random' if random else ''
         file_name = os.path.join(
             '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/characterization/success_rate',
-            f'{bravais_lattice}_error{q2_error_multiplier}_cont{n_contaminants}_candscale{n_candidates_scale}_niters{n_iterations}.json'
+            f'{bravais_lattice}_error{q2_error_multiplier}_cont{n_contaminants}_candscale{n_candidates_scale}_niters{n_iterations}{suffix}.json'
         )
-        with open(file_name, 'w') as f:
+        with open(file_name, 'w', encoding='utf-8') as f:
             json.dump(report_counts_all, f)
