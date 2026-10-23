@@ -156,12 +156,19 @@ if __name__ == '__main__':
             continue
         start = time.time()
         optimizer.run(q2=q2, n_top_candidates=n_top_candidates)
+        # The pool is ordered best M20 first; its first n_top_candidates rows are the
+        # candidates this rate has always been measured on.
+        pool = optimizer.result()['pool']
+        unit_cell_pred = get_partial_unit_cell(
+            pool['unit_cell'][:n_top_candidates],
+            lattice_system=BL_TO_LATTICE_SYSTEM[bravais_lattice],
+            )
         correct, candidate_off_by_two = label_known_bl_batch(
-            unit_cell_true, optimizer.top_unit_cell, bravais_lattice
+            unit_cell_true, unit_cell_pred, bravais_lattice
             )
         found = np.any(correct)
         off_by_two = np.any(candidate_off_by_two)
-        found_explainer = np.any(optimizer.top_M20 > 1000)
+        found_explainer = np.any(pool['M20'][:n_top_candidates] > 1000)
         if found:
             report_counts['Found'] += 1
         elif off_by_two:
@@ -174,9 +181,9 @@ if __name__ == '__main__':
         #print(entry)
         #print(found, off_by_two, found_explainer)
         #print(np.column_stack((
-        #    optimizer.top_unit_cell,
-        #    optimizer.top_M20,
-        #    optimizer.top_spacegroup
+        #    pool['unit_cell'][:n_top_candidates],
+        #    pool['M20'][:n_top_candidates],
+        #    pool['spacegroup'][:n_top_candidates]
         #    )))
         #print()
         stop = time.time()

@@ -12,6 +12,8 @@ from mlindex.optimization.UtilitiesOptimizer import get_logger
 from mlindex.optimization.UtilitiesOptimizer import get_mpi_organizer
 from mlindex.optimization.UtilitiesOptimizer import get_optimizers
 from mlindex.optimization.CandidateValidation import validate_candidate
+from mlindex.command_line.run import printed_rows
+from mlindex.utilities.Ranker import load_ranker
 
 
 broadening_tag = '1'
@@ -157,6 +159,10 @@ for bl in bravais_lattices:
 logger.info(f'Including Bravais lattices {bl_string}')
 logger.info('Starting loading optimizers')
 optimizer = get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale=1, logger=logger)
+if rank == 0:
+    # Falls back to ranking by M_sym, and says so in its name, when no learned ranker is found.
+    ranker = load_ranker()
+    logger.info(f'Ranking by {ranker.name}')
 
 if opxrd:
     n = len(df)
@@ -184,12 +190,9 @@ for index in range(n):
     logger.info(f'Starting entry {entry_tag}')
 
     # The next portion is the optimization of a single entry
-    # rank 0 will be the rank that compares results from all bravais lattices. 
+    # rank 0 will be the rank that compares results from all bravais lattices.
     if rank == 0:
-        top_unit_cell = dict.fromkeys(bravais_lattices)
-        top_M20 = dict.fromkeys(bravais_lattices)
-        top_spacegroup = dict.fromkeys(bravais_lattices)
-        top_n_indexed = dict.fromkeys(bravais_lattices)
+        results = dict.fromkeys(bravais_lattices)
 
     # This loop optimizes the entry given an assumed bravais lattice.
     for bravais_lattice in bravais_lattices:
@@ -212,75 +215,18 @@ for index in range(n):
     # Gather the optimization results
     logger.info(f'Starting gathering optimization results of {entry_tag}')
     for bravais_lattice in bravais_lattices:
-        if rank == 0 and mpi_organizers[bravais_lattice].manager == 0:
-            top_unit_cell[bravais_lattice] = optimizer[bravais_lattice].top_unit_cell
-            top_M20[bravais_lattice] = optimizer[bravais_lattice].top_M20
-            top_spacegroup[bravais_lattice] = optimizer[bravais_lattice].top_spacegroup
-            top_n_indexed[bravais_lattice] = optimizer[bravais_lattice].top_n_indexed
-        else:
-            if rank == 0:
-                top_unit_cell[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                top_M20[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                top_spacegroup[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                top_n_indexed[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-            elif rank == mpi_organizers[bravais_lattice].manager:
-                comm.send(optimizer[bravais_lattice].top_unit_cell, dest=0)
-                comm.send(optimizer[bravais_lattice].top_M20, dest=0)
-                comm.send(optimizer[bravais_lattice].top_spacegroup, dest=0)
-                comm.send(optimizer[bravais_lattice].top_n_indexed, dest=0)
+        manager = mpi_organizers[bravais_lattice].manager
+        if rank == 0 and manager == 0:
+            results[bravais_lattice] = optimizer[bravais_lattice].result()
+        elif rank == 0:
+            results[bravais_lattice] = comm.recv(source=manager)
+        elif rank == manager:
+            comm.send(optimizer[bravais_lattice].result(), dest=0)
     if rank == 0:
-        output_data = []
-        for bravais_lattice in bravais_lattices:
-            for result_index in range(top_M20[bravais_lattice].size):
-                partial_unit_cell = top_unit_cell[bravais_lattice][result_index]
-                if bravais_lattice in ['cF', 'cI', 'cP']:
-                    unit_cell = np.array([
-                        partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[0],
-                        np.pi/2, np.pi/2, np.pi/2
-                        ])
-                elif bravais_lattice == 'hP':
-                    unit_cell = np.array([
-                        partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[1],
-                        2*np.pi/3, np.pi/2, np.pi/2
-                        ])
-                elif bravais_lattice == 'hR':
-                    unit_cell = np.array([
-                        partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[0],
-                        partial_unit_cell[1], partial_unit_cell[1], partial_unit_cell[1],
-                        ])
-                elif bravais_lattice in ['tI', 'tP']:
-                    unit_cell = np.array([
-                        partial_unit_cell[0], partial_unit_cell[0], partial_unit_cell[1],
-                        np.pi/2, np.pi/2, np.pi/2
-                        ])
-                elif bravais_lattice in ['oC',  'oF',  'oI',  'oP']:
-                    unit_cell = np.array([
-                        partial_unit_cell[0], partial_unit_cell[1], partial_unit_cell[2],
-                        np.pi/2, np.pi/2, np.pi/2
-                        ])
-                elif bravais_lattice in ['mC',  'mP']:
-                    unit_cell = np.array([
-                        partial_unit_cell[0], partial_unit_cell[1], partial_unit_cell[2],
-                        np.pi/2, partial_unit_cell[3], np.pi/2
-                        ])
-                elif bravais_lattice == 'aP':
-                    unit_cell = partial_unit_cell
-                output_data.append({
-                    'M20': top_M20[bravais_lattice][result_index],
-                    'n_indexed': top_n_indexed[bravais_lattice][result_index],
-                    'bravais_lattice': bravais_lattice,
-                    'spacegroup': top_spacegroup[bravais_lattice][result_index],
-                    'a': unit_cell[0],
-                    'b': unit_cell[1],
-                    'c': unit_cell[2],
-                    'alpha': unit_cell[3],
-                    'beta': unit_cell[4],
-                    'gamma': unit_cell[5],
-                    })
-                #print(output_data[-1])
-                #print()
-        output_df = pd.DataFrame(output_data)
-        output_df.sort_values(by='M20', ascending=False, inplace=True, ignore_index=True)
+        # The ranked list the indexer prints: every lattice's pool scored together, each
+        # lattice's shortlist, repeated cells removed. Columns include score, M20 and M_sym;
+        # angles are in degrees.
+        output_df = pd.DataFrame(printed_rows(results, ranker))
         if opxrd:
             file_name = entry.file_name.replace('.json', '_opt.json')
         else:

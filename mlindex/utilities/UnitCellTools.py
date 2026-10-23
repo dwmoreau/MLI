@@ -111,6 +111,7 @@ def xnn_axis_multipliers(axis_factors, lattice_system):
 
 def get_partial_unit_cell(unit_cell, lattice_system=None, bravais_lattice=None):
     """The free parameters of `unit_cell`, given either a lattice system or a Bravais lattice.
+    `unit_cell` is one cell or a stack of them, parameters on the last axis.
 
     Returns the array unchanged for triclinic and for any system or lattice not recognised, and
     None if neither argument is given.
@@ -122,7 +123,7 @@ def get_partial_unit_cell(unit_cell, lattice_system=None, bravais_lattice=None):
     indices = _FREE_UNIT_CELL_INDICES.get(lattice_system)
     if indices is None:
         return unit_cell
-    return unit_cell[indices]
+    return unit_cell[..., indices]
 
 
 def get_full_unit_cell(partial_unit_cell, lattice_system):
