@@ -1,10 +1,11 @@
-"""The batched labeller must agree with the scalar one, candidate for candidate.
+"""What the labeller decides, outcome by outcome.
 
 `label_known_bl_batch` is the correctness oracle a benchmark labels with: it decides whether a
-candidate cell *is* the true cell, allowing for reindexing and for sub- and super-cells. Every
-top-N number rests on it, and over a pool of millions of candidates the scalar routine is not an
-option. So the batch form is gated against the scalar form here. A disagreement is a defect in the
-batch function, never a reason to relax this test.
+candidate cell *is* the true cell, allowing for reindexing, and whether it is a sub- or super-cell
+of it. Every top-N number rests on it. It used to be gated against a scalar routine that compared
+cells parameter by parameter; that routine flagged a correct monoclinic cell as off by two and
+missed off-by-two cells in another setting, so it now calls the batch labeller and these tests
+state the outcomes instead.
 """
 
 import numpy as np
@@ -13,6 +14,7 @@ import pytest
 from mlindex.optimization.CandidateValidation import is_correct_known_bl_batch
 from mlindex.optimization.CandidateValidation import label_known_bl_batch
 from mlindex.optimization.CandidateValidation import off_by_two_known_bl_batch
+from mlindex.optimization.CandidateValidation import validate_candidate
 from mlindex.optimization.CandidateValidation import validate_candidate_known_bl
 from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM
 from mlindex.utilities.UnitCellTools import get_partial_unit_cell
@@ -72,40 +74,100 @@ def _candidates(true_partial, system, rng, n_random=6):
     return np.array(block)
 
 
+# The positions of the free axis lengths in each system's partial cell.
+_LENGTHS = {'cubic': [0], 'tetragonal': [0, 1], 'hexagonal': [0, 1], 'rhombohedral': [0],
+            'orthorhombic': [0, 1, 2], 'monoclinic': [0, 1, 2], 'triclinic': [0, 1, 2]}
+
+
 @pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
-def test_the_batched_labeller_agrees_with_the_scalar_one(bravais_lattice):
+def test_the_true_cell_is_correct_and_never_off_by_two(bravais_lattice):
+    """The grids contain the identity, so without the mask a correct cell is flagged as its own
+    sub-cell; it was masked for four systems only, and a correct monoclinic cell came back as
+    both."""
     system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
     rng = np.random.default_rng(BRAVAIS_LATTICES.index(bravais_lattice))
-    n_compared = 0
-    seen = set()
-
-    for _ in range(25):
-        true_full = _random_true_cell(system, rng)
-        true_partial = _sliced(true_full, system)
-        block = _candidates(true_partial, system, rng)
-
-        correct, off_by_two = label_known_bl_batch(true_partial, block, bravais_lattice)
-
-        for index in range(block.shape[0]):
-            expected = validate_candidate_known_bl(true_full.copy(), block[index].copy(),
-                                                   bravais_lattice)
-            got = (bool(correct[index]), bool(off_by_two[index]))
-            assert got == tuple(map(bool, expected)), (
-                f'{system} candidate {index}: batch {got} != scalar {tuple(map(bool, expected))}\n'
-                f'  true {true_partial}\n  pred {block[index]}')
-            seen.add(got)
-            n_compared += 1
-
-    assert n_compared > 0
-    # The comparison is worthless if every candidate landed in one bucket.
-    assert len(seen) >= 2, f'{system}: only outcome(s) {seen} were exercised'
+    truths = [_sliced(_random_true_cell(system, rng), system) for _ in range(10)]
+    for truth in truths:
+        correct, off_by_two = label_known_bl_batch(truth, truth[np.newaxis], bravais_lattice)
+        assert (correct.tolist(), off_by_two.tolist()) == ([True], [False]), truth
 
 
 @pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
-def test_the_two_arms_are_the_two_halves_of_the_scalar_return(bravais_lattice):
+def test_one_axis_doubled_or_halved_is_off_by_two(bravais_lattice):
+    system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
+    rng = np.random.default_rng(BRAVAIS_LATTICES.index(bravais_lattice))
+    for _ in range(10):
+        truth = _sliced(_random_true_cell(system, rng), system)
+        block = []
+        for axis in _LENGTHS[system]:
+            for scale in (0.5, 2.0):
+                scaled = truth.copy()
+                scaled[axis] *= scale
+                block.append(scaled)
+        correct, off_by_two = label_known_bl_batch(truth, np.array(block), bravais_lattice)
+        assert not correct.any() and off_by_two.all(), (truth, off_by_two)
+
+
+@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
+def test_a_cell_off_by_no_small_multiple_is_neither(bravais_lattice):
+    system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
+    rng = np.random.default_rng(BRAVAIS_LATTICES.index(bravais_lattice))
+    for _ in range(10):
+        truth = _sliced(_random_true_cell(system, rng), system)
+        other = truth.copy()
+        other[_LENGTHS[system]] *= 1.37
+        correct, off_by_two = label_known_bl_batch(truth, other[np.newaxis], bravais_lattice)
+        assert (correct.tolist(), off_by_two.tolist()) == ([False], [False]), truth
+
+
+def test_a_monoclinic_cell_doubled_in_another_setting_is_off_by_two():
+    """DUWTAR's truth and its copy two shears away are one lattice; with b doubled the copy is off
+    by two. Compared parameter by parameter from the cells as given it was neither."""
+    truth = np.array([19.133, 14.349, 19.564, np.radians(151.04)])
+    other = _monoclinic_in_setting(truth, np.array([[-1, 0, 2], [0, -1, 0], [0, 0, 1]]))
+    for lattice in ('mP', 'mC'):
+        correct, off_by_two = label_known_bl_batch(truth, np.stack([other, other*[1, 2, 1, 1]]),
+                                                   lattice)
+        assert correct.tolist() == [True, False], lattice
+        assert off_by_two.tolist() == [False, True], lattice
+
+
+def test_a_triclinic_cell_doubled_is_off_by_two_in_any_setting():
+    """The candidate was reduced before the grid and the truth was not, so a triclinic cell with an
+    axis doubled was missed even in the truth's own setting."""
+    truth = np.array([6.1, 7.3, 9.4, np.radians(82.0), np.radians(97.0), np.radians(104.0)])
+    other = _in_setting(truth, np.array([[1, 0, -1], [0, 1, -1], [0, 0, -1]]))
+    doubled = np.array([2, 1, 1, 1, 1, 1])
+    correct, off_by_two = label_known_bl_batch(truth, np.stack([truth*doubled, other*doubled]),
+                                               'aP')
+    assert correct.tolist() == [False, False]
+    assert off_by_two.tolist() == [True, True]
+
+
+def test_validate_candidate_reports_any_candidate_not_the_last():
+    """`validate_candidate` reused the name of its result for each candidate's, so it reported
+    whether the last candidate checked was off by two."""
+    truth = np.array([10.0, 12.0, 15.0, np.pi/2, np.radians(103.0), np.pi/2])
+    doubled = _sliced(truth, 'monoclinic')*[2, 1, 1, 1]
+    unrelated = np.array([7.7, 8.8, 13.1, np.radians(95.0)])
+    entry = {'reindexed_unit_cell': truth, 'bravais_lattice': 'mP'}
+    for block in (np.stack([doubled, unrelated]), np.stack([unrelated, doubled])):
+        assert validate_candidate(entry, {'mP': block}, {'mP': np.zeros(2)}) == (
+            False, True, False, False)
+
+
+def test_validate_candidate_known_bl_is_the_batch_label_of_one_candidate():
+    truth = np.array([10.0, 12.0, 15.0, np.pi/2, np.radians(103.0), np.pi/2])
+    partial = _sliced(truth, 'monoclinic')
+    assert validate_candidate_known_bl(truth, partial, 'mP') == (True, False)
+    assert validate_candidate_known_bl(truth, partial*[1, 2, 1, 1], 'mP') == (False, True)
+
+
+@pytest.mark.parametrize('bravais_lattice', BRAVAIS_LATTICES)
+def test_the_two_arms_are_the_two_halves_of_the_label(bravais_lattice):
     """`is_correct_known_bl_batch` and `off_by_two_known_bl_batch` are usable separately, and must
-    mean the same thing they do inside `label_known_bl_batch` -- apart from the early-return mask,
-    which is the one documented difference."""
+    mean the same thing they do inside `label_known_bl_batch` -- apart from the mask that clears
+    off-by-two on a correct candidate."""
     system = BL_TO_LATTICE_SYSTEM[bravais_lattice]
     rng = np.random.default_rng(11)
     true_full = _random_true_cell(system, rng)

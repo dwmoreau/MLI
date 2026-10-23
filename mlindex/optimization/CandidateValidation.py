@@ -1,10 +1,5 @@
 import numpy as np
 
-from mlindex.utilities.Reindexing import MONOCLINIC_BASIS_CHANGES
-from mlindex.utilities.Reindexing import RHOMBOHEDRAL_TRANSFORMATIONS
-from mlindex.utilities.Reindexing import monoclinic_cell_matrix
-from mlindex.utilities.Reindexing import monoclinic_settings
-from mlindex.utilities.Reindexing import rhombohedral_cell_matrix
 from mlindex.utilities.Reindexing import rhombohedral_settings
 from mlindex.utilities.Reindexing import niggli_cell
 from mlindex.utilities.Reindexing import same_lattice
@@ -24,133 +19,39 @@ MULTIPLIERS_UNIT = np.array([1 / 2, 1, 2])
 
 
 def validate_candidate(entry, top_unit_cell, top_M20):
-    found = False
-    off_by_two = False
-    incorrect_bl = False
-    found_explainer = False
+    """Classify one pattern's candidates against its truth, `entry`.
 
+    `top_unit_cell` and `top_M20` map each Bravais lattice to its candidates' partial cells and
+    M20s. Returns `(found, off_by_two, incorrect_bl, found_explainer)`, each true when any
+    candidate of any lattice is so, labelled by `label_known_bl_batch`.
+    """
     unit_cell_true = np.array(entry['reindexed_unit_cell'])
-    bravais_lattice_true = entry['bravais_lattice']
-
-    for bravais_lattice_pred in top_unit_cell.keys():
-        for candidate_index in range(top_unit_cell[bravais_lattice_pred].shape[0]):
-            correct, off_by_two = validate_candidate_known_bl(
-                unit_cell_true=unit_cell_true,
-                unit_cell_pred=top_unit_cell[bravais_lattice_pred][candidate_index],
-                bravais_lattice_pred=bravais_lattice_pred,
-                )
-            if correct:
-                if bravais_lattice_pred == bravais_lattice_true:
-                    found = True
-                else:
-                    incorrect_bl = True
-            if off_by_two:
-                off_by_two = True
-            if np.any(top_M20[bravais_lattice_pred] > 1000):
-                found_explainer = True
+    found = off_by_two = incorrect_bl = found_explainer = False
+    for bravais_lattice_pred, unit_cell_pred in top_unit_cell.items():
+        correct, candidate_off_by_two = label_known_bl_batch(
+            get_partial_unit_cell(unit_cell_true, bravais_lattice=bravais_lattice_pred),
+            unit_cell_pred, bravais_lattice_pred)
+        if np.any(correct):
+            if bravais_lattice_pred == entry['bravais_lattice']:
+                found = True
+            else:
+                incorrect_bl = True
+        off_by_two |= bool(np.any(candidate_off_by_two))
+        found_explainer |= bool(np.any(top_M20[bravais_lattice_pred] > 1000))
     return found, off_by_two, incorrect_bl, found_explainer
 
 
 def validate_candidate_known_bl(unit_cell_true, unit_cell_pred, bravais_lattice_pred, rtol=1e-2):
     """Is `unit_cell_pred` the true cell, and if not, is it a sub- or super-cell of it?
 
-    Returns (correct, off_by_two). `unit_cell_true` is the full six-parameter cell;
-    `unit_cell_pred` is the partial cell of the predicted Bravais lattice, so the truth is sliced
-    to the same free parameters before anything is compared. Each lattice system is tested against
-    its own multiplier grid, and monoclinic and rhombohedral cells are additionally re-expressed
-    under every basis change that leaves the lattice unchanged.
+    Returns (correct, off_by_two) for one candidate, as `label_known_bl_batch` labels it.
+    `unit_cell_true` is the full six-parameter cell; `unit_cell_pred` is the partial cell of the
+    predicted Bravais lattice.
     """
-    # This should probably be replace with distance measurements in NCDIST
-    from mlindex.utilities.Reindexing import reindex_entry_triclinic
-
-    lattice_system_pred = BL_TO_LATTICE_SYSTEM[bravais_lattice_pred]
-    unit_cell_true = get_partial_unit_cell(unit_cell_true, lattice_system=lattice_system_pred)
-
-    if lattice_system_pred == 'cubic':
-        if np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol):
-            return True, False
-        for mf in MULTIPLIERS_HALF_DOUBLE:
-            if np.isclose(mf * unit_cell_pred, unit_cell_true, rtol=rtol):
-                return False, True
-    elif lattice_system_pred in ['tetragonal', 'hexagonal']:
-        if np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol)):
-            return True, False
-        for mf0 in MULTIPLIERS_THIRDS:
-            for mf1 in MULTIPLIERS_THIRDS:
-                mf = np.array([mf0, mf1])
-                if np.all(np.isclose(mf * unit_cell_pred, unit_cell_true, rtol=rtol)):
-                    return False, True
-    elif lattice_system_pred == 'rhombohedral':
-        if np.all(np.isclose(unit_cell_pred, unit_cell_true, rtol=rtol)):
-            return True, False
-        ucm = rhombohedral_cell_matrix(unit_cell_pred)
-        found = False
-        off_by_two = False
-        for trans in RHOMBOHEDRAL_TRANSFORMATIONS:
-            rucm = ucm @ trans
-            reindexed_unit_cell = np.zeros(2)
-            reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
-            reindexed_unit_cell[1] = np.arccos(
-                np.dot(rucm[:, 1], rucm[:, 2]) / reindexed_unit_cell[0]**2)
-            if np.all(np.isclose(reindexed_unit_cell, unit_cell_true, rtol=rtol)):
-                found = True
-            for mf in MULTIPLIERS_HALF_DOUBLE:
-                if np.all(np.isclose(np.array([mf, 1]) * reindexed_unit_cell, unit_cell_true,
-                                     rtol=rtol)):
-                    off_by_two = True
-        return found, off_by_two
-    elif lattice_system_pred == 'orthorhombic':
-        unit_cell_true_sorted = np.sort(unit_cell_true)
-        unit_cell_pred_sorted = np.sort(unit_cell_pred)
-        if np.all(np.isclose(unit_cell_pred_sorted, unit_cell_true_sorted, rtol=rtol)):
-            return True, False
-        for mf0 in MULTIPLIERS_UNIT:
-            for mf1 in MULTIPLIERS_UNIT:
-                for mf2 in MULTIPLIERS_UNIT:
-                    mf = np.array([mf0, mf1, mf2])
-                    if np.all(np.isclose(np.sort(mf * unit_cell_pred), unit_cell_true_sorted,
-                                         rtol=rtol)):
-                        return False, True
-    elif lattice_system_pred == 'monoclinic':
-        ucm = monoclinic_cell_matrix(unit_cell_pred, partial_unit_cell=True)
-        off_by_two = False
-        for basis_change in MONOCLINIC_BASIS_CHANGES:
-            rucm = ucm @ basis_change
-            reindexed_unit_cell = np.zeros(4)
-            reindexed_unit_cell[0] = np.linalg.norm(rucm[:, 0])
-            reindexed_unit_cell[1] = np.linalg.norm(rucm[:, 1])
-            reindexed_unit_cell[2] = np.linalg.norm(rucm[:, 2])
-            dot_product = np.dot(rucm[:, 0], rucm[:, 2])
-            mag = reindexed_unit_cell[0] * reindexed_unit_cell[2]
-            reindexed_unit_cell[3] = np.arccos(dot_product / mag)
-            for mf0 in MULTIPLIERS_UNIT:
-                for mf1 in MULTIPLIERS_UNIT:
-                    for mf2 in MULTIPLIERS_UNIT:
-                        mf = np.array([mf0, mf1, mf2, 1])
-                        if np.all(np.isclose(mf * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
-                            off_by_two = True
-        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred,
-                                               bravais_lattice_pred, rtol=rtol)[0])
-        return found, off_by_two
-    elif lattice_system_pred == 'triclinic':
-        reindexed_unit_cell, _ = reindex_entry_triclinic(unit_cell_pred)
-        found = bool(is_correct_known_bl_batch(unit_cell_true, unit_cell_pred,
-                                               bravais_lattice_pred, rtol=rtol)[0])
-        off_by_two = False
-        for mf0 in MULTIPLIERS_UNIT:
-            for mf1 in MULTIPLIERS_UNIT:
-                for mf2 in MULTIPLIERS_UNIT:
-                    mf = np.array([mf0, mf1, mf2, 1, 1, 1])
-                    if np.all(np.isclose(mf * reindexed_unit_cell, unit_cell_true, rtol=rtol)):
-                        off_by_two = True
-        return found, off_by_two
-    return False, False
-
-
-# The systems whose scalar arm returns on the first match, so `correct` and `off_by_two` cannot
-# both be set. The other three accumulate both inside one loop over the bases and a candidate can
-# carry each, which is why this is a set rather than a rule.
-_EARLY_RETURN_SYSTEMS = frozenset({'cubic', 'tetragonal', 'hexagonal', 'orthorhombic'})
+    correct, off_by_two = label_known_bl_batch(
+        get_partial_unit_cell(np.asarray(unit_cell_true), bravais_lattice=bravais_lattice_pred),
+        np.asarray(unit_cell_pred)[np.newaxis], bravais_lattice_pred, rtol=rtol)
+    return bool(correct[0]), bool(off_by_two[0])
 
 
 def _lattice_system_of(bravais_lattice, function):
@@ -160,8 +61,7 @@ def _lattice_system_of(bravais_lattice, function):
     generation failure and must stay distinguishable from a ranking one.
     """
     if bravais_lattice not in BL_TO_LATTICE_SYSTEM:
-        raise ValueError(f'{function} does not implement {bravais_lattice!r}. '
-                         'Use validate_candidate_known_bl for it.')
+        raise ValueError(f'{function} does not implement {bravais_lattice!r}.')
     return BL_TO_LATTICE_SYSTEM[bravais_lattice]
 
 
@@ -250,10 +150,8 @@ def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, r
     The multiplier loop runs over the grid and vectorises over candidates and bases, rather than
     the other way round: the transposed form materialises a (grid, bases, n, k) array for no gain.
 
-    Two asymmetries of the scalar routine are reproduced rather than tidied. The grids differ per
-    system, and the ones containing 1 therefore re-test the correctness comparison -- which is why
-    `label_known_bl_batch` masks the early-return systems afterwards. And triclinic compares the
-    Selling-reduced cell here while the correctness arm compares the Niggli-reduced one.
+    The grids differ per system, and the ones containing 1 re-test the correctness comparison, so
+    a correct candidate can come back set here; `label_known_bl_batch` clears it.
     """
     lattice_system = _lattice_system_of(bravais_lattice, 'off_by_two_known_bl_batch')
     unit_cell_true = np.asarray(unit_cell_true, dtype=np.float64)
@@ -302,13 +200,20 @@ def off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, r
         grid = np.stack([MULTIPLIERS_HALF_DOUBLE, np.ones_like(MULTIPLIERS_HALF_DOUBLE)], axis=-1)
         return any_multiple(rhombohedral_settings(unit_cell_pred), grid, unit_cell_true)
 
-    if lattice_system == 'monoclinic':
-        return any_multiple(monoclinic_settings(unit_cell_pred),
-                            grid_of(MULTIPLIERS_UNIT, 3, pad=1), unit_cell_true)
-
-    from mlindex.utilities.Reindexing import reindex_entry_triclinic
-    reindexed, _ = reindex_entry_triclinic(unit_cell_pred)
-    return any_multiple(reindexed, grid_of(MULTIPLIERS_UNIT, 3, pad=3), unit_cell_true)
+    # Monoclinic and triclinic: compared as lattices, by the test the correctness arm makes
+    # (`_same_reduced_lattice`). The candidate with its axes scaled is tested against the truth,
+    # and the candidate against the truth with its axes scaled, so a doubling along an axis of
+    # either cell as written is found in whatever setting the other is in.
+    truth = get_full_unit_cell(unit_cell_true[np.newaxis], lattice_system)[0]
+    cells = get_full_unit_cell(unit_cell_pred, lattice_system)
+    centring = BL_TO_CENTRING[bravais_lattice]
+    found = np.zeros(cells.shape[0], dtype=bool)
+    for multiplier in grid_of(MULTIPLIERS_UNIT, 3, pad=3):
+        if np.all(multiplier == 1):
+            continue
+        found |= _same_reduced_lattice(truth, multiplier * cells, centring, rtol)
+        found |= _same_reduced_lattice(multiplier * truth, cells, centring, rtol)
+    return found
 
 
 def label_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, rtol=1e-2):
@@ -322,12 +227,10 @@ def label_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, rtol=1
     correct = is_correct_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice, rtol=rtol)
     off_by_two = off_by_two_known_bl_batch(unit_cell_true, unit_cell_pred, bravais_lattice,
                                            rtol=rtol)
-    if BL_TO_LATTICE_SYSTEM[bravais_lattice] in _EARLY_RETURN_SYSTEMS:
-        # The scalar routine returns before it reaches the grid, and every one of those grids
-        # contains the identity, so without this a correct candidate comes back flagged as its
-        # own sub-cell.
-        off_by_two &= ~correct
-    return correct, off_by_two
+    # A correct candidate is never also off by two. The grids containing the identity flag it as
+    # its own sub-cell; this was masked for four systems only, so a correct monoclinic cell came
+    # back as both.
+    return correct, off_by_two & ~correct
 
 
 def get_best_candidates(self, report_counts):

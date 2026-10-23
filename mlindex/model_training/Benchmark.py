@@ -318,11 +318,8 @@ def label_frame(candidates, entries, rtol=1e-2):
     `is_off_by_two` marks a sub- or super-cell of the truth, in any lattice, as it does there.
 
     Batched per (pattern, Bravais lattice): the lattice's centring is part of the comparison
-    (`UnitCellTools.BL_TO_CENTRING`), so mP and mC are labelled apart. The scalar
-    `validate_candidate_known_bl` costs
-    milliseconds a candidate against pools of millions, so it is not an option here; the batch
-    form is gated against it on all seven lattice systems in
-    `tests/test_candidate_validation_batch.py`.
+    (`UnitCellTools.BL_TO_CENTRING`), so mP and mC are labelled apart. The outcomes are stated
+    for all seven lattice systems in `tests/test_candidate_validation_batch.py`.
     """
     from mlindex.optimization.CandidateValidation import label_known_bl_batch
     from mlindex.utilities.UnitCellTools import BL_TO_LATTICE_SYSTEM, get_partial_unit_cell
