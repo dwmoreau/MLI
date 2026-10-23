@@ -806,6 +806,9 @@ def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
     Shirley argues independently that F_N's wavelength dependence is a defect and that it should be
     standardised to Cu K-alpha-1; pass wavelength=1.540598 for that variant.
 
+    A candidate whose lines match the peaks exactly scores inf, as it does under get_M20: the
+    merit grows without bound as the discrepancy shrinks, so a perfect fit is the best value.
+
     Returns (F_N or None, F_N_q), each (n_candidates,).
     """
     n_peaks = q2_obs.shape[0]
@@ -814,7 +817,9 @@ def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
 
     q_obs, q_calc = np.sqrt(q2_obs), np.sqrt(np.maximum(q2_calc, 0))
     mean_dq = np.mean(np.abs(q_obs[np.newaxis] - q_calc), axis=1)
-    merit_q = np.where(mean_dq > 0, n_peaks/(mean_dq*n_possible), 0.0)
+    merit_q = np.divide(
+        n_peaks, mean_dq*n_possible, out=np.full_like(mean_dq, np.inf), where=mean_dq > 0
+        )
 
     merit_2theta = None
     if wavelength is not None:
@@ -824,7 +829,10 @@ def get_F_N(q2_obs, q2_calc, q2_ref_calc, wavelength=None):
         two_theta_obs = np.degrees(2*np.arcsin(argument_obs))
         two_theta_calc = np.degrees(2*np.arcsin(argument_calc))
         mean_d2theta = np.mean(np.abs(two_theta_obs[np.newaxis] - two_theta_calc), axis=1)
-        merit_2theta = np.where(mean_d2theta > 0, n_peaks/(mean_d2theta*n_possible), 0.0)
+        merit_2theta = np.divide(
+            n_peaks, mean_d2theta*n_possible, out=np.full_like(mean_d2theta, np.inf),
+            where=mean_d2theta > 0
+            )
     return merit_2theta, merit_q
 
 

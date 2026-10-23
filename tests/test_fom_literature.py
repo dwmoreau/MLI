@@ -12,6 +12,7 @@ is not always attainable from the printed values.
 """
 import os
 import sys
+import warnings
 
 import numpy as np
 import pytest
@@ -637,6 +638,21 @@ def test_get_F_N_reproduces_published_F33():
     assert merit_2theta[0] == pytest.approx(fixtures.SMITH_SNYDER79_TABLE1_SUMMARY['F_33'], rel=0.02)
     # The q-space analogue is a different quantity in different units and must NOT match.
     assert not np.isclose(merit_q[0], merit_2theta[0], rtol=0.5)
+
+
+def test_get_F_N_scores_a_perfect_fit_best_without_warning():
+    """A candidate whose lines match the peaks exactly scores inf, not 0, and raises no
+    divide-by-zero warning."""
+    q2_obs = np.array([0.01, 0.02, 0.03])
+    q2_calc = np.array([[0.01, 0.02, 0.03], [0.0101, 0.0198, 0.0303]])
+    q2_ref = np.repeat(np.linspace(0.005, 0.05, 20)[np.newaxis], 2, axis=0)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        merit_2theta, merit_q = get_F_N(q2_obs, q2_calc, q2_ref, wavelength=fixtures.CU_KALPHA1)
+    for merit in (merit_2theta, merit_q):
+        assert merit[0] == np.inf
+        assert np.isfinite(merit[1]) and merit[1] > 0
 
 
 def test_smith_snyder_table1_summary_is_consistent_with_the_rows():
