@@ -646,7 +646,7 @@ def test_get_F_N_reproduces_published_F33():
 
 def test_a_perfect_fit_scores_large_and_finite_without_warning():
     """A candidate whose lines match the peaks exactly scores a large finite value -- above an
-    imperfect one, never 0 or inf -- under F_N, M_wu, M_tilde and M_rev, with no warning.
+    imperfect one, never 0 or inf -- under M20, F_N, M_wu, M_tilde and M_rev, with no warning.
 
     Each candidate's reference lines are its own assigned lines plus two beyond the cut-off, so
     the first candidate's forward and reversed discrepancies are both exactly zero.
@@ -659,8 +659,9 @@ def test_a_perfect_fit_scores_large_and_finite_without_warning():
         warnings.simplefilter('error')
         merit_2theta, merit_q = get_F_N(q2_obs, q2_calc, q2_ref, wavelength=fixtures.CU_KALPHA1)
         merit_wu = get_M_wu(q2_obs, q2_calc, q2_ref)
+        merit_20 = get_M20(q2_obs, q2_calc, q2_ref)
         M_tilde, M_rev, M_sym = get_M_rev_sym(q2_obs, q2_calc, q2_ref, min_n_cal=None)
-    for merit in (merit_2theta, merit_q, merit_wu, M_tilde, M_rev, M_sym):
+    for merit in (merit_20, merit_2theta, merit_q, merit_wu, M_tilde, M_rev, M_sym):
         assert np.all(np.isfinite(merit))
         assert merit[0] > merit[1] > 0
 

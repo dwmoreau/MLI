@@ -24,9 +24,9 @@ HIGHER_IS_BETTER = {
     "max_gap": False,
 }
 
-# Added to the discrepancy wherever a merit divides by it, so a candidate whose lines match the
-# peaks exactly scores a large finite value rather than inf or 0. It is in the discrepancy's own
-# units (1/A^2, 1/A or degrees). It sits far below any measured discrepancy -- lab data run near
+# Added to the discrepancy wherever a merit divides by it (M20, M_tilde, M_rev, M_wu, F_N), so a
+# candidate whose lines match the peaks exactly scores a large finite value rather than inf or 0.
+# It is in the discrepancy's own units (1/A^2, 1/A or degrees). It sits far below any measured discrepancy -- lab data run near
 # 1e-4 (Smith & Snyder 1979 Table 1), and the smallest in the ranker's fitting inputs near 1e-5 --
 # so the inputs ranker_1 was fitted on move by < 1e-7 relative, inside the 1e-6 agreement
 # test_ranker_inference holds them to (1e-10 moved them by 6.4e-6). It sits ~1e3 above the
@@ -307,7 +307,8 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
     `lines_below_cutoff` counts the reference lines below the last assigned line and returns the
     largest of them, in one pass and without writing to `q2_ref_calc`. Its maximum starts at 0.0
     rather than -inf so that a row with no line below the cut-off yields 0.0, and `value < limit`
-    excludes NaN from both the count and the maximum.
+    excludes NaN from both the count and the maximum. DISCREPANCY_EPSILON keeps a perfect fit
+    finite.
     """
     discrepancy = np.mean(np.abs(q2_obs[np.newaxis] - q2_calc), axis=1)
     N, last_smaller_ref_peak = lines_below_cutoff(q2_ref_calc, q2_calc[:, -1])
@@ -320,7 +321,7 @@ def get_M20(q2_obs, q2_calc, q2_ref_calc):
     expected_discrepancy[good_indices] = last_smaller_ref_peak[good_indices] / (
         2 * N[good_indices]
     )
-    M20 = expected_discrepancy / discrepancy
+    M20 = expected_discrepancy / (discrepancy + DISCREPANCY_EPSILON)
     return M20
 
 

@@ -283,8 +283,10 @@ def test_m20(unique_test_metadata):
         hkl_assigned = hkl_ref[hkl_assign][np.newaxis]
         result = get_M20_from_xnn(q2_obs, xnn, hkl_assigned, hkl_ref, lattice_system)
         expected = np.load(expected_dir / f"m20_{bl}.npy")
+        # The expected values predate DISCREPANCY_EPSILON, which moves M20 by
+        # 1e-12/discrepancy relative: 1.1e-7 for cP, whose discrepancy is 9e-6.
         np.testing.assert_allclose(
-            result, expected, rtol=1e-10, err_msg=f"M20 mismatch for {bl}"
+            result, expected, rtol=1e-6, err_msg=f"M20 mismatch for {bl}"
         )
 
 
