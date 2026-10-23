@@ -8,11 +8,12 @@ from mpi4py import MPI
 import numpy as np
 import pandas as pd
 
-from Utilities import get_peak_generation_info
-from UtilitiesOptimizer import get_logger
-from UtilitiesOptimizer import get_mpi_organizer
-from UtilitiesOptimizer import get_optimizers
-from UtilitiesOptimizer import validate_candidate
+from mlindex.dataset_generation.EntryHelpers import get_peak_generation_info
+from mlindex.optimization.UtilitiesOptimizer import get_logger
+from mlindex.optimization.UtilitiesOptimizer import get_mpi_organizer
+from mlindex.optimization.UtilitiesOptimizer import get_optimizers
+from mlindex.optimization.CandidateValidation import validate_candidate
+from mlindex.utilities.UnitCellTools import get_partial_unit_cell
 
 
 broadening_tag = '1'
@@ -177,16 +178,19 @@ for bl_index_data, bravais_lattice_data in enumerate(bravais_lattices):
         # Gather the optimization results
         logger.info(f'Starting gathering optimization results {entry_index} of {bravais_lattice_data}')
         for bravais_lattice in bravais_lattices:
-            if rank == 0 and mpi_organizers[bravais_lattice].manager == 0:
-                top_unit_cell[bravais_lattice] = optimizer[bravais_lattice].top_unit_cell
-                top_M20[bravais_lattice] = optimizer[bravais_lattice].top_M20
-            else:
-                if rank == 0:
-                    top_unit_cell[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                    top_M20[bravais_lattice] = comm.recv(source=mpi_organizers[bravais_lattice].manager)
-                elif rank == mpi_organizers[bravais_lattice].manager:
-                    comm.send(optimizer[bravais_lattice].top_unit_cell, dest=0)
-                    comm.send(optimizer[bravais_lattice].top_M20, dest=0)
+            manager = mpi_organizers[bravais_lattice].manager
+            if rank == 0:
+                if manager == 0:
+                    pool = optimizer[bravais_lattice].result()['pool']
+                else:
+                    pool = comm.recv(source=manager)['pool']
+                # The pool is ordered best M20 first; validate_candidate takes the free
+                # parameters of each lattice's first n_top_candidates.
+                top_unit_cell[bravais_lattice] = get_partial_unit_cell(
+                    pool['unit_cell'][:n_top_candidates], bravais_lattice=bravais_lattice)
+                top_M20[bravais_lattice] = pool['M20'][:n_top_candidates]
+            elif rank == manager:
+                comm.send(optimizer[bravais_lattice].result(), dest=0)
         logger.info(f'Finished gathering optimization results {entry_index} of {bravais_lattice_data}')
 
         # do a final validation
