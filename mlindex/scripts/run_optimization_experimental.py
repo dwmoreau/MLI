@@ -13,6 +13,7 @@ from mlindex.optimization.UtilitiesOptimizer import get_mpi_organizer
 from mlindex.optimization.UtilitiesOptimizer import get_optimizers
 from mlindex.optimization.CandidateValidation import validate_candidate
 from mlindex.command_line.run import printed_rows
+from mlindex.scripts.run_real_benchmark import peak_list as q2_from_peak_positions
 from mlindex.utilities.Ranker import load_ranker
 
 
@@ -73,7 +74,7 @@ entry_tags = [
     'Lcys-lowph',
     'thiorene',
     ]
-"""
+
 base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/experimental_data/gsas'
 entry_tags = [
     #'11bmb_3844',
@@ -100,12 +101,10 @@ entry_tags = [
 """
 
 base_dir = '/global/cfs/cdirs/m4064/dwmoreau/MLI/mlindex/data/opxrd'
-df = pd.read_json(os.path.join(base_dir, 'CNRS_output_data_verified_final2.json'))
 opxrd = True
-"""
+
 #failed_entries = np.load(os.path.join(base_dir, 'failed_entries.npy'))
 failed_entries = [37, 57, 110, 251, 337, 467, 496, 508]
-rng = np.random.default_rng()
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -113,43 +112,32 @@ n_ranks = comm.Get_size()
 logger = get_logger(comm, optimization_tag)
 logger.info('Starting process')
 
+# Each rank indexes its own share of the entries from start to finish: it manages every lattice
+# itself, serially, and writes its own results. The list is read and filtered once, on rank 0, so
+# every rank splits the same list.
+if opxrd:
+    if rank == 0:
+        df = pd.read_json(os.path.join(base_dir, 'CNRS_output_data_verified_final2.json'))
+        # Entries already indexed by an earlier run are skipped.
+        opt_files = df['file_name'].str.replace('.json', '_opt.json', regex=False)
+        df = df[~opt_files.apply(os.path.exists)]
+        shares = [df.iloc[i::n_ranks] for i in range(n_ranks)]
+    else:
+        shares = None
+    entries = comm.scatter(shares, root=0)
+else:
+    entries = entry_tags[rank::n_ranks]
+
 #bravais_lattices = ['cP', 'hP', 'hR', 'tP', 'oP', 'mP', 'aP']
-#manager_rank =     [   0,    0,    0,    0,    0,    0,    0]
-#serial =           [True, True, True, True, True, True, True]
-
 bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP',  'aP']
-##manager_rank =     [   0,    0,    0,    1,    2,    3,    4,     1,     2,     3,     4,     5,     0,     5]
-##serial =           [True, True, True, True, True, True, True, False, False, False, False, False, False, False]
-manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,     0]
-serial =           [True, True, True, True, True, True, True, True, True, True, True, True, True, True]
-
 #bravais_lattices = [ 'oC',  'oF',  'oI',  'oP']
-#manager_rank =     [    0,     0,     1,     1]
-#serial =           [False, False, False, False]
-
 #bravais_lattices = ['cF', 'cI', 'cP']
-#manager_rank =     [   0,    0,    0]
-#serial =           [True, True, True]
-
 #bravais_lattices = ['tP']
-#manager_rank =     [   0]
-#serial =           [True]
-
 #bravais_lattices = ['tP', 'tI']
-#manager_rank =     [   0, 0]
-#serial =           [True, True]
-
 #bravais_lattices = ['tI']
-#manager_rank =     [  0]
-#serial =           [True]
-
 #bravais_lattices = [ 'mP']
-#manager_rank =     [    0]
-#serial =           [False]
-
-#bravais_lattices = ['cF', 'cI', 'cP', 'hP', 'hR', 'tI', 'tP',  'oC',  'oF',  'oI',  'oP',  'mC',  'mP', 'aP']
-#manager_rank =     [   0,    0,    0,    0,    0,    0,    0,     0,     0,     0,     0,     0,     0,    0]
-#serial =           [True, True, True, True, True, True, True,  True,  True,  True,  True,  True,  True, True]
+manager_rank = [rank for _ in bravais_lattices]
+serial = [True for _ in bravais_lattices]
 
 mpi_organizers = get_mpi_organizer(comm, bravais_lattices, manager_rank, serial)
 
@@ -159,29 +147,25 @@ for bl in bravais_lattices:
 logger.info(f'Including Bravais lattices {bl_string}')
 logger.info('Starting loading optimizers')
 optimizer = get_optimizers(rank, mpi_organizers, broadening_tag, n_candidates_scale=1, logger=logger)
-if rank == 0:
-    # Falls back to ranking by M_sym, and says so in its name, when no learned ranker is found.
-    ranker = load_ranker()
-    logger.info(f'Ranking by {ranker.name}')
+# Falls back to ranking by M_sym, and says so in its name, when no learned ranker is found.
+ranker = load_ranker()
+logger.info(f'Ranking by {ranker.name}')
 
-if opxrd:
-    n = len(df)
-else:
-    n = len(entry_tags)
 #for index in failed_entries:
-for index in range(n):
+for index in range(len(entries)):
     if opxrd:
-        entry = df.iloc[index]
+        entry = entries.iloc[index]
         print(entry)
         entry_tag = entry.file_name
-        peak_list = np.array(entry.peak_positions)[:20]**2
+        # Read as the real-data benchmark reads them: distinct peaks, the first 20, q -> q2.
+        peak_list = q2_from_peak_positions(entry.peak_positions)
         if zero_error:
             wavelength = entry.primary_wavelength
         else:
             wavelength = None
     else:
-        entry_tag = entry_tags[index]
-        peak_list = np.load(base_dir + f'/{entry_tag}/{entry_tag}_peak_list.npy')[:20]
+        entry_tag = entries[index]
+        peak_list = np.load(os.path.join(base_dir, entry_tag, f'{entry_tag}_peak_list.npy'))[:20]
         #wavelength = None
         #zero_error = False
         wavelength = 1.5418
@@ -189,52 +173,32 @@ for index in range(n):
 
     logger.info(f'Starting entry {entry_tag}')
 
-    # The next portion is the optimization of a single entry
-    # rank 0 will be the rank that compares results from all bravais lattices.
-    if rank == 0:
-        results = dict.fromkeys(bravais_lattices)
-
     # This loop optimizes the entry given an assumed bravais lattice.
+    results = dict.fromkeys(bravais_lattices)
     for bravais_lattice in bravais_lattices:
-        if rank in mpi_organizers[bravais_lattice].workers:
-            if rank == mpi_organizers[bravais_lattice].manager:
-                role = 'manager'
-            else:
-                role = 'worker'
-            mpi_organizers[bravais_lattice].split_comm.barrier()
-            logger.info(f'Starting optimization of {bravais_lattice} {role}')
-            optimizer[bravais_lattice].run(
-                q2=peak_list,
-                n_top_candidates=n_top_candidates,
-                zero_error=zero_error,
-                wavelength=wavelength
-            )
-            logger.info(f'Finishing optimization of {bravais_lattice} {role}')
-    comm.barrier()
+        logger.info(f'Starting optimization of {bravais_lattice}')
+        optimizer[bravais_lattice].run(
+            q2=peak_list,
+            n_top_candidates=n_top_candidates,
+            zero_error=zero_error,
+            wavelength=wavelength
+        )
+        results[bravais_lattice] = optimizer[bravais_lattice].result()
+        logger.info(f'Finishing optimization of {bravais_lattice}')
 
-    # Gather the optimization results
-    logger.info(f'Starting gathering optimization results of {entry_tag}')
-    for bravais_lattice in bravais_lattices:
-        manager = mpi_organizers[bravais_lattice].manager
-        if rank == 0 and manager == 0:
-            results[bravais_lattice] = optimizer[bravais_lattice].result()
-        elif rank == 0:
-            results[bravais_lattice] = comm.recv(source=manager)
-        elif rank == manager:
-            comm.send(optimizer[bravais_lattice].result(), dest=0)
-    if rank == 0:
-        # The ranked list the indexer prints: every lattice's pool scored together, each
-        # lattice's shortlist, repeated cells removed. Columns include score, M20 and M_sym;
-        # angles are in degrees.
-        output_df = pd.DataFrame(printed_rows(results, ranker))
-        if opxrd:
-            file_name = entry.file_name.replace('.json', '_opt.json')
-        else:
-            file_name = base_dir + f'/{entry_tag}/{entry_tag}_indexing_results_{optimization_tag}.json'
-        output_df.to_json(file_name)
-        if opxrd:
-            print(entry.bravais_lattice, entry.unit_cell)
-            for i in range(min(5, len(output_df))):
-                print(output_df.iloc[i])
-                print()
-    logger.info(f'Finished gathering optimization results of {entry_tag}')
+    # The ranked list the indexer prints: every lattice's pool scored together, each
+    # lattice's shortlist, repeated cells removed. Columns include score, M20 and M_sym;
+    # angles are in degrees.
+    output_df = pd.DataFrame(printed_rows(results, ranker))
+    if opxrd:
+        file_name = entry.file_name.replace('.json', '_opt.json')
+    else:
+        file_name = os.path.join(base_dir, entry_tag, f'{entry_tag}_indexing_results_{optimization_tag}.json')
+    print(file_name)
+    output_df.to_json(file_name)
+    if opxrd:
+        print(entry.bravais_lattice, entry.unit_cell)
+        for i in range(min(5, len(output_df))):
+            print(output_df.iloc[i])
+            print()
+    logger.info(f'Finished entry {entry_tag}')
